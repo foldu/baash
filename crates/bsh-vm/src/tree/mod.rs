@@ -46,9 +46,14 @@
 //! * **`select`, `time`, `coproc`, `[[ x =~ re ]]`** — `select` and `time`
 //!   parse as command words (`bsh-syntax` documents that); `[[ … =~ … ]]`
 //!   reports a deferred-feature diagnostic rather than a wrong answer.
-//! * **Arrays** — `name=(a b)` and `a[1]=v` are diagnosed, not evaluated.
-//!   `bsh-syntax` carries `ArrayArg` and `bsh-runtime` can store arrays; the
-//!   word model cannot expand them yet.
+//! * **`read -a` and `set -u`** — arrays themselves are implemented (storage,
+//!   expansion, literals, element assignment, `declare`/`local`/`unset`), but
+//!   `read` has no body yet and `nounset` is not implemented at all, so a
+//!   missing element under `set -u` behaves as empty rather than as an error.
+//! * **Assignment-before-command ordering** — the values of a simple command's
+//!   prefix assignments are all expanded before any is applied, so
+//!   `FOO=1 BAR=$FOO cmd` does not see `FOO` in `BAR`. bash applies each
+//!   assignment before expanding the next.
 //! * **`${x#pat}`, `${x%pat}`, `${x/pat/rep}`, `${!x}`, `${x@Q}`** — reported
 //!   as `Unsupported` by `bsh-lang` (its documented boundary).
 //! * **Process substitution `<(…)`/`>(…)`** — `bsh-lang`'s default callback
@@ -95,6 +100,7 @@ use std::sync::Arc;
 
 use bsh_diag::{Diagnostic, SourceFile};
 use bsh_runtime::{Opts, ShellHost, ShellState, Status, consequence};
+use bsh_syntax::ArrayElement;
 use bsh_syntax::{Ast, NodeId, ParseOpts, ParseOutcome, parse_with};
 
 mod builtins;
@@ -200,6 +206,27 @@ pub struct Interp {
     /// Function-call nesting, so runaway recursion is diagnosed instead of
     /// overflowing the stack.
     depth: usize,
+    /// Array literals in the command being executed, for the declaration
+    /// built-ins (`local a=(1 2)`, `declare -A m=([k]=v)`).
+    ///
+    /// `exec_simple` fills this immediately before dispatching the built-in;
+    /// `bi_declare` drains it. The literal is structural so it cannot be
+    /// confused with the textual placeholder `argv` carries.
+    array_literals: Vec<ArrayLiteral>,
+}
+
+/// One `name=(…)` argument in a declaration command.
+#[derive(Clone, Debug)]
+pub(crate) struct ArrayLiteral {
+    /// The variable name before `=`.
+    pub(crate) name: Vec<u8>,
+    /// The raw `name=(…)` text as written, which is the placeholder argument
+    /// the built-in sees.
+    pub(crate) raw: Vec<u8>,
+    /// The parsed elements, in source order.
+    pub(crate) elements: Vec<ArrayElement>,
+    /// Whether this was `name+=(…)`.
+    pub(crate) append: bool,
 }
 
 /// The recursion limit for shell functions. bash has none and eventually
@@ -225,6 +252,7 @@ impl Interp {
             last_cmdsub: None,
             pending: None,
             depth: 0,
+            array_literals: Vec::new(),
         };
         // `$?`, `$$` and `$-` must answer before the first command runs.
         interp.sync_specials();
@@ -343,6 +371,16 @@ impl Interp {
         }
     }
 
+    /// Take the array literal whose raw text is `operand`, if this command
+    /// has one. Declaration built-ins call this for each operand.
+    pub(crate) fn take_array_literal(&mut self, operand: &[u8]) -> Option<ArrayLiteral> {
+        let index = self
+            .array_literals
+            .iter()
+            .position(|literal| literal.raw == operand)?;
+        Some(self.array_literals.remove(index))
+    }
+
     pub(crate) fn set_status(&mut self, status: Status) {
         self.state.vars.set_last_status(status);
     }
@@ -455,6 +493,18 @@ impl bsh_lang::Vars for Interp {
             Err(_) => Err(bsh_lang::SetError::ReadOnly),
         }
     }
+
+    fn array(&self, name: &[u8]) -> Option<bsh_lang::ArrayValue<'_>> {
+        match self.state.vars.value(name)? {
+            bsh_runtime::VarValue::Indexed(elements) => {
+                Some(bsh_lang::ArrayValue::Indexed(elements))
+            }
+            bsh_runtime::VarValue::Assoc(pairs) => {
+                Some(bsh_lang::ArrayValue::Assoc(pairs.as_slice()))
+            }
+            _ => None,
+        }
+    }
 }
 
 impl bsh_lang::Shell for Interp {
@@ -527,11 +577,16 @@ impl crate::arith::IntVars for Interp {
                 .and_then(crate::arith::parse_int)
                 .unwrap_or(0);
         }
-        self.state
-            .vars
-            .scalar(name)
-            .and_then(crate::arith::parse_int)
-            .unwrap_or(0)
+        // An array decays to element zero in arithmetic, just as `${a}` does.
+        let bytes = match self.state.vars.value(name) {
+            Some(bsh_runtime::VarValue::Indexed(elements)) => elements.get(&0).map(Vec::as_slice),
+            Some(bsh_runtime::VarValue::Assoc(pairs)) => pairs
+                .iter()
+                .find(|(key, _)| key.as_slice() == b"0")
+                .map(|(_, value)| value.as_slice()),
+            _ => self.state.vars.scalar(name),
+        };
+        bytes.and_then(crate::arith::parse_int).unwrap_or(0)
     }
 
     fn set(&mut self, name: &[u8], value: i64) -> Result<(), String> {
@@ -539,6 +594,64 @@ impl crate::arith::IntVars for Interp {
             .vars
             .assign_scalar(name, value.to_string().as_bytes())
             .map_err(|error| error.message())
+    }
+
+    fn get_text(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        if !name.is_empty() && name.iter().all(u8::is_ascii_digit) && name[0] != b'0' {
+            let index: usize = std::str::from_utf8(name)
+                .ok()
+                .and_then(|text| text.parse().ok())
+                .unwrap_or(0);
+            return self.state.vars.positional().get(index).map(<[u8]>::to_vec);
+        }
+        match self.state.vars.value(name) {
+            Some(bsh_runtime::VarValue::Indexed(elements)) => elements.get(&0).cloned(),
+            Some(bsh_runtime::VarValue::Assoc(pairs)) => pairs
+                .iter()
+                .find(|(key, _)| key.as_slice() == b"0")
+                .map(|(_, value)| value.clone()),
+            _ => self.state.vars.scalar(name).map(<[u8]>::to_vec),
+        }
+    }
+
+    fn get_index_text(&mut self, name: &[u8], index: i64) -> Option<Vec<u8>> {
+        let value = match self.state.vars.shape(name) {
+            Some(bsh_runtime::ArrayShape::Associative) => self
+                .state
+                .vars
+                .element_assoc(name, index.to_string().as_bytes()),
+            _ => self.state.vars.element_indexed(name, index),
+        };
+        value.map(<[u8]>::to_vec)
+    }
+
+    fn get_index(&mut self, name: &[u8], index: i64) -> i64 {
+        let value = match self.state.vars.shape(name) {
+            Some(bsh_runtime::ArrayShape::Associative) => self
+                .state
+                .vars
+                .element_assoc(name, index.to_string().as_bytes()),
+            _ => self.state.vars.element_indexed(name, index),
+        };
+        value.and_then(crate::arith::parse_int).unwrap_or(0)
+    }
+
+    fn set_index(&mut self, name: &[u8], index: i64, value: i64) -> Result<(), String> {
+        let text = value.to_string();
+        match self.state.vars.shape(name) {
+            // An associative array's subscript is a string key, even when it
+            // looks like a number (`assoc[0]=42`).
+            Some(bsh_runtime::ArrayShape::Associative) => self
+                .state
+                .vars
+                .set_assoc(name, index.to_string().as_bytes(), text.as_bytes())
+                .map_err(|error| error.message()),
+            _ => self
+                .state
+                .vars
+                .set_indexed(name, index, text.as_bytes())
+                .map_err(|error| error.message()),
+        }
     }
 }
 
@@ -574,6 +687,48 @@ impl ShellHost for Interp {
 
     fn is_interactive(&self) -> bool {
         self.interactive
+    }
+
+    fn unset_array_element(&mut self, operand: &[u8]) -> Option<Status> {
+        // `name[subscript]`: `unset` re-parses the operand as an assignment
+        // word, so the subscript can contain expansion and, for an
+        // associative array, is a string key rather than arithmetic.
+        let open = operand.iter().position(|&byte| byte == b'[')?;
+        if !operand.ends_with(b"]") {
+            return None;
+        }
+        let name = operand[..open].to_vec();
+        let subscript = operand[open + 1..operand.len() - 1].to_vec();
+        let word = match bsh_syntax::parse_word(&subscript, &self.parse_opts()) {
+            Ok(word) => word,
+            Err(_) => return Some(Status(1)),
+        };
+        let text = match bsh_lang::expand_assignment(&word, self) {
+            Ok(text) => text,
+            Err(error) => {
+                self.diagnose(&error.diagnostic());
+                return Some(Status(1));
+            }
+        };
+        let result = match self.state.vars.shape(&name) {
+            Some(bsh_runtime::ArrayShape::Associative) => {
+                self.state.vars.unset_element_assoc(&name, &text)
+            }
+            _ => match crate::arith::eval(&text, self) {
+                Ok(index) => self.state.vars.unset_element_indexed(&name, index),
+                Err(message) => {
+                    self.report(crate::codes::ARITHMETIC, 0..0, message);
+                    return Some(Status(1));
+                }
+            },
+        };
+        Some(match result {
+            Ok(()) => Status::SUCCESS,
+            Err(error) => {
+                self.report(crate::codes::ASSIGNMENT, 0..0, error.message());
+                Status(1)
+            }
+        })
     }
 
     fn diagnose(&mut self, diagnostic: &Diagnostic) {

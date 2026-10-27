@@ -18,9 +18,18 @@
 //! contract `bsh-runtime` records ("integer attributes store raw bytes;
 //! arithmetic happens before `assign`").
 //!
-//! Deferred: `**`, the comma operator, `?:`, `base#digits` literals, array
-//! subscripts, and recursive evaluation of a variable whose value is itself an
-//! expression.
+//! A variable whose value is not a number is *evaluated as an expression*,
+//! which is how bash makes `a=(1+2+3); $((a[0]))` six and
+//! `i='0+1'; [[ -v a[i] ]]` look at element one. Recursion is bounded.
+//!
+//! Array elements are part of the lvalue grammar: `a[1]`, `a[i+1]`,
+//! `(( a[i] += 1 ))` and `$(( a[i]++ ))`. The subscript is a full arithmetic
+//! expression (`a[a[0]]` works), and an indexed array's element reads as 0
+//! when it is unset — bash's "empty cell is zero" rule, which is what makes
+//! `(( a[99] += 1 ))` a sparse increment rather than an error.
+//!
+//! Deferred: `**`, the comma operator, `?:`, `base#digits` literals, and
+//! recursive evaluation of a variable whose value is itself an expression.
 
 use std::collections::HashMap;
 
@@ -31,15 +40,65 @@ pub trait IntVars {
 
     /// Write the decimal text of `value` back to `name`.
     fn set(&mut self, name: &[u8], value: i64) -> Result<(), String>;
+
+    /// Read one indexed element. Unset or non-numeric reads as 0.
+    ///
+    /// The default encodes the element as `name[index]` in the same variable
+    /// namespace, which is enough for an in-memory test map; a real shell
+    /// overrides it.
+    fn get_index(&mut self, name: &[u8], index: i64) -> i64 {
+        self.get(&element_key(name, index))
+    }
+
+    /// Write one indexed element. Negative indices have already been resolved
+    /// by the array store, which is the only thing that knows the length.
+    fn set_index(&mut self, name: &[u8], index: i64, value: i64) -> Result<(), String> {
+        self.set(&element_key(name, index), value)
+    }
+
+    /// The raw bytes of `name`'s value, for recursive expression evaluation.
+    ///
+    /// `None` (the default) means the source cannot supply them; a shell that
+    /// can should override it.
+    fn get_text(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        let _ = name;
+        None
+    }
+
+    /// The raw bytes of one indexed element.
+    fn get_index_text(&mut self, name: &[u8], index: i64) -> Option<Vec<u8>> {
+        self.get_text(&element_key(name, index))
+    }
+}
+
+/// How deep recursive variable-value evaluation may go before bash reports a
+/// recursion error. bash's limit is in the same range.
+const MAX_RECURSION: usize = 32;
+
+/// `name[index]` as a byte string, for the default [`IntVars`] element access.
+fn element_key(name: &[u8], index: i64) -> Vec<u8> {
+    let mut key = name.to_vec();
+    key.push(b'[');
+    key.extend_from_slice(index.to_string().as_bytes());
+    key.push(b']');
+    key
 }
 
 /// Evaluate an arithmetic expression.
 pub fn eval(src: &[u8], vars: &mut impl IntVars) -> Result<i64, String> {
+    eval_depth(src, vars, 0)
+}
+
+fn eval_depth(src: &[u8], vars: &mut impl IntVars, depth: usize) -> Result<i64, String> {
+    if depth > MAX_RECURSION {
+        return Err("expression recursion level exceeded".to_owned());
+    }
     let mut parser = Parser {
         src,
         pos: 0,
         dead: false,
         vars,
+        depth,
     };
     let value = parser.assignment()?;
     parser.skip_space();
@@ -93,6 +152,8 @@ struct Parser<'a, V: IntVars> {
     /// Inside a short-circuited operand: parse, but do not evaluate.
     dead: bool,
     vars: &'a mut V,
+    /// Evaluation nesting, for recursive variable values.
+    depth: usize,
 }
 
 /// Binary operators with C precedence, longest spelling first so `<<` beats
@@ -134,11 +195,14 @@ impl<'a, V: IntVars> Parser<'a, V> {
         false
     }
 
-    /// `name = expr` and the compound assignment operators.
+    /// `name = expr`, `a[i] += expr`, and the compound assignment operators.
     fn assignment(&mut self) -> Result<i64, String> {
+        self.skip_space();
         let start = self.pos;
         if let Some(name) = self.peek_name() {
             self.pos += name.len();
+            self.skip_space();
+            let subscript = self.take_subscript()?;
             self.skip_space();
             const ASSIGN: &[&str] = &[
                 "<<=", ">>=", "=", "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=",
@@ -150,7 +214,7 @@ impl<'a, V: IntVars> Parser<'a, V> {
             if let Some(&token) = found {
                 self.pos += token.len();
                 let value = self.assignment()?;
-                let current = self.read(name);
+                let current = self.read_lvalue(name, subscript);
                 let value = if self.dead {
                     0
                 } else {
@@ -170,18 +234,100 @@ impl<'a, V: IntVars> Parser<'a, V> {
                     }
                 };
                 if !self.dead {
-                    self.vars.set(name, value)?;
+                    self.write_lvalue(name, subscript, value)?;
                 }
                 return Ok(value);
             }
-            self.pos = start;
+            // No assignment operator after all: the name (and any subscript)
+            // is an rvalue. Do not backtrack and re-parse it — evaluating a
+            // subscript twice would double its side effects.
+            let current = self.read_lvalue(name, subscript);
+            let current = self.take_postfix(current, name, subscript)?;
+            return self.binary_from(current, 1);
         }
+        let _ = start;
         self.binary(1)
+    }
+
+    /// Parse `[expr]` when present, returning the evaluated subscript.
+    fn take_subscript(&mut self) -> Result<Option<i64>, String> {
+        if !self.src[self.pos..].starts_with(b"[") {
+            return Ok(None);
+        }
+        self.pos += 1;
+        let index = self.assignment()?;
+        self.skip_space();
+        if !self.eat(b"]") {
+            return Err("missing `]`".to_owned());
+        }
+        Ok(Some(index))
+    }
+
+    /// Consume a postfix `++`/`--` on an lvalue, returning the value before
+    /// the increment (its value in the surrounding expression).
+    fn take_postfix(
+        &mut self,
+        current: i64,
+        name: &[u8],
+        subscript: Option<i64>,
+    ) -> Result<i64, String> {
+        self.skip_space();
+        for (token, step) in [(b"++".as_slice(), 1i64), (b"--", -1)] {
+            if self.src[self.pos..].starts_with(token) {
+                self.pos += 2;
+                let value = current.wrapping_add(step);
+                if !self.dead {
+                    self.write_lvalue(name, subscript, value)?;
+                }
+                return Ok(current);
+            }
+        }
+        Ok(current)
+    }
+
+    fn read_lvalue(&mut self, name: &[u8], subscript: Option<i64>) -> i64 {
+        if self.dead {
+            return 0;
+        }
+        let (value, text) = match subscript {
+            Some(index) => (
+                self.vars.get_index(name, index),
+                self.vars.get_index_text(name, index),
+            ),
+            None => (self.vars.get(name), self.vars.get_text(name)),
+        };
+        // A non-numeric value is itself an expression: `a=(1+2+3);
+        // $((a[0]))` is 6, and `i=0+1; $((i))` is 1.
+        if let Some(text) = text {
+            if !text.is_empty() && parse_int(&text).is_none() {
+                if let Ok(nested) = eval_depth(&text, self.vars, self.depth + 1) {
+                    return nested;
+                }
+            }
+        }
+        value
+    }
+
+    fn write_lvalue(
+        &mut self,
+        name: &[u8],
+        subscript: Option<i64>,
+        value: i64,
+    ) -> Result<(), String> {
+        match subscript {
+            Some(index) => self.vars.set_index(name, index, value),
+            None => self.vars.set(name, value),
+        }
     }
 
     /// Precedence climbing, with short-circuiting `&&`/`||`.
     fn binary(&mut self, minimum: u8) -> Result<i64, String> {
-        let mut lhs = self.unary()?;
+        let lhs = self.unary()?;
+        self.binary_from(lhs, minimum)
+    }
+
+    /// Continue a precedence climb from an already-parsed left operand.
+    fn binary_from(&mut self, mut lhs: i64, minimum: u8) -> Result<i64, String> {
         loop {
             self.skip_space();
             let Some((operator, precedence)) = self.peek_binop(minimum) else {
@@ -257,10 +403,11 @@ impl<'a, V: IntVars> Parser<'a, V> {
             self.pos += token.len();
             if kind <= 2 {
                 let name = self.take_name()?;
+                let subscript = self.take_subscript()?;
                 let step = if kind == 1 { 1 } else { -1 };
-                let value = self.read(&name).wrapping_add(step);
+                let value = self.read_lvalue(&name, subscript).wrapping_add(step);
                 if !self.dead {
-                    self.vars.set(&name, value)?;
+                    self.write_lvalue(&name, subscript, value)?;
                 }
                 return Ok(value);
             }
@@ -304,10 +451,12 @@ impl<'a, V: IntVars> Parser<'a, V> {
         if self.eat(b"$") {
             if self.eat(b"{") {
                 let name = self.take_name()?;
+                // `${a[0]}` inside arithmetic is an element read.
+                let subscript = self.take_subscript()?;
                 if !self.eat(b"}") {
                     return Err("missing `}`".to_owned());
                 }
-                return Ok(self.read(&name));
+                return Ok(self.read_lvalue(&name, subscript));
             }
             // `$1`-style positional references are ordinary names here.
             if self.src[self.pos..]
@@ -322,20 +471,9 @@ impl<'a, V: IntVars> Parser<'a, V> {
             }
         }
         let name = self.take_name()?;
-        let current = self.read(&name);
-        self.skip_space();
-        let rest = &self.src[self.pos..];
-        for (token, step) in [(b"++".as_slice(), 1i64), (b"--", -1)] {
-            if rest.starts_with(token) {
-                self.pos += 2;
-                let value = current.wrapping_add(step);
-                if !self.dead {
-                    self.vars.set(&name, value)?;
-                }
-                return Ok(current);
-            }
-        }
-        Ok(current)
+        let subscript = self.take_subscript()?;
+        let current = self.read_lvalue(&name, subscript);
+        self.take_postfix(current, &name, subscript)
     }
 
     fn peek_name(&self) -> Option<&'a [u8]> {
@@ -355,7 +493,7 @@ impl<'a, V: IntVars> Parser<'a, V> {
     }
 
     fn read(&mut self, name: &[u8]) -> i64 {
-        if self.dead { 0 } else { self.vars.get(name) }
+        self.read_lvalue(name, None)
     }
 }
 

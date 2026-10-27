@@ -69,6 +69,15 @@ struct Parser<'a> {
     span: Range<usize>,
 }
 
+/// Split `name[subscript]` into its parts, when the operand ends with `]`.
+fn split_subscript(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    let open = bytes.iter().position(|&byte| byte == b'[')?;
+    if !bytes.ends_with(b"]") {
+        return None;
+    }
+    Some((&bytes[..open], &bytes[open + 1..bytes.len() - 1]))
+}
+
 impl Parser<'_> {
     fn report(&mut self, message: &str) {
         self.interp
@@ -268,7 +277,34 @@ impl Parser<'_> {
                 };
                 mode & bit != 0
             }
-            b"-v" => self.interp.state.vars.contains(&operand.bytes),
+            b"-v" => {
+                // `-v name[subscript]` asks whether one element is set; a bare
+                // name asks whether the variable exists at all (an array
+                // counts). The subscript is arithmetic for an indexed array
+                // and a literal key for an associative one.
+                let bytes = &operand.bytes;
+                match split_subscript(bytes) {
+                    Some((name, subscript)) => {
+                        if self.interp.state.vars.shape(name)
+                            == Some(bsh_runtime::ArrayShape::Associative)
+                        {
+                            self.interp
+                                .state
+                                .vars
+                                .element_assoc(name, subscript)
+                                .is_some()
+                        } else {
+                            let index = crate::arith::eval(subscript, self.interp)?;
+                            self.interp
+                                .state
+                                .vars
+                                .element_indexed(name, index)
+                                .is_some()
+                        }
+                    }
+                    None => self.interp.state.vars.contains(bytes),
+                }
+            }
             other => {
                 self.report(&format!(
                     "`{}`: unsupported unary operator",

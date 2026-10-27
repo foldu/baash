@@ -19,12 +19,42 @@
 
 use std::sync::Arc;
 
-use bsh_lang::{expand_assignment, expand_words};
-use bsh_runtime::{ShellError, ShellHost, Status, Tier, lookup_builtin};
-use bsh_syntax::{Redirect, SimpleCommand};
+use bsh_lang::{Mode, expand_assignment, expand_word, expand_word_with};
+use bsh_runtime::{ArrayShape, ShellError, ShellHost, Status, Tier, lookup_builtin};
+use bsh_syntax::{ArrayElement, Redirect, SimpleCommand};
 use bsh_sys::SpawnPlan;
 
-use super::{Ctx, Interp, ParsedChunk, Unwind};
+use super::{ArrayLiteral, Ctx, Interp, ParsedChunk, Unwind};
+
+/// One assignment word of a simple command, after its values have been
+/// expanded but before it has been applied.
+///
+/// Array assignments cannot go through the scalar `(name, value)` path: the
+/// literal's elements are expanded in one phase and written in a second, and
+/// an element assignment needs the array's shape to know whether the
+/// subscript is an index or a key.
+enum AssignmentAction {
+    /// `name=value` / `name+=value`.
+    Scalar {
+        name: Vec<u8>,
+        value: Vec<u8>,
+        append: bool,
+    },
+    /// `name[subscript]=value` / `name[subscript]+=value`; the subscript has
+    /// been expanded but not yet evaluated.
+    Element {
+        name: Vec<u8>,
+        subscript: Vec<u8>,
+        value: Vec<u8>,
+        append: bool,
+    },
+    /// `name=( … )` / `name+=( … )`.
+    Array {
+        name: Vec<u8>,
+        elements: Vec<ArrayElement>,
+        append: bool,
+    },
+}
 
 /// Where the shell finds commands when `PATH` is unset.
 const DEFAULT_PATH: &[u8] = b"/usr/local/bin:/usr/bin:/bin";
@@ -55,47 +85,85 @@ impl Interp {
         // must not be applied to this one.
         self.state.clear_error();
         self.sync_specials();
-        if !command.array_args.is_empty() {
-            self.report(
-                crate::codes::DEFERRED,
-                command.array_args[0].span.clone(),
-                "array literals are not implemented yet",
-            );
-            return Unwind::Status(Status(2));
+        self.array_literals.clear();
+
+        // Array-literal arguments (`local a=(1 2)`) keep the structured
+        // elements; the `argv` entry is a quoted placeholder holding the raw
+        // text, which is how the declaration built-in recognises the operand.
+        let mut array_literals: Vec<ArrayLiteral> = Vec::with_capacity(command.array_args.len());
+        for argument in &command.array_args {
+            let raw = chunk.source.bytes()[command.words[argument.word].span.clone()].to_vec();
+            let name = chunk.source.bytes()[argument.name.clone()].to_vec();
+            array_literals.push(ArrayLiteral {
+                name,
+                raw,
+                elements: argument.elements.clone(),
+                append: argument.append,
+            });
         }
 
         // 1. The command words.
         self.last_cmdsub = None;
-        let argv = match expand_words(&command.words, self) {
+        let argv = match self.expand_command_words(chunk, command) {
             Ok(argv) => argv,
             Err(error) => return self.expansion_failed(error),
         };
 
-        // 2. The prefix assignments, whose values may run command
-        //    substitutions of their own.
-        let mut assigns: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(command.assignments.len());
+        // 2. The assignments, whose values may run command substitutions of
+        //    their own. Everything is expanded in source order first; array
+        //    literals defer writing to `apply_assignments` because bash
+        //    expands every element before it modifies the array.
+        let mut actions: Vec<AssignmentAction> = Vec::with_capacity(command.assignments.len());
         for assignment in &command.assignments {
             let name = chunk.source.bytes()[assignment.name.clone()].to_vec();
-            if assignment.index.is_some() || assignment.array.is_some() {
-                self.report(
-                    crate::codes::DEFERRED,
-                    assignment.span.clone(),
-                    "array assignment is not implemented yet",
-                );
-                return Unwind::Status(Status(2));
+            if let Some(elements) = &assignment.array {
+                if !argv.is_empty() {
+                    self.report(
+                        crate::codes::DEFERRED,
+                        assignment.span.clone(),
+                        "an array assignment cannot be part of a command's environment",
+                    );
+                    return Unwind::Status(Status(2));
+                }
+                actions.push(AssignmentAction::Array {
+                    name,
+                    elements: elements.clone(),
+                    append: assignment.append,
+                });
+                continue;
             }
             let value = match expand_assignment(&assignment.value, self) {
                 Ok(value) => value,
                 Err(error) => return self.expansion_failed(error),
             };
-            let value = if assignment.append {
-                let mut joined = self.state.vars.scalar(&name).unwrap_or_default().to_vec();
-                joined.extend_from_slice(&value);
-                joined
+            if let Some(subscript) = &assignment.index {
+                let subscript = match expand_assignment(subscript, self) {
+                    Ok(text) => text,
+                    Err(error) => return self.expansion_failed(error),
+                };
+                if !argv.is_empty() {
+                    // bash reports `a[0]': not a valid identifier` and runs
+                    // the command without applying it.
+                    self.report(
+                        crate::codes::DEFERRED,
+                        assignment.span.clone(),
+                        format!("{}: not a valid identifier", String::from_utf8_lossy(&name)),
+                    );
+                    continue;
+                }
+                actions.push(AssignmentAction::Element {
+                    name,
+                    subscript,
+                    value,
+                    append: assignment.append,
+                });
             } else {
-                value
-            };
-            assigns.push((name, value));
+                actions.push(AssignmentAction::Scalar {
+                    name,
+                    value,
+                    append: assignment.append,
+                });
+            }
         }
         let assignment_status = self.last_cmdsub.take().unwrap_or(Status::SUCCESS);
 
@@ -105,9 +173,31 @@ impl Interp {
             return self.exec_assignments_only(
                 chunk,
                 &command.redirects,
-                &assigns,
+                &actions,
                 assignment_status,
             );
+        }
+
+        // Prefix assignments are scalars by definition: an array literal is
+        // not an environment binding (bash refuses one), and an element
+        // assignment is rejected above.
+        let mut assigns: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(actions.len());
+        for action in &actions {
+            if let AssignmentAction::Scalar {
+                name,
+                value,
+                append,
+            } = action
+            {
+                let value = if *append {
+                    let mut joined = self.state.vars.scalar(name).unwrap_or_default().to_vec();
+                    joined.extend_from_slice(value);
+                    joined
+                } else {
+                    value.clone()
+                };
+                assigns.push((name.clone(), value));
+            }
         }
 
         let name = argv[0].clone();
@@ -122,6 +212,7 @@ impl Interp {
             return self.exec_process(chunk, &command.redirects, &assign_views, &argv);
         }
 
+        self.array_literals = array_literals;
         match self.resolve(&name) {
             Target::Vm(builtin) => {
                 let tier = super::builtins::tier_of(builtin.name);
@@ -160,12 +251,48 @@ impl Interp {
         }
     }
 
+    /// Expand a simple command's words.
+    ///
+    /// Every word is a command word except the arguments of the declaration
+    /// built-ins that look like `name=value`: those are expanded as assignment
+    /// values, so `export x=$v` does not field-split or glob `$v` (POSIX
+    /// XCU 2.9.1.1 treats them as assignment words even though they are
+    /// arguments).
+    fn expand_command_words(
+        &mut self,
+        chunk: &Arc<ParsedChunk>,
+        command: &SimpleCommand,
+    ) -> Result<Vec<Vec<u8>>, bsh_lang::Error> {
+        let source = chunk.source.bytes();
+        let mut argv: Vec<Vec<u8>> = Vec::new();
+        let mut declaration = false;
+        for (index, word) in command.words.iter().enumerate() {
+            let assignment_argument =
+                index > 0 && declaration && bsh_syntax::is_assignment_word(source, &word.span);
+            let mode = if assignment_argument {
+                Mode::Assignment
+            } else {
+                Mode::Command
+            };
+            argv.extend(expand_word_with(word, self, mode)?);
+            if index == 0 {
+                declaration = argv.first().is_some_and(|name| {
+                    matches!(
+                        name.as_slice(),
+                        b"declare" | b"typeset" | b"local" | b"export" | b"readonly"
+                    )
+                });
+            }
+        }
+        Ok(argv)
+    }
+
     /// Commands with only assignments and redirections: `x=1`, `>file`.
     fn exec_assignments_only(
         &mut self,
         chunk: &Arc<ParsedChunk>,
         redirects: &[Redirect],
-        assigns: &[(Vec<u8>, Vec<u8>)],
+        actions: &[AssignmentAction],
         status: Status,
     ) -> Unwind {
         let saved = match self.apply_redirects(chunk, redirects) {
@@ -178,19 +305,249 @@ impl Interp {
                 return self.apply_consequence(error, Status::FAILURE);
             }
         };
-        for (name, value) in assigns {
-            if let Err(error) = self.state.vars.assign_scalar(name, value) {
-                self.report(crate::codes::ASSIGNMENT, 0..0, error.message());
-                self.restore_fds(saved);
-                self.state.record_error(ShellError::VariableAssignment);
-                return self.apply_consequence(ShellError::VariableAssignment, Status::FAILURE);
-            }
-            if self.state.opts.allexport {
-                let _ = self.state.vars.mark_exported(name);
-            }
+        if let Err(message) = self.apply_assignments(actions) {
+            self.report(crate::codes::ASSIGNMENT, 0..0, message);
+            self.restore_fds(saved);
+            self.state.record_error(ShellError::VariableAssignment);
+            return self.apply_consequence(ShellError::VariableAssignment, Status::FAILURE);
         }
         self.restore_fds(saved);
+        // Array elements are expanded during `apply_assignments`, so a command
+        // substitution inside one contributes its status just like a scalar
+        // assignment's does.
+        let status = self.last_cmdsub.take().unwrap_or(status);
         Unwind::Status(status)
+    }
+
+    /// Apply expanded assignment words in order.
+    fn apply_assignments(&mut self, actions: &[AssignmentAction]) -> Result<(), String> {
+        for action in actions {
+            match action {
+                AssignmentAction::Scalar {
+                    name,
+                    value,
+                    append,
+                } => {
+                    let result = if *append {
+                        self.state.vars.append(name, value)
+                    } else {
+                        self.state.vars.assign_scalar(name, value)
+                    };
+                    result.map_err(|error| error.message())?;
+                    if self.state.opts.allexport {
+                        let _ = self.state.vars.mark_exported(name);
+                    }
+                }
+                AssignmentAction::Element {
+                    name,
+                    subscript,
+                    value,
+                    append,
+                } => {
+                    self.assign_element(name, subscript, *append, value)?;
+                }
+                AssignmentAction::Array {
+                    name,
+                    elements,
+                    append,
+                } => {
+                    self.assign_array_literal(name, elements, *append, None)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `a[sub]=v` / `a[sub]+=v`.
+    ///
+    /// The subscript's meaning depends on the target's shape: an associative
+    /// array uses the expanded text as the key, everything else evaluates it
+    /// arithmetically through the same evaluator `$((…))` uses.
+    pub(crate) fn assign_element(
+        &mut self,
+        name: &[u8],
+        subscript: &[u8],
+        append: bool,
+        value: &[u8],
+    ) -> Result<(), String> {
+        match self.state.vars.shape(name) {
+            Some(ArrayShape::Associative) => {
+                let result = if append {
+                    self.state.vars.append_assoc(name, subscript, value)
+                } else {
+                    self.state.vars.set_assoc(name, subscript, value)
+                };
+                result.map_err(|error| error.message())
+            }
+            _ => {
+                let index = crate::arith::eval(subscript, self)?;
+                let result = if append {
+                    self.state.vars.append_indexed(name, index, value)
+                } else {
+                    self.state.vars.set_indexed(name, index, value)
+                };
+                result.map_err(|error| error.message())
+            }
+        }
+    }
+
+    /// `a=( … )` / `a+=( … )`.
+    ///
+    /// Two phases on purpose, because bash expands every element before it
+    /// touches the array: `a=(old; a+=("${a[@]}"))` must copy the old
+    /// elements. Explicit subscripts are evaluated in the second phase, so
+    /// `a=([0]=x [a[0]]=y)` sees the element written just before it.
+    pub(crate) fn assign_array_literal(
+        &mut self,
+        name: &[u8],
+        elements: &[ArrayElement],
+        append: bool,
+        shape: Option<ArrayShape>,
+    ) -> Result<(), String> {
+        let shape = shape
+            .or_else(|| self.state.vars.shape(name))
+            .unwrap_or(ArrayShape::Indexed);
+
+        // Phase 1: expand values (and explicit subscripts) without writing.
+        struct Prepared {
+            subscript: Option<(Vec<u8>, bool)>,
+            values: Vec<Vec<u8>>,
+        }
+        let mut prepared: Vec<Prepared> = Vec::with_capacity(elements.len());
+        for element in elements {
+            match &element.index {
+                Some(index) => {
+                    let subscript = expand_assignment(&index.subscript, self)
+                        .map_err(|error| error.to_string())?;
+                    let value = expand_assignment(&element.value, self)
+                        .map_err(|error| error.to_string())?;
+                    prepared.push(Prepared {
+                        subscript: Some((subscript, index.append)),
+                        values: vec![value],
+                    });
+                }
+                None => {
+                    // A bare element is an ordinary command word: it splits
+                    // and globs, which is how `a=(*.c)` becomes several
+                    // elements.
+                    let values =
+                        expand_word(&element.value, self).map_err(|error| error.to_string())?;
+                    prepared.push(Prepared {
+                        subscript: None,
+                        values,
+                    });
+                }
+            }
+        }
+
+        if !append {
+            self.state
+                .vars
+                .clear_array(name, shape)
+                .map_err(|error| error.message())?;
+        } else if self.state.vars.shape(name).is_none() {
+            // `a+=(…)` on a scalar keeps the scalar as element zero, which is
+            // bash's promotion rule.
+            if let Some(existing) = self.state.vars.scalar(name).map(<[u8]>::to_vec) {
+                self.state
+                    .vars
+                    .declare_shape(name, ArrayShape::Indexed)
+                    .map_err(|error| error.message())?;
+                self.state
+                    .vars
+                    .set_indexed(name, 0, &existing)
+                    .map_err(|error| error.message())?;
+            } else {
+                self.state
+                    .vars
+                    .declare_shape(name, shape)
+                    .map_err(|error| error.message())?;
+            }
+        }
+
+        match shape {
+            ArrayShape::Indexed => {
+                let mut next = if append {
+                    self.state
+                        .vars
+                        .max_index(name)
+                        .map_or(0, |index| index.saturating_add(1))
+                } else {
+                    0
+                };
+                for element in &prepared {
+                    match &element.subscript {
+                        Some((text, element_append)) => {
+                            let index = crate::arith::eval(text, self)?;
+                            let value = &element.values[0];
+                            let result = if *element_append {
+                                self.state.vars.append_indexed(name, index, value)
+                            } else {
+                                self.state.vars.set_indexed(name, index, value)
+                            };
+                            result.map_err(|error| error.message())?;
+                            next = index.saturating_add(1);
+                        }
+                        None => {
+                            for value in &element.values {
+                                self.state
+                                    .vars
+                                    .set_indexed(name, next, value)
+                                    .map_err(|error| error.message())?;
+                                next = next.saturating_add(1);
+                            }
+                        }
+                    }
+                }
+            }
+            ArrayShape::Associative => {
+                let has_subscripts = prepared.iter().any(|element| element.subscript.is_some());
+                let has_bare = prepared.iter().any(|element| element.subscript.is_none());
+                if has_subscripts && has_bare {
+                    return Err(format!(
+                        "{}: must use subscript when assigning associative array",
+                        String::from_utf8_lossy(name)
+                    ));
+                }
+                if has_subscripts {
+                    for element in &prepared {
+                        let Some((key, element_append)) = &element.subscript else {
+                            continue;
+                        };
+                        let value = &element.values[0];
+                        let result = if *element_append {
+                            self.state.vars.append_assoc(name, key, value)
+                        } else {
+                            self.state.vars.set_assoc(name, key, value)
+                        };
+                        result.map_err(|error| error.message())?;
+                    }
+                } else {
+                    // bash 5.1's `assoc=(key value …)` alternation.
+                    let mut pending: Option<Vec<u8>> = None;
+                    for element in &prepared {
+                        for value in &element.values {
+                            match pending.take() {
+                                None => pending = Some(value.clone()),
+                                Some(key) => {
+                                    self.state
+                                        .vars
+                                        .set_assoc(name, &key, value)
+                                        .map_err(|error| error.message())?;
+                                }
+                            }
+                        }
+                    }
+                    if let Some(key) = pending {
+                        self.state
+                            .vars
+                            .set_assoc(name, &key, b"")
+                            .map_err(|error| error.message())?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Apply the sequence around a built-in body.

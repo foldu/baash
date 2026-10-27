@@ -437,12 +437,13 @@ fn split_assignment(operand: &[u8]) -> (&[u8], Option<&[u8]>, bool) {
 
 /// `local`, `declare` and `typeset`.
 ///
-/// Supported flags: `-a -A -x -r -i` and `--`. `-p`/`-f`/`-g` are diagnosed as
+/// Supported flags: `-a -A -x -r -i -p` and `--`. `-f`/`-g` are diagnosed as
 /// deferred rather than silently ignored.
 fn declare(interp: &mut Interp, argv: &[Vec<u8>], local_only: bool) -> Status {
     let name = program(argv, "declare");
     let (mut indexed, mut associative) = (false, false);
     let (mut export, mut readonly, mut integer) = (false, false, false);
+    let mut print = false;
     let mut index = 1;
     while index < argv.len() {
         let argument = &argv[index];
@@ -463,7 +464,8 @@ fn declare(interp: &mut Interp, argv: &[Vec<u8>], local_only: bool) -> Status {
                 b'x' => export = true,
                 b'r' => readonly = true,
                 b'i' => integer = true,
-                b'p' | b'f' | b'g' => {
+                b'p' => print = true,
+                b'f' | b'g' => {
                     diagnose(
                         interp,
                         format!("{name}: -{}: not implemented yet", flag as char),
@@ -483,6 +485,24 @@ fn declare(interp: &mut Interp, argv: &[Vec<u8>], local_only: bool) -> Status {
     }
 
     if index >= argv.len() {
+        // Listing forms: `declare -p` (everything), `declare -a` (indexed
+        // arrays), `declare -A` (associative arrays).
+        if print || indexed || associative {
+            let mut out = Vec::new();
+            for (variable, var) in interp.state.vars.visible() {
+                let keep = if print {
+                    true
+                } else if associative {
+                    matches!(var.value, bsh_runtime::VarValue::Assoc(_))
+                } else {
+                    matches!(var.value, bsh_runtime::VarValue::Indexed(_))
+                };
+                if keep {
+                    render_declaration(&mut out, variable, var);
+                }
+            }
+            return interp.write_out(&out);
+        }
         diagnose(interp, format!("{name}: no names given"));
         return Status::FAILURE;
     }
@@ -499,6 +519,100 @@ fn declare(interp: &mut Interp, argv: &[Vec<u8>], local_only: bool) -> Status {
 
     let mut status = Status::SUCCESS;
     for operand in &argv[index..] {
+        // `declare -p name` prints; it never assigns.
+        if print {
+            match interp.state.vars.lookup(operand) {
+                Some(var) => {
+                    let mut out = Vec::new();
+                    render_declaration(&mut out, operand, var);
+                    let _ = interp.write_out(&out);
+                }
+                None => {
+                    diagnose(
+                        interp,
+                        format!("{name}: {}: not found", String::from_utf8_lossy(operand)),
+                    );
+                    status = Status::FAILURE;
+                }
+            }
+            continue;
+        }
+
+        // `declare -a a=(1 2)`: the structured literal arrives on the side
+        // channel, keyed by the raw text of this operand.
+        if let Some(literal) = interp.take_array_literal(operand) {
+            let variable = literal.name.clone();
+            let shape = if associative {
+                Some(bsh_runtime::ArrayShape::Associative)
+            } else if indexed {
+                Some(bsh_runtime::ArrayShape::Indexed)
+            } else {
+                interp.state.vars.shape(&variable)
+            };
+            if scope == CreateScope::Local {
+                if let Err(error) = interp.state.vars.declare_local(&variable) {
+                    diagnose(interp, format!("{name}: {}", error.message()));
+                    status = Status::FAILURE;
+                    continue;
+                }
+            }
+            if let Some(shape) = shape {
+                if let Err(error) = interp.state.vars.declare_shape(&variable, shape) {
+                    diagnose(interp, format!("{name}: {}", error.message()));
+                    status = Status::FAILURE;
+                    continue;
+                }
+            }
+            if let Err(message) =
+                interp.assign_array_literal(&variable, &literal.elements, literal.append, shape)
+            {
+                diagnose(interp, format!("{name}: {message}"));
+                status = Status::FAILURE;
+                continue;
+            }
+            if let Err(error) =
+                apply_declaration_attrs(interp, &variable, export, readonly, integer)
+            {
+                diagnose(interp, format!("{name}: {}", error.message()));
+                status = Status::FAILURE;
+            }
+            continue;
+        }
+
+        // `a[sub]=value`: a subscripted operand, which `declare` allows where a
+        // plain assignment word would not be split.
+        if let Some((variable, subscript, value, append)) = split_element_operand(operand) {
+            if !bsh_runtime::Vars::is_name(variable) {
+                diagnose(
+                    interp,
+                    format!(
+                        "{name}: {}: not a valid identifier",
+                        String::from_utf8_lossy(variable)
+                    ),
+                );
+                status = Status::FAILURE;
+                continue;
+            }
+            if scope == CreateScope::Local {
+                if let Err(error) = interp.state.vars.declare_local(variable) {
+                    diagnose(interp, format!("{name}: {}", error.message()));
+                    status = Status::FAILURE;
+                    continue;
+                }
+            }
+            if let Err(message) = interp.assign_element(variable, subscript, append, value) {
+                diagnose(interp, format!("{name}: {message}"));
+                status = Status::FAILURE;
+                continue;
+            }
+            if let Err(error) = apply_declaration_attrs(interp, variable, export, readonly, integer)
+            {
+                diagnose(interp, format!("{name}: {}", error.message()));
+                status = Status::FAILURE;
+            }
+            continue;
+        }
+
         let (variable, value, append) = split_assignment(operand);
         if !bsh_runtime::Vars::is_name(variable) {
             diagnose(
@@ -544,24 +658,187 @@ fn declare(interp: &mut Interp, argv: &[Vec<u8>], local_only: bool) -> Status {
                 continue;
             }
         }
-        let attribute = (|| {
-            if export {
-                interp.state.vars.mark_exported(variable)?;
-            }
-            if readonly {
-                interp.state.vars.mark_readonly(variable)?;
-            }
-            if integer {
-                interp.state.vars.mark_integer(variable)?;
-            }
-            Ok::<(), bsh_runtime::Error>(())
-        })();
-        if let Err(error) = attribute {
+        if let Err(error) = apply_declaration_attrs(interp, variable, export, readonly, integer) {
             diagnose(interp, format!("{name}: {}", error.message()));
             status = Status::FAILURE;
         }
     }
     status
+}
+
+/// Apply `-x`/`-r`/`-i` after a value has been written, so
+/// `readonly -a a=(1 2)` can still fill the array first.
+fn apply_declaration_attrs(
+    interp: &mut Interp,
+    variable: &[u8],
+    export: bool,
+    readonly: bool,
+    integer: bool,
+) -> Result<(), bsh_runtime::Error> {
+    if export {
+        interp.state.vars.mark_exported(variable)?;
+    }
+    if readonly {
+        interp.state.vars.mark_readonly(variable)?;
+    }
+    if integer {
+        interp.state.vars.mark_integer(variable)?;
+    }
+    Ok(())
+}
+
+/// `(name, subscript, value, append)` from a `name[sub]=value` operand.
+type ElementOperand<'a> = (&'a [u8], &'a [u8], &'a [u8], bool);
+
+/// Split `name[sub]=value` / `name[sub]+=value` for a declaration operand.
+fn split_element_operand(operand: &[u8]) -> Option<ElementOperand<'_>> {
+    let open = operand.iter().position(|&byte| byte == b'[')?;
+    let mut depth = 0usize;
+    let mut close = None;
+    for (index, &byte) in operand.iter().enumerate().skip(open) {
+        match byte {
+            b'[' => depth += 1,
+            b']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    close = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close?;
+    let append = operand.get(close + 1) == Some(&b'+');
+    let equals = if append { close + 2 } else { close + 1 };
+    if operand.get(equals) != Some(&b'=') {
+        return None;
+    }
+    Some((
+        &operand[..open],
+        &operand[open + 1..close],
+        &operand[equals + 1..],
+        append,
+    ))
+}
+
+/// Render one `declare -… name=value` line, re-input safe.
+///
+/// Array values are double-quoted and subscripts are printed explicitly, so
+/// the output can be fed back to `declare` (bash's format). Scalar values stay
+/// bare when they are safe, which is the format the suite expects for
+/// `declare -- x=1`.
+fn render_declaration(out: &mut Vec<u8>, name: &[u8], var: &bsh_runtime::Var) {
+    out.extend_from_slice(b"declare -");
+    let mut any = false;
+    if var.attrs.readonly {
+        out.push(b'r');
+        any = true;
+    }
+    if var.attrs.exported {
+        out.push(b'x');
+        any = true;
+    }
+    if var.attrs.integer {
+        out.push(b'i');
+        any = true;
+    }
+    match &var.value {
+        bsh_runtime::VarValue::Indexed(_) => {
+            out.push(b'a');
+            any = true;
+        }
+        bsh_runtime::VarValue::Assoc(_) => {
+            out.push(b'A');
+            any = true;
+        }
+        _ => {}
+    }
+    if !any {
+        out.push(b'-');
+    }
+    out.push(b' ');
+    out.extend_from_slice(name);
+    match &var.value {
+        bsh_runtime::VarValue::Unset => {}
+        bsh_runtime::VarValue::Str(bytes) => {
+            out.push(b'=');
+            quote_scalar(out, bytes);
+        }
+        bsh_runtime::VarValue::Indexed(elements) => {
+            out.extend_from_slice(b"=(");
+            for (position, (index, value)) in elements.iter().enumerate() {
+                if position > 0 {
+                    out.push(b' ');
+                }
+                out.extend_from_slice(format!("[{index}]=").as_bytes());
+                quote_double(out, value);
+            }
+            out.push(b')');
+        }
+        bsh_runtime::VarValue::Assoc(pairs) => {
+            if pairs.is_empty() {
+                out.extend_from_slice(b"=()");
+                out.push(b'\n');
+                return;
+            }
+            out.extend_from_slice(b"=(");
+            for (position, (key, value)) in pairs.iter().enumerate() {
+                if position > 0 {
+                    out.push(b' ');
+                }
+                if is_bare_word(key) && !key.is_empty() {
+                    out.push(b'[');
+                    out.extend_from_slice(key);
+                    out.extend_from_slice(b"]=");
+                } else {
+                    out.extend_from_slice(b"[");
+                    quote_double(out, key);
+                    out.extend_from_slice(b"]=");
+                }
+                quote_double(out, value);
+            }
+            // bash puts a space before the closing parenthesis for assoc
+            // arrays; keeping it makes the output byte-identical to bash's.
+            out.extend_from_slice(b" )");
+        }
+    }
+    out.push(b'\n');
+}
+
+/// Double-quote bytes with the escaping a re-input-safe `declare -p` needs.
+fn quote_double(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.push(b'"');
+    for &byte in bytes {
+        match byte {
+            b'"' | b'\\' | b'$' | b'`' => {
+                out.push(b'\\');
+                out.push(byte);
+            }
+            _ => out.push(byte),
+        }
+    }
+    out.push(b'"');
+}
+
+/// Quote a scalar only when it needs it (the suite's `declare -- x=1` form).
+fn quote_scalar(out: &mut Vec<u8>, bytes: &[u8]) {
+    if is_bare_word(bytes) || bytes.is_empty() {
+        out.extend_from_slice(bytes);
+    } else {
+        quote_double(out, bytes);
+    }
+}
+
+/// Bytes that need no quoting in `declare -p` output.
+fn is_bare_word(bytes: &[u8]) -> bool {
+    bytes.iter().all(|&byte| {
+        byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'_' | b'-' | b'.' | b'/' | b':' | b'@' | b'%' | b'+' | b',' | b'='
+            )
+    })
 }
 
 fn bi_local(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
@@ -570,4 +847,61 @@ fn bi_local(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
 
 fn bi_declare(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
     declare(interp, argv, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use bsh_runtime::{Attrs, Var, VarValue};
+
+    use super::render_declaration;
+
+    fn render(var: &Var) -> String {
+        let mut out = Vec::new();
+        render_declaration(&mut out, b"v", var);
+        String::from_utf8(out).expect("ASCII output")
+    }
+
+    #[test]
+    fn declare_p_renders_reinput_safe_arrays() {
+        let indexed = Var {
+            value: VarValue::Indexed(
+                [(0, b"1".to_vec()), (2, b"2 3".to_vec())]
+                    .into_iter()
+                    .collect(),
+            ),
+            attrs: Attrs::default(),
+        };
+        assert_eq!(render(&indexed), "declare -a v=([0]=\"1\" [2]=\"2 3\")\n");
+
+        let assoc = Var {
+            value: VarValue::Assoc(vec![
+                (b"k".to_vec(), b"v".to_vec()),
+                (b"x y".to_vec(), b"a\"b".to_vec()),
+            ]),
+            attrs: Attrs::default(),
+        };
+        assert_eq!(
+            render(&assoc),
+            "declare -A v=([k]=\"v\" [\"x y\"]=\"a\\\"b\" )\n"
+        );
+
+        // Empty arrays and attribute order.
+        let empty = Var {
+            value: VarValue::Assoc(Vec::new()),
+            attrs: Attrs {
+                readonly: true,
+                ..Attrs::default()
+            },
+        };
+        assert_eq!(render(&empty), "declare -rA v=()\n");
+
+        let scalar = Var {
+            value: VarValue::Str(b"111".to_vec()),
+            attrs: Attrs {
+                exported: true,
+                ..Attrs::default()
+            },
+        };
+        assert_eq!(render(&scalar), "declare -x v=111\n");
+    }
 }
