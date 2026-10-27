@@ -13,7 +13,7 @@
 //! body is one or more `|`-separated alternatives; groups nest. A backslash
 //! escapes the following character everywhere, including `|` and `)`.
 
-use crate::units::char_len;
+use crate::units::unit_len;
 
 /// One pattern element.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,11 +148,12 @@ const MAX_DEPTH: usize = 128;
 /// Parse a pattern into one top-level sequence.
 ///
 /// A `|` at the top level is literal: `case` has already split alternatives.
-pub(crate) fn parse(pattern: &[u8], extglob: bool) -> Vec<Elem> {
+pub(crate) fn parse(pattern: &[u8], extglob: bool, utf8: bool) -> Vec<Elem> {
     let mut parser = Parser {
         p: pattern,
         i: 0,
         extglob,
+        utf8,
         broken: false,
     };
     parser.sequence(false, 0).0
@@ -187,6 +188,8 @@ struct Parser<'a> {
     p: &'a [u8],
     i: usize,
     extglob: bool,
+    /// Character units in the pattern instead of bytes.
+    utf8: bool,
     /// A group failed to find its closing `)`, so no later group can find one
     /// either. Set once instead of rescanning to end-of-input for every later
     /// operator, which would make a pattern like `@(@(@(…` quadratic.
@@ -271,9 +274,9 @@ impl Parser<'_> {
         }
     }
 
-    /// Take one character (not a backslash escape).
+    /// Take one unit (not a backslash escape): a character or a byte.
     fn take_char(&mut self) -> Vec<u8> {
-        let n = char_len(self.p, self.i);
+        let n = unit_len(self.p, self.i, self.utf8);
         let out = self.p[self.i..self.i + n].to_vec();
         self.i += n;
         out
@@ -320,12 +323,12 @@ impl Parser<'_> {
                     continue;
                 }
             }
-            let (ch, next) = bracket_char(p, i)?;
+            let (ch, next) = bracket_char(p, i, self.utf8)?;
             i = next;
             // A `-` that is not last makes a range; `-` first or last is a
             // literal and is handled by simply parsing it as a character.
             if i < p.len() && p[i] == b'-' && p.get(i + 1).is_some_and(|&b| b != b']') {
-                if let Some((end_ch, after)) = bracket_char(p, i + 1) {
+                if let Some((end_ch, after)) = bracket_char(p, i + 1, self.utf8) {
                     items.push(BracketItem::Range(ch, end_ch));
                     i = after;
                     first = false;
@@ -340,13 +343,13 @@ impl Parser<'_> {
 }
 
 /// Parse the character at `i`, honouring one level of backslash escape.
-fn bracket_char(p: &[u8], i: usize) -> Option<(Vec<u8>, usize)> {
+fn bracket_char(p: &[u8], i: usize, utf8: bool) -> Option<(Vec<u8>, usize)> {
     let &b = p.get(i)?;
     if b == b'\\' && i + 1 < p.len() {
-        let n = char_len(p, i + 1);
+        let n = unit_len(p, i + 1, utf8);
         Some((p[i + 1..i + 1 + n].to_vec(), i + 1 + n))
     } else {
-        let n = char_len(p, i);
+        let n = unit_len(p, i, utf8);
         Some((p[i..i + n].to_vec(), i + n))
     }
 }
@@ -375,7 +378,7 @@ mod tests {
 
     #[test]
     fn plain_pattern() {
-        assert_eq!(parse(b"a*b?", false), {
+        assert_eq!(parse(b"a*b?", false, false), {
             let mut v = lits("a");
             v.push(Elem::Star);
             v.extend(lits("b"));
@@ -386,8 +389,8 @@ mod tests {
 
     #[test]
     fn extglob_off_keeps_groups_literal() {
-        assert_eq!(parse(b"@(a|b)", false), lits("@(a|b)"));
-        assert_eq!(parse(b"?(a)", false), {
+        assert_eq!(parse(b"@(a|b)", false, false), lits("@(a|b)"));
+        assert_eq!(parse(b"?(a)", false, false), {
             let mut v = vec![Elem::Any];
             v.extend(lits("(a)"));
             v
@@ -396,12 +399,12 @@ mod tests {
 
     #[test]
     fn extglob_on_parses_groups() {
-        let elems = parse(b"@(a|b)", true);
+        let elems = parse(b"@(a|b)", true, false);
         assert_eq!(
             elems,
             vec![Elem::Ext(ExtKind::At, vec![lits("a"), lits("b")])]
         );
-        let elems = parse(b"!(@(a|b))", true);
+        let elems = parse(b"!(@(a|b))", true, false);
         assert_eq!(
             elems,
             vec![Elem::Ext(
@@ -413,55 +416,55 @@ mod tests {
 
     #[test]
     fn escapes_and_trailing_backslash() {
-        assert_eq!(parse(b"\\*", true), vec![Elem::Lit(b"*".to_vec())]);
-        assert_eq!(parse(b"a\\", true), {
+        assert_eq!(parse(b"\\*", true, false), vec![Elem::Lit(b"*".to_vec())]);
+        assert_eq!(parse(b"a\\", true, false), {
             let mut v = lits("a");
             v.push(Elem::Lit(b"\\".to_vec()));
             v
         });
         assert_eq!(
-            parse(b"@(a\\|b)", true),
+            parse(b"@(a\\|b)", true, false),
             vec![Elem::Ext(ExtKind::At, vec![lits("a|b")])]
         );
     }
 
     #[test]
     fn unterminated_group_degrades_to_literals() {
-        assert_eq!(parse(b"@(a", true), lits("@(a"));
-        assert_eq!(parse(b"@(", true), lits("@("));
+        assert_eq!(parse(b"@(a", true, false), lits("@(a"));
+        assert_eq!(parse(b"@(", true, false), lits("@("));
     }
 
     #[test]
     fn unterminated_bracket_is_literal() {
-        assert_eq!(parse(b"[abc", false), lits("[abc"));
-        assert_eq!(parse(b"[]", false), lits("[]"));
+        assert_eq!(parse(b"[abc", false, false), lits("[abc"));
+        assert_eq!(parse(b"[]", false, false), lits("[]"));
     }
 
     #[test]
     fn brackets() {
         assert_eq!(
-            parse(b"[a-c]", false),
+            parse(b"[a-c]", false, false),
             vec![Elem::Bracket(Bracket {
                 negate: false,
                 items: vec![BracketItem::Range(b"a".to_vec(), b"c".to_vec())],
             })]
         );
         assert_eq!(
-            parse(b"[!a]", false),
+            parse(b"[!a]", false, false),
             vec![Elem::Bracket(Bracket {
                 negate: true,
                 items: vec![BracketItem::Char(b"a".to_vec())],
             })]
         );
         assert_eq!(
-            parse(b"[[:digit:]]", false),
+            parse(b"[[:digit:]]", false, false),
             vec![Elem::Bracket(Bracket {
                 negate: false,
                 items: vec![BracketItem::Class(Class::Digit)],
             })]
         );
         assert_eq!(
-            parse(b"[[:bogus:]]", false),
+            parse(b"[[:bogus:]]", false, false),
             vec![Elem::Bracket(Bracket {
                 negate: false,
                 items: vec![BracketItem::Never],
@@ -471,7 +474,7 @@ mod tests {
 
     #[test]
     fn reverse_sequences_and_nested_groups() {
-        let elems = parse(b"a*b", true);
+        let elems = parse(b"a*b", true, false);
         assert_eq!(reverse(&elems), {
             let mut v = lits("b");
             v.push(Elem::Star);
@@ -479,11 +482,11 @@ mod tests {
             v
         });
         assert_eq!(
-            reverse(&parse(b"@(ab|cd)", true)),
+            reverse(&parse(b"@(ab|cd)", true, false)),
             vec![Elem::Ext(ExtKind::At, vec![lits("ba"), lits("dc")])]
         );
         assert_eq!(
-            reverse(&parse(b"!(ab)", true)),
+            reverse(&parse(b"!(ab)", true, false)),
             vec![Elem::Ext(ExtKind::Not, vec![lits("ba")])]
         );
     }

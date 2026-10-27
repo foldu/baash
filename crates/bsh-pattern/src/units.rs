@@ -1,11 +1,18 @@
-//! Character units for pattern matching.
+//! Units for pattern matching: bytes or UTF-8 characters.
 //!
-//! Shell strings are bytes, but bash (in a UTF-8 locale) treats `?`, `*` and
-//! bracket expressions as operating on characters, not bytes: `?` matches
-//! `μ`. See the crate docs for the exact contract. A unit is one well-formed
-//! UTF-8 scalar value, or one invalid byte. Invalid bytes are therefore never
-//! silently merged into a neighbouring character and non-UTF-8 filenames still
-//! match byte for byte.
+//! The shell's C-locale choice is byte units (the default); UTF-8 mode uses
+//! one well-formed UTF-8 scalar value per unit, or one invalid byte. See the
+//! crate docs for the contract. In UTF-8 mode invalid bytes are never silently
+//! merged into a neighbouring character, so non-UTF-8 filenames still match
+//! byte for byte even when the rest of the text is valid UTF-8.
+
+/// Length of the matching unit at `i`: one UTF-8 character or one byte.
+///
+/// This is the single place the locale decision enters text traversal; the
+/// parser uses the same rule for pattern literals.
+pub(crate) fn unit_len(bytes: &[u8], i: usize, utf8: bool) -> usize {
+    if utf8 { char_len(bytes, i) } else { 1 }
+}
 
 /// Byte length of the UTF-8 character starting at `i`.
 ///
@@ -88,22 +95,23 @@ pub(crate) struct Text<'a> {
 }
 
 impl<'a> Text<'a> {
-    /// A text read from the start.
-    pub(crate) fn forward(bytes: &'a [u8]) -> Self {
-        Self::new(bytes, false)
+    /// A text read from the start, with `utf8` choosing character or byte
+    /// units.
+    pub(crate) fn forward(bytes: &'a [u8], utf8: bool) -> Self {
+        Self::new(bytes, false, utf8)
     }
 
     /// A text read from the end, unit by unit.
-    pub(crate) fn reverse(bytes: &'a [u8]) -> Self {
-        Self::new(bytes, true)
+    pub(crate) fn reverse(bytes: &'a [u8], utf8: bool) -> Self {
+        Self::new(bytes, true, utf8)
     }
 
-    fn new(bytes: &'a [u8], reverse: bool) -> Self {
+    fn new(bytes: &'a [u8], reverse: bool, utf8: bool) -> Self {
         let mut bounds = Vec::with_capacity(bytes.len() + 1);
         bounds.push(0);
         let mut i = 0;
         while i < bytes.len() {
-            i += char_len(bytes, i);
+            i += unit_len(bytes, i, utf8);
             bounds.push(i);
         }
         Self {
@@ -175,14 +183,14 @@ mod tests {
     #[test]
     fn offsets_forward_and_reverse() {
         let bytes = "aμ".as_bytes(); // a = 1 byte, μ = 2 bytes
-        let f = Text::forward(bytes);
+        let f = Text::forward(bytes, true);
         assert_eq!(f.len(), 2);
         assert_eq!(f.unit(0), b"a");
         assert_eq!(f.unit(1), "μ".as_bytes());
         assert_eq!(f.offset(0), 0);
         assert_eq!(f.offset(2), 3);
 
-        let r = Text::reverse(bytes);
+        let r = Text::reverse(bytes, true);
         assert_eq!(r.len(), 2);
         assert_eq!(r.unit(0), "μ".as_bytes());
         assert_eq!(r.unit(1), b"a");

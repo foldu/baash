@@ -10,11 +10,13 @@ const OFF: Flags = Flags {
     extglob: false,
     nocasematch: false,
     pathname: false,
+    utf8: false,
 };
 const EXT: Flags = Flags {
     extglob: true,
     nocasematch: false,
     pathname: false,
+    utf8: false,
 };
 
 fn check(flags: Flags, cases: &[(&[u8], &[u8], bool)]) {
@@ -88,11 +90,12 @@ fn question_matches_exactly_one_character() {
             (b"a?c", b"abc", true),
             (b"a?c", b"ac", false),
             (b"a?c", b"abbc", false),
-            // One code point, not one byte (bash 5.3, UTF-8 locale).
-            (b"?", "μ".as_bytes(), true),
-            (b"??", "μ".as_bytes(), false),
-            (b"??", "μa".as_bytes(), true),
-            (b"a?c", "aμc".as_bytes(), true),
+            // Byte mode (the default): each byte of `μ` is one unit.
+            // `unicode.rs` pins the UTF-8-mode expectations.
+            (b"?", "μ".as_bytes(), false),
+            (b"??", "μ".as_bytes(), true),
+            (b"??", "μa".as_bytes(), false),
+            (b"a?c", "aμc".as_bytes(), false),
             // An invalid byte is a character of its own.
             (b"?", &[0xFF], true),
             (b"??", &[0xFF], false),
@@ -388,7 +391,8 @@ fn pathname_star_and_question_refuse_slash() {
             (b"*/b", b"a/b", true),
             (b"a/*", b"a/b/c", false),
             (b"?/b", b"a/b", true),
-            (b"?/b", "μ/b".as_bytes(), true),
+            // Byte mode: `?` matches only the first byte of `μ`.
+            (b"?/b", "μ/b".as_bytes(), false),
         ],
     );
 }

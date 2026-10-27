@@ -12,11 +12,19 @@ const EXT: Flags = Flags {
     extglob: true,
     nocasematch: false,
     pathname: false,
+    utf8: false,
 };
 const OFF: Flags = Flags {
     extglob: false,
     nocasematch: false,
     pathname: false,
+    utf8: false,
+};
+const UTF8_EXT: Flags = Flags {
+    extglob: true,
+    nocasematch: false,
+    pathname: false,
+    utf8: true,
 };
 
 fn yes(pattern: &[u8], text: &[u8]) {
@@ -185,6 +193,7 @@ fn extglob_with_nocasematch() {
         extglob: true,
         nocasematch: true,
         pathname: false,
+        utf8: false,
     };
     assert!(matches(b"@(FOO|BAR)", b"bar", flags));
     assert!(matches(b"!(foo)", b"BAR", flags)); // complement of folded "foo"
@@ -199,6 +208,7 @@ fn extglob_with_pathname() {
         extglob: true,
         nocasematch: false,
         pathname: true,
+        utf8: false,
     };
     assert!(matches(b"@(a|b)/c", b"a/c", flags));
     assert!(!matches(b"@(a|b)/c", b"a/b/c", flags));
@@ -210,20 +220,25 @@ fn extglob_with_pathname() {
 
 #[test]
 fn extglob_on_multibyte_characters() {
-    // The operators are ASCII, but their operands are characters.
-    yes("@(μ|é)".as_bytes(), "é".as_bytes());
-    yes("@(μ|é)".as_bytes(), "μ".as_bytes());
-    no("@(μ|é)".as_bytes(), "e".as_bytes());
-    yes("?(μ)".as_bytes(), "μ".as_bytes());
-    yes("?(μ)".as_bytes(), b"");
-    no("?(μ)".as_bytes(), "μμ".as_bytes());
-    yes("+(μ)".as_bytes(), "μμμ".as_bytes());
-    // `?` inside a group still means one character.
-    yes(b"@(?|??)", "μ".as_bytes());
-    no(b"@(?|??)", "μμμ".as_bytes());
-    // Negation is over characters.
-    no("!(μ)".as_bytes(), "μ".as_bytes());
-    yes("!(μ)".as_bytes(), "é".as_bytes());
+    // These assertions happen to hold in both unit modes: in byte mode the
+    // group operand is several bytes but the text has the same bytes, and
+    // `?` inside `@(?|??)` can still cover two bytes. `unicode.rs` has the
+    // mode-specific `?`/`*` cases.
+    fn check(flags: Flags) {
+        assert!(matches("@(μ|é)".as_bytes(), "é".as_bytes(), flags));
+        assert!(matches("@(μ|é)".as_bytes(), "μ".as_bytes(), flags));
+        assert!(!matches("@(μ|é)".as_bytes(), "e".as_bytes(), flags));
+        assert!(matches("?(μ)".as_bytes(), "μ".as_bytes(), flags));
+        assert!(matches("?(μ)".as_bytes(), b"", flags));
+        assert!(!matches("?(μ)".as_bytes(), "μμ".as_bytes(), flags));
+        assert!(matches("+(μ)".as_bytes(), "μμμ".as_bytes(), flags));
+        assert!(matches(b"@(?|??)", "μ".as_bytes(), flags));
+        assert!(!matches(b"@(?|??)", "μμμ".as_bytes(), flags));
+        assert!(!matches("!(μ)".as_bytes(), "μ".as_bytes(), flags));
+        assert!(matches("!(μ)".as_bytes(), "é".as_bytes(), flags));
+    }
+    check(EXT);
+    check(UTF8_EXT);
 }
 
 #[test]

@@ -12,6 +12,12 @@
 //! assert!(matches(b"a*c", b"abc", Flags::default()));
 //! assert!(!matches(b"a*c", b"abcd", Flags::default()), "matches is anchored");
 //!
+//! // The default is the C locale: `μ` is two bytes and `?` is one byte.
+//! assert!(!matches(b"?", "μ".as_bytes(), Flags::default()));
+//! // UTF-8 mode is opt-in and makes `?` one code point.
+//! let utf8 = Flags { utf8: true, ..Flags::default() };
+//! assert!(matches(b"?", "μ".as_bytes(), utf8));
+//!
 //! // ${x#*b} and ${x##*b} on "aabb".
 //! assert_eq!(prefix_end(b"*b", b"aabb", false, Flags::default()), Some(3));
 //! assert_eq!(prefix_end(b"*b", b"aabb", true, Flags::default()), Some(4));
@@ -40,18 +46,37 @@
 //! `text[start..q]`. The rest of the pattern then continues from `q`. That is
 //! what makes `[[ ac == a!(b)c ]]` true and `[[ abc == a!(b)c ]]` false.
 //!
-//! # Characters, flags and offsets
+//! # Locale, characters and offsets
 //!
-//! `?`, `*` and bracket expressions work on *character units*: one well-formed
-//! UTF-8 scalar value, or one invalid byte. `?` therefore matches `μ` once
-//! (leaving a valid string), while each invalid byte is still matched exactly.
-//! This follows bash 5.3 in a UTF-8 locale. There is deliberately no `LC_ALL=C`
-//! mode: the shell has no locale model yet, and a byte-granular `?` would split
-//! a valid character. Returned offsets are always byte offsets at a character
-//! boundary.
+//! [`Flags::utf8`] selects the unit the pattern engine works on, and it
+//! **defaults to `false`**, the C locale:
 //!
-//! [`Flags`] has three orthogonal switches:
+//! * **Byte mode (`utf8: false`, default).** `?` matches one byte, `*` splits
+//!   between bytes, and a bracket range compares byte values. `μ` is two
+//!   characters for pattern purposes. This is what `bsh-lang`'s `${#x}` already
+//!   does and what the conformance harness (which runs with `LC_ALL=C`) sees.
+//! * **UTF-8 mode (`utf8: true`).** `?`, `*` and brackets work on Unicode
+//!   scalar values; a valid multi-byte character is one character, and an
+//!   invalid byte is a one-byte character. This is bash in a UTF-8 locale.
 //!
+//! Both modes run the same NFA; only unit splitting, literal parsing and range
+//! comparison differ. Returned offsets are always byte offsets at a unit
+//! boundary (every byte offset in byte mode; only character boundaries in
+//! UTF-8 mode), so they can be used directly to slice the input.
+//!
+//! ```text
+//! LC_ALL=C        v=$(printf '\316\274x'); ${#v} = 3; ${v#?} = \xbcx
+//! LC_ALL=C.UTF-8  v=$(printf '\316\274x'); ${#v} = 2; ${v#?} = x
+//! ```
+//!
+//! The shell has no locale model yet, so its callers should leave `utf8`
+//! false; when the model arrives it comes from `LC_ALL`/`LC_CTYPE`. There is no
+//! silent inference from the host environment: a library that guessed would
+//! make the shell disagree with its own `${#x}`.
+//!
+//! [`Flags`] has four orthogonal switches:
+//!
+//! * `utf8` selects byte units (default) or UTF-8 units, described above.
 //! * `extglob` enables the five operators above. Off, `?(…)` is `?` followed
 //!   by a literal `(` — exactly bash's parsing rule.
 //! * `nocasematch` ASCII-folds literals, bracket characters and *range
@@ -69,14 +94,16 @@
 //!
 //! These are the places where a byte-oriented matcher has to make a call:
 //!
-//! * **POSIX classes are ASCII.** `[:alpha:]` does not match `é`, unlike glibc
-//!   in a UTF-8 locale. They are locale-independent on purpose; a shell that
-//!   behaves the same everywhere is worth more than one that matches the host
-//!   locale's idea of `isalpha`.
-//! * **Ranges compare Unicode scalar values**, not collation weights. glibc
-//!   uses the locale's collation order; `[à-ÿ]` matching `é` works here, but a
-//!   locale-specific ordering would not necessarily. Invalid bytes match no
-//!   range, though they match literal bracket characters.
+//! * **POSIX classes are ASCII**, in both unit modes. `[:alpha:]` does not
+//!   match `é`, unlike glibc in a UTF-8 locale. They are locale-independent on
+//!   purpose; a shell that behaves the same everywhere is worth more than one
+//!   that matches the host locale's idea of `isalpha`. In byte mode the test is
+//!   applied to each byte.
+//! * **Ranges compare byte values in byte mode and Unicode scalar values in
+//!   UTF-8 mode**, never collation weights. glibc uses the locale's collation
+//!   order; `[à-ÿ]` matching `é` works here in UTF-8 mode, but a locale-specific
+//!   ordering would not necessarily. Invalid bytes match no scalar range in
+//!   UTF-8 mode, though they match literal bracket characters.
 //! * **An unterminated `[` is a literal `[`.** Bash does this; `[abc` matches
 //!   the five bytes `[abc`.
 //! * **A trailing backslash is a literal backslash.**
@@ -97,6 +124,10 @@
 //!   before pattern matching; they are not part of this crate.
 //! * **Empty alternatives are real**: `@()` matches the empty string, `!()`
 //!   matches every non-empty string, and `!(|)` behaves like `!()`.
+//! * **Unit mode is a decoding choice, not a second engine.** Byte and UTF-8
+//!   mode compile the same AST shape over different units and run the same
+//!   NFA; there is one matcher, one set of extglob semantics and one
+//!   complexity bound.
 //! * **Extglob nesting is capped at 128 groups.** The parser, compiler and
 //!   `!` evaluator recurse on nesting, and patterns can come from variables;
 //!   deeper groups degrade to literal text rather than risk a stack overflow.
@@ -117,7 +148,8 @@
 //! The pattern is parsed into a small tree of literals, `?`, `*`, brackets and
 //! extglob groups, then compiled to a Thompson-style NFA with explicit
 //! `Split`/`Star` epsilon edges. Matching simulates a *set of NFA states* for
-//! each character position instead of backtracking; `prefix_end` simply
+//! each text unit (a byte or a character, per [`Flags::utf8`]) instead of
+//! backtracking; `prefix_end` simply
 //! records every position at which the accept state is active and takes the
 //! first (shortest) or last (longest). Suffix matching reverses the parsed
 //! pattern and walks the text from the end, which is exact because reversal
@@ -130,7 +162,7 @@
 //! the continuation is scheduled at every *other* end. This is why the
 //! algorithm is polynomial even for nested negations.
 //!
-//! For `n` text characters and `m` NFA instructions: `O(n·m)` time and
+//! For `n` text units and `m` NFA instructions: `O(n·m)` time and
 //! `O(n·m / 64)` words for the pending frontier without `!(…)`. With `!(…)`
 //! the worst case is `O(n²·m)` time and `O(n²·m)` bits of memoised end sets,
 //! still polynomial; the memo is per sub-program and start position. There is
@@ -140,6 +172,9 @@
 //!
 //! # Wiring notes
 //!
+//! * **Set `utf8` to the shell's unit policy.** Today that is `false`: pass
+//!   `Flags::default()` in `case`/`[[`/`${…}`/glob. Do not set it from the host
+//!   locale independently of `bsh-lang`, or `${#x}` and `${x#?}` will disagree.
 //! * `case` and `[[ x == pat ]]`: [`matches()`], with `pathname: false`. One
 //!   bash surprise: `[[ ]]` matches its right-hand side with extglob semantics
 //!   **even when `shopt -u extglob`** (`[[ cc == @(cc) ]]` is true), while
@@ -192,6 +227,16 @@ pub struct Flags {
     pub nocasematch: bool,
     /// Make `*`, `?` and bracket expressions refuse `/`.
     pub pathname: bool,
+    /// Decode patterns and subjects as UTF-8 characters instead of bytes.
+    ///
+    /// `false` (the default) is the C locale: `?` matches one byte, bracket
+    /// ranges compare byte values, and a multi-byte character is several
+    /// characters for pattern purposes. `true` is the UTF-8 locale: `?`,
+    /// `*` and brackets work on Unicode scalar values, and an invalid byte is
+    /// a one-byte character. The shell currently computes lengths and matches
+    /// in bytes (`LC_ALL=C`), so its callers should leave this `false` until
+    /// the locale model changes; see the crate docs.
+    pub utf8: bool,
 }
 
 /// A parsed and compiled pattern, reusable across subjects.
@@ -217,7 +262,7 @@ impl Pattern {
     /// Parsing is total: malformed input becomes literal text, it never panics
     /// and never returns an error. See the crate docs for the exact fallbacks.
     pub fn new(pattern: &[u8], flags: Flags) -> Self {
-        let alts = ast::parse(pattern, flags.extglob);
+        let alts = ast::parse(pattern, flags.extglob, flags.utf8);
         let forward = nfa::compile(&alts);
         Self {
             flags,
@@ -234,7 +279,7 @@ impl Pattern {
 
     /// Match the whole of `text`, anchored at both ends.
     pub fn matches(&self, text: &[u8]) -> bool {
-        let text = units::Text::forward(text);
+        let text = units::Text::forward(text, self.flags.utf8);
         let n = text.len();
         nfa::run(&self.forward, &text, self.flags)[n]
     }
@@ -245,7 +290,7 @@ impl Pattern {
     /// `Some(0)` means the pattern matched the empty prefix. `None` means no
     /// prefix matched.
     pub fn prefix_end(&self, text: &[u8], longest: bool) -> Option<usize> {
-        let text = units::Text::forward(text);
+        let text = units::Text::forward(text, self.flags.utf8);
         let ends = nfa::run(&self.forward, &text, self.flags);
         pick(&ends[..], text.len(), longest).map(|q| text.offset(q))
     }
@@ -259,7 +304,7 @@ impl Pattern {
         let program = self
             .reverse
             .get_or_init(|| nfa::compile(&ast::reverse(&self.alts)));
-        let text = units::Text::reverse(text);
+        let text = units::Text::reverse(text, self.flags.utf8);
         let ends = nfa::run(program, &text, self.flags);
         pick(&ends[..], text.len(), longest).map(|q| text.offset(q))
     }

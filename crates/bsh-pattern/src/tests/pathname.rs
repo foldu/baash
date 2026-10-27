@@ -42,9 +42,24 @@ fn question_cannot_match_a_slash() {
     assert!(path(b"a?b", b"axb"));
     assert!(path(b"?/b", b"a/b"));
     assert!(!path(b"?/b", b"aa/b"));
-    // One code point, not one byte, and still not `/`.
-    assert!(path(b"?", "μ".as_bytes()));
-    assert!(path(b"?/?", "μ/€".as_bytes()));
+    // Byte mode: `μ` is two characters, so `?` is not enough.
+    assert!(!path(b"?", "μ".as_bytes()));
+    assert!(!path(b"?/?", "μ/€".as_bytes()));
+}
+
+#[test]
+fn utf8_pathname_still_refuses_slash() {
+    let utf8 = Flags {
+        pathname: true,
+        utf8: true,
+        ..Flags::default()
+    };
+    assert!(matches(b"?", "μ".as_bytes(), utf8));
+    assert!(matches(b"?/?", "μ/€".as_bytes(), utf8));
+    assert!(!matches(b"?", b"/", utf8));
+    assert!(!matches(b"?/?", "/€".as_bytes(), utf8));
+    assert!(!matches(b"*", "μ/€".as_bytes(), utf8));
+    assert!(matches(b"*/*", "μ/€".as_bytes(), utf8));
 }
 
 #[test]

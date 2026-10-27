@@ -9,12 +9,14 @@ fn default_flags_are_all_off() {
     assert!(!flags.extglob);
     assert!(!flags.nocasematch);
     assert!(!flags.pathname);
+    assert!(!flags.utf8, "the default is the C locale");
     assert_eq!(
         flags,
         Flags {
             extglob: false,
             nocasematch: false,
-            pathname: false
+            pathname: false,
+            utf8: false
         }
     );
     let copied = flags;
@@ -33,6 +35,7 @@ fn flags_are_copy_and_independent() {
     assert!(!ext.pathname, "copying must not mutate the original");
     assert!(path.extglob);
     assert!(path.pathname);
+    assert!(!path.utf8);
 }
 
 #[test]
@@ -72,25 +75,28 @@ fn free_functions_match_pattern_methods() {
     for extglob in [false, true] {
         for pathname in [false, true] {
             for nocasematch in [false, true] {
-                let flags = Flags {
-                    extglob,
-                    nocasematch,
-                    pathname,
-                };
-                for &(p, t) in cases {
-                    let compiled = Pattern::new(p, flags);
-                    assert_eq!(compiled.matches(t), matches(p, t, flags));
-                    for longest in [false, true] {
-                        assert_eq!(
-                            compiled.prefix_end(t, longest),
-                            prefix_end(p, t, longest, flags),
-                            "prefix p={p:02x?} t={t:02x?} flags={flags:?} longest={longest}"
-                        );
-                        assert_eq!(
-                            compiled.suffix_start(t, longest),
-                            suffix_start(p, t, longest, flags),
-                            "suffix p={p:02x?} t={t:02x?} flags={flags:?} longest={longest}"
-                        );
+                for utf8 in [false, true] {
+                    let flags = Flags {
+                        extglob,
+                        nocasematch,
+                        pathname,
+                        utf8,
+                    };
+                    for &(p, t) in cases {
+                        let compiled = Pattern::new(p, flags);
+                        assert_eq!(compiled.matches(t), matches(p, t, flags));
+                        for longest in [false, true] {
+                            assert_eq!(
+                                compiled.prefix_end(t, longest),
+                                prefix_end(p, t, longest, flags),
+                                "prefix p={p:02x?} t={t:02x?} flags={flags:?} longest={longest}"
+                            );
+                            assert_eq!(
+                                compiled.suffix_start(t, longest),
+                                suffix_start(p, t, longest, flags),
+                                "suffix p={p:02x?} t={t:02x?} flags={flags:?} longest={longest}"
+                            );
+                        }
                     }
                 }
             }
@@ -131,15 +137,18 @@ fn malformed_patterns_never_panic() {
         b"??(((",
     ];
     for extglob in [false, true] {
-        let flags = Flags {
-            extglob,
-            ..Flags::default()
-        };
-        for &pattern in patterns {
-            for text in [&b""[..], b"a", b"(", b"[", b"|||"] {
-                let _ = matches(pattern, text, flags);
-                let _ = prefix_end(pattern, text, false, flags);
-                let _ = suffix_start(pattern, text, true, flags);
+        for utf8 in [false, true] {
+            let flags = Flags {
+                extglob,
+                utf8,
+                ..Flags::default()
+            };
+            for &pattern in patterns {
+                for text in [&b""[..], b"a", b"(", b"[", b"|||"] {
+                    let _ = matches(pattern, text, flags);
+                    let _ = prefix_end(pattern, text, false, flags);
+                    let _ = suffix_start(pattern, text, true, flags);
+                }
             }
         }
     }
@@ -176,4 +185,22 @@ fn deep_nesting_is_bounded_not_a_stack_overflow() {
         negated.push(')');
     }
     let _ = matches(negated.as_bytes(), b"a", flags);
+}
+
+#[test]
+fn default_is_the_c_locale() {
+    let byte = Flags::default();
+    assert!(!byte.utf8);
+    // `μ` is two bytes: `?` is one byte and `??` is the whole character.
+    assert!(!matches(b"?", "μ".as_bytes(), byte));
+    assert!(matches(b"??", "μ".as_bytes(), byte));
+    assert_eq!(prefix_end(b"?", "μ-".as_bytes(), false, byte), Some(1));
+
+    let utf8 = Flags {
+        utf8: true,
+        ..Flags::default()
+    };
+    assert!(matches(b"?", "μ".as_bytes(), utf8));
+    assert!(!matches(b"??", "μ".as_bytes(), utf8));
+    assert_eq!(prefix_end(b"?", "μ-".as_bytes(), false, utf8), Some(2));
 }

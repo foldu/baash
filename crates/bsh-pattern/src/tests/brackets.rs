@@ -120,14 +120,13 @@ fn bracket_literals_in_a_sequence() {
     miss(b"a[bc]d", b"abcd");
     yes(b"*[0-9]", b"file7");
     miss(b"*[0-9]", b"filex");
-    // A bracket is one character, even with a multi-byte member.
-    yes("[é]".as_bytes(), "é".as_bytes());
+    // Default byte mode: a bracket is one byte, so a two-byte character is
+    // not one bracket match. `unicode.rs` pins the UTF-8-mode versions.
+    miss("[é]".as_bytes(), "é".as_bytes());
     miss("[é]".as_bytes(), "e".as_bytes());
     miss("é".as_bytes(), "e".as_bytes());
-    // Non-ASCII range endpoints compare scalar values.
-    yes("[à-ÿ]".as_bytes(), "é".as_bytes());
+    miss("[à-ÿ]".as_bytes(), "é".as_bytes());
     miss("[à-ÿ]".as_bytes(), "a".as_bytes());
-    // Negation of a multi-byte literal.
     miss("[!é]".as_bytes(), "é".as_bytes());
     yes("[!é]".as_bytes(), b"x");
 }

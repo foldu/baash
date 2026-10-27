@@ -377,11 +377,28 @@ impl Runner<'_> {
         }
     }
 
-    /// Range membership compares Unicode scalar values, not bytes.
+    /// Range membership.
     ///
-    /// Under `nocasematch` both endpoints and the character are ASCII-folded
-    /// first, which is what bash does: `[A-z]` then behaves as `[a-z]`.
+    /// In the default byte mode this is a byte comparison. In UTF-8 mode it
+    /// compares Unicode scalar values. Under `nocasematch` both endpoints and
+    /// the character are ASCII-folded first, which is what bash does:
+    /// `[A-z]` then behaves as `[a-z]`.
     fn range(&self, lo: &[u8], hi: &[u8], unit: &[u8]) -> bool {
+        if !self.flags.utf8 {
+            let (Some(&lo), Some(&hi), Some(&unit)) = (lo.first(), hi.first(), unit.first()) else {
+                return false;
+            };
+            let (lo, hi, unit) = if self.flags.nocasematch {
+                (
+                    lo.to_ascii_lowercase(),
+                    hi.to_ascii_lowercase(),
+                    unit.to_ascii_lowercase(),
+                )
+            } else {
+                (lo, hi, unit)
+            };
+            return lo <= unit && unit <= hi;
+        }
         let (lo, hi, unit) = if self.flags.nocasematch {
             (scalar_folded(lo), scalar_folded(hi), scalar_folded(unit))
         } else {

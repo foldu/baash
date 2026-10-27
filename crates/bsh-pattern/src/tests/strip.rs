@@ -10,11 +10,19 @@ const OFF: Flags = Flags {
     extglob: false,
     nocasematch: false,
     pathname: false,
+    utf8: false,
 };
 const EXT: Flags = Flags {
     extglob: true,
     nocasematch: false,
     pathname: false,
+    utf8: false,
+};
+const UTF8: Flags = Flags {
+    extglob: false,
+    nocasematch: false,
+    pathname: false,
+    utf8: true,
 };
 
 /// `short` is `${v#pat}` / `${v%pat}`, `long` is `##` / `%%`.
@@ -162,14 +170,27 @@ fn strip_nocasematch() {
 }
 
 #[test]
-fn prefix_and_suffix_offsets_are_character_boundaries() {
-    // "μ-" is 2 + 1 bytes.
+fn byte_mode_offsets_are_byte_offsets() {
+    // The default is the C locale: "μ-" is three bytes and `?` is one byte.
     let text = "μ-".as_bytes();
-    prefix(OFF, b"?", text, Some(2), Some(2));
-    prefix(OFF, b"??", text, Some(3), Some(3));
-    // The suffix of one character starts at byte 2.
+    prefix(OFF, b"?", text, Some(1), Some(1));
+    prefix(OFF, b"??", text, Some(2), Some(2));
+    prefix(OFF, b"???", text, Some(3), Some(3));
     suffix(OFF, b"?", text, Some(2), Some(2));
-    suffix(OFF, b"??", text, Some(0), Some(0));
+    suffix(OFF, b"??", text, Some(1), Some(1));
+    suffix(OFF, b"???", text, Some(0), Some(0));
+    suffix(OFF, b"?", "-μ".as_bytes(), Some(2), Some(2));
+}
+
+#[test]
+fn utf8_mode_offsets_are_character_boundaries() {
+    // "μ-" is 2 + 1 bytes and `?` is one code point.
+    let text = "μ-".as_bytes();
+    prefix(UTF8, b"?", text, Some(2), Some(2));
+    prefix(UTF8, b"??", text, Some(3), Some(3));
+    // The suffix of one character starts at byte 2.
+    suffix(UTF8, b"?", text, Some(2), Some(2));
+    suffix(UTF8, b"??", text, Some(0), Some(0));
     // "-μ": the last unit starts at byte 1.
-    suffix(OFF, b"?", "-μ".as_bytes(), Some(1), Some(1));
+    suffix(UTF8, b"?", "-μ".as_bytes(), Some(1), Some(1));
 }
