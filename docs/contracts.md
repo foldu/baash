@@ -8,8 +8,9 @@ Each section is owned by the producing crate. If you are implementing a consumer
 (`bsh-vm`, `bsh-repl`, `bsh-tools`) read the relevant sections before you start,
 and treat every item here as a fact about the API you are calling.
 
-Status: wave 1 (`bsh-diag`, `bsh-sys`, `bsh-runtime`, `bsh-lang`,
-`bsh-syntax`) and `bsh-complete` have landed. `bsh-vm` is in flight.
+Status: everything except the editor and tooling has landed: `bsh-diag`,
+`bsh-sys`, `bsh-runtime`, `bsh-lang`, `bsh-syntax`, `bsh-complete` and the
+`bsh-vm` tree-walking executor.
 
 ---
 
@@ -277,6 +278,59 @@ painting.
 Known copy: the builtin-name list is duplicated from `bsh-runtime` because the
 dependency runs the other way. Replace it with a runtime-supplied list once the
 runtime exposes one.
+
+---
+
+## bsh-vm (tree evaluator)
+
+**Which built-ins the executor owns.** `break`, `continue`, `return`, `exit`,
+`exec`, `eval`, `.`/`source`, `cd` and `echo` are implemented in `bsh_vm`. They
+unwind control flow or re-enter the interpreter, which a
+`fn(host, argv) -> Status` signature cannot express. The executor consults them
+only when `BuiltinDef::is_implemented()` is false, so a runtime implementation
+takes over silently — deliberate, but it means whoever implements one of those
+in `bsh-runtime` must delete the executor's body in the same change.
+
+**`exec` is approximated.** There is no in-place `execve` in `bsh-sys` yet, so
+`exec cmd` is spawn + wait + `Exit`: same output, same status, but the pid
+differs and a *replaced* shell does not carry redirects into the command.
+Redirect-only `exec 3>f` is exact. A `bsh_sys::exec(plan) -> io::Error` would
+make it exact.
+
+**The VM owns `PWD`/`OLDPWD`** because `cd` goes through
+`std::env::set_current_dir` (no `chdir` wrapper in `bsh-sys`), and descriptors
+are saved by `dup2` to fds ≥ 20 (no `dup`/`fcntl` wrapper yet).
+
+**Fragments are parsed by synthesis.** `[[ ]]` operands, `case` patterns and
+here-doc `$…` constructs are parsed as `": <fragment>"` and `words[1]` is taken.
+This reuses the real lexer so quoting is exact, but it is fragile: a fragment
+containing `;` or a newline changes the synthetic command. `bsh_syntax::parse_word`
+is the fix and is queued.
+
+**Here-document body expansion lives here**, as a double-quote-like scanner, and
+is a candidate to move into `bsh-lang` once a here-doc body has a word model.
+
+**`$?`, `$-`, `$$`, `$!` are cached** and refreshed at command boundaries,
+because `Vars::get(&self)` cannot compute them. A runtime-owned `special()`
+accessor would remove the bookkeeping.
+
+**`fork_child`'s closure must call `std::process::exit`** to set the child's
+status; it runs libc atexit handlers in the forked child (safe here only because
+writes are flushed). An exit-status hook in `bsh-sys` would be better.
+
+**Status precedence**: an explicit exit request outranks the POSIX §2.8.1
+consequence table — `exit 7` is 7, not 1.
+
+**`pipefail` takes the *rightmost* failing status**, and is sampled at pipeline
+start (DESIGN §2).
+
+Deferred, and listed in `bsh_vm::tree`'s `# Deferred`: traps, job control,
+`select`, `time`, `coproc`, arrays, pattern parameter operators, `[[ =~ ]]`,
+process substitution, `~user`, `$RANDOM`/`$SECONDS`/`$PIPESTATUS`, `set -x`.
+
+**Platform constants come from `bsh-sys`.** `bsh_sys::{flags, SIGPIPE, c_int,
+mode_t}` are re-exported so no other crate needs `libc`; `bsh-vm` has no `libc`
+dependency, which keeps "only `bsh-sys` touches the platform" true.
 
 ---
 

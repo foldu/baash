@@ -115,7 +115,6 @@ dependencies = [
  "bsh-runtime",
  "bsh-syntax",
  "bsh-sys",
- "libc",
 ]
 
 [[package]]

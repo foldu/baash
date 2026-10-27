@@ -58,6 +58,34 @@ pub use term::{
 pub use threadgate::{ThreadGate, ThreadGuard, fork_gate};
 pub use wait::{WaitOutcome, wait_any_nohang, wait_any_nohang_wuntraced, wait_pid};
 
+// `FdAction::Open` and the signal APIs name C types in their signatures, so a
+// consumer would otherwise need its own `libc` dependency just to call us.
+// Re-exporting keeps the rule that this crate is the only one depending on the
+// platform.
+pub use libc::{c_int, mode_t};
+
+/// `open(2)` access flags, for building [`spawn::FdAction::Open`] without a
+/// `libc` dependency.
+pub mod flags {
+    use super::c_int;
+
+    /// Open for reading.
+    pub const RDONLY: c_int = libc::O_RDONLY;
+    /// Open for writing.
+    pub const WRONLY: c_int = libc::O_WRONLY;
+    /// Open for reading and writing.
+    pub const RDWR: c_int = libc::O_RDWR;
+    /// Create the file if it does not exist.
+    pub const CREAT: c_int = libc::O_CREAT;
+    /// Truncate the file.
+    pub const TRUNC: c_int = libc::O_TRUNC;
+    /// Append to the file.
+    pub const APPEND: c_int = libc::O_APPEND;
+}
+
+/// `SIGPIPE`, for building a [`SignalSet`] that resets it in children.
+pub const SIGPIPE: c_int = libc::SIGPIPE;
+
 /// Whether `fd` refers to a terminal.
 ///
 /// Interactive behaviour (colour, the line editor, job control) hangs off this

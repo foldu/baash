@@ -364,14 +364,16 @@ fn default_fd(op: RedirectOp, explicit: Option<u32>) -> RawFd {
 /// Build an `Open` step for `path` under `op`, onto `to`.
 fn open_step(path: &[u8], op: RedirectOp, to: RawFd) -> Result<Step, ()> {
     let (flags, _) = match op {
-        RedirectOp::Read => (libc::O_RDONLY, ()),
-        RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Both => {
-            (libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC, ())
-        }
-        RedirectOp::Append | RedirectOp::BothAppend => {
-            (libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND, ())
-        }
-        RedirectOp::ReadWrite => (libc::O_RDWR | libc::O_CREAT, ()),
+        RedirectOp::Read => (bsh_sys::flags::RDONLY, ()),
+        RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Both => (
+            bsh_sys::flags::WRONLY | bsh_sys::flags::CREAT | bsh_sys::flags::TRUNC,
+            (),
+        ),
+        RedirectOp::Append | RedirectOp::BothAppend => (
+            bsh_sys::flags::WRONLY | bsh_sys::flags::CREAT | bsh_sys::flags::APPEND,
+            (),
+        ),
+        RedirectOp::ReadWrite => (bsh_sys::flags::RDWR | bsh_sys::flags::CREAT, ()),
         _ => {
             return Err(());
         }

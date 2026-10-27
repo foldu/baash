@@ -74,7 +74,10 @@ Two 2024 facts that shape builtin tiering:
   *"The shell shall use the `pipefail` setting at the time it begins execution
   of the pipeline, not the setting at the time it sets the exit status."* So in
   `cmd1 | set -o pipefail`, `cmd1`'s failure does **not** affect that pipeline's
-  status. The flag must be sampled at pipeline start (§5.2).
+  status. The flag must be sampled at pipeline start (§5.2). Under `pipefail`
+  the status is that of the **last (rightmost)** command that failed, not the
+  first — the spec tabulates four combinations with `!`, and only one of them is
+  a "first failure" reading.
 
 `[spec]` Still unspecified in 2024, and listed as such by name: `local`,
 `declare`, `typeset`, `source`, `shopt`, `pushd`/`popd`, `let`, `mapfile`,
@@ -178,6 +181,7 @@ Rows marked ✔ verified against bash 5.3.20 rather than from memory:
 | `unset $lvalue`, `printf -v $lvalue`, `${!name}` | n/a | re-parses data as code | **opt-in only** (`shopt eval_unsafe_arith`) |
 | `trap '' INT` then child | `SIG_IGN` inherited | same | POSIX — see §4.5 |
 | prefix assignment before a special built-in | persists | bash (non-posix) drops it; `bash --posix` persists | **POSIX**, in both profiles — a deliberate, documented deviation |
+| a *special* built-in fails (`shift 5`) | non-interactive shell exits | bash continues | **POSIX**, in both profiles — the one deviation a bash script can notice |
 
 The last three rows are one bug class: bash re-parses strings as code, so
 `a[$(cmd)]=v` executes `cmd`. Oils refuses by default and exposes
@@ -372,6 +376,19 @@ search order.
 
 Single entry point `fn resolve(&mut self, name: &[u8]) -> &mut Cell`; that is
 where `nameref` lands later, with a chain limit and cycle check.
+
+Built-in *ownership* splits three ways, and the registry should say so rather
+than leave it implied:
+
+| owner | built-ins | why |
+|---|---|---|
+| executor (`bsh-vm`) | `break`, `continue`, `return`, `exit`, `exec`, `eval`, `.`/`source`, `cd`, `echo` | they unwind control flow or re-enter the interpreter, which a `fn(host, argv) -> Status` signature cannot express |
+| `bsh-runtime` | state-only built-ins: `export`, `readonly`, `unset`, `set`, `shift`, `times` | they mutate the variable store and nothing else |
+| `bsh-sys` + caller | everything else | a plain external command |
+
+Today the executor's set is discovered by `BuiltinDef::is_implemented()` being
+false. That works, and it means a runtime implementation silently takes over,
+but an explicit `BuiltinBody::Executor` marker would say it out loud.
 
 ### 4.7 Errors
 

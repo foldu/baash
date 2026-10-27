@@ -396,7 +396,7 @@ impl Interp {
         // the shell, and `exec` preserves `SIG_IGN` — a child that inherits the
         // ignore would never die on a closed pipe (DESIGN.md §4.3, §4.5).
         plan.sigmask = Some(bsh_sys::SignalSet::empty());
-        plan.reset_signals = bsh_sys::SignalSet::of(&[libc::SIGPIPE]);
+        plan.reset_signals = bsh_sys::SignalSet::of(&[bsh_sys::SIGPIPE]);
 
         let result = bsh_sys::spawn(plan);
         drop(keep);
@@ -496,7 +496,7 @@ impl Interp {
             };
         plan.actions = actions;
         plan.sigmask = Some(bsh_sys::SignalSet::empty());
-        plan.reset_signals = bsh_sys::SignalSet::of(&[libc::SIGPIPE]);
+        plan.reset_signals = bsh_sys::SignalSet::of(&[bsh_sys::SIGPIPE]);
         let result = bsh_sys::spawn(plan);
         drop(keep);
         let _ = self.state.vars.finish_prefix_assignments(applied);
