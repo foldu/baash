@@ -84,6 +84,7 @@ name = "bsh-syntax"
 version = "0.0.0"
 dependencies = [
  "bsh-diag",
+ "bsh-lang",
  "bumpalo",
  "memchr",
 ]
