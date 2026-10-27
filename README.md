@@ -3,11 +3,19 @@
 A POSIX- and bash-compatible interactive shell in Rust. The design rationale
 lives in [DESIGN.md](DESIGN.md); this file is the operator's manual.
 
-**Status: it runs.** `bsh` executes scripts, and `bsh` with no arguments gives
-you an interactive editor with syntax highlighting, TAB completion and history.
-POSIX conformance is **not yet measured** — the Oils suite is vendored and the
-harness is in progress — so treat the pass count as unknown rather than assume
-it from the test count.
+**Status: it runs, and conformance is now measured.** `bsh` executes scripts,
+and `bsh` with no arguments gives you an interactive editor with syntax
+highlighting, TAB completion and history.
+
+**1013 of 2787 comparable cases pass** in the vendored Oils suite (36.3%; 1184
+cases skipped as out of scope). For scale, bash passes 2574/2787 (92.4%) on the
+same run — so roughly 1579 cases are things bash does and we do not yet. Those
+are concentrated in arrays, `read`/`trap`/`getopts`/`type`, `${x#pat}`-family
+expansion, brace/extglob expansion, aliases, `[[ =~ ]]` and job control. Run it
+yourself with `cargo run -p bsh-spec -- --shell target/debug/bsh --compare bash`.
+
+Do not read the unit-test count as conformance: it is a different number
+measuring a different thing.
 
 What works today: expansion (words, `IFS`, `$@`/`$*`, quoting), redirections
 including here-documents, pipelines with `pipefail`, `if`/`for`/`while`/`until`/

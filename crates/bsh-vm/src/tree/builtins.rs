@@ -31,7 +31,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 
 use bsh_diag::Diagnostic;
-use bsh_runtime::{CreateScope, ShellHost, Status, Tier};
+use bsh_runtime::{CreateScope, ShellError, ShellHost, Status, Tier};
 
 use super::{Interp, Unwind};
 
@@ -135,6 +135,14 @@ fn loop_control(interp: &mut Interp, argv: &[Vec<u8>], break_it: bool) -> Status
                         String::from_utf8_lossy(argv.get(1).map_or(&b""[..], Vec::as_slice))
                     ),
                 );
+                // Record the failure so the §2.8.1 table decides what happens
+                // next. Without this the diagnostic was printed, the status
+                // was non-zero, and nothing acted on it: `while true; do break
+                // oops; done` printed forever instead of exiting.
+                interp.state.record_error(ShellError::SpecialBuiltin {
+                    status: Status::FAILURE,
+                    via_command: false,
+                });
                 return Status::FAILURE;
             }
             Some(count) => count.min(u32::from(u8::MAX)),

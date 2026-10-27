@@ -41,6 +41,18 @@ test:
   script:
     - nix develop --command cargo test --workspace --all-features
 
+conformance:
+  stage: check
+  tags: [nix]
+  <<: *nix_cache
+  # allow_failure until a runner with a pinned environment exists: the number
+  # depends on python3 being present for the suite's helpers, and on the
+  # reference shells. The baseline in the dev environment is 1013/2787.
+  allow_failure: true
+  script:
+    - nix develop --command cargo build -p bsh
+    - nix develop --command cargo run -p bsh-spec -- --shell target/debug/bsh --min 1000
+
 package:
   stage: package
   tags: [nix]

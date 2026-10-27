@@ -1146,6 +1146,22 @@ The parser and the VM are the fun parts. Ranked by effective effort:
    80 files cover a language we are not implementing.
 2. **Conformance ratchet.** Pass count per file; CI fails on a drop. Put the
    number in the README. It is the only real progress metric.
+
+   **First measurement** (`crates/bsh-spec`, which is the harness this item
+   asked for): **1013 of 2787 compared cases**, 1184 skipped, of 3971 total
+   (36.3% of comparable cases). For reference bash passes 2574/2787 (92.4%) on
+   the same run, so 1579 cases are ones bash passes and we do not — that list,
+   not the headline percentage, is the work queue. The skips are 1162 YSH
+   cases (a language we do not implement) and 22 needing a missing helper; no
+   case is skipped because we cannot run it.
+
+   Two things about the number. First, the suite's helpers are python2
+   scripts, and the harness substitutes python3 equivalents when python2 is
+   absent — without them `argv.py` fails in 772 lines for *every* shell, bash
+   included, which is why bash's 92.4% is the check that the substitution is
+   faithful. Second, `## OK <shell>` alternatives are accepted (worth 48
+   passes), as upstream intends; the harness prints that number separately so
+   it can never be mistaken for strict conformance.
 3. **Real-world corpus** `[oils]`: every autoconf `configure` script (brutally
    portable shell, the best corpus that exists), Debian maintainer scripts,
    `/etc/init.d`, plus `bash-completion`'s own function files. Gate: parse 100%,

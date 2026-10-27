@@ -51,6 +51,11 @@
             clippy
             rustfmt
             rust-analyzer
+            # The vendored Oils suite shells out to python helpers written for
+            # python2; the harness substitutes python3 equivalents when python2
+            # is absent. dash is the reference for --compare.
+            python3
+            dash
           ];
 
           shellHook = ''
