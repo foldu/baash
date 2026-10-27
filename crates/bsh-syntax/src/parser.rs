@@ -30,7 +30,7 @@ use crate::{Token, TokenKind};
 use bsh_diag::{Diagnostic, Label, SourceFile, Span};
 use bsh_lang::{
     Arithmetic, CaseHow, CommandSub, Lit, LitKind, ParamExp, ParamName, ParamOp, Part, ProcSubDir,
-    ProcessSub, TildeSpec, UnsupportedOp, Word,
+    ProcessSub, ReplaceMode, TildeSpec, UnsupportedOp, Word,
 };
 
 /// The most diagnostics one parse will emit before giving up. Recovery is for
@@ -2628,7 +2628,7 @@ impl<'a> Parser<'a, '_> {
                 longest: false,
             }
         } else if rest.starts_with(b"/") {
-            ParamOp::Unsupported(UnsupportedOp::Replace)
+            self.parse_replace_op(op_start, inner.end)
         } else if rest.starts_with(b"@") {
             ParamOp::Unsupported(UnsupportedOp::Transform)
         } else if rest.starts_with(b"^^") || rest.starts_with(b",,") {
@@ -2680,6 +2680,59 @@ impl<'a> Parser<'a, '_> {
             None
         };
         ParamOp::Case { how, pattern }
+    }
+
+    /// `${x/pat/rep}`, `${x//pat/rep}`, `${x/#pat/rep}`, `${x/%pat/rep}`.
+    ///
+    /// The pattern ends at the first **unquoted** `/`, which is why the body is
+    /// parsed as a word first: a `/` inside `'…'`, `"…"`, a backslash escape
+    /// or a nested `${…}` (bash: `${v/${w/a/b}/X}`) is not a separator. Two
+    /// bash quirks live here:
+    ///
+    /// * a single `/` followed by `#` or `%` anchors the match, and only an
+    ///   unquoted one — `${x/'#'/y}` replaces a literal `#`;
+    /// * the global form may not split at its first byte, so `${x////c}`
+    ///   replaces `/` with `c` while `${x/'/'/c}` does the same with a quoted
+    ///   pattern.
+    fn parse_replace_op(&mut self, op_start: usize, end: usize) -> ParamOp {
+        let src: &'a [u8] = self.src;
+        let mut body_start = op_start + 1;
+        let mut mode = ReplaceMode::First;
+        match src.get(body_start) {
+            Some(b'/') => {
+                mode = ReplaceMode::All;
+                body_start += 1;
+            }
+            Some(b'#') => {
+                mode = ReplaceMode::Prefix;
+                body_start += 1;
+            }
+            Some(b'%') => {
+                mode = ReplaceMode::Suffix;
+                body_start += 1;
+            }
+            _ => {}
+        }
+        let mut word = self.parse_word_span(body_start..end);
+        if mode == ReplaceMode::First {
+            if let Some(rest) = word.strip_leading_unquoted(b'#') {
+                word = rest;
+                mode = ReplaceMode::Prefix;
+            } else if let Some(rest) = word.strip_leading_unquoted(b'%') {
+                word = rest;
+                mode = ReplaceMode::Suffix;
+            }
+        }
+        let skip_first = mode == ReplaceMode::All && word.starts_with_unquoted(b'/');
+        let (pattern, replacement) = match word.split_unquoted(b'/', skip_first) {
+            Some((pattern, replacement)) => (pattern, replacement),
+            None => (word, Word::new(Vec::new()).with_span(end..end)),
+        };
+        ParamOp::Replace {
+            pattern,
+            replacement,
+            mode,
+        }
     }
 
     /// Parse a substitution body only to validate and to collect its

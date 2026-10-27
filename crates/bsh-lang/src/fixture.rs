@@ -16,7 +16,7 @@ use crate::host::Shell;
 use crate::vars::{ArrayValue, SetError, Vars};
 use crate::word::{
     Arithmetic, CaseHow, CmdSubStyle, CommandSub, DoubleQ, Lit, ParamExp, ParamName, ParamOp, Part,
-    TildeSpec, UnsupportedOp, Word,
+    ReplaceMode, TildeSpec, UnsupportedOp, Word,
 };
 use crate::{Error, ErrorKind, Field};
 
@@ -848,6 +848,9 @@ fn parse_op(rest: &[u8]) -> ParamOp {
     if let Some(body) = rest.strip_prefix(b"%") {
         return strip_op(body, false, false);
     }
+    if let Some(body) = rest.strip_prefix(b"/") {
+        return replace_op(body);
+    }
     if let Some(body) = rest.strip_prefix(b"^^") {
         return case_op(body, CaseHow::Upper);
     }
@@ -861,7 +864,6 @@ fn parse_op(rest: &[u8]) -> ParamOp {
         return case_op(body, CaseHow::LowerFirst);
     }
     let unsupported = match rest[0] {
-        b'/' => UnsupportedOp::Replace,
         b'@' => UnsupportedOp::Transform,
         b'[' => UnsupportedOp::ArraySubscript,
         _ => UnsupportedOp::Other,
@@ -876,6 +878,37 @@ fn strip_op(body: &[u8], longest: bool, prefix: bool) -> ParamOp {
         ParamOp::RemovePrefix { pattern, longest }
     } else {
         ParamOp::RemoveSuffix { pattern, longest }
+    }
+}
+
+/// `${x/pat/rep}` and the anchored and global forms; `body` starts just past
+/// the first `/`.
+fn replace_op(body: &[u8]) -> ParamOp {
+    let (mut mode, body) = match body.first() {
+        Some(b'/') => (ReplaceMode::All, &body[1..]),
+        Some(b'#') => (ReplaceMode::Prefix, &body[1..]),
+        Some(b'%') => (ReplaceMode::Suffix, &body[1..]),
+        _ => (ReplaceMode::First, body),
+    };
+    let mut word = parse_subword(body);
+    if mode == ReplaceMode::First {
+        if let Some(rest) = word.strip_leading_unquoted(b'#') {
+            word = rest;
+            mode = ReplaceMode::Prefix;
+        } else if let Some(rest) = word.strip_leading_unquoted(b'%') {
+            word = rest;
+            mode = ReplaceMode::Suffix;
+        }
+    }
+    let skip_first = mode == ReplaceMode::All && word.starts_with_unquoted(b'/');
+    let (pattern, replacement) = match word.split_unquoted(b'/', skip_first) {
+        Some((pattern, replacement)) => (pattern, replacement),
+        None => (word, Word::empty()),
+    };
+    ParamOp::Replace {
+        pattern,
+        replacement,
+        mode,
     }
 }
 

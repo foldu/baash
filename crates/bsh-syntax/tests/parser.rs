@@ -5,7 +5,7 @@ mod common;
 
 use bsh_syntax::{
     AndOrOp, CaseHow, CaseTerm, CmdSubStyle, DoubleQ, Lit, LitKind, NodeKind, ParamExp, ParamName,
-    ParamOp, Part, PipeOp, RedirectOp, Separator, UnsupportedOp, Word,
+    ParamOp, Part, PipeOp, RedirectOp, ReplaceMode, Separator, UnsupportedOp, Word,
 };
 
 fn first_simple(ast: &bsh_syntax::Ast) -> &bsh_syntax::SimpleCommand {
@@ -490,6 +490,56 @@ fn pattern_operators_keep_their_quoting() {
 }
 
 #[test]
+fn replacement_splits_at_the_first_unquoted_slash() {
+    // `${x////c}` replaces `/` with `c`; `${x//'/'/c}` does the same with a
+    // quoted pattern. A naive scan for the first `/` gets both wrong.
+    let ast = common::ast(br#"echo ${x////c} ${x//'/'/c} ${x/#/p} ${x/$p/r}"#);
+    let cmd = first_simple(&ast);
+    let cases: &[(&[u8], &[u8], ReplaceMode)] = &[
+        (b"/", b"c", ReplaceMode::All),
+        (b"/", b"c", ReplaceMode::All),
+        (b"", b"p", ReplaceMode::Prefix),
+    ];
+    for (index, (pattern, replacement, mode)) in cases.iter().enumerate() {
+        let Part::Param(p) = &cmd.words[index + 1].parts[0] else {
+            panic!("expected a parameter");
+        };
+        let ParamOp::Replace {
+            pattern: got_pattern,
+            replacement: got_replacement,
+            mode: got_mode,
+        } = &p.op
+        else {
+            panic!("expected a replacement, got {:?}", p.op);
+        };
+        assert_eq!(got_mode, mode, "mode for word {index}");
+        assert_eq!(
+            word_bytes(got_pattern),
+            *pattern,
+            "pattern for word {index}"
+        );
+        assert_eq!(
+            word_bytes(got_replacement),
+            *replacement,
+            "replacement for word {index}"
+        );
+    }
+}
+
+/// The literal text of a word, ignoring quoting (a test convenience).
+fn word_bytes(word: &Word) -> Vec<u8> {
+    let mut out = Vec::new();
+    for part in &word.parts {
+        match part {
+            Part::Lit(lit) => out.extend_from_slice(&lit.bytes),
+            Part::Param(_) => out.push(b'$'),
+            other => panic!("unexpected part in a test pattern: {other:?}"),
+        }
+    }
+    out
+}
+
+#[test]
 fn parameter_operators_map_to_bsh_lang() {
     let cases: &[(&[u8], ParamOp)] = &[
         (b"echo ${x}", ParamOp::Value),
@@ -577,7 +627,37 @@ fn parameter_operators_map_to_bsh_lang() {
         ),
         (
             b"echo ${x/p/r}",
-            ParamOp::Unsupported(UnsupportedOp::Replace),
+            ParamOp::Replace {
+                // Both halves carry the body's span; the parts inside keep
+                // their own, which is what diagnostics point at.
+                pattern: Word::lit(*b"p").with_span(9..12),
+                replacement: Word::lit(*b"r").with_span(9..12),
+                mode: ReplaceMode::First,
+            },
+        ),
+        (
+            b"echo ${x//p/r}",
+            ParamOp::Replace {
+                pattern: Word::lit(*b"p").with_span(10..13),
+                replacement: Word::lit(*b"r").with_span(10..13),
+                mode: ReplaceMode::All,
+            },
+        ),
+        (
+            b"echo ${x/#p/r}",
+            ParamOp::Replace {
+                pattern: Word::lit(*b"p").with_span(10..13),
+                replacement: Word::lit(*b"r").with_span(10..13),
+                mode: ReplaceMode::Prefix,
+            },
+        ),
+        (
+            b"echo ${x/%p/r}",
+            ParamOp::Replace {
+                pattern: Word::lit(*b"p").with_span(10..13),
+                replacement: Word::lit(*b"r").with_span(10..13),
+                mode: ReplaceMode::Suffix,
+            },
         ),
         (
             b"echo ${x@Q}",

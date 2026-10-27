@@ -86,6 +86,95 @@ impl Word {
     pub fn is_empty(&self) -> bool {
         self.parts.is_empty()
     }
+
+    /// Whether the word's first byte is `byte` and arrived unquoted.
+    ///
+    /// `${x//pat/rep}` uses this for bash's rule that a global substitution's
+    /// pattern may start with `/` (`${x////c}` replaces `/` with `c`), which a
+    /// quoted `/` never triggers.
+    pub fn starts_with_unquoted(&self, byte: u8) -> bool {
+        matches!(self.parts.first(), Some(Part::Lit(lit))
+            if lit.kind == LitKind::Unquoted && lit.bytes.first() == Some(&byte))
+    }
+
+    /// This word without a leading unquoted `byte`, when it starts with one.
+    ///
+    /// `${x/#pat/rep}` and `${x/%pat/rep}` are told apart from a pattern that
+    /// begins with a literal `#`/`%` this way: only an *unquoted* one is an
+    /// anchor.
+    #[must_use]
+    pub fn strip_leading_unquoted(&self, byte: u8) -> Option<Word> {
+        let Some(Part::Lit(lit)) = self.parts.first() else {
+            return None;
+        };
+        if lit.kind != LitKind::Unquoted || lit.bytes.first() != Some(&byte) {
+            return None;
+        }
+        let mut parts = self.parts.clone();
+        if lit.bytes.len() == 1 {
+            parts.remove(0);
+        } else {
+            parts[0] = Part::Lit(Lit::new(lit.kind, lit.bytes[1..].to_vec()));
+        }
+        Some(Word {
+            parts,
+            span: self.span.clone(),
+        })
+    }
+
+    /// Split at the first unquoted `sep` byte, dropping the separator.
+    ///
+    /// Only literal text is searched: a `sep` inside `'…'`, `"…"`, a
+    /// backslash escape or a nested `$…` construct is invisible, which is what
+    /// bash's `${x/pat/rep}` scanner does (`${v/${w/a/b}/X}` has no separator
+    /// inside the nested expansion). `skip_first` ignores a separator at the
+    /// word's very first byte — bash's rule for the global form, where
+    /// `${x////c}` is "replace `/` with `c`".
+    ///
+    /// Both halves keep this word's span; the parts inside keep theirs, so a
+    /// diagnostic from a nested expansion still points at the nested text.
+    pub fn split_unquoted(&self, sep: u8, skip_first: bool) -> Option<(Word, Word)> {
+        let mut at_start = true;
+        for (index, part) in self.parts.iter().enumerate() {
+            let Part::Lit(lit) = part else {
+                at_start = false;
+                continue;
+            };
+            if lit.kind != LitKind::Unquoted {
+                at_start = false;
+                continue;
+            }
+            let from = usize::from(skip_first && at_start);
+            at_start = false;
+            let Some(tail) = lit.bytes.get(from..) else {
+                continue;
+            };
+            let Some(offset) = tail.iter().position(|&b| b == sep) else {
+                continue;
+            };
+            let at = from + offset;
+            let mut before: Vec<Part> = self.parts[..index].to_vec();
+            if at > 0 {
+                before.push(Part::Lit(Lit::new(lit.kind, lit.bytes[..at].to_vec())));
+            }
+            let mut after: Vec<Part> = Vec::new();
+            if at + 1 < lit.bytes.len() {
+                after.push(Part::Lit(Lit::new(lit.kind, lit.bytes[at + 1..].to_vec())));
+            }
+            after.extend_from_slice(&self.parts[index + 1..]);
+            return Some((
+                Word {
+                    parts: before,
+                    span: self.span.clone(),
+                },
+                Word {
+                    parts: after,
+                    span: self.span.clone(),
+                },
+            ));
+        }
+        None
+    }
 }
 
 impl Default for Word {
@@ -441,6 +530,17 @@ pub enum ParamOp {
         /// `true` for `%%`: strip the longest match.
         longest: bool,
     },
+    /// `${x/pat/rep}`, `${x//pat/rep}`, `${x/#pat/rep}` or `${x/%pat/rep}`:
+    /// replace a pattern match.
+    Replace {
+        /// The pattern text, quoting included.
+        pattern: Word,
+        /// The replacement; for `/[#%]` forms it is the text after the second
+        /// unquoted `/`, and it is empty when that separator is absent.
+        replacement: Word,
+        /// Which occurrences are replaced.
+        mode: ReplaceMode,
+    },
     /// `${x^pat}`, `${x^^pat}`, `${x,pat}`, `${x,,pat}`: ASCII case conversion
     /// of the characters that match `pattern`.
     ///
@@ -506,6 +606,14 @@ impl ParamOp {
             ParamOp::RemovePrefix { pattern, .. } | ParamOp::RemoveSuffix { pattern, .. } => {
                 visit(pattern);
             }
+            ParamOp::Replace {
+                pattern,
+                replacement,
+                ..
+            } => {
+                visit(pattern);
+                visit(replacement);
+            }
             ParamOp::Case {
                 pattern: Some(pattern),
                 ..
@@ -513,6 +621,22 @@ impl ParamOp {
             _ => {}
         }
     }
+}
+
+/// Which occurrences `${x/pat/rep}` replaces.
+///
+/// The variant is decided by the parser from the operator's spelling, so
+/// expansion never re-reads source text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplaceMode {
+    /// `${x/pat/rep}`: the leftmost longest match, replaced once.
+    First,
+    /// `${x//pat/rep}`: every match, left to right.
+    All,
+    /// `${x/#pat/rep}`: a match anchored at the start of the value.
+    Prefix,
+    /// `${x/%pat/rep}`: a match anchored at the end of the value.
+    Suffix,
 }
 
 /// The direction and reach of a [`ParamOp::Case`] conversion.
@@ -545,8 +669,6 @@ impl CaseHow {
 /// doing something subtly wrong.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsupportedOp {
-    /// `${x/pat/rep}` and friends.
-    Replace,
     /// `${!x}`, `${!prefix*}`: the argument is a variable *name*, which would
     /// mean evaluating data as code.
     Indirect,
@@ -572,7 +694,6 @@ impl UnsupportedOp {
     /// A short, stable description for diagnostics.
     pub fn description(self) -> &'static str {
         match self {
-            UnsupportedOp::Replace => "pattern substitution (`${x/pat/rep}`)",
             UnsupportedOp::Indirect => "indirect expansion (`${!x}`)",
             UnsupportedOp::Transform => "parameter transformation (`${x@Q}`)",
             UnsupportedOp::CaseOfList => "case conversion of `$@`/`$*`",

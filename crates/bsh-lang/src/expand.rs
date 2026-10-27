@@ -38,8 +38,8 @@ use crate::host::Shell;
 use crate::ifs::Ifs;
 use crate::vars::{ArrayKind, ArrayValue, SetError};
 use crate::word::{
-    CaseHow, DoubleQ, Lit, LitKind, ParamExp, ParamName, ParamOp, Part, TildeSpec, UnsupportedOp,
-    Word,
+    CaseHow, DoubleQ, Lit, LitKind, ParamExp, ParamName, ParamOp, Part, ReplaceMode, TildeSpec,
+    UnsupportedOp, Word,
 };
 
 /// Diagnostic codes produced by this crate.
@@ -842,6 +842,21 @@ fn expand_param<S: Shell>(
             let prefix = false;
             strip_parameter(exp, pattern, *longest, prefix, quoted, ctx, out)
         }
+        ParamOp::Replace {
+            pattern,
+            replacement,
+            mode,
+        } => {
+            let pattern = expand_pattern(pattern, ctx)?;
+            let replacement = expand_word_to_scalar(replacement, quoted, ctx)?;
+            let flags = match_flags(ctx);
+            let mode = *mode;
+            let mut replace = |value: &mut Vec<u8>| {
+                *value = replace_value(value, &pattern, &replacement, mode, flags);
+            };
+            map_parameter(ctx, &exp.name, quoted, out, &mut replace);
+            Ok(())
+        }
         ParamOp::Case { how, pattern } => {
             let pattern = match pattern {
                 Some(word) => Some(expand_pattern(word, ctx)?),
@@ -1368,6 +1383,78 @@ fn expand_pattern<S: Shell>(word: &Word, ctx: &mut Ctx<'_, S>) -> Result<Vec<u8>
         }
     }
     Ok(out)
+}
+
+/// One `${x/pat/rep}` pass over one value.
+///
+/// bash scans left to right and takes the **longest** match at each position.
+/// An empty match is never replaced — the byte is copied and the scan advances
+/// one byte — which is why `${x//""/X}` and `${x/x*/X}` leave the value alone.
+/// The empty *pattern* is the one exception, and only for the anchored forms:
+/// `${x/#/X}` prepends and `${x/%/X}` appends.
+fn replace_value(
+    text: &[u8],
+    pattern: &[u8],
+    replacement: &[u8],
+    mode: ReplaceMode,
+    flags: Flags,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() + replacement.len());
+    if pattern.is_empty() {
+        match mode {
+            ReplaceMode::Prefix => {
+                out.extend_from_slice(replacement);
+                out.extend_from_slice(text);
+            }
+            ReplaceMode::Suffix => {
+                out.extend_from_slice(text);
+                out.extend_from_slice(replacement);
+            }
+            ReplaceMode::First | ReplaceMode::All => out.extend_from_slice(text),
+        }
+        return out;
+    }
+    // Compile once per value: the scanning loop asks for a prefix match at
+    // every byte, and recompiling there would cost a parse per position.
+    let pattern = bsh_pattern::Pattern::new(pattern, flags);
+    match mode {
+        ReplaceMode::Prefix => match pattern.prefix_end(text, true) {
+            // An empty match is not a replacement, as in the unanchored loop.
+            Some(end) if end > 0 => {
+                out.extend_from_slice(replacement);
+                out.extend_from_slice(&text[end..]);
+            }
+            _ => out.extend_from_slice(text),
+        },
+        ReplaceMode::Suffix => match pattern.suffix_start(text, true) {
+            Some(start) if start < text.len() => {
+                out.extend_from_slice(&text[..start]);
+                out.extend_from_slice(replacement);
+            }
+            _ => out.extend_from_slice(text),
+        },
+        ReplaceMode::First | ReplaceMode::All => {
+            let global = mode == ReplaceMode::All;
+            let mut index = 0;
+            while index < text.len() {
+                match pattern.prefix_end(&text[index..], true) {
+                    Some(len) if len > 0 => {
+                        out.extend_from_slice(replacement);
+                        index += len;
+                        if !global {
+                            out.extend_from_slice(&text[index..]);
+                            return out;
+                        }
+                    }
+                    _ => {
+                        out.push(text[index]);
+                        index += 1;
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// `${x^^pat}` and friends: ASCII case conversion of the matching bytes.
