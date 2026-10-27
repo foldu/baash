@@ -558,17 +558,17 @@ mod tests {
 
     #[test]
     fn dash_i_forces_interactive_semantics() {
-        let (mode, interactive) = parse_args(&args(&["-i"])).unwrap();
+        let (mode, interactive, _) = parse_args(&args(&["-i"])).unwrap();
         assert!(interactive);
         assert!(matches!(mode, Mode::Execute(Source::Stdin)));
 
-        let (_, interactive) = parse_args(&args(&["--interactive", "-c", "x"])).unwrap();
+        let (_, interactive, _) = parse_args(&args(&["--interactive", "-c", "x"])).unwrap();
         assert!(interactive);
     }
 
     #[test]
     fn a_command_is_not_interactive_by_default() {
-        let (mode, interactive) = parse_args(&args(&["-c", "echo hi"])).unwrap();
+        let (mode, interactive, _) = parse_args(&args(&["-c", "echo hi"])).unwrap();
         assert!(!interactive);
         match mode {
             Mode::Execute(Source::Command(text, argv)) => {
@@ -581,7 +581,7 @@ mod tests {
 
     #[test]
     fn a_script_file_carries_its_arguments() {
-        let (mode, _) = parse_args(&args(&["script.sh", "a", "b"])).unwrap();
+        let (mode, _, _) = parse_args(&args(&["script.sh", "a", "b"])).unwrap();
         match mode {
             Mode::Execute(Source::File(path, argv)) => {
                 assert_eq!(path, b"script.sh");
@@ -593,7 +593,7 @@ mod tests {
 
     #[test]
     fn parse_only_wins_over_execution() {
-        let (mode, _) = parse_args(&args(&["-n", "-c", "x"])).unwrap();
+        let (mode, _, _) = parse_args(&args(&["-n", "-c", "x"])).unwrap();
         assert!(matches!(mode, Mode::ParseOnly(Source::Command(..))));
     }
 
