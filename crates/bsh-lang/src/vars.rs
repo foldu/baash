@@ -1,5 +1,7 @@
 //! The variable source expansion reads and (for `${x:=w}`) writes.
 
+use std::collections::BTreeMap;
+
 /// Everything expansion needs to know about shell variables.
 ///
 /// `bsh-runtime` implements this over its scope stack. Keeping it this small
@@ -39,6 +41,23 @@ pub trait Vars {
         let _ = (name, value);
         Err(SetError::ReadOnly)
     }
+
+    /// The array stored in `name`, if it has array shape.
+    ///
+    /// `None` means the variable is a scalar, is unset, or is not an array at
+    /// all. That distinction matters for subscripts: an indexed array's
+    /// subscript is arithmetic, while an associative one's is a literal key,
+    /// and a scalar behaves like a one-element indexed array for reads
+    /// (`${s[0]}` is `$s`, `${s[1]}` is empty).
+    ///
+    /// The storage is borrowed, not copied: expansion reads elements and
+    /// lengths straight from the scope stack. The default returns `None`,
+    /// which is correct for a variable source with no arrays (completion, the
+    /// passthrough stub).
+    fn array(&self, name: &[u8]) -> Option<ArrayValue<'_>> {
+        let _ = name;
+        None
+    }
 }
 
 /// Why [`Vars::set`] refused an assignment.
@@ -49,4 +68,120 @@ pub enum SetError {
     ReadOnly,
     /// The name cannot be assigned (for example `$1` or `${x?}`).
     InvalidName,
+}
+
+/// A borrowed view of one array.
+///
+/// Indexed arrays are *sparse*: the map is keyed by the subscript, so
+/// `a[100]=x` costs one entry and `unset 'a[0]'` leaves no trace. Iteration
+/// order is index order, which is what `${a[@]}` and `${!a[@]}` promise.
+///
+/// The index type is `i64`, not `u32`, because bash subscripts are machine
+/// integers: the suite exercises `a[0x7FFFFFFFFFFFFFFF]`, and a narrower key
+/// would silently alias it with a neighbour. Negative subscripts are resolved
+/// before storage, so no key here is negative.
+#[derive(Clone, Copy, Debug)]
+pub enum ArrayValue<'a> {
+    /// An indexed array: subscript → element, in subscript order.
+    Indexed(&'a BTreeMap<i64, Vec<u8>>),
+    /// An associative array, in insertion order (bash's order).
+    Assoc(&'a [(Vec<u8>, Vec<u8>)]),
+}
+
+impl<'a> ArrayValue<'a> {
+    /// Which kind of array this is.
+    pub fn kind(&self) -> ArrayKind {
+        match self {
+            ArrayValue::Indexed(_) => ArrayKind::Indexed,
+            ArrayValue::Assoc(_) => ArrayKind::Associative,
+        }
+    }
+
+    /// Number of elements (holes are not elements).
+    pub fn len(&self) -> usize {
+        match self {
+            ArrayValue::Indexed(elements) => elements.len(),
+            ArrayValue::Assoc(pairs) => pairs.len(),
+        }
+    }
+
+    /// Whether the array has no elements.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The elements in iteration order, as borrowed slices.
+    pub fn values(&self) -> Vec<&[u8]> {
+        match self {
+            ArrayValue::Indexed(elements) => elements.values().map(Vec::as_slice).collect(),
+            ArrayValue::Assoc(pairs) => pairs.iter().map(|(_, value)| value.as_slice()).collect(),
+        }
+    }
+
+    /// The subscripts in iteration order: decimal index text for an indexed
+    /// array, the keys themselves for an associative one.
+    pub fn indices(&self) -> Vec<Vec<u8>> {
+        match self {
+            ArrayValue::Indexed(elements) => elements
+                .keys()
+                .map(|index| index.to_string().into_bytes())
+                .collect(),
+            ArrayValue::Assoc(pairs) => pairs.iter().map(|(key, _)| key.clone()).collect(),
+        }
+    }
+
+    /// One element: an index for an indexed array, a key for an associative
+    /// one. A negative indexed subscript counts from the end, where "the end"
+    /// is bash's `greatest index + 1` — *not* the number of elements, which
+    /// is what makes `${a[-2]}` with holes behave the way bash does.
+    pub fn get(&self, subscript: &[u8]) -> Option<&'a [u8]> {
+        match self {
+            ArrayValue::Indexed(elements) => {
+                let index = resolve_index(elements, subscript)?;
+                elements.get(&index).map(Vec::as_slice)
+            }
+            ArrayValue::Assoc(pairs) => pairs
+                .iter()
+                .find(|(key, _)| key.as_slice() == subscript)
+                .map(|(_, value)| value.as_slice()),
+        }
+    }
+}
+
+/// `greatest index + 1`, bash's reference point for a negative subscript.
+fn resolve_index(elements: &BTreeMap<i64, Vec<u8>>, subscript: &[u8]) -> Option<i64> {
+    let index = parse_index(subscript)?;
+    if index >= 0 {
+        return Some(index);
+    }
+    let last = *elements.keys().next_back()?;
+    let length = last.saturating_add(1);
+    let resolved = length.checked_add(index)?;
+    (resolved >= 0).then_some(resolved)
+}
+
+/// Parse a decimal or C-style integer subscript. `${a[08]}` is octal in bash's
+/// arithmetic, but a *stored* key arriving as text (from `${!a[@]}` or an
+/// `unset` operand) is decimal; arithmetic evaluation happens before this in
+/// the expansion layer, which is where bash's literal rules live.
+fn parse_index(subscript: &[u8]) -> Option<i64> {
+    let text = std::str::from_utf8(subscript).ok()?.trim();
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let value: i64 = digits.parse().ok()?;
+    Some(if negative { -value } else { value })
+}
+
+/// The two array shapes bash distinguishes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrayKind {
+    /// `declare -a`, numeric subscripts.
+    Indexed,
+    /// `declare -A`, string keys.
+    Associative,
 }

@@ -326,15 +326,45 @@ pub struct SimpleCommand {
 /// `readonly`, `alias` or `eval`; the parser enforces that. The corresponding
 /// entry in [`SimpleCommand::words`] is a quoted literal holding the raw
 /// `name=(…)` source so that ordinary word expansion leaves it alone, and the
-/// elements live here until arrays get a real word representation.
+/// structure lives here until arrays get a real word representation.
 #[derive(Clone, Debug)]
 pub struct ArrayArg {
     /// Index into [`SimpleCommand::words`] of the placeholder word.
     pub word: usize,
     /// The whole `name=(…)` span.
     pub span: Span,
+    /// The variable name before `=`.
+    pub name: Span,
+    /// Whether this was `name+=(…)`.
+    pub append: bool,
     /// The parsed elements.
-    pub elements: Vec<Word>,
+    pub elements: Vec<ArrayElement>,
+}
+
+/// One element of an array literal.
+///
+/// `a=(1 [5]=x '2 3' [k]+=more)` has four: two bare values, an explicit
+/// subscript and an explicit subscript append. The distinction is structural
+/// — it must survive expansion, because `[i]=$v` is a scalar assignment to
+/// element `i` while a bare `$v` is field-split into one or more elements.
+#[derive(Clone, Debug)]
+pub struct ArrayElement {
+    /// The element's span, including any subscript.
+    pub span: Span,
+    /// The `[subscript]` prefix, when written.
+    pub index: Option<ArrayIndex>,
+    /// The value word: everything after `=` for a subscripted element, or the
+    /// whole element otherwise.
+    pub value: Word,
+}
+
+/// The `[subscript]` prefix of an array-literal element.
+#[derive(Clone, Debug)]
+pub struct ArrayIndex {
+    /// The subscript text between the brackets, as a word.
+    pub subscript: Word,
+    /// Whether the element was written `[k]+=v`.
+    pub append: bool,
 }
 
 /// A variable assignment.
@@ -346,12 +376,14 @@ pub struct Assignment {
     pub name: Span,
     /// Whether this was `+=`.
     pub append: bool,
-    /// The subscript of `name[sub]=value`, if any.
-    pub index: Option<Span>,
+    /// The subscript of `name[sub]=value`, if any. It is a word because it is
+    /// expanded (and, for an indexed array, then evaluated arithmetically)
+    /// when the assignment runs.
+    pub index: Option<Word>,
     /// The value word. Empty parts for `name=`.
     pub value: Word,
     /// For `name=( … )`, the elements. `Some(vec![])` for `name=()`.
-    pub array: Option<Vec<Word>>,
+    pub array: Option<Vec<ArrayElement>>,
 }
 
 /// A redirection.

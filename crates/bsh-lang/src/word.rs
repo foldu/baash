@@ -245,7 +245,31 @@ pub enum ParamName {
     /// A variable name, looked up with [`crate::Vars::get`]. Special
     /// parameters other than `#`, `@` and `*` (`?`, `-`, `$`, `!`, `0`)
     /// also arrive here, because the runtime owns their values.
+    ///
+    /// For an array, `${a}` is bash's `${a[0]}` (see [`crate::Vars::array`]),
+    /// so the bare name still addresses the array's element zero.
     Var(Vec<u8>),
+    /// `${a[subscript]}`: one element. The subscript is a word because it is
+    /// expanded before it is used, and for an indexed array it is then
+    /// evaluated as an arithmetic expression (`${a[i+1]}`). For an
+    /// associative array the expanded bytes are the key, unchanged.
+    Element {
+        /// The array's variable name.
+        name: Vec<u8>,
+        /// The subscript as written, without the brackets.
+        subscript: Word,
+    },
+    /// `${a[@]}` (`star = false`) or `${a[*]}` (`star = true`): every element.
+    ///
+    /// `[@]` and `[*]` differ only when the expansion is quoted: `[@]` yields
+    /// one field per element (none when the array is empty), `[*]` joins the
+    /// elements with the first character of `IFS`.
+    Elements {
+        /// The array's variable name.
+        name: Vec<u8>,
+        /// `true` for `[*]`, `false` for `[@]`.
+        star: bool,
+    },
     /// `$1`, `$2`, … (`$0` is passed as `Var(b"0")`).
     Positional(usize),
     /// `$@`.
@@ -262,22 +286,80 @@ impl ParamName {
         Self::Var(name.into())
     }
 
+    /// `${name[subscript]}`.
+    pub fn element(name: impl Into<Vec<u8>>, subscript: Word) -> Self {
+        Self::Element {
+            name: name.into(),
+            subscript,
+        }
+    }
+
+    /// `${name[@]}` or `${name[*]}`.
+    pub fn elements(name: impl Into<Vec<u8>>, star: bool) -> Self {
+        Self::Elements {
+            name: name.into(),
+            star,
+        }
+    }
+
     /// A positional parameter. `n` is one-based; zero is not a positional
     /// parameter (`$0` is [`ParamName::Var`] holding `0`).
     pub fn positional(n: usize) -> Self {
         Self::Positional(n)
     }
 
+    /// The variable name this expansion addresses, if it addresses one.
+    ///
+    /// A plain parameter is its own name; an array element or element list
+    /// names the array. Positional and special parameters return `None`
+    /// because they are not assignable variables.
+    pub fn variable_name(&self) -> Option<&[u8]> {
+        match self {
+            ParamName::Var(name) => Some(name),
+            ParamName::Element { name, .. } | ParamName::Elements { name, .. } => Some(name),
+            _ => None,
+        }
+    }
+
     /// The spelling used in diagnostics, without the leading `$`.
     pub fn display_bytes(&self) -> Vec<u8> {
         match self {
             ParamName::Var(name) => name.clone(),
+            ParamName::Element { name, subscript } => {
+                let mut out = name.clone();
+                out.push(b'[');
+                out.extend_from_slice(&subscript_text(subscript));
+                out.push(b']');
+                out
+            }
+            ParamName::Elements { name, star } => {
+                let mut out = name.clone();
+                out.extend_from_slice(if *star { b"[*]" } else { b"[@]" });
+                out
+            }
             ParamName::Positional(n) => n.to_string().into_bytes(),
             ParamName::At => vec![b'@'],
             ParamName::Star => vec![b'*'],
             ParamName::Count => vec![b'#'],
         }
     }
+}
+
+/// Best-effort source spelling of a subscript, for messages only. Quoting is
+/// already interpreted, so the bytes are the literal text the front end saw.
+fn subscript_text(word: &Word) -> Vec<u8> {
+    let mut out = Vec::new();
+    for part in &word.parts {
+        match part {
+            Part::Lit(lit) => out.extend_from_slice(&lit.bytes),
+            Part::Param(exp) => {
+                out.push(b'$');
+                out.extend_from_slice(&exp.name.display_bytes());
+            }
+            _ => out.push(b'?'),
+        }
+    }
+    out
 }
 
 /// The operator applied to a parameter.
@@ -327,6 +409,18 @@ pub enum ParamOp {
         /// The length; negative means "up to this many bytes from the end".
         length: Option<i64>,
     },
+    /// `${a[@]:offset:length}` and `${a[*]:offset:length}`: a contiguous
+    /// slice of an array's element list (after holes are skipped).
+    ///
+    /// The bounds are words rather than integers because bash evaluates them
+    /// arithmetically (`${a[@]:i-4:2}`), and the subscript-arithmetic seam
+    /// already exists; expansion expands the word and evaluates the result.
+    ArraySlice {
+        /// The offset expression; negative counts from the end of the list.
+        offset: Word,
+        /// The length expression; negative is an error, as bash reports.
+        length: Option<Word>,
+    },
     /// `${x^^}`: ASCII upper-case the whole value.
     Upper,
     /// `${x,,}`: ASCII lower-case the whole value.
@@ -335,6 +429,16 @@ pub enum ParamOp {
     UpperFirst,
     /// `${x,}`: ASCII lower-case the first byte.
     LowerFirst,
+    /// `${!a[@]}` / `${!a[*]}`: the array's indices (or keys), in the order
+    /// [`crate::Vars::array`] reports them. `${!x}` on a plain variable stays
+    /// [`ParamOp::Unsupported`] with [`UnsupportedOp::Indirect`].
+    Indices,
+    /// `${!a[subscript]}`: the element's value is a variable *name*, which is
+    /// then expanded (`v=hello; a=(v); ${!a[0]}` is `hello`).
+    ///
+    /// Only the element form is implemented: `${!x}` would re-parse arbitrary
+    /// data as a name, which stays [`ParamOp::Unsupported`].
+    Indirect,
     /// An operator this crate deliberately does not implement.
     Unsupported(UnsupportedOp),
 }
@@ -385,7 +489,9 @@ pub enum UnsupportedOp {
     CaseOfList,
     /// `${@:offset:length}`: substring of a parameter list.
     SubstringOfList,
-    /// `${x[subscript]}`: arrays are not part of this crate yet.
+    /// A subscript form this crate could not use (for example a second
+    /// subscript, or one on a special parameter). Kept so the parser can
+    /// report the exact surface form it saw.
     ArraySubscript,
     /// `<(…)`, `>(…)`: the runtime has to supply the file descriptor.
     ProcessSubstitution,

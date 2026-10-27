@@ -14,6 +14,7 @@ use crate::Status;
 use crate::builtins::{AssignPersistence, Tier};
 use crate::errors::Error;
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 /// Variable attributes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -38,8 +39,18 @@ pub enum VarValue {
     Unset,
     /// A scalar.
     Str(Vec<u8>),
-    /// An indexed array. Holes are stored as empty elements.
-    Indexed(Vec<Vec<u8>>),
+    /// An indexed array, stored sparsely: subscript → element.
+    ///
+    /// A `BTreeMap` gives index order, which `${a[@]}` and `${!a[@]}` promise,
+    /// and it costs one entry per *assigned* subscript. `a[100]=x` must not
+    /// allocate 101 slots, and `unset 'a[0]'` must leave a hole `${a[@]}`
+    /// skips — a `Vec` cannot express either without sentinel elements that
+    /// are observable through `${#a[@]}` and `${!a[@]}`.
+    ///
+    /// The key is `i64`, not a narrower integer: bash subscripts are machine
+    /// integers, and the conformance suite exercises `a[0x7FFFFFFFFFFFFFFF]`.
+    /// Negative subscripts are resolved against the array before storage.
+    Indexed(BTreeMap<i64, Vec<u8>>),
     /// An associative array, kept as insertion-ordered pairs.
     Assoc(Vec<(Vec<u8>, Vec<u8>)>),
 }
@@ -96,7 +107,7 @@ pub enum ArrayShape {
 impl ArrayShape {
     fn empty(self) -> VarValue {
         match self {
-            ArrayShape::Indexed => VarValue::Indexed(Vec::new()),
+            ArrayShape::Indexed => VarValue::Indexed(BTreeMap::new()),
             ArrayShape::Associative => VarValue::Assoc(Vec::new()),
         }
     }
@@ -480,11 +491,17 @@ impl Vars {
                 bytes.extend_from_slice(suffix);
                 Ok(())
             }
+            // `a+=text` appends to element zero; bash does not treat it as
+            // "append an element" (that spelling is `a+=(…)`).
+            VarValue::Indexed(elements) => {
+                elements.entry(0).or_default().extend_from_slice(suffix);
+                Ok(())
+            }
             VarValue::Unset => {
                 var.value = VarValue::Str(suffix.to_vec());
                 Ok(())
             }
-            _ => Err(Error::NotScalar {
+            VarValue::Assoc(_) => Err(Error::NotScalar {
                 name: name.to_vec(),
             }),
         }
@@ -545,9 +562,8 @@ impl Vars {
     /// Declare `name` as an indexed or associative array (`declare -a/-A`).
     ///
     /// Returns [`Error::ArrayShapeMismatch`] when the variable already has the
-    /// other shape. A scalar becomes an indexed array of one element, matching
-    /// bash; converting a scalar to an associative array is refused rather
-    /// than silently dropping data.
+    /// other shape (bash refuses indexed↔associative conversion). A scalar
+    /// becomes an array with the scalar at element/key zero, matching bash.
     pub fn declare_shape(&mut self, name: &[u8], shape: ArrayShape) -> Result<(), Error> {
         let var = self.resolve(name)?;
         if var.value.shape() == Some(shape) {
@@ -558,9 +574,14 @@ impl Vars {
                 var.value = shape.empty();
                 Ok(())
             }
-            VarValue::Str(bytes) if shape == ArrayShape::Indexed => {
+            // A scalar converts either way: bash maps it to element/key zero
+            // rather than discarding it.
+            VarValue::Str(bytes) => {
                 let bytes = bytes.clone();
-                var.value = VarValue::Indexed(vec![bytes]);
+                var.value = match shape {
+                    ArrayShape::Indexed => VarValue::Indexed(BTreeMap::from([(0, bytes)])),
+                    ArrayShape::Associative => VarValue::Assoc(vec![(b"0".to_vec(), bytes)]),
+                };
                 Ok(())
             }
             _ => Err(Error::ArrayShapeMismatch {
@@ -634,34 +655,56 @@ impl Vars {
         Ok(())
     }
 
-    /// `a[0]=value`: set an indexed element, growing the array with empty
-    /// elements as needed.
-    pub fn set_indexed(&mut self, name: &[u8], index: usize, value: &[u8]) -> Result<(), Error> {
+    /// `a[index]=value`: set an indexed element.
+    ///
+    /// A negative index counts from `greatest index + 1`, bash's rule; an
+    /// index that still lands before zero is [`Error::ArrayOutOfBounds`]. A
+    /// scalar is promoted: element 0 keeps the old value when a *different*
+    /// index is written, matching `s=hi; s[2]=x`.
+    pub fn set_indexed(&mut self, name: &[u8], index: i64, value: &[u8]) -> Result<(), Error> {
         let var = self.resolve(name)?;
-        let old = std::mem::replace(&mut var.value, VarValue::Unset);
-        var.value = match old {
-            VarValue::Assoc(pairs) => {
-                var.value = VarValue::Assoc(pairs);
+        match &mut var.value {
+            VarValue::Assoc(_) => {
                 return Err(Error::NotIndexed {
                     name: name.to_vec(),
                 });
             }
-            VarValue::Indexed(mut elements) => {
-                resize_and_set(&mut elements, index, value);
-                VarValue::Indexed(elements)
+            VarValue::Indexed(elements) => {
+                let resolved = resolve_write_index(elements, index, name)?;
+                elements.insert(resolved, value.to_vec());
+                return Ok(());
             }
-            VarValue::Str(element) => {
-                let mut elements = vec![element];
-                resize_and_set(&mut elements, index, value);
-                VarValue::Indexed(elements)
-            }
-            VarValue::Unset => {
-                let mut elements = Vec::new();
-                resize_and_set(&mut elements, index, value);
-                VarValue::Indexed(elements)
+            VarValue::Str(_) | VarValue::Unset => {}
+        }
+
+        // Promote a scalar (keeping it at element zero) or create the array.
+        let old = std::mem::take(&mut var.value);
+        let mut elements = match &old {
+            VarValue::Str(element) => BTreeMap::from([(0, element.clone())]),
+            _ => BTreeMap::new(),
+        };
+        let resolved = match resolve_write_index(&elements, index, name) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                // A refused subscript must leave the old value alone.
+                var.value = old;
+                return Err(error);
             }
         };
+        elements.insert(resolved, value.to_vec());
+        var.value = VarValue::Indexed(elements);
         Ok(())
+    }
+
+    /// `a[index]+=suffix`: append to one indexed element.
+    pub fn append_indexed(&mut self, name: &[u8], index: i64, suffix: &[u8]) -> Result<(), Error> {
+        let current = self
+            .element_indexed(name, index)
+            .unwrap_or_default()
+            .to_vec();
+        let mut joined = current;
+        joined.extend_from_slice(suffix);
+        self.set_indexed(name, index, &joined)
     }
 
     /// `a[key]=value`: set an associative element, inserting in order.
@@ -698,10 +741,21 @@ impl Vars {
         Ok(())
     }
 
+    /// `a[key]+=suffix`: append to one associative element.
+    pub fn append_assoc(&mut self, name: &[u8], key: &[u8], suffix: &[u8]) -> Result<(), Error> {
+        let current = self.element_assoc(name, key).unwrap_or_default().to_vec();
+        let mut joined = current;
+        joined.extend_from_slice(suffix);
+        self.set_assoc(name, key, &joined)
+    }
+
     /// `${a[index]}` for an indexed array (a scalar behaves like `[0]`).
-    pub fn element_indexed(&self, name: &[u8], index: usize) -> Option<&[u8]> {
+    pub fn element_indexed(&self, name: &[u8], index: i64) -> Option<&[u8]> {
         match &self.lookup(name)?.value {
-            VarValue::Indexed(elements) => elements.get(index).map(Vec::as_slice),
+            VarValue::Indexed(elements) => {
+                let index = resolve_read_index(elements, index)?;
+                elements.get(&index).map(Vec::as_slice)
+            }
             VarValue::Str(bytes) if index == 0 => Some(bytes),
             _ => None,
         }
@@ -715,6 +769,83 @@ impl Vars {
                 .find(|(candidate, _)| candidate.as_slice() == key)
                 .map(|(_, value)| value.as_slice()),
             _ => None,
+        }
+    }
+
+    /// Number of elements in an array (a scalar counts as one, an unset name
+    /// as zero).
+    pub fn array_len(&self, name: &[u8]) -> usize {
+        match self.value(name) {
+            Some(VarValue::Indexed(elements)) => elements.len(),
+            Some(VarValue::Assoc(pairs)) => pairs.len(),
+            Some(VarValue::Str(_)) => 1,
+            _ => 0,
+        }
+    }
+
+    /// The greatest indexed subscript, if the variable is a non-empty indexed
+    /// array. Appending starts one past it.
+    pub fn max_index(&self, name: &[u8]) -> Option<i64> {
+        match self.value(name) {
+            Some(VarValue::Indexed(elements)) => elements.keys().next_back().copied(),
+            _ => None,
+        }
+    }
+
+    /// The array's shape, if it has one.
+    pub fn shape(&self, name: &[u8]) -> Option<ArrayShape> {
+        self.value(name).and_then(VarValue::shape)
+    }
+
+    /// Clear an array in place, keeping (or setting) its shape.
+    pub fn clear_array(&mut self, name: &[u8], shape: ArrayShape) -> Result<(), Error> {
+        let var = self.resolve(name)?;
+        var.value = shape.empty();
+        Ok(())
+    }
+
+    /// Remove one indexed element. A negative index counts like a read; an
+    /// index that lands before zero is an error, and removing an absent
+    /// non-negative index succeeds (bash's `unset`).
+    pub fn unset_element_indexed(&mut self, name: &[u8], index: i64) -> Result<(), Error> {
+        let var = self.resolve(name)?;
+        match &mut var.value {
+            VarValue::Indexed(elements) => {
+                let resolved =
+                    resolve_read_index(elements, index).ok_or_else(|| Error::ArrayOutOfBounds {
+                        name: name.to_vec(),
+                        index,
+                    })?;
+                elements.remove(&resolved);
+                Ok(())
+            }
+            VarValue::Str(_) | VarValue::Unset if index == 0 => {
+                // `unset 's[0]'` unsets the scalar.
+                var.value = VarValue::Unset;
+                Ok(())
+            }
+            VarValue::Assoc(_) => Err(Error::NotIndexed {
+                name: name.to_vec(),
+            }),
+            _ => Err(Error::ArrayOutOfBounds {
+                name: name.to_vec(),
+                index,
+            }),
+        }
+    }
+
+    /// Remove one associative element. Removing an absent key succeeds.
+    pub fn unset_element_assoc(&mut self, name: &[u8], key: &[u8]) -> Result<(), Error> {
+        let var = self.resolve(name)?;
+        match &mut var.value {
+            VarValue::Assoc(pairs) => {
+                pairs.retain(|(candidate, _)| candidate.as_slice() != key);
+                Ok(())
+            }
+            VarValue::Indexed(_) => Err(Error::NotAssociative {
+                name: name.to_vec(),
+            }),
+            _ => Ok(()),
         }
     }
 
@@ -1080,28 +1211,69 @@ enum Location {
 }
 
 fn set_scalar(var: &mut Var, name: &[u8], value: Vec<u8>) -> Result<(), Error> {
-    if matches!(var.value, VarValue::Assoc(_)) {
-        return Err(Error::AssocNeedsSubscript {
-            name: name.to_vec(),
-        });
-    }
-    if let VarValue::Indexed(elements) = &mut var.value {
-        if elements.is_empty() {
-            elements.push(value);
-        } else {
-            elements[0] = value;
+    match &mut var.value {
+        // `A=text` on an associative array writes key `0`; bash keeps the
+        // other keys, so a scalar assignment is not a conversion.
+        VarValue::Assoc(pairs) => {
+            if let Some((_, existing)) = pairs
+                .iter_mut()
+                .find(|(candidate, _)| candidate.as_slice() == b"0")
+            {
+                *existing = value;
+            } else {
+                pairs.insert(0, (b"0".to_vec(), value));
+            }
+            Ok(())
         }
-        return Ok(());
+        // A scalar assignment to an indexed array writes element 0 and keeps
+        // the rest (`a=(1 2 3); a=x` leaves 1 and 2 in place).
+        VarValue::Indexed(elements) => {
+            elements.insert(0, value);
+            Ok(())
+        }
+        _ => {
+            let _ = name;
+            var.value = VarValue::Str(value);
+            Ok(())
+        }
     }
-    var.value = VarValue::Str(value);
-    Ok(())
 }
 
-fn resize_and_set(elements: &mut Vec<Vec<u8>>, index: usize, value: &[u8]) {
-    if elements.len() <= index {
-        elements.resize(index + 1, Vec::new());
+/// Resolve a subscript for a write: negative counts from `greatest index + 1`.
+fn resolve_write_index(
+    elements: &BTreeMap<i64, Vec<u8>>,
+    index: i64,
+    name: &[u8],
+) -> Result<i64, Error> {
+    if index >= 0 {
+        return Ok(index);
     }
-    elements[index] = value.to_vec();
+    let length = elements
+        .keys()
+        .next_back()
+        .map_or(0, |last| last.saturating_add(1));
+    let resolved = length.saturating_add(index);
+    if resolved < 0 {
+        return Err(Error::ArrayOutOfBounds {
+            name: name.to_vec(),
+            index,
+        });
+    }
+    Ok(resolved)
+}
+
+/// Resolve a subscript for a read; `None` when a negative index falls before
+/// the start.
+fn resolve_read_index(elements: &BTreeMap<i64, Vec<u8>>, index: i64) -> Option<i64> {
+    if index >= 0 {
+        return Some(index);
+    }
+    let length = elements
+        .keys()
+        .next_back()
+        .map_or(0, |last| last.saturating_add(1));
+    let resolved = length.saturating_add(index);
+    (resolved >= 0).then_some(resolved)
 }
 
 fn record_export<'a>(pairs: &mut Vec<(&'a [u8], Option<&'a [u8]>)>, name: &'a [u8], var: &'a Var) {

@@ -39,6 +39,30 @@ pub trait Shell: Vars {
     /// Evaluate `$((…))` and return the decimal text.
     fn arithmetic(&mut self, expr: &Arithmetic) -> Result<Vec<u8>, Error>;
 
+    /// Evaluate an arithmetic expression to an integer.
+    ///
+    /// Array subscripts need the numeric value, not its text. The default
+    /// parses what [`Shell::arithmetic`] returned, which is enough for a
+    /// runtime whose arithmetic callback already produces a decimal; a
+    /// runtime that can do better should override it to avoid the round trip.
+    fn arithmetic_value(&mut self, expr: &Arithmetic) -> Result<i64, Error> {
+        let bytes = self.arithmetic(expr)?;
+        let text = std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|text| text.trim().parse::<i64>().ok());
+        text.ok_or_else(|| {
+            Error::new(
+                crate::ErrorKind::Host {
+                    message: format!(
+                        "arithmetic result is not an integer: {}",
+                        String::from_utf8_lossy(&bytes)
+                    ),
+                },
+                expr.span.clone(),
+            )
+        })
+    }
+
     /// Match `pattern` as a pathname pattern.
     ///
     /// Returns `None` when nothing matched (leave the field alone), or the

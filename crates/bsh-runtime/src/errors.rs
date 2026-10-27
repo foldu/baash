@@ -111,6 +111,13 @@ pub enum Error {
         /// Variable name.
         name: Vec<u8>,
     },
+    /// A negative subscript resolved before the start of the array.
+    ArrayOutOfBounds {
+        /// Variable name.
+        name: Vec<u8>,
+        /// The subscript as written.
+        index: i64,
+    },
 }
 
 impl Error {
@@ -129,7 +136,7 @@ impl Error {
             | Error::ArrayShapeMismatch { .. } => codes::ARRAY_SHAPE,
             Error::NamerefCycle { .. } => codes::NAMEREF_CYCLE,
             Error::BadNumber { .. } => codes::BAD_NUMBER,
-            Error::NotScalar { .. } => codes::ARRAY_SHAPE,
+            Error::NotScalar { .. } | Error::ArrayOutOfBounds { .. } => codes::ARRAY_SHAPE,
         }
     }
 
@@ -177,6 +184,9 @@ impl Error {
             }
             Error::NotScalar { name } => {
                 format!("{}: not a scalar", display(name))
+            }
+            Error::ArrayOutOfBounds { name, index } => {
+                format!("{}[{index}]: index out of bounds", display(name))
             }
         }
     }

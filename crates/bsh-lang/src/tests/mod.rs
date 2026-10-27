@@ -9,6 +9,7 @@
 use crate::fixture::{TestShell, parse_word, parse_words};
 use crate::{expand_word, expand_words};
 
+mod arrays;
 mod at_star;
 mod params;
 mod pipeline;

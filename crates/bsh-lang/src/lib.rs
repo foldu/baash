@@ -54,10 +54,15 @@
 //! # Deliberate gaps
 //!
 //! Operators that need pattern matching or re-parse their argument as code —
-//! `${x#pat}`, `${x%pat}`, `${x/pat/rep}`, `${!x}`, `${x@Q}`, `${x^^pat}` —
-//! return [`ErrorKind::Unsupported`] instead of doing something subtly wrong.
-//! `${@:1:2}` and `${@^^}` are likewise unsupported rather than approximated.
+//! `${x#pat}`, `${x%pat}`, `${x/pat/rep}`, `${!x}` on a non-array, `${x@Q}`,
+//! `${x^^pat}` — return [`ErrorKind::Unsupported`] instead of doing something
+//! subtly wrong. `${@^^}` is likewise unsupported rather than approximated.
 //! Byte-oriented `LC_ALL=C` semantics are used for `${#x}` and `${x:o:l}`.
+//!
+//! Arrays are part of the model: [`ParamName::Element`] is `${a[i]}` and
+//! [`ParamName::Elements`] is `${a[@]}`/`${a[*]}`; [`Vars::array`] exposes the
+//! storage. List slicing (`${a[@]:o:l}`, `${@:o:l}`) evaluates its bounds
+//! through [`Shell::arithmetic_value`].
 //!
 //! # Bytes, never `str`
 //!
@@ -83,7 +88,7 @@ pub use expand::{
 pub use host::{EmptyVars, Passthrough, Shell};
 pub use ifs::Ifs;
 pub use quote::{QuoteCtx, quote};
-pub use vars::{SetError, Vars};
+pub use vars::{ArrayKind, ArrayValue, SetError, Vars};
 pub use word::{
     Arithmetic, CmdSubStyle, CommandSub, DoubleQ, Lit, LitKind, ParamExp, ParamName, ParamOp, Part,
     ProcSubDir, ProcessSub, TildeSpec, UnsupportedOp, Word,

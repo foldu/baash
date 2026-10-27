@@ -63,13 +63,16 @@ fn golden_pipeline_cannot_start_with_pipe() {
 }
 
 #[test]
-fn golden_array_subscript_with_spaces() {
-    let (text, code) = fail_one(b"a[1 + 2]=v");
-    assert_eq!(code, codes::ARRAY_SUBSCRIPT);
-    assert_eq!(
-        text,
-        "t.sh:1:1: error[BSH-E0005]: an array subscript must be a single word\n  help: the subscript may not contain unquoted white space; write `a[1+2]=v`"
-    );
+fn array_subscript_may_contain_spaces() {
+    // bash accepts `a[1 + 2]=v`; the parser stitches the tokens back together
+    // rather than diagnosing the white space.
+    let ast = common::ast(b"a[1 + 2]=v");
+    let command = common::first_command(&ast);
+    let bsh_syntax::NodeKind::Simple(command) = &ast.node(command).kind else {
+        panic!("expected a simple command");
+    };
+    assert_eq!(command.assignments.len(), 1);
+    assert!(command.assignments[0].index.is_some());
 }
 
 #[test]
@@ -149,7 +152,7 @@ fn golden_posix_rejects_arithmetic_command() {
 fn every_diagnostic_has_a_stable_code_and_a_nonempty_span() {
     for src in [
         &b"fi"[..],
-        &b"a[1 + 2]=v"[..],
+        &b"a[$(x)]=v"[..],
         &b"echo (x)"[..],
         &b"echo hi | | wc"[..],
         &b"cat <<\nbody"[..],

@@ -420,8 +420,8 @@ fn push_assignment(
         }
         crate::VarValue::Indexed(elements) => {
             out.extend_from_slice(b"=(");
-            for (index, element) in elements.iter().enumerate() {
-                if index > 0 {
+            for (position, (index, element)) in elements.iter().enumerate() {
+                if position > 0 {
                     out.push(b' ');
                 }
                 out.extend_from_slice(format!("[{index}]=").as_bytes());
@@ -651,6 +651,7 @@ fn bi_export(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
 
 fn bi_readonly(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
     let mut print = false;
+    let (mut indexed, mut associative) = (false, false);
     let mut index = 1;
     while index < argv.len() {
         match argv[index] {
@@ -660,6 +661,16 @@ fn bi_readonly(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
             }
             b"-p" => {
                 print = true;
+                index += 1;
+            }
+            // `readonly -a`/`-A` declare the shape before making it readonly,
+            // so `readonly -a arr` on an existing array keeps its elements.
+            b"-a" => {
+                indexed = true;
+                index += 1;
+            }
+            b"-A" => {
+                associative = true;
                 index += 1;
             }
             option if option.len() > 1 && option[0] == b'-' => {
@@ -684,6 +695,13 @@ fn bi_readonly(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
             let _ = report_error(host, argv, &error);
             status = Status(1);
             continue;
+        }
+        if indexed || associative {
+            if let Err(error) = declare_array_from_flag(&mut host.state().vars, name, associative) {
+                let _ = report_error(host, argv, &error);
+                status = Status(1);
+                continue;
+            }
         }
         if let Some(value) = assignment.value {
             let result = if assignment.append {
@@ -747,6 +765,12 @@ fn bi_unset(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
     let mut status = Status::SUCCESS;
     for &name in &argv[index..] {
         if name.contains(&b'[') {
+            if let Some(element_status) = host.unset_array_element(name) {
+                if !element_status.is_success() {
+                    status = element_status;
+                }
+                continue;
+            }
             diagnose(
                 host,
                 codes::NOT_IMPLEMENTED,

@@ -10,15 +10,18 @@
 //! bytes, which keeps the fixture honest: a test that passes here is testing
 //! the pipeline, not a parser.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::host::Shell;
-use crate::vars::{SetError, Vars};
+use crate::vars::{ArrayValue, SetError, Vars};
 use crate::word::{
     Arithmetic, CmdSubStyle, CommandSub, DoubleQ, Lit, ParamExp, ParamName, ParamOp, Part,
     TildeSpec, UnsupportedOp, Word,
 };
 use crate::{Error, ErrorKind, Field};
+
+/// Test-shell associative storage: key/value pairs in insertion order.
+type AssocMap = HashMap<Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>>;
 
 /// An in-memory shell: variables, positional parameters, and map-backed
 /// command substitution, arithmetic, globbing and home directories.
@@ -46,6 +49,10 @@ pub struct TestShell {
     pub set_calls: Vec<(Vec<u8>, Vec<u8>)>,
     /// When true, [`Vars::set`] refuses with [`SetError::ReadOnly`].
     pub read_only: bool,
+    /// Arrays, by name. Separate from `vars` so a name cannot be both.
+    pub indexed: HashMap<Vec<u8>, BTreeMap<i64, Vec<u8>>>,
+    /// Associative arrays, in insertion order.
+    pub assoc: AssocMap,
 }
 
 impl TestShell {
@@ -112,6 +119,32 @@ impl TestShell {
         self.read_only = true;
         self
     }
+
+    /// Give `name` an indexed array with these elements.
+    #[must_use]
+    pub fn indexed(mut self, name: &[u8], elements: &[(i64, &[u8])]) -> Self {
+        self.indexed.insert(
+            name.to_vec(),
+            elements
+                .iter()
+                .map(|(index, value)| (*index, value.to_vec()))
+                .collect(),
+        );
+        self
+    }
+
+    /// Give `name` an associative array with these keys, in this order.
+    #[must_use]
+    pub fn assoc(mut self, name: &[u8], pairs: &[(&[u8], &[u8])]) -> Self {
+        self.assoc.insert(
+            name.to_vec(),
+            pairs
+                .iter()
+                .map(|(key, value)| (key.to_vec(), value.to_vec()))
+                .collect(),
+        );
+        self
+    }
 }
 
 impl Vars for TestShell {
@@ -130,6 +163,15 @@ impl Vars for TestShell {
         self.set_calls.push((name.to_vec(), value.clone()));
         self.vars.insert(name.to_vec(), value);
         Ok(())
+    }
+
+    fn array(&self, name: &[u8]) -> Option<ArrayValue<'_>> {
+        if let Some(elements) = self.indexed.get(name) {
+            return Some(ArrayValue::Indexed(elements));
+        }
+        self.assoc
+            .get(name)
+            .map(|pairs| ArrayValue::Assoc(pairs.as_slice()))
     }
 }
 
@@ -159,6 +201,38 @@ impl Shell for TestShell {
                 0..0,
             )
         })
+    }
+
+    fn arithmetic_value(&mut self, expr: &Arithmetic) -> Result<i64, Error> {
+        if let Some(bytes) = self.arith.get(&expr.source) {
+            self.arith_calls.push(expr.source.clone());
+            return std::str::from_utf8(bytes)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Host {
+                            message: "arithmetic fixture is not an integer".to_string(),
+                        },
+                        0..0,
+                    )
+                });
+        }
+        // A bare integer subscript needs no fixture; that keeps array tests
+        // readable (`${a[1]}` rather than an `arith("1", "1")` setup).
+        std::str::from_utf8(&expr.source)
+            .ok()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .and_then(|text| text.parse::<i64>().ok())
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Host {
+                        message: "no arithmetic fixture".to_string(),
+                    },
+                    0..0,
+                )
+            })
     }
 
     fn pathname(&mut self, pattern: &Field) -> Result<Option<Vec<Vec<u8>>>, Error> {
@@ -600,6 +674,21 @@ fn parse_param(inner: &[u8]) -> Part {
         return Part::lit(b"${}".to_vec());
     }
     if inner[0] == b'!' {
+        // `${!a[@]}` is the index list; `${!x}` would re-parse the value as a
+        // name and stays unsupported.
+        if let Some((name, rest)) = parse_name(&inner[1..])
+            && rest.is_empty()
+        {
+            match &name {
+                ParamName::Elements { .. } => {
+                    return Part::Param(ParamExp::new(name, ParamOp::Indices, span));
+                }
+                ParamName::Element { .. } => {
+                    return Part::Param(ParamExp::new(name, ParamOp::Indirect, span));
+                }
+                _ => {}
+            }
+        }
         return Part::Param(ParamExp::new(
             ParamName::Var(inner[1..].to_vec()),
             ParamOp::Unsupported(UnsupportedOp::Indirect),
@@ -624,12 +713,24 @@ fn parse_param(inner: &[u8]) -> Part {
         return Part::lit(inner.to_vec());
     };
     let op = parse_op(rest);
+    // An array/positional-list slice keeps its bounds as words so expansion
+    // can evaluate them arithmetically, exactly like the real front end.
+    let op = if matches!(
+        name,
+        ParamName::Elements { .. } | ParamName::At | ParamName::Star
+    ) && (matches!(op, ParamOp::Substring { .. })
+        || matches!(op, ParamOp::Unsupported(UnsupportedOp::ArithmeticSubstring)))
+    {
+        parse_list_slice(rest).unwrap_or(op)
+    } else {
+        op
+    };
     Part::Param(ParamExp::new(name, op, span))
 }
 
 fn parse_name(inner: &[u8]) -> Option<(ParamName, &[u8])> {
     let first = *inner.first()?;
-    if first.is_ascii_digit() {
+    let (name, index) = if first.is_ascii_digit() {
         let mut value = 0usize;
         let mut index = 0;
         while index < inner.len() && inner[index].is_ascii_digit() {
@@ -641,23 +742,39 @@ fn parse_name(inner: &[u8]) -> Option<(ParamName, &[u8])> {
         } else {
             ParamName::Positional(value)
         };
-        return Some((name, &inner[index..]));
-    }
-    let rest = &inner[1..];
-    match first {
-        b'@' => Some((ParamName::At, rest)),
-        b'*' => Some((ParamName::Star, rest)),
-        b'#' => Some((ParamName::Count, rest)),
-        b'?' | b'-' | b'$' | b'!' => Some((ParamName::Var(vec![first]), rest)),
-        _ if is_name_start(first) => {
-            let mut index = 1;
-            while index < inner.len() && is_name_continue(inner[index]) {
-                index += 1;
+        (name, index)
+    } else {
+        match first {
+            b'@' => (ParamName::At, 1),
+            b'*' => (ParamName::Star, 1),
+            b'#' => (ParamName::Count, 1),
+            b'?' | b'-' | b'$' | b'!' => (ParamName::Var(vec![first]), 1),
+            _ if is_name_start(first) => {
+                let mut index = 1;
+                while index < inner.len() && is_name_continue(inner[index]) {
+                    index += 1;
+                }
+                (ParamName::Var(inner[..index].to_vec()), index)
             }
-            Some((ParamName::Var(inner[..index].to_vec()), &inner[index..]))
+            _ => return None,
         }
-        _ => None,
+    };
+    // A subscript is only meaningful on a variable name.
+    let name = match name {
+        ParamName::Var(name) => name,
+        other => return Some((other, &inner[index..])),
+    };
+    if inner.get(index) != Some(&b'[') {
+        return Some((ParamName::Var(name), &inner[index..]));
     }
+    let close = inner[index + 1..].iter().position(|&byte| byte == b']')? + index + 1;
+    let subscript = &inner[index + 1..close];
+    let name = if subscript == b"@" || subscript == b"*" {
+        ParamName::elements(name, subscript == b"*")
+    } else {
+        ParamName::element(name, parse_subword(subscript))
+    };
+    Some((name, &inner[close + 1..]))
 }
 
 fn parse_op(rest: &[u8]) -> ParamOp {
@@ -714,6 +831,26 @@ fn parse_op(rest: &[u8]) -> ParamOp {
         _ => UnsupportedOp::Other,
     };
     ParamOp::Unsupported(unsupported)
+}
+
+/// `${a[@]:off:len}` / `${@:off:len}`: the bounds stay words.
+fn parse_list_slice(rest: &[u8]) -> Option<ParamOp> {
+    let body = rest.strip_prefix(b":")?;
+    if body.starts_with(b"-")
+        || body.starts_with(b"=")
+        || body.starts_with(b"+")
+        || body.starts_with(b"?")
+    {
+        return None;
+    }
+    let (offset, length) = match body.iter().position(|&byte| byte == b':') {
+        Some(index) => (&body[..index], Some(&body[index + 1..])),
+        None => (body, None),
+    };
+    Some(ParamOp::ArraySlice {
+        offset: parse_subword(offset),
+        length: length.map(parse_subword),
+    })
 }
 
 fn parse_substring(body: &[u8]) -> ParamOp {

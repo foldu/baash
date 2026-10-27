@@ -1597,22 +1597,12 @@ impl<'a> Parser<'a, '_> {
                 }
                 TokenKind::Word | TokenKind::WordUnterminated => {
                     let text = self.text_of(&t);
-                    if words.is_empty()
-                        && assignments.is_empty()
-                        && looks_like_broken_subscript(text)
-                        && find_assignment_eq(self.src, &t.span).is_none()
-                    {
-                        let d = Diagnostic::error(
-                            codes::ARRAY_SUBSCRIPT,
-                            t.span.clone(),
-                            "an array subscript must be a single word",
-                        )
-                        .with_help(
-                            "the subscript may not contain unquoted white space; write `a[1+2]=v`",
-                        );
-                        self.push_error(d);
-                    }
+                    let _ = text;
                     if words.is_empty() {
+                        if let Some(a) = self.try_spaced_assignment(&t) {
+                            assignments.push(a);
+                            continue;
+                        }
                         if let Some(a) = self.try_assignment(&t) {
                             assignments.push(a);
                             continue;
@@ -1621,12 +1611,9 @@ impl<'a> Parser<'a, '_> {
                         && t.kind == TokenKind::Word
                         && self.array_argument_follows(&t)
                     {
-                        let (word, span, elements) = self.take_array_argument(&t);
-                        array_args.push(ArrayArg {
-                            word: words.len(),
-                            span,
-                            elements,
-                        });
+                        let (word, mut argument) = self.take_array_argument(&t);
+                        argument.word = words.len();
+                        array_args.push(argument);
                         words.push(word);
                         continue;
                     }
@@ -1696,7 +1683,12 @@ impl<'a> Parser<'a, '_> {
             && open.span.start == t.span.end
     }
 
-    fn take_array_argument(&mut self, t: &Token) -> (Word, Span, Vec<Word>) {
+    fn take_array_argument(&mut self, t: &Token) -> (Word, ArrayArg) {
+        let src: &'a [u8] = self.src;
+        let raw = &src[t.span.clone()];
+        let append = raw.ends_with(b"+=");
+        let name_len = raw.len() - if append { 2 } else { 1 };
+        let name = t.span.start..t.span.start + name_len;
         self.posix(
             t.span.clone(),
             "array assignment is a bash extension",
@@ -1708,7 +1700,7 @@ impl<'a> Parser<'a, '_> {
             .peek_sig()
             .expect("caller verified the adjacent parenthesis");
         self.advance_exact();
-        let mut elements: Vec<Word> = Vec::new();
+        let mut elements: Vec<ArrayElement> = Vec::new();
         loop {
             self.skip_newlines();
             if self.at_end() {
@@ -1719,8 +1711,8 @@ impl<'a> Parser<'a, '_> {
                 self.advance_exact();
                 break;
             }
-            match self.take_literal_word(Expect::Word) {
-                Some(w) => elements.push(w),
+            match self.take_array_element() {
+                Some(element) => elements.push(element),
                 None => {
                     self.unexpected_current();
                     self.advance_exact();
@@ -1730,16 +1722,62 @@ impl<'a> Parser<'a, '_> {
         }
         let end = self.prev_end();
         let span = t.span.start..end;
-        let src: &'a [u8] = self.src;
-        // `bsh-lang` has no array literal yet; a quoted placeholder keeps
-        // ordinary expansion inert while `SimpleCommand::array_args` carries
-        // the elements for the declaration builtins.
+        // A quoted placeholder keeps ordinary expansion inert while
+        // `SimpleCommand::array_args` carries the structure for the
+        // declaration builtins.
         let placeholder = Lit::new(LitKind::Quoted, src[span.clone()].to_vec());
         let word = Word {
             parts: vec![Part::Lit(placeholder)],
             span: span.clone(),
         };
-        (word, span, elements)
+        (
+            word,
+            ArrayArg {
+                word: 0,
+                span,
+                name,
+                append,
+                elements,
+            },
+        )
+    }
+
+    /// One element of an array literal: `[subscript]=value`,
+    /// `[subscript]+=value`, or a bare `value`.
+    ///
+    /// The subscript is structural, not textual: `[i]=$v` assigns one scalar
+    /// element while a bare `$v` is field-split, and that difference has to
+    /// survive expansion.
+    fn take_array_element(&mut self) -> Option<ArrayElement> {
+        let t = self.peek_sig()?;
+        if !matches!(
+            t.kind,
+            TokenKind::Word | TokenKind::WordUnterminated | TokenKind::Keyword
+        ) {
+            return None;
+        }
+        let src: &'a [u8] = self.src;
+        let span = t.span.clone();
+        let split = array_element_spans(src, span.clone());
+        if t.kind == TokenKind::WordUnterminated {
+            self.mark_unterminated(t.span.clone());
+        }
+        self.advance_exact();
+        Some(match split {
+            Some((subscript_span, append, value_span)) => ArrayElement {
+                span,
+                index: Some(ArrayIndex {
+                    subscript: self.parse_word_span(subscript_span),
+                    append,
+                }),
+                value: self.parse_word_span(value_span),
+            },
+            None => ArrayElement {
+                span: span.clone(),
+                index: None,
+                value: self.parse_word_span(span),
+            },
+        })
     }
 
     fn take_word_token(&mut self, t: &Token) -> Word {
@@ -1927,52 +1965,130 @@ impl<'a> Parser<'a, '_> {
     // ---------------------------------------------------------- assignments
 
     fn try_assignment(&mut self, t: &Token) -> Option<Assignment> {
+        // Validate first: a non-assignment word must not be consumed, and the
+        // array-literal branch needs to look at the *next* token for `(`.
+        if !assignment_span_ok(self.src, &t.span) {
+            return None;
+        }
+        self.advance_exact();
+        self.assignment_at(t.span.clone())
+    }
+
+    /// Recognise `name[expr]=value` whose subscript is spread over several
+    /// tokens (`a[1 + 2]=v`). The lexer splits on white space, so the parser
+    /// stitches the source span back together, exactly as bash's parser does.
+    fn try_spaced_assignment(&mut self, t: &Token) -> Option<Assignment> {
         let src: &'a [u8] = self.src;
-        let eq = find_assignment_eq(src, &t.span)?;
+        let span = t.span.clone();
+        // Only look ahead when this token cannot be a complete assignment.
+        if find_assignment_eq(src, &span).is_some() {
+            return None;
+        }
+        let mut i = span.start;
+        if !src.get(i).is_some_and(|&byte| lexer::is_name_start(byte)) {
+            return None;
+        }
+        i += 1;
+        while i < src.len() && lexer::is_name(src[i]) {
+            i += 1;
+        }
+        if src.get(i) != Some(&b'[') {
+            return None;
+        }
+        let line_end = src[span.start..]
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(src.len(), |offset| span.start + offset);
+        let close = matching_bracket(src, i, line_end)?;
+        let mut after = close + 1;
+        if src.get(after) == Some(&b'+') {
+            after += 1;
+        }
+        if src.get(after) != Some(&b'=') {
+            return None;
+        }
+        // The value is the rest of the token that contains `=`, if any.
+        let mut value_end = after + 1;
+        let mut probe = 0usize;
+        while let Some(token) = self.peek_sig_n(probe) {
+            if token.span.start <= after && after < token.span.end {
+                value_end = value_end.max(token.span.end);
+                break;
+            }
+            if token.span.start > after {
+                break;
+            }
+            probe += 1;
+        }
+        let assignment = self.assignment_at(span.start..value_end)?;
+        while self
+            .peek_sig()
+            .is_some_and(|next| next.span.start < value_end)
+        {
+            self.advance_exact();
+        }
+        Some(assignment)
+    }
+
+    /// Build an assignment from an explicit word span. The span may cover one
+    /// token (`a[i]=v`) or several (`a[1 + 2]=v`).
+    fn assignment_at(&mut self, span: Span) -> Option<Assignment> {
+        let src: &'a [u8] = self.src;
+        let eq = find_assignment_eq(src, &span)?;
         let mut name_end = eq;
         let mut append = false;
         if src.get(eq.wrapping_sub(1)) == Some(&b'+') {
             append = true;
             name_end -= 1;
         }
-        let mut index = None;
+        let mut index_span = None;
         let mut plain_end = name_end;
-        if let Some(open) = src[t.span.start..name_end].iter().position(|&b| b == b'[') {
-            let open = t.span.start + open;
+        if let Some(open) = src[span.start..name_end].iter().position(|&b| b == b'[') {
+            let open = span.start + open;
             let close = memrchr_byte(src, b']', open + 1, name_end)?;
-            index = Some(open + 1..close);
+            index_span = Some(open + 1..close);
             plain_end = open;
             let sub = &src[open + 1..close];
             if sub.windows(2).any(|w| w == b"$(") || sub.contains(&b'`') {
                 let d = Diagnostic::error(
                     codes::ARRAY_SUBSCRIPT,
-                    t.span.start..eq,
+                    span.start..eq,
                     "a subscript containing a command substitution is refused",
                 )
                 .with_help("the subscript would be re-parsed as code; assign to a variable first");
                 self.push_error(d);
             }
             self.posix(
-                t.span.start..eq,
+                span.start..eq,
                 "array assignment is a bash extension",
                 "POSIX has no arrays; use a plain string",
             );
         }
-        let name = t.span.start..plain_end;
+        let name = span.start..plain_end;
         if name.start >= name.end || !is_valid_name(&src[name.clone()]) {
             return None;
         }
-        let value_span = eq + 1..t.span.end;
-        self.advance_exact();
+        let value_span = eq + 1..span.end;
+        let has_index = index_span.is_some();
+        let index = index_span.map(|index_span| self.parse_word_span(index_span));
 
         // `name=( … )`, with the `(` hard against the `=`.
         let array = if value_span.is_empty() {
             let adjacent_paren = self.peek_sig().is_some_and(|p| {
                 p.kind == TokenKind::Operator
                     && self.text_of(&p) == b"("
-                    && p.span.start == t.span.end
+                    && p.span.start == span.end
             });
             if adjacent_paren {
+                if has_index {
+                    let d = Diagnostic::error(
+                        codes::ARRAY_SUBSCRIPT,
+                        span.clone(),
+                        "an array literal cannot be assigned to one element",
+                    )
+                    .with_help("assign a scalar, or drop the subscript to replace the array");
+                    self.push_error(d);
+                }
                 self.advance_exact();
                 let mut elems = Vec::new();
                 loop {
@@ -1982,11 +2098,11 @@ impl<'a> Parser<'a, '_> {
                         break;
                     }
                     if self.at_end() {
-                        self.incomplete_at(t.span.clone());
+                        self.incomplete_at(span.clone());
                         break;
                     }
-                    match self.take_literal_word(Expect::Word) {
-                        Some(w) => elems.push(w),
+                    match self.take_array_element() {
+                        Some(element) => elems.push(element),
                         None => {
                             self.unexpected_current();
                             self.advance_exact();
@@ -1995,7 +2111,7 @@ impl<'a> Parser<'a, '_> {
                     }
                 }
                 self.posix(
-                    t.span.clone(),
+                    span.clone(),
                     "array assignment is a bash extension",
                     "POSIX has no arrays; use a plain string",
                 );
@@ -2016,7 +2132,7 @@ impl<'a> Parser<'a, '_> {
             self.parse_word_span(value_span)
         };
         Some(Assignment {
-            span: t.span.clone(),
+            span: span.clone(),
             name,
             append,
             index,
@@ -2369,14 +2485,66 @@ impl<'a> Parser<'a, '_> {
             Some(_) => ParamName::Var(Vec::new()),
         };
 
-        if i < text.len() && text[i] == b'[' && !length && !indirect {
-            return ParamExp {
-                name,
-                op: ParamOp::Unsupported(UnsupportedOp::ArraySubscript),
-                span,
+        // `${a[…]}`, `${#a[…]}`, `${!a[@]}`: the subscript is parsed as a
+        // word because it is expanded before it is interpreted, and only then
+        // arithmetically evaluated (indexed) or used as a key (associative).
+        let mut name = name;
+        if i < text.len() && text[i] == b'[' {
+            let Some(close) = matching_bracket(text, i, text.len()) else {
+                return ParamExp {
+                    name,
+                    op: ParamOp::Unsupported(UnsupportedOp::ArraySubscript),
+                    span,
+                };
             };
+            let subscript = &text[i + 1..close];
+            name = match name {
+                ParamName::Var(base) if subscript == b"@" || subscript == b"*" => {
+                    ParamName::elements(base, subscript == b"*")
+                }
+                ParamName::Var(base) => ParamName::element(
+                    base,
+                    self.parse_word_span(inner.start + i + 1..inner.start + close),
+                ),
+                other => {
+                    // `${@[0]}` and friends are not a thing.
+                    return ParamExp {
+                        name: other,
+                        op: ParamOp::Unsupported(UnsupportedOp::ArraySubscript),
+                        span,
+                    };
+                }
+            };
+            i = close + 1;
+            if text.get(i) == Some(&b'[') {
+                let d = Diagnostic::error(
+                    codes::ARRAY_SUBSCRIPT,
+                    span.clone(),
+                    "only one array subscript is allowed",
+                );
+                self.push_error(d);
+                return ParamExp {
+                    name,
+                    op: ParamOp::Unsupported(UnsupportedOp::ArraySubscript),
+                    span,
+                };
+            }
         }
         if length {
+            if i < text.len() {
+                // `${#a[0]/x/y}` is not `${#a[0]}` followed by an operator.
+                let d = Diagnostic::error(
+                    codes::ARRAY_SUBSCRIPT,
+                    span.clone(),
+                    "a length with an array subscript cannot take another operator",
+                );
+                self.push_error(d);
+                return ParamExp {
+                    name,
+                    op: ParamOp::Unsupported(UnsupportedOp::Other),
+                    span,
+                };
+            }
             return ParamExp {
                 name,
                 op: ParamOp::Length,
@@ -2384,11 +2552,16 @@ impl<'a> Parser<'a, '_> {
             };
         }
         if indirect {
-            return ParamExp {
-                name,
-                op: ParamOp::Unsupported(UnsupportedOp::Indirect),
-                span,
+            let op = if i >= text.len() {
+                match &name {
+                    ParamName::Elements { .. } => ParamOp::Indices,
+                    ParamName::Element { .. } | ParamName::Var(_) => ParamOp::Indirect,
+                    _ => ParamOp::Unsupported(UnsupportedOp::Indirect),
+                }
+            } else {
+                ParamOp::Unsupported(UnsupportedOp::Indirect)
             };
+            return ParamExp { name, op, span };
         }
         if i >= text.len() {
             return ParamExp {
@@ -2402,6 +2575,7 @@ impl<'a> Parser<'a, '_> {
         let op_start = inner.start + i;
         let arg_span = op_start..inner.end;
         let list_param = matches!(name, ParamName::At | ParamName::Star);
+        let array_param = matches!(name, ParamName::Elements { .. });
 
         let op = if rest.starts_with(b":-") || rest.starts_with(b"-") {
             let colon = rest[0] == b':';
@@ -2476,8 +2650,11 @@ impl<'a> Parser<'a, '_> {
                 ParamOp::Unsupported(UnsupportedOp::CasePattern)
             }
         } else if rest.starts_with(b":") {
-            if list_param {
-                ParamOp::Unsupported(UnsupportedOp::SubstringOfList)
+            // Array and positional-list slices evaluate their bounds
+            // arithmetically, so the bounds stay words; a scalar slice is
+            // pre-evaluated only when it is a pure integer literal.
+            if list_param || array_param {
+                self.array_slice_op(&src[(op_start + 1)..inner.end], op_start + 1)
             } else {
                 substring_op(&src[(op_start + 1)..inner.end])
             }
@@ -3302,6 +3479,48 @@ fn substring_op(text: &[u8]) -> ParamOp {
     ParamOp::Substring { offset, length }
 }
 
+/// `${a[@]:offset:length}` / `${@:offset:length}`: the bounds stay words
+/// because bash evaluates them arithmetically when the expansion runs.
+impl Parser<'_, '_> {
+    /// `${a[@]:offset:length}` / `${@:offset:length}`: the bounds stay words
+    /// because bash evaluates them arithmetically when the expansion runs.
+    fn array_slice_op(&mut self, text: &[u8], start: usize) -> ParamOp {
+        let (offset_text, length_text) = match split_top_level_colon(text) {
+            Some(index) => (&text[..index], Some(&text[index + 1..])),
+            None => (text, None),
+        };
+        let offset_end = start + offset_text.len();
+        ParamOp::ArraySlice {
+            offset: self.parse_word_span(start..offset_end),
+            length: length_text
+                .map(|text| self.parse_word_span(offset_end + 1..offset_end + 1 + text.len())),
+        }
+    }
+}
+
+/// Split at the first `:` that is not inside brackets or quotes.
+fn split_top_level_colon(text: &[u8]) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    for (index, &byte) in text.iter().enumerate() {
+        match quote {
+            Some(q) => {
+                if byte == q {
+                    quote = None;
+                }
+            }
+            None => match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'[' | b'(' => depth += 1,
+                b']' | b')' => depth = depth.saturating_sub(1),
+                b':' if depth == 0 => return Some(index),
+                _ => {}
+            },
+        }
+    }
+    None
+}
+
 fn is_blank(text: &[u8]) -> bool {
     text.iter().all(|b| matches!(b, b' ' | b'\t' | b'\n'))
 }
@@ -3543,19 +3762,27 @@ fn is_reserved_stop(text: &[u8]) -> bool {
     )
 }
 
-/// Detect the `a[1 + 2]=v` trap: a word that starts like an array assignment
-/// but whose subscript is split across words.
-fn looks_like_broken_subscript(text: &[u8]) -> bool {
-    let mut i = 0;
-    if text.get(i).is_some_and(|&b| lexer::is_name_start(b)) {
-        i += 1;
-        while i < text.len() && lexer::is_name(text[i]) {
-            i += 1;
-        }
-    } else {
+/// Whether a word span has the shape of an assignment, without building one.
+///
+/// Kept separate from [`Parser::assignment_at`] so the caller can decide
+/// whether to consume the token first: `name=(…)` needs the following `(`,
+/// while a plain command word must not be consumed by a failed attempt.
+fn assignment_span_ok(src: &[u8], span: &Span) -> bool {
+    let Some(eq) = find_assignment_eq(src, span) else {
         return false;
+    };
+    let mut name_end = eq;
+    if src.get(eq.wrapping_sub(1)) == Some(&b'+') {
+        name_end = name_end.saturating_sub(1);
     }
-    text.get(i) == Some(&b'[') && !text[i..].contains(&b']')
+    if let Some(open) = src[span.start..name_end].iter().position(|&b| b == b'[') {
+        let open = span.start + open;
+        if memrchr_byte(src, b']', open + 1, name_end).is_none() {
+            return false;
+        }
+        name_end = open;
+    }
+    name_end > span.start && is_valid_name(&src[span.start..name_end])
 }
 
 fn memrchr_byte(src: &[u8], needle: u8, from: usize, to: usize) -> Option<usize> {
@@ -3611,4 +3838,64 @@ fn orphan_help(text: &[u8], _kind: TokenKind) -> Option<String> {
         _ => return None,
     };
     Some(help.to_string())
+}
+
+/// Split an array-literal element into `([subscript]=|+=[)value`.
+///
+/// Returns the subscript's byte span (inside the brackets), whether the
+/// element was written with `+=`, and the value's span. `None` means the
+/// element is a bare value. Quote-aware, because `['a]b']=v` is one key.
+fn array_element_spans(src: &[u8], span: Span) -> Option<(Span, bool, Span)> {
+    if span.start >= span.end || src[span.start] != b'[' {
+        return None;
+    }
+    let close = matching_bracket(src, span.start, span.end)?;
+    let mut after = close + 1;
+    let append = src.get(after) == Some(&b'+');
+    if append {
+        after += 1;
+    }
+    if src.get(after) != Some(&b'=') {
+        return None;
+    }
+    let value_start = after + 1;
+    Some((
+        span.start + 1..close,
+        append,
+        value_start..span.end.max(value_start),
+    ))
+}
+
+/// The index of the `]` matching the `[` at `open`, skipping quoted text and
+/// nested brackets.
+fn matching_bracket(src: &[u8], open: usize, end: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut index = open;
+    while index < end {
+        let byte = src[index];
+        match quote {
+            Some(q) => {
+                if byte == q {
+                    quote = None;
+                } else if byte == b'\\' && q == b'"' {
+                    index += 1;
+                }
+            }
+            None => match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'\\' => index += 1,
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(index);
+                    }
+                }
+                _ => {}
+            },
+        }
+        index += 1;
+    }
+    None
 }

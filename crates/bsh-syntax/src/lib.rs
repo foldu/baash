@@ -40,8 +40,9 @@ mod parser;
 mod role;
 
 pub use ast::{
-    AndOrLink, AndOrOp, ArrayArg, Assignment, Ast, CaseArm, CaseTerm, IfBranch, ListItem, Node,
-    NodeId, NodeKind, PipeOp, Redirect, RedirectOp, Separator, SimpleCommand,
+    AndOrLink, AndOrOp, ArrayArg, ArrayElement, ArrayIndex, Assignment, Ast, CaseArm, CaseTerm,
+    IfBranch, ListItem, Node, NodeId, NodeKind, PipeOp, Redirect, RedirectOp, Separator,
+    SimpleCommand,
 };
 pub use bsh_lang::{
     Arithmetic, CmdSubStyle, CommandSub, DoubleQ, Lit, LitKind, ParamExp, ParamName, ParamOp, Part,
@@ -56,6 +57,16 @@ pub use parser::{
     expectations_after, expectations_at, parse, parse_bytes, parse_with, parse_word, parse_word_at,
 };
 pub use role::{TokenRole, classify_tokens};
+
+/// Whether the word at `span` has the shape of a variable assignment
+/// (`name=value`, `name+=value`, `name[sub]=value`).
+///
+/// The VM uses this for the arguments of the declaration built-ins:
+/// `export x=$v` must expand `$v` as an *assignment value* (one field, no
+/// globbing), while an ordinary argument still splits.
+pub fn is_assignment_word(src: &[u8], span: &bsh_diag::Span) -> bool {
+    lexer::assignment_value_start(src, span).is_some()
+}
 
 /// Diagnostic codes produced by this crate.
 ///

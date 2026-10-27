@@ -476,7 +476,39 @@ pub(crate) fn find_assignment_eq(src: &[u8], span: &Span) -> Option<usize> {
             b'"' => i = skip_dquote(src, i + 1, 0, &mut Vec::new())?,
             b'`' => i = skip_backtick(src, i + 1)?,
             b'$' => i = scan_dollar(src, i, 0, false, &mut Vec::new())?,
+            // A subscript may contain `=` (`a[x=1]=v`); the assignment's own
+            // `=` is the one after the closing bracket.
+            b'[' => match skip_subscript(src, i, span.end) {
+                Some(after) => i = after,
+                None => i += 1,
+            },
             b'=' => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Skip `[ … ]` quote-aware, returning the offset just past the matching `]`.
+fn skip_subscript(src: &[u8], open: usize, end: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < end {
+        match src[i] {
+            b'\\' => i += 2,
+            b'\'' => i = skip_squote(src, i + 1)?,
+            b'"' => i = skip_dquote(src, i + 1, 0, &mut Vec::new())?,
+            b'[' => {
+                depth += 1;
+                i += 1;
+            }
+            b']' => {
+                depth = depth.checked_sub(1)?;
+                i += 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
             _ => i += 1,
         }
     }

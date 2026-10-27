@@ -521,7 +521,8 @@ fn arrays_keep_shape_order_and_holes() {
     vars.set_indexed(b"a", 0, b"0").unwrap();
     vars.set_indexed(b"a", 3, b"3").unwrap();
     assert_eq!(vars.element_indexed(b"a", 0), Some(b"0".as_slice()));
-    assert_eq!(vars.element_indexed(b"a", 1), Some(b"".as_slice()));
+    // Storage is sparse: an unwritten subscript is absent, not an empty cell.
+    assert_eq!(vars.element_indexed(b"a", 1), None);
     assert_eq!(vars.element_indexed(b"a", 3), Some(b"3".as_slice()));
     // A scalar assignment to an indexed array sets element 0.
     vars.assign_scalar(b"a", b"new").unwrap();
@@ -547,26 +548,28 @@ fn arrays_keep_shape_order_and_holes() {
         vars.set_indexed(b"m", 0, b"x"),
         Err(Error::NotIndexed { .. })
     ));
-    assert!(matches!(
-        vars.assign_scalar(b"m", b"x"),
-        Err(Error::AssocNeedsSubscript { .. })
-    ));
+    // A bare scalar assignment to an associative array writes key `0`.
+    vars.assign_scalar(b"m", b"x").unwrap();
+    assert_eq!(vars.element_assoc(b"m", b"0"), Some(b"x".as_slice()));
     vars.declare_shape(b"i", ArrayShape::Indexed).unwrap();
     assert!(matches!(
         vars.set_assoc(b"i", b"k", b"v"),
         Err(Error::NotAssociative { .. })
     ));
-    assert!(matches!(
-        vars.append(b"i", b"x"),
-        Err(Error::NotScalar { .. })
-    ));
+    // `a+=text` appends to element zero of an indexed array.
+    vars.set_indexed(b"i", 0, b"v").unwrap();
+    vars.append(b"i", b"x").unwrap();
+    assert_eq!(vars.element_indexed(b"i", 0), Some(b"vx".as_slice()));
 }
 
 #[test]
 fn whole_value_assignment_and_append() {
     let mut vars = Vars::default();
-    vars.assign(b"a", VarValue::Indexed(vec![b"x".to_vec()]))
-        .unwrap();
+    vars.assign(
+        b"a",
+        VarValue::Indexed(std::collections::BTreeMap::from([(0, b"x".to_vec())])),
+    )
+    .unwrap();
     assert_eq!(vars.element_indexed(b"a", 0), Some(b"x".as_slice()));
     vars.assign_scalar(b"s", b"ab").unwrap();
     vars.append(b"s", b"cd").unwrap();
@@ -640,8 +643,11 @@ fn envp_exports_only_the_right_things() {
     vars.mark_exported(b"u").unwrap(); // exported but unset
     vars.assign_scalar(b"e", b"").unwrap();
     vars.mark_exported(b"e").unwrap();
-    vars.assign(b"arr", VarValue::Indexed(vec![b"x".to_vec()]))
-        .unwrap();
+    vars.assign(
+        b"arr",
+        VarValue::Indexed(std::collections::BTreeMap::from([(0, b"x".to_vec())])),
+    )
+    .unwrap();
     vars.mark_exported(b"arr").unwrap();
     vars.assign_scalar(b"raw", b"a\xffb").unwrap();
     vars.mark_exported(b"raw").unwrap();
@@ -1114,4 +1120,114 @@ fn set_option_table_is_printable() {
     let table = set_option_table(&Opts::BASH);
     assert!(table.iter().any(|(name, on)| *name == "pipefail" && !*on));
     assert!(table.iter().any(|(name, on)| *name == "braceexpand" && *on));
+}
+
+#[test]
+fn indexed_arrays_are_sparse_and_ordered() {
+    let mut vars = Vars::default();
+    vars.set_indexed(b"a", 100, b"x").unwrap();
+    assert_eq!(
+        vars.array_len(b"a"),
+        1,
+        "a[100] must not allocate 101 slots"
+    );
+    assert_eq!(vars.max_index(b"a"), Some(100));
+    assert_eq!(vars.element_indexed(b"a", 0), None);
+    assert_eq!(vars.element_indexed(b"a", 100), Some(b"x".as_slice()));
+
+    vars.set_indexed(b"a", 3, b"y").unwrap();
+    vars.set_indexed(b"a", 0, b"z").unwrap();
+    let VarValue::Indexed(elements) = vars.value(b"a").unwrap() else {
+        panic!("expected an indexed array");
+    };
+    assert_eq!(
+        elements.keys().copied().collect::<Vec<_>>(),
+        vec![0, 3, 100],
+        "iteration order is subscript order"
+    );
+
+    // Unsetting leaves a hole; the count and the greatest index agree with it.
+    vars.unset_element_indexed(b"a", 3).unwrap();
+    assert_eq!(vars.array_len(b"a"), 2);
+    assert_eq!(vars.element_indexed(b"a", 3), None);
+    vars.unset_element_indexed(b"a", 100).unwrap();
+    assert_eq!(vars.max_index(b"a"), Some(0));
+    // Removing an absent, non-negative subscript succeeds.
+    vars.unset_element_indexed(b"a", 77).unwrap();
+}
+
+#[test]
+fn negative_subscripts_resolve_against_the_greatest_index() {
+    let mut vars = Vars::default();
+    for (index, value) in [(0, b"zero".as_slice()), (2, b"two")] {
+        vars.set_indexed(b"a", index, value).unwrap();
+    }
+    // greatest+1 is 3: -1 is 2, -2 is the hole at 1, -3 is 0.
+    assert_eq!(vars.element_indexed(b"a", -1), Some(b"two".as_slice()));
+    assert_eq!(vars.element_indexed(b"a", -2), None);
+    assert_eq!(vars.element_indexed(b"a", -3), Some(b"zero".as_slice()));
+    assert_eq!(vars.element_indexed(b"a", -4), None);
+
+    // A write at -1 lands on the greatest element and keeps it the greatest.
+    vars.set_indexed(b"a", -1, b"TWO").unwrap();
+    assert_eq!(vars.element_indexed(b"a", 2), Some(b"TWO".as_slice()));
+    // Before the start is an error, and leaves the array untouched.
+    assert!(matches!(
+        vars.set_indexed(b"a", -4, b"x"),
+        Err(Error::ArrayOutOfBounds { .. })
+    ));
+    assert_eq!(vars.element_indexed(b"a", 2), Some(b"TWO".as_slice()));
+}
+
+#[test]
+fn indexed_append_and_scalar_promotion() {
+    let mut vars = Vars::default();
+    vars.set_indexed(b"a", 10, b"a").unwrap();
+    vars.append_indexed(b"a", 10, b"b").unwrap();
+    assert_eq!(vars.element_indexed(b"a", 10), Some(b"ab".as_slice()));
+    // Appending to an absent element creates it.
+    vars.append_indexed(b"a", 20, b"c").unwrap();
+    assert_eq!(vars.element_indexed(b"a", 20), Some(b"c".as_slice()));
+
+    // `s=hi; s[2]=x` keeps the old value at element zero.
+    vars.assign_scalar(b"s", b"hi").unwrap();
+    vars.set_indexed(b"s", 2, b"x").unwrap();
+    assert_eq!(vars.element_indexed(b"s", 0), Some(b"hi".as_slice()));
+    assert_eq!(vars.element_indexed(b"s", 2), Some(b"x".as_slice()));
+
+    // A scalar converts to an associative array with key zero.
+    vars.assign_scalar(b"m", b"hello").unwrap();
+    vars.declare_shape(b"m", ArrayShape::Associative).unwrap();
+    assert_eq!(vars.element_assoc(b"m", b"0"), Some(b"hello".as_slice()));
+    // But an indexed array cannot change shape.
+    assert!(matches!(
+        vars.declare_shape(b"s", ArrayShape::Associative),
+        Err(Error::ArrayShapeMismatch { .. })
+    ));
+}
+
+#[test]
+fn associative_arrays_keep_insertion_order_and_removal() {
+    let mut vars = Vars::default();
+    vars.declare_shape(b"m", ArrayShape::Associative).unwrap();
+    vars.set_assoc(b"m", b"b", b"2").unwrap();
+    vars.set_assoc(b"m", b"a", b"1").unwrap();
+    vars.append_assoc(b"m", b"b", b"0").unwrap();
+    assert_eq!(vars.element_assoc(b"m", b"b"), Some(b"20".as_slice()));
+    let VarValue::Assoc(pairs) = vars.value(b"m").unwrap() else {
+        panic!("expected an associative array");
+    };
+    assert_eq!(
+        pairs,
+        &[
+            (b"b".to_vec(), b"20".to_vec()),
+            (b"a".to_vec(), b"1".to_vec()),
+        ],
+        "updating a key keeps its position"
+    );
+    vars.unset_element_assoc(b"m", b"b").unwrap();
+    assert_eq!(vars.element_assoc(b"m", b"b"), None);
+    assert_eq!(vars.array_len(b"m"), 1);
+    // Removing an absent key succeeds.
+    vars.unset_element_assoc(b"m", b"zzz").unwrap();
 }

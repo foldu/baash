@@ -35,7 +35,7 @@ use bsh_diag::{Diagnostic, ErrCode, Span};
 
 use crate::host::Shell;
 use crate::ifs::Ifs;
-use crate::vars::SetError;
+use crate::vars::{ArrayKind, ArrayValue, SetError};
 use crate::word::{
     DoubleQ, Lit, LitKind, ParamExp, ParamName, ParamOp, Part, TildeSpec, UnsupportedOp, Word,
 };
@@ -339,32 +339,101 @@ impl Field {
 /// bash's directory-stack forms (`~+2`, `~-3`) are left alone.
 pub fn expand_tilde<S: Shell>(word: &Word, shell: &mut S) -> Result<Word, Error> {
     let mut word = word.clone();
-    expand_tilde_word(&mut word, false, shell);
+    expand_tilde_word(&mut word, false, false, shell);
     Ok(word)
 }
 
-fn expand_tilde_word<S: Shell>(word: &mut Word, quoted: bool, shell: &mut S) {
+/// Tilde expansion for an assignment value.
+///
+/// In an assignment POSIX expands a tilde at the start of the value *and*
+/// after every unquoted `:` (that is how `PATH=~:~/bin` works), which a
+/// command word does not do. `~` and `~user` are both recognised; an unknown
+/// login name is left as written.
+pub fn expand_assignment_tilde<S: Shell>(word: &Word, shell: &mut S) -> Result<Word, Error> {
+    let mut word = word.clone();
+    expand_tilde_word(&mut word, false, true, shell);
+    Ok(word)
+}
+
+fn expand_tilde_word<S: Shell>(word: &mut Word, quoted: bool, assignment: bool, shell: &mut S) {
     if !quoted {
-        expand_leading_tilde(word, shell);
+        if assignment {
+            expand_assignment_tildes(word, shell);
+        } else {
+            expand_leading_tilde(word, shell);
+        }
     }
     for part in &mut word.parts {
-        expand_tilde_part(part, quoted, shell);
+        expand_tilde_part(part, quoted, assignment, shell);
     }
 }
 
-fn expand_tilde_part<S: Shell>(part: &mut Part, quoted: bool, shell: &mut S) {
+fn expand_tilde_part<S: Shell>(part: &mut Part, quoted: bool, assignment: bool, shell: &mut S) {
     match part {
         Part::DoubleQ(DoubleQ { parts }) => {
             for part in parts {
-                expand_tilde_part(part, true, shell);
+                expand_tilde_part(part, true, assignment, shell);
             }
         }
         Part::Param(ParamExp { op, .. }) => {
             if let Some(word) = op.word_mut() {
-                expand_tilde_word(word, quoted, shell);
+                // A replacement word is expanded like an assignment value:
+                // `${x:-~:~/b}` expands both tildes.
+                expand_tilde_word(word, quoted, assignment, shell);
             }
         }
         _ => {}
+    }
+}
+
+/// Expand `~`/`~user` at the start of the value and after each unquoted `:`.
+fn expand_assignment_tildes<S: Shell>(word: &mut Word, shell: &mut S) {
+    let mut at_segment_start = true;
+    for part in &mut word.parts {
+        if let Part::Tilde(spec) = part {
+            let replacement = if at_segment_start {
+                resolve_tilde(&spec.user, shell)
+            } else {
+                None
+            };
+            *part = match replacement {
+                Some(home) => Part::Lit(Lit::quoted(home)),
+                None => Part::Lit(Lit::unquoted(spec.source_bytes())),
+            };
+            at_segment_start = false;
+            continue;
+        }
+        let Part::Lit(lit) = part else {
+            at_segment_start = false;
+            continue;
+        };
+        if lit.kind != LitKind::Unquoted {
+            // Quoted text is never a tilde prefix, and it ends the segment.
+            at_segment_start = false;
+            continue;
+        }
+        let bytes = std::mem::take(&mut lit.bytes);
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if at_segment_start && bytes[index] == b'~' {
+                let end = bytes[index + 1..]
+                    .iter()
+                    .position(|&byte| byte == b'/' || byte == b':')
+                    .map_or(bytes.len(), |offset| index + 1 + offset);
+                let user = &bytes[index + 1..end];
+                if let Some(home) = resolve_tilde(user, shell) {
+                    out.extend_from_slice(&home);
+                    index = end;
+                    at_segment_start = false;
+                    continue;
+                }
+            }
+            out.push(bytes[index]);
+            at_segment_start = bytes[index] == b':';
+            index += 1;
+        }
+        lit.bytes = out;
     }
 }
 
@@ -481,9 +550,24 @@ struct Ctx<'a, S: Shell> {
 }
 
 impl<S: Shell> Ctx<'_, S> {
+    /// The scalar value of `name`.
+    ///
+    /// Arrays decay to element zero: bash's `${a}` is `${a[0]}` for both
+    /// shapes (an associative array looks up the key `0`). That is what makes
+    /// `b="${a[@]}"` and `echo $a` behave like bash rather than like an
+    /// unset variable.
     fn value(&self, name: &ParamName) -> Option<Vec<u8>> {
         match name {
-            ParamName::Var(name) => self.shell.get(name).map(<[u8]>::to_vec),
+            ParamName::Var(name) => match self.shell.get(name) {
+                Some(value) => Some(value.to_vec()),
+                None => self.shell.array(name).and_then(|array| match array {
+                    ArrayValue::Indexed(elements) => elements.get(&0).cloned(),
+                    ArrayValue::Assoc(pairs) => pairs
+                        .iter()
+                        .find(|(key, _)| key.as_slice() == b"0")
+                        .map(|(_, value)| value.clone()),
+                }),
+            },
             ParamName::Positional(n) => {
                 if *n == 0 {
                     self.shell.get(b"0").map(<[u8]>::to_vec)
@@ -493,22 +577,94 @@ impl<S: Shell> Ctx<'_, S> {
             }
             ParamName::Count => Some(self.shell.positional().len().to_string().into_bytes()),
             ParamName::At | ParamName::Star => None,
+            ParamName::Element { .. } | ParamName::Elements { .. } => None,
         }
     }
 
-    fn is_set(&self, name: &ParamName) -> bool {
+    fn is_set(&mut self, name: &ParamName) -> bool {
         match name {
             ParamName::At | ParamName::Star => !self.shell.positional().is_empty(),
+            ParamName::Element { name, subscript } => read_element(self, name, subscript).is_some(),
+            ParamName::Elements { name, .. } => self
+                .shell
+                .array(name)
+                .map(|array| !array.is_empty())
+                .unwrap_or_else(|| self.shell.get(name).is_some()),
             _ => self.value(name).is_some(),
         }
     }
 
-    fn is_nonnull(&self, name: &ParamName) -> bool {
+    fn is_nonnull(&mut self, name: &ParamName) -> bool {
         match name {
             ParamName::At | ParamName::Star => !self.shell.positional().is_empty(),
+            ParamName::Element { name, subscript } => {
+                read_element(self, name, subscript).is_some_and(|value| !value.is_empty())
+            }
+            ParamName::Elements { name, .. } => {
+                // bash's `${a[@]:-word}` rule: a one-element list behaves like
+                // a scalar for the null test, while a longer list is non-null
+                // as a list (`a=("" ""); "${a[@]:-x}"` yields two empties).
+                match self.shell.array(name) {
+                    Some(array) => match array.len() {
+                        0 => false,
+                        1 => array
+                            .values()
+                            .first()
+                            .is_some_and(|value| !value.is_empty()),
+                        _ => true,
+                    },
+                    None => self.shell.get(name).is_some_and(|value| !value.is_empty()),
+                }
+            }
             _ => self.value(name).is_some_and(|value| !value.is_empty()),
         }
     }
+}
+
+/// `subscript` inside `${a[subscript]}` for a *read*.
+///
+/// The word is expanded first, then interpreted by the array's shape: an
+/// associative array uses the bytes as the key, an indexed one (and a scalar,
+/// which behaves like a one-element indexed array) evaluates them
+/// arithmetically. The arithmetic callback is the same one `$((…))` uses, so
+/// `${a[i+1]}` and `$((i+1))` cannot disagree.
+fn read_element<S: Shell>(ctx: &mut Ctx<'_, S>, name: &[u8], subscript: &Word) -> Option<Vec<u8>> {
+    let kind = ctx.shell.array(name).map(|array| array.kind());
+    let text = expand_word_to_scalar(subscript, false, ctx).ok()?;
+    match kind {
+        Some(ArrayKind::Associative) => ctx
+            .shell
+            .array(name)
+            .and_then(|array| array.get(&text))
+            .map(<[u8]>::to_vec),
+        Some(ArrayKind::Indexed) => {
+            let index = arithmetic(&text, subscript, ctx).ok()?;
+            let key = index.to_string().into_bytes();
+            ctx.shell
+                .array(name)
+                .and_then(|array| array.get(&key))
+                .map(<[u8]>::to_vec)
+        }
+        // No shape: bash treats the subscript arithmetically and a scalar is
+        // an indexed array with one element.
+        None => {
+            let index = arithmetic(&text, subscript, ctx).ok()?;
+            if index == 0 {
+                ctx.shell.get(name).map(<[u8]>::to_vec)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Evaluate subscript text as arithmetic, through the runtime's evaluator.
+fn arithmetic<S: Shell>(text: &[u8], source: &Word, ctx: &mut Ctx<'_, S>) -> Result<i64, Error> {
+    let expr = crate::word::Arithmetic {
+        source: text.to_vec(),
+        span: source.span.clone(),
+    };
+    ctx.shell.arithmetic_value(&expr)
 }
 
 fn expand_parts<S: Shell>(
@@ -568,16 +724,82 @@ fn expand_param<S: Shell>(
         ParamOp::Length => {
             let len = match &exp.name {
                 ParamName::At | ParamName::Star => ctx.shell.positional().len(),
+                ParamName::Elements { name, .. } => {
+                    match ctx.shell.array(name) {
+                        Some(array) => array.len(),
+                        // A scalar is one element; an unset name is none.
+                        None => usize::from(ctx.shell.get(name).is_some()),
+                    }
+                }
+                ParamName::Element { name, subscript } => {
+                    read_element(ctx, name, subscript).map_or(0, |value| value.len())
+                }
                 name => ctx.value(name).map_or(0, |value| value.len()),
             };
             out.push(len.to_string().into_bytes(), quoted, !quoted);
             Ok(())
         }
+        ParamOp::Indices => {
+            let ParamName::Elements { name, star } = &exp.name else {
+                // `${!x}` re-parses a variable's *value* as a name; that stays
+                // out of scope (it is an eval by another name).
+                return Err(Error::unsupported(UnsupportedOp::Indirect, span));
+            };
+            let indices = array_indices(ctx, name);
+            emit_values(ctx, &indices, *star, quoted, out);
+            Ok(())
+        }
+        ParamOp::Indirect => {
+            let target = match &exp.name {
+                ParamName::Element { name, subscript } => {
+                    read_element(ctx, name, subscript).unwrap_or_default()
+                }
+                // `${!a}` on an array is `${!a[0]}`; on a plain variable it
+                // would re-parse the value as a name, which stays out of
+                // scope.
+                ParamName::Var(name) if ctx.shell.array(name).is_some() => {
+                    ctx.value(&exp.name).unwrap_or_default()
+                }
+                _ => return Err(Error::unsupported(UnsupportedOp::Indirect, span)),
+            };
+            substitute(&ParamName::Var(target), quoted, ctx, out);
+            Ok(())
+        }
+        ParamOp::ArraySlice { offset, length } => {
+            let (source, star) = match &exp.name {
+                ParamName::Elements { name, star } => (array_values(ctx, name), *star),
+                ParamName::At | ParamName::Star => (
+                    ctx.shell.positional().to_vec(),
+                    matches!(&exp.name, ParamName::Star),
+                ),
+                _ => return Err(Error::unsupported(UnsupportedOp::SubstringOfList, span)),
+            };
+            let bounds = slice_bounds(offset, length.as_ref(), ctx)?;
+            let values = slice_list(&source, bounds, span)?;
+            emit_values(ctx, &values, star, quoted, out);
+            Ok(())
+        }
         ParamOp::Substring { offset, length } => {
             if matches!(&exp.name, ParamName::At | ParamName::Star) {
-                // bash slices the parameter *list* here; doing it on a joined
+                // bash slices the parameter *list* here; slicing a joined
                 // string would be quietly wrong.
-                return Err(Error::unsupported(UnsupportedOp::SubstringOfList, span));
+                let values: Vec<Vec<u8>> = ctx.shell.positional().to_vec();
+                let values = slice_list(&values, (*offset, *length), span)?;
+                let star = matches!(&exp.name, ParamName::Star);
+                emit_values(ctx, &values, star, quoted, out);
+                return Ok(());
+            }
+            if let ParamName::Element { name, subscript } = &exp.name {
+                let value = read_element(ctx, name, subscript).unwrap_or_default();
+                let slice = substring(&value, *offset, *length, span)?;
+                out.push(slice.to_vec(), quoted, !quoted);
+                return Ok(());
+            }
+            if let ParamName::Elements { name, star } = &exp.name {
+                let values = array_values(ctx, name);
+                let values = slice_list(&values, (*offset, *length), span)?;
+                emit_values(ctx, &values, *star, quoted, out);
+                return Ok(());
             }
             let Some(value) = ctx.value(&exp.name) else {
                 out.push(Vec::new(), quoted, !quoted);
@@ -590,6 +812,15 @@ fn expand_param<S: Shell>(
         ParamOp::Upper | ParamOp::Lower | ParamOp::UpperFirst | ParamOp::LowerFirst => {
             if matches!(&exp.name, ParamName::At | ParamName::Star) {
                 return Err(Error::unsupported(UnsupportedOp::CaseOfList, span));
+            }
+            if let ParamName::Elements { .. } = &exp.name {
+                return Err(Error::unsupported(UnsupportedOp::CaseOfList, span));
+            }
+            if let ParamName::Element { name, subscript } = &exp.name {
+                let mut value = read_element(ctx, name, subscript).unwrap_or_default();
+                apply_case(&mut value, &exp.op);
+                out.push(value, quoted, !quoted);
+                return Ok(());
             }
             let mut value = ctx.value(&exp.name).unwrap_or_default();
             apply_case(&mut value, &exp.op);
@@ -656,15 +887,162 @@ fn expand_param<S: Shell>(
     }
 }
 
+/// The elements of `name` in iteration order. A scalar is a one-element list;
+/// an unset name is empty.
+fn array_values<S: Shell>(ctx: &Ctx<'_, S>, name: &[u8]) -> Vec<Vec<u8>> {
+    match ctx.shell.array(name) {
+        Some(array) => array.values().into_iter().map(<[u8]>::to_vec).collect(),
+        None => ctx
+            .shell
+            .get(name)
+            .map(|value| vec![value.to_vec()])
+            .unwrap_or_default(),
+    }
+}
+
+/// The subscripts of `name`: decimal indices for an indexed array, keys for an
+/// associative one, both in iteration order.
+fn array_indices<S: Shell>(ctx: &Ctx<'_, S>, name: &[u8]) -> Vec<Vec<u8>> {
+    match ctx.shell.array(name) {
+        Some(array) => array.indices(),
+        // A scalar has the single subscript 0; an unset name has none.
+        None => {
+            if ctx.shell.get(name).is_some() {
+                vec![b"0".to_vec()]
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
+/// Evaluate `${a[@]:offset:length}`'s bounds. Both are words, expanded and
+/// then evaluated arithmetically through the runtime.
+fn slice_bounds<S: Shell>(
+    offset: &Word,
+    length: Option<&Word>,
+    ctx: &mut Ctx<'_, S>,
+) -> Result<(i64, Option<i64>), Error> {
+    let offset_text = expand_word_to_scalar(offset, false, ctx)?;
+    let offset = arithmetic(&offset_text, offset, ctx)?;
+    let length = match length {
+        None => None,
+        Some(word) => {
+            let text = expand_word_to_scalar(word, false, ctx)?;
+            Some(arithmetic(&text, word, ctx)?)
+        }
+    };
+    Ok((offset, length))
+}
+
+/// `values[offset..offset+length]`, with bash's list slicing rules.
+///
+/// A negative offset counts from the end; an offset before the start or past
+/// the end yields nothing; a negative length is an error bash reports as
+/// `substring expression < 0`.
+fn slice_list(
+    values: &[Vec<u8>],
+    (offset, length): (i64, Option<i64>),
+    span: Span,
+) -> Result<Vec<Vec<u8>>, Error> {
+    let len = values.len() as i64;
+    let start = if offset < 0 { len + offset } else { offset };
+    if start < 0 || start > len {
+        return Ok(Vec::new());
+    }
+    let end = match length {
+        None => len,
+        Some(length) if length >= 0 => (start + length).min(len),
+        Some(length) => {
+            return Err(Error::new(
+                ErrorKind::SubstringRange { value: length },
+                span,
+            ));
+        }
+    };
+    Ok(values[start as usize..end as usize].to_vec())
+}
+
 /// Substitute the value of `name` as an expansion result.
 fn substitute<S: Shell>(name: &ParamName, quoted: bool, ctx: &mut Ctx<'_, S>, out: &mut Expanded) {
     match name {
         ParamName::At => emit_at(ctx, quoted, out),
         ParamName::Star => emit_star(ctx, quoted, out),
+        ParamName::Elements { name, star } => {
+            let values = array_values(ctx, name);
+            emit_values(ctx, &values, *star, quoted, out);
+        }
+        ParamName::Element { name, subscript } => {
+            let value = read_element(ctx, name, subscript).unwrap_or_default();
+            out.push(value, quoted, !quoted);
+        }
         _ => {
             let value = ctx.value(name).unwrap_or_default();
             out.push(value, quoted, !quoted);
         }
+    }
+}
+
+/// Emit a list expansion (`$@`/`$*` or `${a[@]}`/`${a[*]}`).
+///
+/// `star` selects the `[*]` joining rule; quoted `[@]` produces one field per
+/// value and *zero* fields for an empty list. [`Expanded::break_field`] is the
+/// same field-boundary mechanism quoted `$@` uses, so arrays cannot drift from
+/// positional parameters.
+fn emit_values<S: Shell>(
+    ctx: &Ctx<'_, S>,
+    values: &[Vec<u8>],
+    star: bool,
+    quoted: bool,
+    out: &mut Expanded,
+) {
+    let join = |separator: Option<u8>| {
+        let mut joined = Vec::new();
+        for (index, value) in values.iter().enumerate() {
+            if index > 0 {
+                if let Some(separator) = separator {
+                    joined.push(separator);
+                }
+            }
+            joined.extend_from_slice(value);
+        }
+        joined
+    };
+
+    if quoted {
+        if star {
+            // `"${a[*]}"` is one field even when the array is empty (bash:
+            // `"$*"` behaves the same way).
+            let separator = Ifs::from_vars(&*ctx.shell).join_separator();
+            out.push(join(separator), true, false);
+        } else {
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    out.break_field();
+                }
+                out.push(value.clone(), true, false);
+            }
+        }
+        return;
+    }
+
+    match ctx.mode {
+        // A scalar context cannot carry field boundaries; bash joins `$@`
+        // with spaces in assignments, and arrays follow the equal rule.
+        Mode::Assignment => out.push(join(Some(b' ')), false, true),
+        Mode::Command => match Ifs::from_vars(&*ctx.shell).join_separator() {
+            Some(separator) => out.push(join(Some(separator)), false, true),
+            None => {
+                // IFS is set but empty: no separator, so each value is its
+                // own expansion result.
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        out.break_field();
+                    }
+                    out.push(value.clone(), false, true);
+                }
+            }
+        },
     }
 }
 
@@ -1001,7 +1379,10 @@ pub fn expand_word_with<S: Shell>(
     shell: &mut S,
     mode: Mode,
 ) -> Result<Vec<Vec<u8>>, Error> {
-    let word = expand_tilde(word, shell)?;
+    let word = match mode {
+        Mode::Command => expand_tilde(word, shell)?,
+        Mode::Assignment => expand_assignment_tilde(word, shell)?,
+    };
     let expanded = expand_parameters(&word, shell, mode)?;
     match mode {
         Mode::Command => {

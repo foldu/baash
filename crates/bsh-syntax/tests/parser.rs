@@ -4,8 +4,8 @@
 mod common;
 
 use bsh_syntax::{
-    AndOrOp, CaseTerm, CmdSubStyle, DoubleQ, Lit, LitKind, NodeKind, ParamName, ParamOp, Part,
-    PipeOp, RedirectOp, Separator, UnsupportedOp,
+    AndOrOp, CaseTerm, CmdSubStyle, DoubleQ, Lit, LitKind, NodeKind, ParamExp, ParamName, ParamOp,
+    Part, PipeOp, RedirectOp, Separator, UnsupportedOp,
 };
 
 fn first_simple(ast: &bsh_syntax::Ast) -> &bsh_syntax::SimpleCommand {
@@ -495,10 +495,6 @@ fn parameter_operators_map_to_bsh_lang() {
             b"echo ${x@Q}",
             ParamOp::Unsupported(UnsupportedOp::Transform),
         ),
-        (
-            b"echo ${x[1]}",
-            ParamOp::Unsupported(UnsupportedOp::ArraySubscript),
-        ),
     ];
     for (src, want) in cases {
         let ast = common::ast(src);
@@ -530,6 +526,52 @@ fn parameter_operators_map_to_bsh_lang() {
         ));
         assert_eq!(&src[word.span.clone()], b"y");
     }
+}
+
+#[test]
+fn array_subscripts_map_to_the_word_model() {
+    let ast = common::ast(b"echo ${x[1]} ${#x[@]} ${!x[@]} ${x[*]}");
+    let cmd = first_simple(&ast);
+    let parts: Vec<&Part> = cmd.words[1..]
+        .iter()
+        .flat_map(|word| word.parts.iter())
+        .collect();
+    assert!(
+        matches!(
+            &parts[0],
+            Part::Param(ParamExp {
+                name: ParamName::Element { name, subscript },
+                op: ParamOp::Value,
+                ..
+            }) if name == b"x" && !subscript.parts.is_empty()
+        ),
+        "{:?}",
+        parts[0]
+    );
+    assert!(matches!(
+        &parts[1],
+        Part::Param(ParamExp {
+            name: ParamName::Elements { name, .. },
+            op: ParamOp::Length,
+            ..
+        }) if name == b"x"
+    ));
+    assert!(matches!(
+        &parts[2],
+        Part::Param(ParamExp {
+            name: ParamName::Elements { star: false, .. },
+            op: ParamOp::Indices,
+            ..
+        })
+    ));
+    assert!(matches!(
+        &parts[3],
+        Part::Param(ParamExp {
+            name: ParamName::Elements { star: true, .. },
+            op: ParamOp::Value,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -823,4 +865,65 @@ fn posix_mode_rejects_bash_only_syntax_with_a_span() {
             String::from_utf8_lossy(src)
         );
     }
+}
+
+#[test]
+fn array_literal_elements_are_structured() {
+    let src = b"a=(1 [5]='2 3' [k]+=v)";
+    let ast = common::ast(src);
+    let cmd = first_simple(&ast);
+    let assignment = &cmd.assignments[0];
+    assert_eq!(&src[assignment.name.clone()], b"a");
+    let elements = assignment.array.as_ref().expect("array literal");
+    assert_eq!(elements.len(), 3, "three elements");
+
+    assert!(elements[0].index.is_none(), "bare element");
+    assert_eq!(&src[elements[0].value.span.clone()], b"1");
+
+    let index = elements[1].index.as_ref().expect("subscript");
+    assert_eq!(&src[index.subscript.span.clone()], b"5");
+    assert!(!index.append);
+    assert_eq!(&src[elements[1].value.span.clone()], b"'2 3'");
+
+    let index = elements[2].index.as_ref().expect("subscript");
+    assert_eq!(&src[index.subscript.span.clone()], b"k");
+    assert!(index.append, "[k]+=v appends");
+    assert_eq!(&src[elements[2].value.span.clone()], b"v");
+}
+
+#[test]
+fn append_array_assignment_and_spaced_subscript() {
+    let src = b"a+=(x y)";
+    let ast = common::ast(src);
+    let cmd = first_simple(&ast);
+    let assignment = &cmd.assignments[0];
+    assert!(assignment.append);
+    assert_eq!(assignment.array.as_ref().map(Vec::len), Some(2));
+
+    // `a[1 + 2]=v`: the subscript is one word even though the lexer split it.
+    let src = b"a[1 + 2]=v";
+    let ast = common::ast(src);
+    let cmd = first_simple(&ast);
+    let index = cmd.assignments[0].index.as_ref().expect("subscript");
+    assert_eq!(&src[index.span.clone()], b"1 + 2");
+}
+
+#[test]
+fn declaration_array_arguments_carry_name_and_elements() {
+    let src = b"local -a a=(1 '2 3')";
+    let ast = common::ast(src);
+    let cmd = first_simple(&ast);
+    assert_eq!(cmd.array_args.len(), 1);
+    let argument = &cmd.array_args[0];
+    assert_eq!(&src[argument.name.clone()], b"a");
+    assert!(!argument.append);
+    assert_eq!(argument.elements.len(), 2);
+    // The placeholder keeps ordinary word expansion inert.
+    assert!(matches!(
+        &cmd.words[argument.word].parts[0],
+        Part::Lit(Lit {
+            kind: LitKind::Quoted,
+            ..
+        })
+    ));
 }

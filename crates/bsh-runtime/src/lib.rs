@@ -162,6 +162,19 @@ pub trait ShellHost {
         false
     }
 
+    /// Remove one array element for `unset 'name[subscript]'`.
+    ///
+    /// `unset` re-parses its operand as an assignment word, so the subscript
+    /// may contain expansion (`unset 'a[$i]'`) and the array may be
+    /// associative (a string key) or indexed (arithmetic). That is word work,
+    /// which lives in the VM; the storage lives in this crate. `None` means
+    /// the host does not implement it, and the runtime keeps its "not
+    /// implemented yet" diagnostic.
+    fn unset_array_element(&mut self, operand: &[u8]) -> Option<Status> {
+        let _ = operand;
+        None
+    }
+
     /// Report a diagnostic.
     ///
     /// The default renders one greppable line on standard error, which is the
