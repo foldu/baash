@@ -772,10 +772,11 @@ fn expand_param<S: Shell>(
                         None => usize::from(ctx.shell.get(name).is_some()),
                     }
                 }
-                ParamName::Element { name, subscript } => {
-                    read_element(ctx, name, subscript).map_or(0, |value| value.len())
-                }
-                name => ctx.value(name).map_or(0, |value| value.len()),
+                ParamName::Element { name, subscript } => read_element(ctx, name, subscript)
+                    .map_or(0, |value| char_count(&value, ctx.shell.utf8())),
+                name => ctx
+                    .value(name)
+                    .map_or(0, |value| char_count(&value, ctx.shell.utf8())),
             };
             out.push(len.to_string().into_bytes(), quoted, !quoted);
             Ok(())
@@ -832,7 +833,7 @@ fn expand_param<S: Shell>(
             }
             if let ParamName::Element { name, subscript } = &exp.name {
                 let value = read_element(ctx, name, subscript).unwrap_or_default();
-                let slice = substring(&value, *offset, *length, span)?;
+                let slice = substring(&value, *offset, *length, ctx.shell.utf8(), span)?;
                 out.push(slice.to_vec(), quoted, !quoted);
                 return Ok(());
             }
@@ -846,7 +847,7 @@ fn expand_param<S: Shell>(
                 out.push(Vec::new(), quoted, !quoted);
                 return Ok(());
             };
-            let slice = substring(&value, *offset, *length, span)?;
+            let slice = substring(&value, *offset, *length, ctx.shell.utf8(), span)?;
             out.push(slice.to_vec(), quoted, !quoted);
             Ok(())
         }
@@ -1506,8 +1507,22 @@ fn convert_case(value: &mut [u8], how: CaseHow, pattern: Option<&[u8]>, flags: F
 /// Byte units, i.e. `LC_ALL=C` semantics. bash reports a negative *length*
 /// that reaches past the start as `substring expression < 0`, and an offset
 /// that reaches past the start simply yields nothing; both are reproduced.
-fn substring(value: &[u8], offset: i64, length: Option<i64>, span: Span) -> Result<&[u8], Error> {
-    let len = value.len() as i64;
+fn substring(
+    value: &[u8],
+    offset: i64,
+    length: Option<i64>,
+    utf8: bool,
+    span: Span,
+) -> Result<&[u8], Error> {
+    // In a UTF-8 locale the offset and length count characters; in the C
+    // locale they count bytes. Both paths share the arithmetic, which is why
+    // the only difference is the unit table.
+    let starts = if utf8 {
+        unit_starts(value)
+    } else {
+        (0..=value.len()).collect()
+    };
+    let len = starts.len() as i64 - 1;
     let start = if offset < 0 { len + offset } else { offset };
     if start < 0 || start > len {
         return Ok(&[]);
@@ -1526,7 +1541,33 @@ fn substring(value: &[u8], offset: i64, length: Option<i64>, span: Span) -> Resu
             end.min(len)
         }
     };
-    Ok(&value[start as usize..end as usize])
+    Ok(&value[starts[start as usize]..starts[end as usize]])
+}
+
+/// Byte offset of every character boundary, plus `value.len()`.
+fn unit_starts(value: &[u8]) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(value.len() + 1);
+    let mut index = 0;
+    while index < value.len() {
+        starts.push(index);
+        index += bsh_pattern::char_len(value, index);
+    }
+    starts.push(value.len());
+    starts
+}
+
+/// Characters in `value`: code points in a UTF-8 locale, bytes otherwise.
+fn char_count(value: &[u8], utf8: bool) -> usize {
+    if !utf8 {
+        return value.len();
+    }
+    let mut count = 0;
+    let mut index = 0;
+    while index < value.len() {
+        index += bsh_pattern::char_len(value, index);
+        count += 1;
+    }
+    count
 }
 
 fn assignable_name(name: &ParamName) -> Option<&[u8]> {

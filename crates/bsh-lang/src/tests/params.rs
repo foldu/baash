@@ -5,7 +5,9 @@ use crate::{
     ErrorKind, ParamExp, ParamName, ParamOp, Part, UnsupportedOp, Vars, Word, expand_word,
 };
 
-use super::{argv, assert_argv, expand_one, expand_one_bytes, try_expand_line, values};
+use super::{
+    argv, assert_argv, assert_values, expand_one, expand_one_bytes, try_expand_line, values,
+};
 
 #[test]
 fn default_and_alternate_operators() {
@@ -282,4 +284,35 @@ fn assignment_operator_flattens_positionals() {
 
 fn one(src: &str, shell: &mut TestShell) -> Vec<Vec<u8>> {
     expand_one(src, shell)
+}
+
+#[test]
+fn length_and_substring_count_characters_in_a_utf8_locale() {
+    // The same bytes, counted two ways: bytes in the C locale, characters in a
+    // UTF-8 one. `μ` is two bytes and one character.
+    let value: &[u8] = "μx".as_bytes();
+    assert_eq!(value.len(), 3);
+
+    let mut bytes = TestShell::new();
+    bytes.vars.insert(b"v".to_vec(), value.to_vec());
+    let got = expand_one("${#v}", &mut bytes);
+    assert_argv(&got, &["3"], "${#v} in the C locale");
+    // In the C locale a slice is a byte slice: offset 1 lands inside `μ`, so
+    // the result is the lone continuation byte, not a character.
+    let got = expand_one("${v:1:1}", &mut bytes);
+    assert_values(&got, &[&[0xbc]], "${v:1:1} slices bytes");
+    let got = expand_one("${v:2:1}", &mut bytes);
+    assert_argv(&got, &["x"], "${v:2:1} reaches the second byte");
+
+    let mut chars = TestShell::new().utf8(true);
+    chars.vars.insert(b"v".to_vec(), value.to_vec());
+    let got = expand_one("${#v}", &mut chars);
+    assert_argv(&got, &["2"], "${#v} in a UTF-8 locale");
+    let got = expand_one("${v:0:1}", &mut chars);
+    assert_argv(&got, &["μ"], "${v:0:1} takes one character");
+    let got = expand_one("${v:1:1}", &mut chars);
+    assert_argv(&got, &["x"], "${v:1:1} skips one character");
+    // A negative offset counts characters back from the end.
+    let got = expand_one("${v: -1}", &mut chars);
+    assert_argv(&got, &["x"], "${v: -1} from the end");
 }

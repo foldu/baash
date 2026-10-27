@@ -47,6 +47,8 @@ pub struct TestShell {
     pub glob_calls: Vec<Vec<u8>>,
     /// Every assignment attempted through [`Vars::set`].
     pub set_calls: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Whether the fixture is in a UTF-8 locale (`${#x}` counts characters).
+    pub utf8: bool,
     /// When true, [`Vars::set`] refuses with [`SetError::ReadOnly`].
     pub read_only: bool,
     /// `set -u`: expanding an unset parameter is an error.
@@ -74,6 +76,13 @@ impl TestShell {
     #[must_use]
     pub fn var(mut self, name: &[u8], value: &[u8]) -> Self {
         self.vars.insert(name.to_vec(), value.to_vec());
+        self
+    }
+
+    /// Put the fixture in a UTF-8 locale.
+    #[must_use]
+    pub fn utf8(mut self, utf8: bool) -> Self {
+        self.utf8 = utf8;
         self
     }
 
@@ -159,6 +168,10 @@ impl TestShell {
 impl Vars for TestShell {
     fn nounset(&self) -> bool {
         self.nounset
+    }
+
+    fn utf8(&self) -> bool {
+        self.utf8
     }
 
     fn get(&self, name: &[u8]) -> Option<&[u8]> {

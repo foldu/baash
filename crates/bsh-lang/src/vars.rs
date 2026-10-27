@@ -41,6 +41,16 @@ pub trait Vars {
         false
     }
 
+    /// Whether the shell is in a UTF-8 locale, so `${#x}`, `${x:o:l}` and `?`
+    /// count characters rather than bytes.
+    ///
+    /// Defaults to `false` — the C locale — because that is what a shell with
+    /// no locale model must assume, and because a read-only view should not
+    /// silently disagree with the shell that built it.
+    fn utf8(&self) -> bool {
+        false
+    }
+
     /// Assign a variable, for `${x:=word}` and `${x=word}`.
     ///
     /// Read-only variables and invalid names are reported with [`SetError`];

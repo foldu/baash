@@ -211,6 +211,19 @@ mod ast;
 mod nfa;
 mod units;
 
+/// Byte length of the character starting at `index` in `bytes`.
+///
+/// One well-formed UTF-8 scalar value, or `1` for an invalid byte (which then
+/// stands alone). This is the workspace's one decoder: `${#x}` and `?` must
+/// agree about what a character is, or the shell contradicts itself.
+///
+/// # Panics
+///
+/// Panics if `index` is not less than `bytes.len()`.
+pub fn char_len(bytes: &[u8], index: usize) -> usize {
+    units::char_len(bytes, index)
+}
+
 #[cfg(test)]
 mod tests;
 
