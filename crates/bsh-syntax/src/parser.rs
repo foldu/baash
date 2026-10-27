@@ -2637,22 +2637,16 @@ impl<'a> Parser<'a, '_> {
             } else {
                 CaseHow::Lower
             };
-            if list_param || array_param {
-                ParamOp::Unsupported(UnsupportedOp::CaseOfList)
-            } else {
-                self.parse_case_op(how, op_start + 2, inner.end)
-            }
+            // Case conversion applies element-wise to `$@`/`a[@]`; the
+            // expansion layer already vectorises it.
+            self.parse_case_op(how, op_start + 2, inner.end)
         } else if rest.starts_with(b"^") || rest.starts_with(b",") {
             let how = if rest.starts_with(b"^") {
                 CaseHow::UpperFirst
             } else {
                 CaseHow::LowerFirst
             };
-            if list_param || array_param {
-                ParamOp::Unsupported(UnsupportedOp::CaseOfList)
-            } else {
-                self.parse_case_op(how, op_start + 1, inner.end)
-            }
+            self.parse_case_op(how, op_start + 1, inner.end)
         } else if rest.starts_with(b":") {
             // Array and positional-list slices evaluate their bounds
             // arithmetically, so the bounds stay words; a scalar slice is

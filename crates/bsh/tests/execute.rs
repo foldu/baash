@@ -854,3 +854,11 @@ fn nounset_errors_only_where_bash_does() {
     let output = run_args(&["-u", "-c", "a=(1); echo \"${a[5]}\""]);
     assert_eq!(code(&output), 1);
 }
+
+#[test]
+fn case_conversion_applies_to_lists() {
+    let output = run("set -- ab cd; echo \"${@^^}\"");
+    assert_eq!(stdout(&output), "AB CD\n");
+    let output = run("a=(xy zz); echo \"${a[@]^^}\"");
+    assert_eq!(stdout(&output), "XY ZZ\n");
+}

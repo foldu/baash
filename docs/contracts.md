@@ -258,11 +258,30 @@ fields when empty — and `"${a[*]}"` joins with the first `IFS` character.
 Unquoted forms are a single splittable expansion result. No third path was
 introduced.
 
-**Unsupported is an error, not a guess.** `${x#pat}`, `${x%pat}`, `${x/p/r}`,
-`${!x}` (on a non-array), `${x@Q}`, `${x^^pat}`, `${@^^}` and process
-substitution return `ErrorKind::Unsupported` with the operator's span. The
-parser must map those surface forms to the corresponding `ParamOp`, so the
-error can point at the right place instead of failing later.
+**Pattern operators carry their patterns as `Word`s** and match through
+`bsh-pattern` via `Shell::pattern_flags()`: `RemovePrefix`/`RemoveSuffix
+{ pattern, longest }`, `Replace { pattern, replacement, mode }` with modes
+`First|All|Prefix|Suffix`, and `Case { how, pattern: Option<Word> }` for
+`${x^pat}`/`${x^^pat}`/`${x,pat}`/`${x,,pat}`. Case conversion applies
+element-wise to `$@` and `a[@]`, like every other list operator.
+
+There is no quote mask in the matcher, so quoted pattern bytes reach it as
+backslash escapes (a quoted backslash becomes `\\`). Two rules follow from
+bash and are tested: the enclosing double quotes do **not** quote a pattern
+(`"${x##$p}"` behaves exactly like `${x##$p}`), and tilde expansion of a
+pattern word ignores them too.
+
+Decisions, each verified against bash 5.3.20 under `LC_ALL=C`: an empty pattern
+strips nothing; in substitution an **empty match is never replaced** (copy a
+byte and advance), while an empty pattern under `/#/` prepends and `/%/`
+appends; the pattern/replacement separator is the first *unquoted* `/` after a
+word parse; the four strip operators force `nocasematch: false` whatever
+`shopt` says; case conversion matches one character at a time, ASCII only, in
+byte units.
+
+**Unsupported is still an error, not a guess** for what remains: `${!x}` on a
+non-array, `${x@Q}`/`@E`/`@P`/`@u`, and process substitution return
+`ErrorKind::Unsupported` with the operator's span.
 
 **Errors** are `bsh_lang::Error { kind, span }` with `Display`, `code()` and
 `diagnostic() -> bsh_diag::Diagnostic`. Codes 301–306 are provisional.

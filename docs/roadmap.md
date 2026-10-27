@@ -87,11 +87,14 @@ does not yet retry `ENOEXEC` as a script) plus `command -v`.
 
 ## Tranche 2 — expansion and pattern work
 
-- [ ] `${x#pat}`, `${x##pat}`, `${x%pat}`, `${x%%pat}` (152 regressions) — needs
-      the shared pattern engine (§4.8), which also unblocks `case` patterns
-      with extglob and `[[ == ]]`.
-- [ ] `${x/a/b}`, `${x//a/b}`, `${x/#a/b}`, `${x/%a/b}`.
-- [ ] `${x^}`, `${x^^}`, `${x,}`, `${x,,}`, `${x@Q}`, `${x@E}`, `${x@P}`.
+- [x] Shared pattern engine (`bsh-pattern`): Thompson NFA, byte and UTF-8
+      modes, extglob, brackets, POSIX classes, no exponential blowup.
+- [x] `${x#pat}`, `${x##pat}`, `${x%pat}`, `${x%%pat}` — 0/29 → 26/29.
+- [x] `${x/a/b}`, `${x//a/b}`, `${x/#a/b}`, `${x/%a/b}` — 1/28 → 25/28.
+- [x] `${x^pat}`, `${x^^pat}`, `${x,}`, `${x,,}`, including on `$@`/arrays.
+- [ ] `${x@Q}`, `${x@E}`, `${x@P}`, `${!prefix@}` (the rest of `var-op-bash`).
+- [ ] `shopt` plus the `pattern_flags()` override, so `extglob`/`nocasematch`
+      reach the matcher.
 - [ ] Brace expansion `{a,b}` and `{1..3}` (92 regressions with extglob).
 - [ ] `extglob` `?(…)`, `*(…)`, `+(…)`, `@(…)`, `!(…)`.
 - [ ] `[[ =~ ]]` with `BASH_REMATCH` (34).

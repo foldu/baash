@@ -674,8 +674,6 @@ pub enum UnsupportedOp {
     Indirect,
     /// `${x@Q}` and the other transformations.
     Transform,
-    /// `${@^^}` / `${*^^}`: case conversion of a parameter list.
-    CaseOfList,
     /// `${@:offset:length}`: substring of a parameter list.
     SubstringOfList,
     /// A subscript form this crate could not use (for example a second
@@ -696,7 +694,6 @@ impl UnsupportedOp {
         match self {
             UnsupportedOp::Indirect => "indirect expansion (`${!x}`)",
             UnsupportedOp::Transform => "parameter transformation (`${x@Q}`)",
-            UnsupportedOp::CaseOfList => "case conversion of `$@`/`$*`",
             UnsupportedOp::SubstringOfList => "substring of `$@`/`$*`",
             UnsupportedOp::ArraySubscript => "array subscript",
             UnsupportedOp::ProcessSubstitution => "process substitution",

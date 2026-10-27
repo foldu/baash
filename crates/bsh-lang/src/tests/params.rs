@@ -210,8 +210,6 @@ fn unsupported_operators_fail_instead_of_guessing() {
         ("${!x}", UnsupportedOp::Indirect),
         ("${x@Q}", UnsupportedOp::Transform),
         ("${x@P}", UnsupportedOp::Transform),
-        ("${@^^}", UnsupportedOp::CaseOfList),
-        ("${a[@]^^}", UnsupportedOp::CaseOfList),
     ];
     for (source, expected) in cases {
         let mut shell = TestShell::new().var(b"x", b"abc").positionals(&[b"a"]);

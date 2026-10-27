@@ -3,10 +3,10 @@
 //! Every expected value was checked against bash 5.3.20 under `LC_ALL=C`,
 //! which is the unit policy the whole crate uses: `?` matches one byte.
 
+use crate::ParamOp;
 use crate::fixture::TestShell;
-use crate::{ParamOp, UnsupportedOp};
 
-use super::{assert_argv, expand_one, expand_one_bytes, try_expand_line, values};
+use super::{assert_argv, expand_one, expand_one_bytes, values};
 
 fn one(src: &str, shell: &mut TestShell) -> Vec<Vec<u8>> {
     expand_one(src, shell)
@@ -196,10 +196,6 @@ fn the_operator_shapes_are_public() {
     };
     assert_eq!(exp.op, expected);
     let _ = expand_one("\"${x##p}\"", &mut shell);
-    // `${@^^}` stays out of scope, and says so.
-    let err = try_expand_line("${@^^}", &mut TestShell::new().positionals(&[b"a"])).unwrap_err();
-    assert_eq!(
-        err.kind,
-        crate::ErrorKind::Unsupported(UnsupportedOp::CaseOfList)
-    );
+    // `${@^^}` used to be refused; the shell-level test in `crates/bsh`
+    // covers its element-wise expansion.
 }

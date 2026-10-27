@@ -748,7 +748,10 @@ fn parse_param(inner: &[u8]) -> Part {
                 ParamName::Elements { .. } | ParamName::At | ParamName::Star
             ) =>
         {
-            ParamOp::Unsupported(UnsupportedOp::CaseOfList)
+            ParamOp::Case {
+                how: CaseHow::Upper,
+                pattern: None,
+            }
         }
         _ => op,
     };
