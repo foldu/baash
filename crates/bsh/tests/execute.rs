@@ -1,0 +1,800 @@
+//! End-to-end execution tests: every case runs the real binary with `-c`, a
+//! script file or stdin, so the path exercised is lexer → parser → expansion →
+//! evaluator → syscalls, not a unit-test double.
+//!
+//! Deliberate non-tests live in `bsh-vm`'s module docs under `# Deferred`
+//! (traps, job control, `select`, arrays, `${x#pat}`, `=~`, in-place `exec`).
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+
+/// The binary under test, as cargo built it.
+fn bsh() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_bsh"))
+}
+
+fn run(script: &str) -> Output {
+    bsh().arg("-c").arg(script).output().expect("spawn bsh")
+}
+
+fn code(output: &Output) -> i32 {
+    output.status.code().unwrap_or_else(|| {
+        panic!(
+            "bsh terminated by a signal; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// Run `script`, require success, return stdout.
+fn out(script: &str) -> String {
+    let output = run(script);
+    assert_eq!(
+        code(&output),
+        0,
+        "expected success for `{script}`; stderr: {}",
+        stderr(&output)
+    );
+    stdout(&output)
+}
+
+/// A temporary directory that removes itself.
+struct TestDir {
+    path: PathBuf,
+}
+
+impl TestDir {
+    fn new(tag: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("bsh-exec-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create the test directory");
+        Self { path }
+    }
+
+    /// The path as bytes, for interpolation into a script. The temp directory
+    /// is ASCII, so `Display` is safe here.
+    fn at(&self, name: &str) -> String {
+        self.path.join(name).display().to_string()
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Simple commands, statuses and the CLI
+// ---------------------------------------------------------------------------
+
+#[test]
+fn echo_prints_its_arguments() {
+    assert_eq!(out("echo hi"), "hi\n");
+    assert_eq!(out("echo a b   c"), "a b c\n");
+    assert_eq!(out("echo -n no-newline"), "no-newline");
+    assert_eq!(out("echo"), "\n");
+}
+
+#[test]
+fn true_and_false_set_the_status() {
+    assert_eq!(code(&run("true")), 0);
+    assert_eq!(code(&run("false")), 1);
+    assert_eq!(out("true; echo $?"), "0\n");
+    assert_eq!(out("false; echo $?"), "1\n");
+    assert_eq!(out("false; true; echo $?"), "0\n");
+}
+
+#[test]
+fn variable_assignment_and_expansion() {
+    assert_eq!(out("x=hello; echo $x"), "hello\n");
+    assert_eq!(out("x=hello; echo ${x}world"), "helloworld\n");
+    assert_eq!(out("x=1 y=2; echo $x$y"), "12\n");
+    assert_eq!(out("x=1; y=$x$x; echo $y"), "11\n");
+    // Unset (None) and null (Some("")) stay distinct (bsh-lang's contract).
+    assert_eq!(out("unset x; echo ${x-unset}:${x:-null}"), "unset:null\n");
+    assert_eq!(out("x=; echo ${x-unset}:${x:-null}"), ":null\n");
+    assert_eq!(out("x=1; echo ${x+set}:${y+set}"), "set:\n");
+}
+
+#[test]
+fn prefix_assignments_are_temporary_except_before_special_builtins() {
+    // Expanded before the assignment, and scoped to the command.
+    assert_eq!(out("x=1; x=2 echo $x; echo $x"), "1\n1\n");
+    // POSIX: assignments before a *special* built-in persist. bash (non-posix)
+    // drops them; we follow POSIX in both profiles (DESIGN.md §3.3 Tier C, and
+    // docs/contracts.md records the reasoning).
+    assert_eq!(out("x=1; x=2 :; echo $x"), "2\n");
+    // A temporary assignment is visible in the command's environment.
+    assert_eq!(out("X=temp sh -c 'echo $X'"), "temp\n");
+    assert_eq!(out("x=1; X=temp sh -c 'echo $X'; echo $x"), "temp\n1\n");
+}
+
+#[test]
+fn readonly_assignment_is_fatal_non_interactively() {
+    let output = run("readonly r=1; r=2; echo unreached");
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).contains("BSH-E0207"), "{}", stderr(&output));
+}
+
+#[test]
+fn cd_changes_the_directory_and_survives() {
+    let dir = TestDir::new("cd");
+    let target = dir.path().display().to_string();
+    assert_eq!(out(&format!("cd {target} && pwd")), format!("{target}\n"));
+    // `cd -` prints the previous directory.
+    assert_eq!(
+        out(&format!("cd {target}; cd /; cd -")),
+        format!("{target}\n")
+    );
+    let failed = run("cd /definitely/not/a/directory");
+    assert_eq!(code(&failed), 1);
+    // A failed `cd` leaves the shell where it was.
+    assert_eq!(
+        out("cd /definitely/not/a/directory; echo still-here"),
+        "still-here\n"
+    );
+}
+
+#[test]
+fn exit_status_and_masking() {
+    assert_eq!(code(&run("exit 0")), 0);
+    assert_eq!(code(&run("exit 42")), 42);
+    // Only the low eight bits reach the process exit status.
+    assert_eq!(code(&run("exit 300")), 44);
+    assert_eq!(code(&run("false; exit")), 1);
+    assert_eq!(code(&run("exit 3 || echo no")), 3);
+}
+
+#[test]
+fn syntax_errors_exit_two() {
+    assert_eq!(code(&run("if true; then")), 2);
+    assert_eq!(code(&run("case x in")), 2);
+    let output = run("echo )");
+    assert_eq!(code(&output), 2);
+    assert!(stderr(&output).contains("BSH-E"), "{}", stderr(&output));
+}
+
+#[test]
+fn parse_only_reports_without_executing() {
+    let dir = TestDir::new("parse-only");
+    let good = dir.at("good.sh");
+    let bad = dir.at("bad.sh");
+    let side_effect = dir.at("side-effect");
+    std::fs::write(&good, format!("echo hi > {side_effect}\n")).unwrap();
+    std::fs::write(&bad, "if true; then\n").unwrap();
+
+    let ok = bsh().arg("-n").arg(&good).output().unwrap();
+    assert_eq!(code(&ok), 0);
+    assert!(!Path::new(&side_effect).exists(), "-n must not execute");
+
+    let failed = bsh().arg("-n").arg(&bad).output().unwrap();
+    assert_eq!(code(&failed), 2);
+    assert!(stderr(&failed).contains("BSH-E0002"), "{}", stderr(&failed));
+}
+
+#[test]
+fn runs_a_script_file_with_positional_parameters() {
+    let dir = TestDir::new("script");
+    let script = dir.at("args.sh");
+    std::fs::write(&script, "echo \"$0|$1|$2|$#\"\n").unwrap();
+    let output = bsh().arg(&script).arg("one").arg("two").output().unwrap();
+    assert_eq!(code(&output), 0);
+    assert_eq!(stdout(&output), format!("{script}|one|two|2\n"));
+}
+
+#[test]
+fn runs_stdin_when_there_is_no_file() {
+    let mut child = bsh()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn bsh");
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"x=41\necho $((x + 1))\n")
+            .unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(code(&output), 0);
+    assert_eq!(stdout(&output), "42\n");
+}
+
+#[test]
+fn dash_c_sets_dollar_zero_and_arguments() {
+    let output = bsh()
+        .arg("-c")
+        .arg("echo \"$0|$1|$#\"")
+        .arg("myname")
+        .arg("first")
+        .output()
+        .unwrap();
+    assert_eq!(code(&output), 0);
+    assert_eq!(stdout(&output), "myname|first|1\n");
+}
+
+#[test]
+fn highlight_still_works() {
+    let mut child = bsh()
+        .arg("--highlight")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"echo hi\n")
+            .unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(code(&output), 0);
+    // Painted or not, the bytes survive; colour is decided by the tty.
+    assert!(stdout(&output).contains("echo hi"));
+}
+
+// ---------------------------------------------------------------------------
+// Expansion
+// ---------------------------------------------------------------------------
+
+#[test]
+fn at_and_star_follow_quoting() {
+    assert_eq!(
+        out("set -- a b c; printf '<%s>' \"$@\"; echo"),
+        "<a><b><c>\n"
+    );
+    assert_eq!(out("set -- a b c; printf '<%s>' $@; echo"), "<a><b><c>\n");
+    assert_eq!(
+        out("set -- 'a b' c; printf '<%s>' \"$@\"; echo"),
+        "<a b><c>\n"
+    );
+    assert_eq!(
+        out("set -- 'a b' c; printf '<%s>' $@; echo"),
+        "<a><b><c>\n",
+        "unquoted $@ is field-split"
+    );
+    assert_eq!(out("set -- a b; printf '<%s>' \"$*\"; echo"), "<a b>\n");
+    assert_eq!(out("set -- a b; echo $#"), "2\n");
+}
+
+#[test]
+fn ifs_field_splitting_uses_the_current_value() {
+    assert_eq!(out("IFS=:; x=a:b:c; printf '<%s>' $x; echo"), "<a><b><c>\n");
+    assert_eq!(
+        out("IFS=:; x=a:b:c; printf '<%s>' \"$x\"; echo"),
+        "<a:b:c>\n",
+        "quoted expansion is never split"
+    );
+    // Literal source text is not an expansion result, so it is never split.
+    assert_eq!(out("IFS=:; printf '<%s>' a:b; echo"), "<a:b>\n");
+}
+
+#[test]
+fn command_substitution_captures_stdout_and_status() {
+    assert_eq!(out("echo $(echo nested)"), "nested\n");
+    assert_eq!(out("echo \"pre$(echo x)post\""), "prexpost\n");
+    assert_eq!(out("echo $(echo a; echo b)"), "a b\n");
+    assert_eq!(out("echo $(printf 'x\\n\\n\\n')"), "x\n");
+    assert_eq!(out("x=$(false); echo $?"), "1\n");
+    assert_eq!(out("x=$(exit 3); echo $?"), "3\n");
+    // The *command's* status is `echo`'s own; only a command with no words
+    // (`x=$(…)`) takes its status from the substitution.
+    assert_eq!(out("echo $(exit 3); echo $?"), "\n0\n");
+    assert_eq!(out("echo `echo backtick`"), "backtick\n");
+}
+
+#[test]
+fn arithmetic_expansion_and_command() {
+    assert_eq!(out("echo $((1 + 2 * 3))"), "7\n");
+    assert_eq!(out("echo $((7 / 2)) $((7 % 2))"), "3 1\n");
+    assert_eq!(out("echo $((1 << 4)) $((~0))"), "16 -1\n");
+    assert_eq!(out("x=5; ((x++)); echo $x"), "6\n");
+    assert_eq!(out("((1)) && echo true"), "true\n");
+    assert_eq!(out("((0)) || echo false"), "false\n");
+    assert_eq!(out("unset n; echo $((n + 1))"), "1\n");
+    assert_eq!(
+        out("for ((i = 0; i < 3; i++)); do echo $i; done"),
+        "0\n1\n2\n"
+    );
+}
+
+#[test]
+fn conditional_command_operators() {
+    assert_eq!(out("[[ abc == a* ]] && echo yes"), "yes\n");
+    assert_eq!(out("[[ abc == \"a*\" ]] || echo literal"), "literal\n");
+    assert_eq!(out("[[ abc != z* ]] && echo ne"), "ne\n");
+    assert_eq!(out("[[ -z \"\" ]] && echo empty"), "empty\n");
+    assert_eq!(out("[[ -n abc ]] && echo nonempty"), "nonempty\n");
+    assert_eq!(out("[[ 3 -gt 2 ]] && echo gt"), "gt\n");
+    assert_eq!(out("[[ a < b ]] && echo lt"), "lt\n");
+    assert_eq!(
+        out("[[ ! -e /definitely/not/here ]] && echo missing"),
+        "missing\n"
+    );
+    assert_eq!(out("[[ abc == abc && 1 -eq 1 ]] && echo both"), "both\n");
+    assert_eq!(out("[[ ( abc == abc ) || x ]] && echo paren"), "paren\n");
+    assert_eq!(out("x=abc; [[ $x == a* ]] && echo var"), "var\n");
+    let dir = TestDir::new("cond");
+    let file = dir.at("f");
+    std::fs::write(&file, "x").unwrap();
+    assert_eq!(out(&format!("[[ -f {file} ]] && echo file")), "file\n");
+    assert_eq!(out(&format!("[[ -d {file} ]] || echo notdir")), "notdir\n");
+    // `[[ ]]` failure is a status, not an error.
+    assert_eq!(out("[[ 1 -eq 2 ]]; echo $?"), "1\n");
+}
+
+#[test]
+fn globbing_matches_quoting_and_ranges() {
+    let dir = TestDir::new("glob");
+    for name in ["a.txt", "b.txt", "c.md", ".hidden"] {
+        std::fs::write(dir.path().join(name), "").unwrap();
+    }
+    std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub/deep.txt"), "").unwrap();
+    let pattern = |p: &str| format!("cd {dir} && echo {p}", dir = dir.path().display());
+
+    assert_eq!(out(&pattern("*.txt")), "a.txt b.txt\n");
+    assert_eq!(out(&pattern("?.txt")), "a.txt b.txt\n");
+    assert_eq!(out(&pattern("[ab].txt")), "a.txt b.txt\n");
+    assert_eq!(out(&pattern("[!a].txt")), "b.txt\n");
+    assert_eq!(
+        out(&pattern("\"*.txt\"")),
+        "*.txt\n",
+        "quoting inhibits globbing"
+    );
+    assert_eq!(
+        out(&pattern("*.nomatch")),
+        "*.nomatch\n",
+        "no match leaves the word"
+    );
+    assert_eq!(out(&pattern("sub/*.txt")), "sub/deep.txt\n");
+    assert_eq!(out(&pattern("*/*.txt")), "sub/deep.txt\n");
+    // Hidden files are not matched by a wildcard (no dotglob).
+    assert_eq!(out(&pattern("*")), "a.txt b.txt c.md sub\n");
+}
+
+// ---------------------------------------------------------------------------
+// Redirections
+// ---------------------------------------------------------------------------
+
+#[test]
+fn output_redirections_write_files() {
+    let dir = TestDir::new("redirect-out");
+    let file = dir.at("f");
+    assert_eq!(out(&format!("echo one > {file}; cat {file}")), "one\n");
+    assert_eq!(
+        out(&format!(
+            "echo one > {file}; echo two >> {file}; cat {file}"
+        )),
+        "one\ntwo\n"
+    );
+    assert_eq!(
+        out(&format!("echo again > {file}; cat {file}")),
+        "again\n",
+        "> truncates"
+    );
+    // A redirection on a compound command covers the whole command.
+    assert_eq!(
+        out(&format!("{{ echo a; echo b; }} > {file}; cat {file}")),
+        "a\nb\n"
+    );
+    assert_eq!(
+        out(&format!(
+            "for i in 1 2; do echo $i; done > {file}; cat {file}"
+        )),
+        "1\n2\n"
+    );
+}
+
+#[test]
+fn input_redirections_and_here_documents() {
+    let dir = TestDir::new("redirect-in");
+    let file = dir.at("f");
+    std::fs::write(&file, "line\n").unwrap();
+    assert_eq!(out(&format!("cat < {file}")), "line\n");
+    assert_eq!(out("cat <<EOF\nplain\nEOF"), "plain\n");
+    assert_eq!(out("x=v; cat <<EOF\nv=$x\nEOF"), "v=v\n");
+    assert_eq!(out("cat <<'EOF'\nlit $x\nEOF"), "lit $x\n");
+    assert_eq!(out("cat <<-EOF\n\tstripped\nEOF"), "stripped\n");
+    assert_eq!(out("cat <<< word"), "word\n");
+    assert_eq!(
+        out("for i in 1 2; do cat <<EOF\nline $i\nEOF\ndone"),
+        "line 1\nline 2\n"
+    );
+    // A body larger than a pipe buffer must not deadlock (DESIGN.md §4.4).
+    // It goes through a file because a single `-c` argument is limited to
+    // MAX_ARG_STRLEN.
+    let body: String = "x".repeat(200_000);
+    let big = dir.at("big.sh");
+    std::fs::write(&big, format!("cat <<EOF | wc -c\n{body}\nEOF\n")).unwrap();
+    let output = bsh().arg(&big).output().unwrap();
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    assert_eq!(stdout(&output).trim(), "200001");
+}
+
+#[test]
+fn descriptor_duplication_and_ordering() {
+    assert_eq!(out("echo hi 2>&1 | cat"), "hi\n");
+    // `2>&1 >file` duplicates the *terminal* stdout onto stderr, then moves
+    // stdout to the file: stderr still reaches the pipe (DESIGN.md §4.4).
+    let dir = TestDir::new("redirect-order");
+    let file = dir.at("f");
+    let script = format!("{{ echo out >&2; }} 2>&1 > {file} | cat; echo file:; cat {file}");
+    assert_eq!(out(&script), "out\nfile:\n");
+    assert_eq!(out("echo both &> /dev/null; echo $?"), "0\n");
+    assert_eq!(
+        out(&format!(
+            "echo x &> {file}; cat {file}",
+            file = dir.at("both")
+        )),
+        "x\n"
+    );
+    // A descriptor that `exec` opened stays open for later commands.
+    let three = dir.at("three");
+    assert_eq!(
+        out(&format!(
+            "exec 3> {three}; echo via3 >&3; exec 3>&-; cat {three}"
+        )),
+        "via3\n"
+    );
+}
+
+#[test]
+fn redirection_failures_are_status_one() {
+    let output = run("echo hi > /definitely/not/a/dir/file");
+    assert_eq!(code(&output), 1);
+    assert!(stderr(&output).contains("BSH-E0202"), "{}", stderr(&output));
+    // An ambiguous redirect never opens anything.
+    let output = run("x='a b'; echo hi > $x");
+    assert_eq!(code(&output), 1);
+    assert!(stderr(&output).contains("ambiguous"), "{}", stderr(&output));
+}
+
+// ---------------------------------------------------------------------------
+// Pipelines and processes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pipelines_connect_stages() {
+    assert_eq!(out("echo hi | cat"), "hi\n");
+    assert_eq!(out("echo hi | cat | cat"), "hi\n");
+    assert_eq!(out("printf 'b\\na\\n' | sort"), "a\nb\n");
+    assert_eq!(out("echo hi | wc -l").trim(), "1");
+    // Status is the last stage's.
+    assert_eq!(out("false | true; echo $?"), "0\n");
+    assert_eq!(out("true | false; echo $?"), "1\n");
+    // With `pipefail` it is the last (rightmost) non-zero stage's.
+    assert_eq!(out("set -o pipefail; false | true; echo $?"), "1\n");
+    assert_eq!(
+        out("set -o pipefail; sh -c 'exit 3' | sh -c 'exit 4' | true; echo $?"),
+        "3\n"
+    );
+}
+
+#[test]
+fn pipefail_is_sampled_when_the_pipeline_starts() {
+    // POSIX 2024 §2.9.2, DESIGN.md §2. `set -o pipefail` inside the last stage
+    // runs in that stage's process, so the parent's setting does not change —
+    // but the point of the rule is that a *later* change must not retroactively
+    // judge an earlier pipeline either.
+    assert_eq!(
+        out("false | set -o pipefail; echo $?"),
+        "0\n",
+        "the pipeline started without pipefail"
+    );
+    assert_eq!(
+        out("set -o pipefail; false | set +o pipefail; echo $?"),
+        "1\n"
+    );
+}
+
+#[test]
+fn negation_and_pipeline_status() {
+    assert_eq!(out("! true; echo $?"), "1\n");
+    assert_eq!(out("! false; echo $?"), "0\n");
+    assert_eq!(out("! false | false; echo $?"), "0\n");
+}
+
+#[test]
+fn subshells_are_isolated() {
+    assert_eq!(out("(echo sub)"), "sub\n");
+    assert_eq!(out("x=1; (x=2; echo $x); echo $x"), "2\n1\n");
+    assert_eq!(out("(exit 7); echo $?"), "7\n");
+    assert_eq!(
+        out("x=1; { x=2; }; echo $x"),
+        "2\n",
+        "brace groups are not subshells"
+    );
+    // Positional parameters are per-process too.
+    assert_eq!(out("set -- a; (set -- b; echo $1); echo $1"), "b\na\n");
+}
+
+#[test]
+fn background_jobs_set_the_last_pid() {
+    assert_eq!(
+        out("sleep 0.05 & echo \"$!\" | grep -qE '^[0-9]+$' && echo numeric"),
+        "numeric\n"
+    );
+    // `&` does not wait, so the next command runs immediately.
+    let output = run("sleep 5 & echo after");
+    assert_eq!(code(&output), 0);
+    assert_eq!(stdout(&output), "after\n");
+}
+
+// ---------------------------------------------------------------------------
+// Compound commands
+// ---------------------------------------------------------------------------
+
+#[test]
+fn if_elif_else() {
+    assert_eq!(out("if true; then echo t; else echo f; fi"), "t\n");
+    assert_eq!(out("if false; then echo t; else echo f; fi"), "f\n");
+    assert_eq!(
+        out("if false; then echo t; elif true; then echo e; else echo f; fi"),
+        "e\n"
+    );
+    assert_eq!(out("if false; then echo t; fi; echo $?"), "0\n");
+    assert_eq!(out("if true; then false; fi; echo $?"), "1\n");
+}
+
+#[test]
+fn for_loops() {
+    assert_eq!(out("for i in 1 2 3; do echo $i; done"), "1\n2\n3\n");
+    assert_eq!(out("for i in; do echo $i; done; echo done"), "done\n");
+    assert_eq!(
+        out("set -- a b; for i; do echo $i; done"),
+        "a\nb\n",
+        "a `for` with no list iterates the positional parameters"
+    );
+    assert_eq!(
+        out("for i in a b; do for j in 1 2; do echo $i$j; done; done"),
+        "a1\na2\nb1\nb2\n"
+    );
+}
+
+#[test]
+fn while_until_and_break_continue() {
+    assert_eq!(
+        out("i=0; while [ $i -lt 3 ]; do echo $i; i=$((i+1)); done"),
+        "0\n1\n2\n"
+    );
+    assert_eq!(
+        out("i=0; until [ $i -ge 2 ]; do echo $i; i=$((i+1)); done"),
+        "0\n1\n"
+    );
+    assert_eq!(
+        out("for i in 1 2 3; do [ $i = 2 ] && continue; echo $i; done"),
+        "1\n3\n"
+    );
+    assert_eq!(
+        out("for i in 1 2 3; do [ $i = 2 ] && break; echo $i; done"),
+        "1\n"
+    );
+    assert_eq!(
+        out("for i in 1 2; do for j in a b; do break 2; done; done; echo out"),
+        "out\n"
+    );
+    assert_eq!(
+        out("for i in 1 2; do for j in a b; do continue 2; done; echo no; done; echo out"),
+        "out\n"
+    );
+    assert_eq!(out("while false; do :; done; echo $?"), "0\n");
+}
+
+#[test]
+fn case_with_all_three_terminators() {
+    assert_eq!(out("case abc in a*) echo A;; *) echo B;; esac"), "A\n");
+    assert_eq!(out("case xyz in a*) echo A;; *) echo B;; esac"), "B\n");
+    assert_eq!(
+        out("case b in a|b|c) echo listed;; esac"),
+        "listed\n",
+        "`|` gives alternative patterns"
+    );
+    // `;;` stops; `;&` falls into the next body; `;;&` keeps testing patterns.
+    assert_eq!(
+        out("case a in a) echo one;;& b) echo two;;& *) echo three;; esac"),
+        "one\nthree\n"
+    );
+    assert_eq!(
+        out("case a in a) echo one;& b) echo two;; esac"),
+        "one\ntwo\n"
+    );
+    assert_eq!(out("case z in a) echo A;; esac; echo $?"), "0\n");
+    assert_eq!(out("x=abc; case $x in a*) echo var;; esac"), "var\n");
+}
+
+#[test]
+fn functions_take_arguments_and_return() {
+    assert_eq!(out("f() { echo in; }; f"), "in\n");
+    assert_eq!(out("f() { echo $1 $2; }; f a b"), "a b\n");
+    assert_eq!(out("f() { echo $#; }; f a b c"), "3\n");
+    assert_eq!(out("f() { echo \"$@\"; }; f 'a b' c"), "a b c\n");
+    assert_eq!(out("f() { return 4; }; f; echo $?"), "4\n");
+    assert_eq!(out("f() { return; }; false; f; echo $?"), "1\n");
+    // A function sees its own positionals and restores the caller's.
+    assert_eq!(
+        out("f() { set -- x; echo $1; }; set -- a; f; echo $1"),
+        "x\na\n"
+    );
+    // Redefinition replaces the body.
+    assert_eq!(out("f() { echo one; }; f() { echo two; }; f"), "two\n");
+    // Recursion, with arithmetic as the counter.
+    assert_eq!(
+        out("f() { if [ $1 -le 1 ]; then echo 1; else echo $1; f $(($1 - 1)); fi; }; f 3"),
+        "3\n2\n1\n"
+    );
+    assert_eq!(
+        out("f() { local v=inner; echo $v; }; v=outer; f; echo $v"),
+        "inner\nouter\n"
+    );
+    assert_eq!(out("function g { echo keyword; }; g"), "keyword\n");
+    assert_eq!(out("f() { echo body > /dev/null; }; f; echo $?"), "0\n");
+}
+
+#[test]
+fn eval_and_source_run_in_the_current_environment() {
+    assert_eq!(out("eval 'x=5; echo $x'"), "5\n");
+    assert_eq!(out("x=1; eval 'x=2'; echo $x"), "2\n");
+    assert_eq!(out("eval 'if true; then echo nested; fi'"), "nested\n");
+    let output = run("eval 'exit 3'; echo no");
+    assert_eq!(code(&output), 3);
+    assert_eq!(stdout(&output), "");
+
+    let dir = TestDir::new("source");
+    let file = dir.at("lib.sh");
+    std::fs::write(&file, "sourced=yes\n").unwrap();
+    assert_eq!(
+        out(&format!(". {file}; echo $sourced")),
+        "yes\n",
+        "dot sources in the current shell"
+    );
+    assert_eq!(out(&format!("source {file}; echo $sourced")), "yes\n");
+}
+
+#[test]
+fn exec_replaces_the_command_and_keeps_redirects() {
+    assert_eq!(out("exec echo replaced"), "replaced\n");
+    assert_eq!(out("exec echo replaced; echo not-run"), "replaced\n");
+    let dir = TestDir::new("exec");
+    let file = dir.at("f");
+    let output = run(&format!("exec echo hi > {file}; echo after"));
+    assert_eq!(code(&output), 0);
+    assert_eq!(stdout(&output), "");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "hi\n");
+    // `exec` with only redirections changes the shell's own descriptor table.
+    assert_eq!(
+        out(&format!(
+            "exec 4> {file}; echo via4 >&4; exec 4>&-; cat {file}"
+        )),
+        "via4\n"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Unwinding: errexit
+// ---------------------------------------------------------------------------
+
+#[test]
+fn errexit_exits_on_a_failing_command() {
+    let output = run("set -e; false; echo unreached");
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "");
+    assert_eq!(out("set -e; true; echo reached"), "reached\n");
+    assert_eq!(out("set -e; false || true; echo reached"), "reached\n");
+    assert_eq!(out("set -e; ! false; echo reached"), "reached\n");
+    assert_eq!(out("set -e; ! true; echo reached"), "reached\n");
+    // Conditions are exempt.
+    assert_eq!(
+        out("set -e; if false; then :; fi; echo reached"),
+        "reached\n"
+    );
+    assert_eq!(
+        out("set -e; while false; do :; done; echo reached"),
+        "reached\n"
+    );
+    assert_eq!(
+        out("set -e; until true; do :; done; echo reached"),
+        "reached\n"
+    );
+    // Only the last command of an `&&`/`||` list is judged.
+    assert_eq!(out("set -e; false && echo no; echo reached"), "reached\n");
+    // A non-final pipeline stage is exempt; the pipeline's status is the
+    // last stage's.
+    assert_eq!(out("set -e; false | true; echo reached"), "reached\n");
+    // A failing pipeline at the end is not exempt.
+    let output = run("set -e; true | false; echo unreached");
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "");
+    // A function called in an ignored context does not exit the shell.
+    assert_eq!(
+        out("set -e; f() { false; }; if f; then :; fi; echo reached"),
+        "reached\n"
+    );
+    let output = run("set -e; f() { false; }; f; echo unreached");
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "");
+    // `set +e` re-arms normal behaviour.
+    assert_eq!(out("set -e; set +e; false; echo reached"), "reached\n");
+}
+
+#[test]
+fn break_and_continue_only_unwind_to_their_loop() {
+    // A `break` inside a function unwinds outwards, as bash does.
+    assert_eq!(
+        out("f() { break; }; for i in 1 2 3; do f; echo body; done; echo out"),
+        "out\n"
+    );
+    assert_eq!(
+        out("f() { for i in 1 2; do return 0; done; }; f; echo after"),
+        "after\n"
+    );
+}
+
+#[test]
+fn errexit_is_inherited_by_compound_commands() {
+    // A compound command as the *final* command of a list is not exempt: the
+    // failure inside its body exits the shell.
+    let output = run("set -e; { false; echo unreached; }; echo unreached");
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "");
+
+    let output = run("set -e; f() { false; echo unreached; }; true && f; echo unreached");
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "");
+
+    // A *non-final* `&&`/`||` operand is exempt, and its body inherits the
+    // exemption — so the body keeps running and the list continues.
+    assert_eq!(out("set -e; { false; } && true; echo after"), "after\n");
+    assert_eq!(
+        out("set -e; f() { false; echo body; }; f && true; echo after"),
+        "body\nafter\n"
+    );
+    // `!` is an ignore context too.
+    assert_eq!(
+        out("set -e; ! { false; echo body; }; echo after"),
+        "body\nafter\n"
+    );
+    // A pipeline stage is its own process and is *not* exempt internally, even
+    // though the pipeline's own failure never exits the shell here.
+    assert_eq!(
+        out("set -e; { false; echo unreached; } | cat; echo after"),
+        "after\n"
+    );
+}
+
+#[test]
+fn a_failing_special_builtin_exits_a_non_interactive_shell() {
+    // POSIX §2.8.1 says a non-interactive shell exits when a *special* built-in
+    // fails; bash (without --posix) continues. `bsh_runtime::consequence` is
+    // the landed authority for that table and encodes POSIX, so this is the
+    // documented deviation (see `bsh_vm::tree`'s module docs).
+    let output = run("set -- one; shift 5; echo unreached");
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).contains("BSH-E0505"), "{}", stderr(&output));
+    // A failing *ordinary* built-in is not fatal.
+    assert_eq!(
+        out("cd /definitely/not/here || echo recovered"),
+        "recovered\n"
+    );
+}

@@ -1,0 +1,281 @@
+//! `[[ … ]]`: the bash conditional command.
+//!
+//! `bsh-syntax` keeps the body as a span rather than a tree on purpose (`=~`
+//! operands are arbitrary bytes), so the conditional expression is parsed here
+//! over that span: `!`, `&&`, `||`, `( … )` with the C-like precedence bash
+//! uses, plus the unary and binary operators below.
+//!
+//! Inside `[[ ]]` the operands undergo tilde, parameter, command and arithmetic
+//! expansion and quote removal, but **no field splitting and no pathname
+//! expansion** (POSIX XCU 2.13, bash's documented behaviour); that is why every
+//! operand is expanded in [`bsh_lang::Mode::Assignment`] and keeps its quoting
+//! mask, which decides whether `==`'s right-hand side is a pattern or a string.
+//!
+//! Deferred: `=~` needs POSIX ERE (DESIGN.md §4.8 says to bind `regcomp`
+//! rather than use the `regex` crate), so it reports a deferred-feature
+//! diagnostic instead of guessing.
+
+use std::ops::Range;
+use std::sync::Arc;
+
+use bsh_lang::Field;
+use bsh_runtime::{ShellHost, Status};
+
+use super::words::{CondToken, binary_operator, conditional_tokens, unary_operator};
+use super::{Interp, ParsedChunk};
+
+/// Evaluate a `[[ … ]]` body.
+pub(crate) fn evaluate(
+    interp: &mut Interp,
+    chunk: &Arc<ParsedChunk>,
+    body: Range<usize>,
+) -> Status {
+    let text = &chunk.source.bytes()[body.clone()];
+    let tokens = conditional_tokens(text);
+    let mut parser = Parser {
+        interp,
+        text,
+        tokens,
+        pos: 0,
+        span: body,
+    };
+    let result = parser.or_expr();
+    match result {
+        Ok(value) => {
+            if parser.pos < parser.tokens.len() {
+                parser.report("unexpected token");
+                return Status(2);
+            }
+            if value {
+                Status::SUCCESS
+            } else {
+                Status::FAILURE
+            }
+        }
+        Err(message) => {
+            if !message.is_empty() {
+                parser.report(&message);
+            }
+            Status(2)
+        }
+    }
+}
+
+struct Parser<'a> {
+    interp: &'a mut Interp,
+    text: &'a [u8],
+    tokens: Vec<CondToken>,
+    pos: usize,
+    span: Range<usize>,
+}
+
+impl Parser<'_> {
+    fn report(&mut self, message: &str) {
+        self.interp
+            .report(crate::codes::CONDITIONAL, self.span.clone(), message);
+    }
+
+    fn peek(&self) -> Option<&CondToken> {
+        self.tokens.get(self.pos)
+    }
+
+    fn eat(&mut self, token: &CondToken) -> bool {
+        if self.peek() == Some(token) {
+            self.pos += 1;
+            return true;
+        }
+        false
+    }
+
+    fn take_word(&mut self) -> Option<Range<usize>> {
+        match self.peek()?.clone() {
+            CondToken::Word(range) => {
+                self.pos += 1;
+                Some(range)
+            }
+            _ => None,
+        }
+    }
+
+    fn or_expr(&mut self) -> Result<bool, String> {
+        let mut value = self.and_expr()?;
+        while self.eat(&CondToken::Or) {
+            let right = self.and_expr()?;
+            value = value || right;
+        }
+        Ok(value)
+    }
+
+    fn and_expr(&mut self) -> Result<bool, String> {
+        let mut value = self.unary()?;
+        while self.eat(&CondToken::And) {
+            let right = self.unary()?;
+            value = value && right;
+        }
+        Ok(value)
+    }
+
+    fn unary(&mut self) -> Result<bool, String> {
+        if self.eat(&CondToken::Bang) {
+            return Ok(!self.unary()?);
+        }
+        self.primary()
+    }
+
+    fn primary(&mut self) -> Result<bool, String> {
+        if self.eat(&CondToken::LParen) {
+            let value = self.or_expr()?;
+            if !self.eat(&CondToken::RParen) {
+                return Err("missing `)`".to_owned());
+            }
+            return Ok(value);
+        }
+        let Some(range) = self.take_word() else {
+            return Err("expected an operand".to_owned());
+        };
+        let word = self.text[range.clone()].to_vec();
+
+        // A one-operand test: `[[ -f file ]]`.
+        if unary_operator(&word) && matches!(self.peek(), Some(CondToken::Word(_))) {
+            let operand = self.take_word().expect("checked");
+            let operand = self.expand(&operand)?;
+            return self.unary_test(&word, &operand);
+        }
+
+        let left = self.expand(&range)?;
+
+        // A two-operand test, either written with a comparison token
+        // (`==`, `!=`, `=~`, `<`, `>`) or with an operator word (`-eq`, …).
+        if let Some(operator) = self.peek().cloned() {
+            let comparison = match operator {
+                CondToken::Eq => Some(b"==".to_vec()),
+                CondToken::Ne => Some(b"!=".to_vec()),
+                CondToken::Match => Some(b"=~".to_vec()),
+                CondToken::Lt => Some(b"<".to_vec()),
+                CondToken::Gt => Some(b">".to_vec()),
+                CondToken::Word(inner) if binary_operator(&self.text[inner.clone()]) => {
+                    Some(self.text[inner].to_vec())
+                }
+                _ => None,
+            };
+            if let Some(operator) = comparison {
+                self.pos += 1;
+                let Some(right) = self.take_word() else {
+                    return Err(format!(
+                        "`{}` needs a right-hand operand",
+                        String::from_utf8_lossy(&operator)
+                    ));
+                };
+                let right = self.expand(&right)?;
+                return self.compare(&operator, &left, &right);
+            }
+        }
+
+        // A single word: true when non-empty.
+        Ok(!left.bytes.is_empty())
+    }
+
+    fn expand(&mut self, range: &Range<usize>) -> Result<Field, String> {
+        let text = &self.text[range.clone()];
+        match self.interp.expand_fragment(text) {
+            Ok(field) => Ok(field),
+            Err(error) => {
+                self.interp.diagnose(&error.diagnostic());
+                Err(String::new())
+            }
+        }
+    }
+
+    fn compare(&mut self, operator: &[u8], left: &Field, right: &Field) -> Result<bool, String> {
+        match operator {
+            b"==" | b"=" | b"!=" => {
+                let pattern = crate::glob::Pattern::new(&right.bytes, Some(&right.quoted));
+                let hit = crate::glob::matches(&pattern, &left.bytes);
+                Ok(if operator == b"!=" { !hit } else { hit })
+            }
+            b"<" => Ok(left.bytes < right.bytes),
+            b">" => Ok(left.bytes > right.bytes),
+            b"-eq" | b"-ne" | b"-lt" | b"-le" | b"-gt" | b"-ge" => {
+                let (Some(left), Some(right)) = (
+                    crate::arith::parse_int(&left.bytes),
+                    crate::arith::parse_int(&right.bytes),
+                ) else {
+                    self.report("integer expression expected");
+                    return Err(String::new());
+                };
+                Ok(match operator {
+                    b"-eq" => left == right,
+                    b"-ne" => left != right,
+                    b"-lt" => left < right,
+                    b"-le" => left <= right,
+                    b"-gt" => left > right,
+                    _ => left >= right,
+                })
+            }
+            b"=~" => {
+                self.report(
+                    "`[[ … =~ … ]]` is not implemented yet: POSIX ERE needs regcomp/regexec (DESIGN.md §4.8)",
+                );
+                Err(String::new())
+            }
+            other => Err(format!(
+                "unknown operator `{}`",
+                String::from_utf8_lossy(other)
+            )),
+        }
+    }
+
+    fn unary_test(&mut self, operator: &[u8], operand: &Field) -> Result<bool, String> {
+        use std::os::unix::ffi::OsStrExt;
+        let path = || std::path::Path::new(std::ffi::OsStr::from_bytes(&operand.bytes));
+        let metadata = || std::fs::metadata(path());
+        let link = || std::fs::symlink_metadata(path());
+        Ok(match operator {
+            b"-z" => operand.bytes.is_empty(),
+            b"-n" => !operand.bytes.is_empty(),
+            b"-e" | b"-a" => metadata().is_ok(),
+            b"-f" => metadata().is_ok_and(|meta| meta.is_file()),
+            b"-d" => metadata().is_ok_and(|meta| meta.is_dir()),
+            b"-s" => metadata().is_ok_and(|meta| meta.len() > 0),
+            b"-L" | b"-h" => link().is_ok_and(|meta| meta.file_type().is_symlink()),
+            b"-p" | b"-S" | b"-b" | b"-c" => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::FileTypeExt;
+                    let kind = link().map(|meta| meta.file_type()).ok();
+                    match operator {
+                        b"-p" => kind.is_some_and(|kind| kind.is_fifo()),
+                        b"-S" => kind.is_some_and(|kind| kind.is_socket()),
+                        b"-b" => kind.is_some_and(|kind| kind.is_block_device()),
+                        _ => kind.is_some_and(|kind| kind.is_char_device()),
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    false
+                }
+            }
+            b"-r" | b"-w" | b"-x" => {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = metadata().map(|meta| meta.permissions().mode());
+                let Ok(mode) = mode else {
+                    return Ok(false);
+                };
+                let bit = match operator {
+                    b"-r" => 0o444,
+                    b"-w" => 0o222,
+                    _ => 0o111,
+                };
+                mode & bit != 0
+            }
+            b"-v" => self.interp.state.vars.contains(&operand.bytes),
+            other => {
+                self.report(&format!(
+                    "`{}`: unsupported unary operator",
+                    String::from_utf8_lossy(other)
+                ));
+                return Err(String::new());
+            }
+        })
+    }
+}

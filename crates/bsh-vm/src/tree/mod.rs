@@ -1,0 +1,590 @@
+//! The tree-walking evaluator: ßhell's reference execution backend.
+//!
+//! DESIGN.md §5.7 sequences the work this way on purpose: build an AST
+//! interpreter first, ship the interactive shell on it, and only then add the
+//! bytecode compiler and VM behind `--interp=vm`. The evaluator stays forever
+//! as the **reference backend** and the whole spec suite runs through both, so
+//! that a disagreement between them is a compiler bug rather than a second
+//! opinion about the language.
+//!
+//! # What is here
+//!
+//! * [`Interp`] — one object that is a `bsh_runtime::ShellHost`, a
+//!   `bsh_lang::Vars` and a `bsh_lang::Shell`. Expansion needs
+//!   `&mut S where S: Vars + Shell`, and re-entrant execution (`eval`,
+//!   `source`, `$(…)`) needs `ShellHost`, so all three traits live on the one
+//!   type that owns the state.
+//! * [`Unwind`] — shell control flow as *one* explicit enum returned up the
+//!   tree, never a `Result` at every node (DESIGN.md §5.3). That keeps
+//!   `errexit`, `break n`, `return` and `exit` in one place instead of smeared
+//!   over forty AST arms.
+//! * `eval` — the AST walk; `command` — simple commands, search order and the
+//!   per-command sequence; `redir` — redirections, left to right; `builtins` —
+//!   executor-side built-ins; `cond` — `[[ … ]]`; `words` — the seams back
+//!   into `bsh-lang` and `bsh-syntax`.
+//!
+//! # `errexit`
+//!
+//! DESIGN.md §4.7: the POSIX text does not determine the behaviour, so one
+//! algorithm is implemented and documented — the *ignore-context* model.
+//! `errexit` never fires in the condition of `if`/`while`/`until`, in a
+//! left-hand `&&`/`||` operand, under `!`, or in a non-final pipeline stage.
+//! It fires after a whole and-or list whose last executed pipeline failed.
+//! The private `Ctx::ignore_errexit` flag carries "this region is exempt".
+//!
+//! # Deferred
+//!
+//! Deliberately not implemented in this wave, so the next one inherits an
+//! honest list rather than a surprise:
+//!
+//! * **Traps** — `trap` is a stub. [`Unwind::Trap`]/[`TrapKind`] exist so the
+//!   next wave can carry a trap kind without reshaping signatures; nothing
+//!   constructs them yet, and no signal handling runs.
+//! * **Job control** — no process groups, no `fg`/`bg`/`jobs`, no `%` names.
+//!   `&` forks, sets `$!` and does not reap; stopped children are not
+//!   tracked.
+//! * **`select`, `time`, `coproc`, `[[ x =~ re ]]`** — `select` and `time`
+//!   parse as command words (`bsh-syntax` documents that); `[[ … =~ … ]]`
+//!   reports a deferred-feature diagnostic rather than a wrong answer.
+//! * **Arrays** — `name=(a b)` and `a[1]=v` are diagnosed, not evaluated.
+//!   `bsh-syntax` carries `ArrayArg` and `bsh-runtime` can store arrays; the
+//!   word model cannot expand them yet.
+//! * **`${x#pat}`, `${x%pat}`, `${x/pat/rep}`, `${!x}`, `${x@Q}`** — reported
+//!   as `Unsupported` by `bsh-lang` (its documented boundary).
+//! * **Process substitution `<(…)`/`>(…)`** — `bsh-lang`'s default callback
+//!   errors, and this evaluator does not override it.
+//! * **`trap`, `set -x`/`set -v`, `command`, `type`, `hash`, `read`, `wait`,
+//!   `umask`, `shopt`, `builtin`, `getopts`, `alias`, `kill`, `ulimit`** —
+//!   registry stubs; see `builtins.rs` for the small executor-side set that
+//!   *is* implemented and why. `printf`/`test`/`[`/`pwd` are served from
+//!   `PATH` until `bsh-runtime` writes their bodies, which is where POSIX puts
+//!   a regular built-in.
+//! * **`~user`** — `bsh_lang::Shell::home_dir` has a default of `None` and
+//!   `bsh-sys` exposes no `getpwnam`, so `~root` is left as written. `~`,
+//!   `~+` and `~-` work.
+//! * **Command substitution inside arithmetic** — `$(( $(cmd) + 1 ))` reports
+//!   a syntax error, because arithmetic evaluation has no access to the
+//!   command-substitution callback ([`crate::arith::IntVars`] is deliberately
+//!   about integers only).
+//! * **`$FUNCNAME`, `$PIPESTATUS`, `$RANDOM`, `$SECONDS`, `$LINENO`** — bash
+//!   extensions the runtime does not define yet; `$PIPESTATUS` and `$FUNCNAME`
+//!   are arrays, which are deferred above.
+//! * **`set -i`/`PS1`** — the CLI marks the shell interactive when stdin is a
+//!   terminal and reads lines from it, but the prompt, editor, completion and
+//!   history are `bsh-repl`'s job and are not wired up.
+//! * **SIGPIPE** — Rust's runtime ignores it, so a built-in writing into a
+//!   closed pipe sees `EPIPE` and reports status 1 instead of dying by signal.
+//!   Children get `SIGPIPE` reset to `SIG_DFL` through `SpawnPlan`.
+//! * **In-place `execve`** — `bsh-sys` exposes no way to replace the process
+//!   without `unsafe`, so `exec cmd` spawns, waits and exits. Observationally
+//!   equivalent except for the pid and for redirect-only `exec`, which is
+//!   applied to the shell's own descriptors (that case is exact).
+//!
+//! # One deliberate deviation: a failing special built-in
+//!
+//! POSIX §2.8.1 says a non-interactive shell shall exit when a *special*
+//! built-in fails, and `bsh_runtime::consequence` encodes exactly that. bash
+//! (without `--posix`) continues instead, so `shift 5; echo after` prints
+//! `after` in bash and exits 1 here. This follows the landed consequence table
+//! and the project's rule of POSIX over bash where the two disagree, exactly as
+//! it does for prefix assignments before special built-ins (DESIGN.md §3.3
+//! Tier C). It is called out here because it is the one place a bash script
+//! may notice.
+
+use std::sync::Arc;
+
+use bsh_diag::{Diagnostic, SourceFile};
+use bsh_runtime::{Opts, ShellHost, ShellState, Status, consequence};
+use bsh_syntax::{Ast, NodeId, ParseOpts, ParseOutcome, parse_with};
+
+mod builtins;
+mod command;
+mod cond;
+mod eval;
+mod redir;
+mod words;
+
+pub use eval::TrapKind;
+
+/// Why evaluation stopped short of a plain status.
+///
+/// Shell control flow *is* exception semantics (DESIGN.md §5.3), so it is one
+/// enum returned up the tree rather than a `Result` at every node: `set -e`,
+/// `break n`, `continue n`, `return n` and `exit n` are all "unwind to a
+/// handler", and the handlers live in exactly one place each (the loop, the
+/// function call, the top level).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unwind {
+    /// Ordinary completion with a status.
+    Status(Status),
+    /// `break n`: unwind to the nth enclosing loop. `n` is never 0.
+    Break(u8),
+    /// `continue n`: resume the nth enclosing loop.
+    Continue(u8),
+    /// `return n`: unwind to the enclosing function frame.
+    Return(Status),
+    /// `exit n`: unwind everything, then exit the shell.
+    Exit(Status),
+    /// A trap to run at the next safe point. Traps are deferred in this wave
+    /// (see the module docs), so nothing constructs this yet; the variant is
+    /// here so the next wave does not have to reshape every signature.
+    Trap(TrapKind),
+}
+
+impl Unwind {
+    /// The status this unwind carries, for `$?` and for a caller that has
+    /// already decided to absorb it.
+    pub fn status(self) -> Status {
+        match self {
+            Unwind::Status(status) | Unwind::Return(status) | Unwind::Exit(status) => status,
+            Unwind::Break(_) | Unwind::Continue(_) | Unwind::Trap(_) => Status::SUCCESS,
+        }
+    }
+
+    /// Whether this unwind still has to reach a handler.
+    pub fn is_unwinding(self) -> bool {
+        !matches!(self, Unwind::Status(_))
+    }
+}
+
+/// A single piece of parsed source, kept alive because a function body's node
+/// ids and every diagnostic span index it.
+#[derive(Debug)]
+pub(crate) struct ParsedChunk {
+    pub(crate) ast: Ast,
+    pub(crate) source: Arc<SourceFile>,
+}
+
+/// A defined shell function: the chunk it was parsed from plus its body node.
+#[derive(Clone, Debug)]
+struct Function {
+    name: Vec<u8>,
+    chunk: Arc<ParsedChunk>,
+    body: NodeId,
+}
+
+/// Cached values for the special parameters that `bsh_lang::Vars::get` has to
+/// answer by value (`$?`, `$-`, `$$`, `$!`). `$0` is read straight from
+/// `Vars::arg0` and `$#` is computed from `positional()`, as the contract says.
+#[derive(Clone, Debug, Default)]
+struct Specials {
+    status: Vec<u8>,
+    dash: Vec<u8>,
+    pid: Vec<u8>,
+    bang: Vec<u8>,
+}
+
+/// Where an `errexit` check is allowed to fire.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Ctx {
+    /// True inside a condition, a left-hand `&&`/`||` operand, `!`'s pipeline
+    /// or a non-final pipeline stage: regions where a failure is not fatal.
+    pub(crate) ignore_errexit: bool,
+}
+
+/// The evaluator.
+#[derive(Clone, Debug)]
+pub struct Interp {
+    state: ShellState,
+    interactive: bool,
+    /// The source of the chunk being evaluated, for diagnostics.
+    current: Arc<SourceFile>,
+    functions: Vec<Function>,
+    specials: Specials,
+    /// Status of the last command substitution performed while expanding:
+    /// `x=$(false)` must leave `$?` at 1.
+    last_cmdsub: Option<Status>,
+    /// Set by a built-in that unwinds (`break`, `continue`, `return`), read by
+    /// the command sequence after the built-in returns.
+    pending: Option<Unwind>,
+    /// Function-call nesting, so runaway recursion is diagnosed instead of
+    /// overflowing the stack.
+    depth: usize,
+}
+
+/// The recursion limit for shell functions. bash has none and eventually
+/// crashes; a diagnostic is better than a crash.
+const MAX_FUNCTION_DEPTH: usize = 512;
+
+impl Interp {
+    /// A fresh shell. `interactive` selects the POSIX §2.8.1 consequences and
+    /// the diagnostic renderer.
+    pub fn new(interactive: bool) -> Self {
+        Self::with_opts(Opts::default(), interactive)
+    }
+
+    /// A fresh shell with explicit options (a profile preset, per the runtime
+    /// contract: never an exhaustive `Opts` literal).
+    pub fn with_opts(opts: Opts, interactive: bool) -> Self {
+        let mut interp = Self {
+            state: ShellState::new(opts),
+            interactive,
+            current: Arc::new(SourceFile::new("<none>", &b""[..])),
+            functions: Vec::new(),
+            specials: Specials::default(),
+            last_cmdsub: None,
+            pending: None,
+            depth: 0,
+        };
+        // `$?`, `$$` and `$-` must answer before the first command runs.
+        interp.sync_specials();
+        interp
+    }
+
+    /// Import the process environment as exported shell variables, the way
+    /// every shell starts. Bytes are preserved exactly.
+    pub fn import_environment(&mut self) {
+        use std::os::unix::ffi::OsStrExt;
+        let mut entries: Vec<Vec<u8>> = Vec::new();
+        for (name, value) in std::env::vars_os() {
+            let mut entry = name.as_os_str().as_bytes().to_vec();
+            entry.push(b'=');
+            entry.extend_from_slice(value.as_os_str().as_bytes());
+            entries.push(entry);
+        }
+        self.state.vars.import_envp(&entries);
+    }
+
+    /// Set `$0`.
+    pub fn set_arg0(&mut self, arg0: impl Into<Vec<u8>>) {
+        self.state.vars.set_arg0(arg0.into());
+    }
+
+    /// Set the positional parameters (`$1`, `$2`, …).
+    pub fn set_positional(&mut self, argv: Vec<Vec<u8>>) {
+        self.state.vars.set_positional(argv);
+    }
+
+    /// `$?`.
+    pub fn status(&self) -> Status {
+        self.state.vars.last_status()
+    }
+
+    /// Parse and run one chunk, reporting diagnostics against `name`.
+    ///
+    /// This is what `-c`, a script file, a `$(…)` body, `eval` and `source`
+    /// all funnel through, so there is exactly one place where "a chunk of
+    /// shell text becomes commands" happens.
+    pub fn run_named(&mut self, name: &str, src: &[u8]) -> Status {
+        let source = Arc::new(SourceFile::new(name, src));
+        let opts = self.parse_opts();
+        let chunk = match parse_with(&source, &opts) {
+            ParseOutcome::Ok(ast) => Arc::new(ParsedChunk {
+                ast,
+                source: source.clone(),
+            }),
+            ParseOutcome::NeedMoreInput { open, .. } => {
+                let previous = std::mem::replace(&mut self.current, source);
+                self.diagnose(&Diagnostic::error(
+                    bsh_syntax::codes::NEED_MORE_INPUT,
+                    open,
+                    "unexpected end of file: the input is incomplete",
+                ));
+                self.current = previous;
+                self.set_status(Status(2));
+                return Status(2);
+            }
+            ParseOutcome::Failed(diagnostics) => {
+                let previous = std::mem::replace(&mut self.current, source);
+                for diagnostic in &diagnostics {
+                    self.diagnose(diagnostic);
+                }
+                self.current = previous;
+                self.set_status(Status(2));
+                return Status(2);
+            }
+        };
+
+        let previous = std::mem::replace(&mut self.current, source);
+        let unwind = self.eval_node(&chunk, chunk.ast.root, Ctx::default());
+        self.current = previous;
+        let status = self.absorb(unwind);
+        self.set_status(status);
+        // Leave the cached specials agreeing with the final state, so a caller
+        // that reads `$?` after `run_named` sees this chunk's status.
+        self.sync_specials();
+        status
+    }
+
+    /// Turn a top-level unwind into an exit status.
+    ///
+    /// An `Exit` is re-requested through `ShellState` rather than merely
+    /// converted: `eval 'exit 3'` and `source` run a nested chunk, and the
+    /// outer command sequence must still see the exit request. Without this,
+    /// `exit` inside `eval` would only end the `eval`.
+    fn absorb(&mut self, unwind: Unwind) -> Status {
+        match unwind {
+            Unwind::Status(status) => status,
+            Unwind::Exit(status) => {
+                self.state.request_exit(status);
+                status
+            }
+            // `return` outside a function exits (or returns from) the current
+            // script, which is what bash does for a script's top level.
+            Unwind::Return(status) => status,
+            Unwind::Break(_) | Unwind::Continue(_) => {
+                self.diagnose(&Diagnostic::error(
+                    crate::codes::CONTROL_FLOW,
+                    0..0,
+                    "break/continue is only meaningful inside a loop",
+                ));
+                Status::SUCCESS
+            }
+            Unwind::Trap(_) => Status::SUCCESS,
+        }
+    }
+
+    /// The parse profile, derived from the shell's own options.
+    fn parse_opts(&self) -> ParseOpts {
+        ParseOpts {
+            posix_mode: self.state.opts.posix_mode,
+            extglob: self.state.opts.extglob,
+            ..ParseOpts::DEFAULT
+        }
+    }
+
+    pub(crate) fn set_status(&mut self, status: Status) {
+        self.state.vars.set_last_status(status);
+    }
+
+    /// Refresh the cached special parameters. Called before expansion, because
+    /// `Vars::get` cannot allocate and `$?` must be current.
+    pub(crate) fn sync_specials(&mut self) {
+        let status = self.state.vars.last_status().exit_code().to_string();
+        let dash = self.state.opts.dash_flags();
+        let pid = self.state.vars.shell_pid().to_string();
+        let bang = self
+            .state
+            .vars
+            .last_bg_pid()
+            .map(|pid| pid.to_string())
+            .unwrap_or_default();
+        self.specials = Specials {
+            status: status.into_bytes(),
+            dash,
+            pid: pid.into_bytes(),
+            bang: bang.into_bytes(),
+        };
+    }
+
+    /// Report a diagnostic at `span`, with an evaluator code (2xx).
+    pub(crate) fn report(
+        &mut self,
+        code: bsh_diag::ErrCode,
+        span: bsh_diag::Span,
+        message: impl Into<String>,
+    ) {
+        self.diagnose(&Diagnostic::error(code, span, message.into()));
+    }
+
+    /// The POSIX §2.8.1 table, applied. Returns the unwind the caller must
+    /// honour: `Continue` becomes an ordinary status.
+    pub(crate) fn apply_consequence(
+        &mut self,
+        error: bsh_runtime::ShellError,
+        status: Status,
+    ) -> Unwind {
+        match consequence(&error, self.interactive) {
+            bsh_runtime::Action::Continue => Unwind::Status(status),
+            bsh_runtime::Action::Exit(code) => Unwind::Exit(code),
+        }
+    }
+
+    /// Report an expansion error and classify it.
+    pub(crate) fn expansion_failed(&mut self, error: bsh_lang::Error) -> Unwind {
+        self.diagnose(&error.diagnostic());
+        self.apply_consequence(bsh_runtime::ShellError::Expansion, Status(1))
+    }
+
+    /// `errexit`, applied at the one place a whole and-or list finishes.
+    pub(crate) fn check_errexit(&mut self, status: Status, ctx: Ctx, negated: bool) -> Unwind {
+        if status.is_success() || ctx.ignore_errexit || negated || !self.state.opts.errexit {
+            return Unwind::Status(status);
+        }
+        Unwind::Exit(status)
+    }
+
+    /// Run `body` in a forked child and return its exit status.
+    ///
+    /// Used for subshells, `&`, pipeline stages and `$(…)`: shell code cannot
+    /// be `posix_spawn`ed, so it needs a real `fork` (DESIGN.md §4.3). The
+    /// child runs the interpreter — which is safe only because the fork gate
+    /// guarantees the parent had no helper threads — and exits with the
+    /// status the body produced.
+    pub(crate) fn fork_shell(
+        &mut self,
+        chunk: &Arc<ParsedChunk>,
+        body: NodeId,
+        ctx: Ctx,
+    ) -> std::io::Result<bsh_sys::Child> {
+        bsh_sys::fork_child(|| {
+            let unwind = self.eval_node(chunk, body, ctx);
+            let status = match unwind {
+                Unwind::Status(status) | Unwind::Return(status) | Unwind::Exit(status) => status,
+                Unwind::Break(_) | Unwind::Continue(_) | Unwind::Trap(_) => Status::SUCCESS,
+            };
+            std::process::exit(status.exit_code());
+        })
+    }
+}
+
+impl bsh_lang::Vars for Interp {
+    fn get(&self, name: &[u8]) -> Option<&[u8]> {
+        if let [special] = name {
+            match *special {
+                b'?' => return Some(&self.specials.status),
+                b'-' => return Some(&self.specials.dash),
+                b'$' => return Some(&self.specials.pid),
+                b'!' => return Some(&self.specials.bang),
+                b'0' => return Some(self.state.vars.arg0()),
+                // `$#` is computed from `positional()`, per the contract.
+                _ => {}
+            }
+        }
+        self.state.vars.scalar(name)
+    }
+
+    fn positional(&self) -> &[Vec<u8>] {
+        &self.state.vars.positional().argv
+    }
+
+    fn set(&mut self, name: &[u8], value: Vec<u8>) -> Result<(), bsh_lang::SetError> {
+        match self.state.vars.assign_scalar(name, &value) {
+            Ok(()) => Ok(()),
+            Err(bsh_runtime::Error::InvalidName { .. }) => Err(bsh_lang::SetError::InvalidName),
+            Err(_) => Err(bsh_lang::SetError::ReadOnly),
+        }
+    }
+}
+
+impl bsh_lang::Shell for Interp {
+    fn command_substitution(
+        &mut self,
+        cmd: &bsh_lang::CommandSub,
+    ) -> Result<Vec<u8>, bsh_lang::Error> {
+        match self.capture_substitution(&cmd.source) {
+            Ok((bytes, status)) => {
+                self.set_status(status);
+                self.last_cmdsub = Some(status);
+                self.sync_specials();
+                Ok(bytes)
+            }
+            Err(message) => Err(bsh_lang::Error::new(
+                bsh_lang::ErrorKind::Host { message },
+                cmd.span.clone(),
+            )),
+        }
+    }
+
+    fn arithmetic(&mut self, expr: &bsh_lang::Arithmetic) -> Result<Vec<u8>, bsh_lang::Error> {
+        match crate::arith::eval(&expr.source, self) {
+            Ok(value) => Ok(value.to_string().into_bytes()),
+            Err(message) => Err(bsh_lang::Error::new(
+                bsh_lang::ErrorKind::Host { message },
+                expr.span.clone(),
+            )),
+        }
+    }
+
+    fn pathname(
+        &mut self,
+        pattern: &bsh_lang::Field,
+    ) -> Result<Option<Vec<Vec<u8>>>, bsh_lang::Error> {
+        if self.state.opts.noglob {
+            return Ok(None);
+        }
+        let pattern = crate::glob::Pattern::new(&pattern.bytes, Some(&pattern.quoted));
+        match crate::glob::expand(&pattern) {
+            Some(matches) => Ok(Some(matches)),
+            None if self.state.opts.nullglob => Ok(Some(Vec::new())),
+            None if self.state.opts.failglob => Err(bsh_lang::Error::new(
+                bsh_lang::ErrorKind::Host {
+                    message: format!("no match: {}", String::from_utf8_lossy(pattern.bytes)),
+                },
+                0..0,
+            )),
+            None => Ok(None),
+        }
+    }
+}
+
+impl crate::arith::IntVars for Interp {
+    fn get(&mut self, name: &[u8]) -> i64 {
+        // A name of digits is a positional parameter, not a variable:
+        // `$(( $1 + 1 ))` reads `$1`.
+        if !name.is_empty() && name.iter().all(u8::is_ascii_digit) && name[0] != b'0' {
+            let index: usize = std::str::from_utf8(name)
+                .ok()
+                .and_then(|text| text.parse().ok())
+                .unwrap_or(0);
+            // `Positional::get` is one-based: `get(0)` is `None` because `$0`
+            // is not a positional parameter.
+            return self
+                .state
+                .vars
+                .positional()
+                .get(index)
+                .and_then(crate::arith::parse_int)
+                .unwrap_or(0);
+        }
+        self.state
+            .vars
+            .scalar(name)
+            .and_then(crate::arith::parse_int)
+            .unwrap_or(0)
+    }
+
+    fn set(&mut self, name: &[u8], value: i64) -> Result<(), String> {
+        self.state
+            .vars
+            .assign_scalar(name, value.to_string().as_bytes())
+            .map_err(|error| error.message())
+    }
+}
+
+impl ShellHost for Interp {
+    fn state(&mut self) -> &mut ShellState {
+        &mut self.state
+    }
+
+    fn run_source(&mut self, src: &[u8]) -> Status {
+        self.run_named("<eval>", src)
+    }
+
+    fn write_out(&mut self, bytes: &[u8]) -> Status {
+        use std::io::Write;
+        let mut stdout = std::io::stdout().lock();
+        match stdout.write_all(bytes).and_then(|()| stdout.flush()) {
+            Ok(()) => Status::SUCCESS,
+            // EPIPE is the reader going away, not the shell failing. Rust
+            // ignores SIGPIPE, so the write returns an error instead of
+            // killing the shell.
+            Err(_) => Status(1),
+        }
+    }
+
+    fn write_err(&mut self, bytes: &[u8]) -> Status {
+        use std::io::Write;
+        let mut stderr = std::io::stderr().lock();
+        match stderr.write_all(bytes).and_then(|()| stderr.flush()) {
+            Ok(()) => Status::SUCCESS,
+            Err(_) => Status(1),
+        }
+    }
+
+    fn is_interactive(&self) -> bool {
+        self.interactive
+    }
+
+    fn diagnose(&mut self, diagnostic: &Diagnostic) {
+        let source = self.current.clone();
+        let rendered = if self.interactive {
+            bsh_diag::render_compact(diagnostic, &source)
+        } else {
+            diagnostic.render_line_with_help(&source)
+        };
+        let mut line = rendered.into_bytes();
+        line.push(b'\n');
+        let _ = self.write_err(&line);
+    }
+}

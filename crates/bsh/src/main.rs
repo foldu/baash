@@ -1,50 +1,72 @@
 //! The ßhell binary.
 //!
-//! Scope right now is the scaffold: argument dispatch, and one feature that is
-//! genuinely finished, `--highlight`, which exercises the `bsh-syntax` →
-//! `bsh-highlight` → `bsh-repl` chain end to end.
+//! Argument dispatch plus the three ways to give a shell some text: `-c`, a
+//! script file, and standard input. Parsing, execution and diagnostics all
+//! live in the crates; this file decides *which* bytes get run, sets `$0` and
+//! the positional parameters, and turns the final status into an exit code.
+//!
+//! `-n` is the one mode that never executes: it parses and renders
+//! `bsh_diag::render_report`, exiting 2 on a syntax error, because a syntax
+//! error must be visible *before* any side effect (DESIGN.md §5.6).
 
 #![forbid(unsafe_code)]
 
-use std::io::{Read, Write};
+use std::ffi::OsString;
+use std::io::{BufRead, Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::process::ExitCode;
 
+use bsh_diag::{Diagnostic, SourceFile};
 use bsh_repl::Theme;
+use bsh_runtime::ShellHost;
+use bsh_syntax::{ParseOpts, ParseOutcome};
+use bsh_vm::Interp;
 
 const USAGE: &str = "\
 ßhell — a POSIX- and bash-compatible shell
 
 USAGE
-    bsh [OPTIONS] [SCRIPT]
+    bsh [OPTIONS] [SCRIPT [ARGUMENT...]]
+    bsh -c COMMAND [NAME [ARGUMENT...]]
 
 OPTIONS
     -c <COMMAND>    Run COMMAND.
     -n              Parse SCRIPT (or stdin) without executing.
-    --lint          Report non-POSIX constructs.
     --highlight     Syntax-highlight stdin to stdout and exit.
     -h, --help      Print this help.
     -V, --version   Print the version.
 
-Only --highlight is implemented so far; the rest exits with status 2.
+Exit status: the status of the last command, or 2 for a usage or syntax error.
 ";
+
+/// Exit status for "this is not implemented yet", mirroring the shell
+/// convention of refusing to pretend.
+const UNIMPLEMENTED: u8 = 2;
 
 /// What the invocation asked for.
 enum Mode {
     Help,
     Version,
     Highlight,
-    ParseOnly(Option<String>),
-    Lint(Option<String>),
-    Execute(Option<String>),
-    Run(Option<String>),
+    /// `-n`: parse, report, do not execute.
+    ParseOnly(Source),
+    /// Run `-c`, a file, or stdin.
+    Execute(Source),
+    Lint(Source),
 }
 
-/// Exit status for "this is not implemented yet", mirroring the shell
-/// convention of refusing to pretend.
-const UNIMPLEMENTED: u8 = 2;
+/// Where the shell text comes from.
+enum Source {
+    /// `-c COMMAND`, with an optional `$0` and positional parameters.
+    Command(Vec<u8>, Vec<Vec<u8>>),
+    /// A script file and its arguments.
+    File(Vec<u8>, Vec<Vec<u8>>),
+    /// Standard input.
+    Stdin,
+}
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
         Ok(mode) => dispatch(mode),
         Err(message) => {
@@ -55,44 +77,82 @@ fn main() -> ExitCode {
     }
 }
 
-fn parse_args(args: &[String]) -> Result<Mode, String> {
-    let mut i = 0;
-    let mut mode: Option<Mode> = None;
-    let mut positional: Option<String> = None;
+fn bytes(value: &OsString) -> Vec<u8> {
+    value.as_os_str().as_bytes().to_vec()
+}
 
-    while i < args.len() {
-        let arg = args[i].as_str();
-        match arg {
-            "-h" | "--help" => mode = Some(Mode::Help),
-            "-V" | "--version" => mode = Some(Mode::Version),
-            "--highlight" => mode = Some(Mode::Highlight),
-            "--lint" => mode = Some(Mode::Lint(None)),
-            "-n" => mode = Some(Mode::ParseOnly(None)),
-            "-c" => {
-                i += 1;
-                let command = args
-                    .get(i)
-                    .ok_or_else(|| "-c requires an argument".to_string())?;
-                mode = Some(Mode::Execute(Some(command.clone())));
+fn parse_args(args: &[OsString]) -> Result<Mode, String> {
+    let mut index = 0;
+    let mut command: Option<Vec<u8>> = None;
+    let mut parse_only = false;
+    let mut highlight = false;
+    let mut positional: Vec<Vec<u8>> = Vec::new();
+
+    while index < args.len() {
+        let argument = bytes(&args[index]);
+        match argument.as_slice() {
+            b"-h" | b"--help" => return Ok(Mode::Help),
+            b"-V" | b"--version" => return Ok(Mode::Version),
+            b"--highlight" => highlight = true,
+            b"--lint" => {
+                return Ok(Mode::Lint(source_from(&positional, &mut None)?));
             }
-            _ if arg.starts_with('-') && arg.len() > 1 => {
-                return Err(format!("unknown option `{arg}`"));
+            b"-n" => parse_only = true,
+            b"-c" => {
+                index += 1;
+                let Some(text) = args.get(index) else {
+                    return Err("-c requires an argument".to_owned());
+                };
+                command = Some(bytes(text));
             }
-            _ => {
-                if positional.replace(arg.to_string()).is_some() {
-                    return Err(format!("unexpected extra argument `{arg}`"));
+            b"--" => {
+                index += 1;
+                while index < args.len() {
+                    positional.push(bytes(&args[index]));
+                    index += 1;
                 }
+                break;
             }
+            other if other.first() == Some(&b'-') && other.len() > 1 => {
+                return Err(format!(
+                    "unknown option `{}`",
+                    String::from_utf8_lossy(other)
+                ));
+            }
+            _ => positional.push(argument),
         }
-        i += 1;
+        index += 1;
     }
 
-    Ok(match mode {
-        Some(Mode::Lint(_)) => Mode::Lint(positional),
-        Some(Mode::ParseOnly(_)) => Mode::ParseOnly(positional),
-        Some(other) => other,
-        None => Mode::Run(positional),
+    if highlight {
+        return Ok(Mode::Highlight);
+    }
+    let source = source_from(&positional, &mut command)?;
+    Ok(if parse_only {
+        Mode::ParseOnly(source)
+    } else {
+        Mode::Execute(source)
     })
+}
+
+/// Turn the trailing operands (plus any `-c` command) into a [`Source`].
+fn source_from(positional: &[Vec<u8>], command: &mut Option<Vec<u8>>) -> Result<Source, String> {
+    if let Some(text) = command.take() {
+        let (name, arguments) = match positional.split_first() {
+            Some((name, rest)) => (Some(name.clone()), rest.to_vec()),
+            None => (None, Vec::new()),
+        };
+        let mut argv = Vec::with_capacity(arguments.len() + usize::from(name.is_some()));
+        if let Some(name) = name {
+            argv.push(name);
+        }
+        argv.extend(arguments);
+        return Ok(Source::Command(text, argv));
+    }
+    match positional.split_first() {
+        Some((path, arguments)) => Ok(Source::File(path.clone(), arguments.to_vec())),
+        None => Ok(Source::Stdin),
+    }
 }
 
 fn dispatch(mode: Mode) -> ExitCode {
@@ -106,19 +166,183 @@ fn dispatch(mode: Mode) -> ExitCode {
             ExitCode::SUCCESS
         }
         Mode::Highlight => highlight_stdin(),
-        Mode::Run(input) => not_yet("execution and the interactive editor", input.as_deref()),
-        Mode::Execute(command) => not_yet("`-c` execution", command.as_deref()),
-        Mode::ParseOnly(input) => not_yet("parsing", input.as_deref()),
-        Mode::Lint(input) => not_yet("`--lint`", input.as_deref()),
+        Mode::Lint(source) => {
+            eprintln!("bsh: `--lint` is not implemented yet");
+            let _ = source;
+            ExitCode::from(UNIMPLEMENTED)
+        }
+        Mode::ParseOnly(source) => {
+            let mut shell = shell(false);
+            match read_source(&mut shell, source) {
+                Ok((name, bytes)) => parse_only(&name, &bytes),
+                Err(code) => code,
+            }
+        }
+        Mode::Execute(source) => {
+            // `bsh` with a terminal on stdin is interactive; anything else
+            // (a script, `-c`, a pipe) is not, which is what selects the
+            // POSIX §2.8.1 consequences and the compact diagnostic renderer.
+            // A real interactive REPL — prompt, editor, completion — is
+            // `bsh-repl`'s job and is not wired up here.
+            let interactive = matches!(source, Source::Stdin) && bsh_sys::is_tty(0);
+            let mut shell = shell(interactive);
+            execute(&mut shell, source)
+        }
     }
 }
 
-fn not_yet(what: &str, subject: Option<&str>) -> ExitCode {
-    match subject {
-        Some(subject) => eprintln!("bsh: {what} is not implemented yet ({subject})"),
-        None => eprintln!("bsh: {what} is not implemented yet"),
+/// A shell with the environment imported and `PWD` sane.
+fn shell(interactive: bool) -> Interp {
+    let mut shell = Interp::new(interactive);
+    shell.import_environment();
+    if shell.state().vars.scalar(b"PWD").is_none() {
+        if let Ok(directory) = std::env::current_dir() {
+            let _ = shell
+                .state()
+                .vars
+                .assign_scalar(b"PWD", directory.as_os_str().as_bytes());
+            let _ = shell.state().vars.mark_exported(b"PWD");
+        }
     }
-    ExitCode::from(UNIMPLEMENTED)
+    shell
+}
+
+fn execute(shell: &mut Interp, source: Source) -> ExitCode {
+    match source {
+        Source::Stdin => run_stdin(shell),
+        other => match read_source(shell, other) {
+            Ok((name, bytes)) => {
+                let display = String::from_utf8_lossy(&name).into_owned();
+                let status = shell.run_named(&display, &bytes);
+                ExitCode::from(status.exit_code() as u8)
+            }
+            Err(code) => code,
+        },
+    }
+}
+
+/// Read the bytes a [`Source`] names, and set `$0`/positional for it.
+fn read_source(shell: &mut Interp, source: Source) -> Result<(Vec<u8>, Vec<u8>), ExitCode> {
+    match source {
+        Source::Command(text, argv) => {
+            let (name, arguments) = match argv.split_first() {
+                Some((name, rest)) => (name.clone(), rest.to_vec()),
+                None => (b"bsh".to_vec(), Vec::new()),
+            };
+            shell.set_arg0(name.clone());
+            shell.set_positional(arguments);
+            Ok((name, text))
+        }
+        Source::File(path, argv) => {
+            match std::fs::read(std::path::Path::new(std::ffi::OsStr::from_bytes(&path))) {
+                Ok(bytes) => {
+                    shell.set_arg0(path.clone());
+                    shell.set_positional(argv);
+                    Ok((path, bytes))
+                }
+                Err(error) => {
+                    eprintln!("bsh: {}: {error}", String::from_utf8_lossy(&path));
+                    Err(ExitCode::from(127))
+                }
+            }
+        }
+        Source::Stdin => {
+            let mut bytes = Vec::new();
+            if let Err(error) = std::io::stdin().read_to_end(&mut bytes) {
+                eprintln!("bsh: cannot read stdin: {error}");
+                return Err(ExitCode::from(1));
+            }
+            shell.set_arg0("bsh");
+            Ok((b"<stdin>".to_vec(), bytes))
+        }
+    }
+}
+
+/// Write to stderr without panicking when the reader has gone away.
+///
+/// `eprint!` panics on a failed write, and a diagnostic report can be far
+/// larger than the pipe buffer, so `bsh -n … | head` must not turn a syntax
+/// error into exit status 101.
+fn write_stderr(text: &str) {
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr
+        .write_all(text.as_bytes())
+        .and_then(|()| stderr.flush());
+}
+
+fn parse_only(name: &[u8], bytes: &[u8]) -> ExitCode {
+    let file = SourceFile::new(String::from_utf8_lossy(name).into_owned(), bytes);
+    match bsh_syntax::parse_with(&file, &ParseOpts::DEFAULT) {
+        ParseOutcome::Ok(_) => ExitCode::SUCCESS,
+        ParseOutcome::NeedMoreInput { open, .. } => {
+            let diagnostic = Diagnostic::error(
+                bsh_syntax::codes::NEED_MORE_INPUT,
+                open,
+                "unexpected end of file: the input is incomplete",
+            );
+            write_stderr(&bsh_diag::render_report(&[diagnostic], &file));
+            ExitCode::from(2)
+        }
+        ParseOutcome::Failed(diagnostics) => {
+            write_stderr(&bsh_diag::render_report(&diagnostics, &file));
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Non-interactive stdin is one chunk; a terminal gets a line-at-a-time loop
+/// so a half-typed compound command is not executed early. The line editor is
+/// `bsh-repl`'s job and is not wired up here.
+fn run_stdin(shell: &mut Interp) -> ExitCode {
+    if !bsh_sys::is_tty(0) {
+        let mut bytes = Vec::new();
+        if let Err(error) = std::io::stdin().read_to_end(&mut bytes) {
+            eprintln!("bsh: cannot read stdin: {error}");
+            return ExitCode::from(1);
+        }
+        let status = shell.run_named("<stdin>", &bytes);
+        return ExitCode::from(status.exit_code() as u8);
+    }
+
+    let mut pending: Vec<u8> = Vec::new();
+    let mut status = bsh_runtime::Status::SUCCESS;
+    let stdin = std::io::stdin();
+    let mut stdin = stdin.lock();
+    loop {
+        let mut line = Vec::new();
+        let read = stdin.read_until(b'\n', &mut line);
+        match read {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("bsh: cannot read stdin: {error}");
+                return ExitCode::from(1);
+            }
+        }
+        pending.extend_from_slice(&line);
+        match bsh_syntax::parse_bytes(&pending, &ParseOpts::DEFAULT) {
+            ParseOutcome::NeedMoreInput { .. } => continue,
+            ParseOutcome::Failed(diagnostics) => {
+                let file = SourceFile::new("<stdin>", pending.as_slice());
+                for diagnostic in &diagnostics {
+                    write_stderr(&bsh_diag::render_compact(diagnostic, &file));
+                }
+                pending.clear();
+                status = bsh_runtime::Status(2);
+                continue;
+            }
+            ParseOutcome::Ok(_) => {}
+        }
+        let chunk = std::mem::take(&mut pending);
+        // The status of the last chunk is the shell's exit status; an `exit`
+        // inside it already requested the unwind, and the request survives in
+        // the shell state, so the loop stops here too.
+        status = shell.run_named("<stdin>", &chunk);
+        if shell.state().take_exit_request().is_some() {
+            break;
+        }
+    }
+    ExitCode::from(status.exit_code() as u8)
 }
 
 /// Read stdin, paint it, write it back.

@@ -4,10 +4,15 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The bytecode interpreter loop"
+description = "The execution engine: AST evaluator (reference backend) and the bytecode interpreter loop"
 
 [dependencies]
 bsh-compile.workspace = true
 bsh-runtime.workspace = true
 bsh-lang.workspace = true
 bsh-diag.workspace = true
+bsh-syntax.workspace = true
+bsh-sys.workspace = true
+# Only for the `open(2)` flags and signal numbers that `bsh-sys` names in its
+# public API (`FdAction::Open`, `SignalSet`). No platform code lives here.
+libc.workspace = true

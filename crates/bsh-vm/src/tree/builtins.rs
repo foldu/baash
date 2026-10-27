@@ -1,0 +1,566 @@
+//! Executor-side built-ins.
+//!
+//! `bsh-runtime` owns the builtin registry, the tiers and every body that only
+//! touches shell state (`export`, `readonly`, `set`, `shift`, `unset`, `exit`,
+//! `:`, `true`, `false`). Three kinds of body cannot live there:
+//!
+//! * bodies that *unwind* (`break`, `continue`, `return`), because unwinding is
+//!   the evaluator's control-flow channel;
+//! * bodies that need the syscall layer or the interpreter (`cd`, `exec`,
+//!   `eval`, `.`/`source`);
+//! * `local`/`declare`, which need the frame stack that only the evaluator
+//!   opens.
+//!
+//! A VM built-in is consulted **only when the registry entry has no body**
+//! (`BuiltinDef::is_implemented()` is false), so when `bsh-runtime` fills one
+//! in this module goes dormant instead of shadowing it. That rule is what keeps
+//! the ownership boundary honest.
+//!
+//! `echo` is here because a shell that forks `/bin/echo` for the most common
+//! command in existence is not an interactive shell, and because `echo -e` /
+//! `echo -n` are *bash* behaviour, not the coreutils behaviour a `PATH` hit
+//! would give. It stops being used the moment `bsh-runtime` writes its body.
+//!
+//! Deliberately *not* here: `printf`, `test`, `[` and `pwd` are regular
+//! utilities in POSIX terms — they must remain exec-able, their program forms
+//! are correct, and they are `bsh-runtime`'s bodies to write. Until it writes
+//! them, the `PATH` position serves them, which is exactly where POSIX puts a
+//! regular built-in.
+
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+
+use bsh_diag::Diagnostic;
+use bsh_runtime::{CreateScope, ShellHost, Status, Tier};
+
+use super::{Interp, Unwind};
+
+/// One executor-side built-in.
+pub(crate) struct VmBuiltin {
+    /// Name as typed.
+    pub(crate) name: &'static [u8],
+    /// The body. `argv[0]` is the name as written.
+    pub(crate) run: fn(&mut Interp, &[Vec<u8>]) -> Status,
+}
+
+pub(crate) fn lookup(name: &[u8]) -> Option<&'static VmBuiltin> {
+    VM_BUILTINS.iter().find(|builtin| builtin.name == name)
+}
+
+/// The registry tier of a `name`, so prefix assignments behave correctly.
+pub(crate) fn tier_of(name: &[u8]) -> Tier {
+    bsh_runtime::tier_of(name).unwrap_or(Tier::Extension)
+}
+
+static VM_BUILTINS: &[VmBuiltin] = &[
+    VmBuiltin {
+        name: b"break",
+        run: bi_break,
+    },
+    VmBuiltin {
+        name: b"continue",
+        run: bi_continue,
+    },
+    VmBuiltin {
+        name: b"return",
+        run: bi_return,
+    },
+    VmBuiltin {
+        name: b"cd",
+        run: bi_cd,
+    },
+    VmBuiltin {
+        name: b"echo",
+        run: bi_echo,
+    },
+    VmBuiltin {
+        name: b"eval",
+        run: bi_eval,
+    },
+    VmBuiltin {
+        name: b".",
+        run: bi_source,
+    },
+    VmBuiltin {
+        name: b"source",
+        run: bi_source,
+    },
+    VmBuiltin {
+        name: b"local",
+        run: bi_local,
+    },
+    VmBuiltin {
+        name: b"declare",
+        run: bi_declare,
+    },
+    VmBuiltin {
+        name: b"typeset",
+        run: bi_declare,
+    },
+];
+
+fn diagnose(interp: &mut Interp, message: impl Into<String>) {
+    interp.diagnose(&Diagnostic::error(
+        crate::codes::DEFERRED,
+        0..0,
+        message.into(),
+    ));
+}
+
+fn program(argv: &[Vec<u8>], fallback: &str) -> String {
+    argv.first()
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
+/// A small decimal count, for `break n`, `continue n`, `return n`.
+fn count(argv: &[Vec<u8>], index: usize) -> Option<u32> {
+    let argument = argv.get(index)?;
+    if argument.is_empty() || !argument.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(argument).ok()?.parse().ok()
+}
+
+fn loop_control(interp: &mut Interp, argv: &[Vec<u8>], break_it: bool) -> Status {
+    let requested = match argv.get(1) {
+        None => 1,
+        Some(_) => match count(argv, 1) {
+            Some(0) | None => {
+                diagnose(
+                    interp,
+                    format!(
+                        "{}: {}: loop count out of range",
+                        program(argv, "loop"),
+                        String::from_utf8_lossy(argv.get(1).map_or(&b""[..], Vec::as_slice))
+                    ),
+                );
+                return Status::FAILURE;
+            }
+            Some(count) => count.min(u32::from(u8::MAX)),
+        },
+    };
+    let level = requested.clamp(1, u32::from(u8::MAX)) as u8;
+    interp.pending = Some(if break_it {
+        Unwind::Break(level)
+    } else {
+        Unwind::Continue(level)
+    });
+    Status::SUCCESS
+}
+
+fn bi_break(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
+    loop_control(interp, argv, true)
+}
+
+fn bi_continue(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
+    loop_control(interp, argv, false)
+}
+
+fn bi_return(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
+    let status = match argv.get(1) {
+        None => interp.state.vars.last_status(),
+        Some(_) => match count(argv, 1) {
+            Some(value) => Status(value as i32 & 0xff),
+            None => {
+                diagnose(
+                    interp,
+                    format!(
+                        "return: {}: numeric argument required",
+                        String::from_utf8_lossy(argv.get(1).map_or(&b""[..], Vec::as_slice))
+                    ),
+                );
+                Status(2)
+            }
+        },
+    };
+    interp.pending = Some(Unwind::Return(status));
+    Status::SUCCESS
+}
+
+fn bi_eval(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
+    let mut source = Vec::new();
+    for (index, argument) in argv[1..].iter().enumerate() {
+        if index > 0 {
+            source.push(b' ');
+        }
+        source.extend_from_slice(argument);
+    }
+    interp.run_named("<eval>", &source)
+}
+
+fn bi_source(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
+    let name = program(argv, "source");
+    let Some(file) = argv.get(1).cloned() else {
+        diagnose(interp, format!("{name}: filename argument required"));
+        return Status(2);
+    };
+    let path = if file.contains(&b'/') {
+        file.clone()
+    } else {
+        interp.search_path(&file).unwrap_or_else(|| file.clone())
+    };
+    let bytes = match std::fs::read(std::path::Path::new(OsStr::from_bytes(&path))) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            diagnose(
+                interp,
+                format!("{name}: {}: {error}", String::from_utf8_lossy(&path)),
+            );
+            return Status::FAILURE;
+        }
+    };
+    let display = String::from_utf8_lossy(&path).into_owned();
+    if argv.len() > 2 {
+        // `source file a b` gives the sourced file its own positional
+        // parameters; a frame is the cheapest way to scope them.
+        interp.state.vars.push_frame();
+        interp.state.vars.set_positional(argv[2..].to_vec());
+        let status = interp.run_named(&display, &bytes);
+        let _ = interp.state.vars.pop_frame();
+        return status;
+    }
+    interp.run_named(&display, &bytes)
+}
+
+/// `echo`, with bash's `-n`/`-e`/`-E` handling.
+fn bi_echo(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
+    let mut newline = true;
+    let mut escapes = false;
+    let mut index = 1;
+    while let Some(option) = argv.get(index) {
+        let flags = option.strip_prefix(b"-").unwrap_or_default();
+        if flags.is_empty() || !flags.iter().all(|flag| matches!(flag, b'n' | b'e' | b'E')) {
+            break;
+        }
+        for &flag in flags {
+            match flag {
+                b'n' => newline = false,
+                b'e' => escapes = true,
+                _ => escapes = false,
+            }
+        }
+        index += 1;
+    }
+
+    let mut out = Vec::new();
+    for (position, argument) in argv[index..].iter().enumerate() {
+        if position > 0 {
+            out.push(b' ');
+        }
+        if escapes && !interpret_escapes(argument, &mut out) {
+            // `\c` drops the rest of the output, including the newline.
+            return interp.write_out(&out);
+        } else if !escapes {
+            out.extend_from_slice(argument);
+        }
+    }
+    if newline {
+        out.push(b'\n');
+    }
+    interp.write_out(&out)
+}
+
+/// Decode `echo -e` escapes into `out`. Returns false on `\c`.
+fn interpret_escapes(bytes: &[u8], out: &mut Vec<u8>) -> bool {
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'\\' || index + 1 >= bytes.len() {
+            out.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        index += 1;
+        match bytes[index] {
+            b'a' => {
+                out.push(7);
+                index += 1;
+            }
+            b'b' => {
+                out.push(8);
+                index += 1;
+            }
+            b'c' => return false,
+            b'e' | b'E' => {
+                out.push(27);
+                index += 1;
+            }
+            b'f' => {
+                out.push(12);
+                index += 1;
+            }
+            b'n' => {
+                out.push(b'\n');
+                index += 1;
+            }
+            b'r' => {
+                out.push(b'\r');
+                index += 1;
+            }
+            b't' => {
+                out.push(b'\t');
+                index += 1;
+            }
+            b'v' => {
+                out.push(11);
+                index += 1;
+            }
+            b'\\' => {
+                out.push(b'\\');
+                index += 1;
+            }
+            b'0' => {
+                index += 1;
+                let start = index;
+                let limit = (start + 3).min(bytes.len());
+                let mut value: u32 = 0;
+                while index < limit && (b'0'..=b'7').contains(&bytes[index]) {
+                    value = value * 8 + u32::from(bytes[index] - b'0');
+                    index += 1;
+                }
+                out.push((value & 0xff) as u8);
+            }
+            b'x' => {
+                index += 1;
+                let start = index;
+                let limit = (start + 2).min(bytes.len());
+                let mut value: u32 = 0;
+                while index < limit {
+                    let Some(digit) = (bytes[index] as char).to_digit(16) else {
+                        break;
+                    };
+                    value = value * 16 + digit;
+                    index += 1;
+                }
+                if index == start {
+                    out.extend_from_slice(b"\\x");
+                } else {
+                    out.push((value & 0xff) as u8);
+                }
+            }
+            other => {
+                out.push(b'\\');
+                out.push(other);
+                index += 1;
+            }
+        }
+    }
+    true
+}
+
+fn bi_cd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
+    let name = program(argv, "cd");
+    let mut target: Option<Vec<u8>> = None;
+    for argument in &argv[1..] {
+        match argument.as_slice() {
+            b"-L" | b"-P" | b"--" => {}
+            b"-" => target = Some(b"-".to_vec()),
+            other if other.first() == Some(&b'-') && other.len() > 1 => {
+                diagnose(interp, format!("{name}: {other:?}: invalid option"));
+                return Status(2);
+            }
+            other => {
+                if target.is_some() {
+                    diagnose(interp, format!("{name}: too many arguments"));
+                    return Status::FAILURE;
+                }
+                target = Some(other.to_vec());
+            }
+        }
+    }
+    let mut print = false;
+    let target = match target {
+        None => match interp.state.vars.scalar(b"HOME") {
+            Some(home) => home.to_vec(),
+            None => {
+                diagnose(interp, format!("{name}: HOME not set"));
+                return Status::FAILURE;
+            }
+        },
+        Some(path) if path == b"-" => {
+            print = true;
+            match interp.state.vars.scalar(b"OLDPWD") {
+                Some(previous) => previous.to_vec(),
+                None => {
+                    diagnose(interp, format!("{name}: OLDPWD not set"));
+                    return Status::FAILURE;
+                }
+            }
+        }
+        Some(path) => path,
+    };
+
+    let os = std::path::Path::new(OsStr::from_bytes(&target));
+    if let Err(error) = std::env::set_current_dir(os) {
+        diagnose(
+            interp,
+            format!("{name}: {}: {error}", String::from_utf8_lossy(&target)),
+        );
+        return Status::FAILURE;
+    }
+    let previous = interp.state.vars.scalar(b"PWD").map(<[u8]>::to_vec);
+    let current = std::env::current_dir()
+        .map(|dir| dir.as_os_str().as_bytes().to_vec())
+        .unwrap_or_else(|_| target.clone());
+    if let Some(previous) = previous {
+        let _ = interp.state.vars.assign_scalar(b"OLDPWD", &previous);
+        let _ = interp.state.vars.mark_exported(b"OLDPWD");
+    }
+    let _ = interp.state.vars.assign_scalar(b"PWD", &current);
+    let _ = interp.state.vars.mark_exported(b"PWD");
+    if print {
+        let mut out = current;
+        out.push(b'\n');
+        let _ = interp.write_out(&out);
+    }
+    Status::SUCCESS
+}
+
+/// Split `name=value` / `name+=value` into its parts.
+fn split_assignment(operand: &[u8]) -> (&[u8], Option<&[u8]>, bool) {
+    let Some(equals) = operand.iter().position(|&byte| byte == b'=') else {
+        return (operand, None, false);
+    };
+    let raw = &operand[..equals];
+    match raw.strip_suffix(b"+") {
+        Some(name) => (name, Some(&operand[equals + 1..]), true),
+        None => (raw, Some(&operand[equals + 1..]), false),
+    }
+}
+
+/// `local`, `declare` and `typeset`.
+///
+/// Supported flags: `-a -A -x -r -i` and `--`. `-p`/`-f`/`-g` are diagnosed as
+/// deferred rather than silently ignored.
+fn declare(interp: &mut Interp, argv: &[Vec<u8>], local_only: bool) -> Status {
+    let name = program(argv, "declare");
+    let (mut indexed, mut associative) = (false, false);
+    let (mut export, mut readonly, mut integer) = (false, false, false);
+    let mut index = 1;
+    while index < argv.len() {
+        let argument = &argv[index];
+        if argument == b"--" {
+            index += 1;
+            break;
+        }
+        let Some(flags) = argument.strip_prefix(b"-") else {
+            break;
+        };
+        if flags.is_empty() {
+            break;
+        }
+        for &flag in flags {
+            match flag {
+                b'a' => indexed = true,
+                b'A' => associative = true,
+                b'x' => export = true,
+                b'r' => readonly = true,
+                b'i' => integer = true,
+                b'p' | b'f' | b'g' => {
+                    diagnose(
+                        interp,
+                        format!("{name}: -{}: not implemented yet", flag as char),
+                    );
+                    return Status(2);
+                }
+                other => {
+                    diagnose(
+                        interp,
+                        format!("{name}: -{}: invalid option", other as char),
+                    );
+                    return Status(2);
+                }
+            }
+        }
+        index += 1;
+    }
+
+    if index >= argv.len() {
+        diagnose(interp, format!("{name}: no names given"));
+        return Status::FAILURE;
+    }
+
+    let scope = if local_only {
+        if interp.state.vars.frame_depth() == 0 {
+            diagnose(interp, format!("{name}: can only be used in a function"));
+            return Status::FAILURE;
+        }
+        CreateScope::Local
+    } else {
+        bsh_runtime::declaration_scope(&interp.state.vars)
+    };
+
+    let mut status = Status::SUCCESS;
+    for operand in &argv[index..] {
+        let (variable, value, append) = split_assignment(operand);
+        if !bsh_runtime::Vars::is_name(variable) {
+            diagnose(
+                interp,
+                format!(
+                    "{name}: {}: not a valid identifier",
+                    String::from_utf8_lossy(variable)
+                ),
+            );
+            status = Status::FAILURE;
+            continue;
+        }
+        if scope == CreateScope::Local {
+            if let Err(error) = interp.state.vars.declare_local(variable) {
+                diagnose(interp, format!("{name}: {}", error.message()));
+                status = Status::FAILURE;
+                continue;
+            }
+        }
+        if indexed || associative {
+            if let Err(error) = interp.state.vars.declare_shape(
+                variable,
+                if associative {
+                    bsh_runtime::ArrayShape::Associative
+                } else {
+                    bsh_runtime::ArrayShape::Indexed
+                },
+            ) {
+                diagnose(interp, format!("{name}: {}", error.message()));
+                status = Status::FAILURE;
+                continue;
+            }
+        }
+        if let Some(value) = value {
+            let result = if append {
+                interp.state.vars.append(variable, value)
+            } else {
+                interp.state.vars.assign_scalar_in(variable, value, scope)
+            };
+            if let Err(error) = result {
+                diagnose(interp, format!("{name}: {}", error.message()));
+                status = Status::FAILURE;
+                continue;
+            }
+        }
+        let attribute = (|| {
+            if export {
+                interp.state.vars.mark_exported(variable)?;
+            }
+            if readonly {
+                interp.state.vars.mark_readonly(variable)?;
+            }
+            if integer {
+                interp.state.vars.mark_integer(variable)?;
+            }
+            Ok::<(), bsh_runtime::Error>(())
+        })();
+        if let Err(error) = attribute {
+            diagnose(interp, format!("{name}: {}", error.message()));
+            status = Status::FAILURE;
+        }
+    }
+    status
+}
+
+fn bi_local(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
+    declare(interp, argv, true)
+}
+
+fn bi_declare(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
+    declare(interp, argv, false)
+}
