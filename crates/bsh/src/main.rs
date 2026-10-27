@@ -181,6 +181,14 @@ fn parse_args(args: &[OsString]) -> Result<(Mode, bool, ShellFlags), String> {
                 }
                 break;
             }
+            other if other.starts_with(b"--") => {
+                // Every long option this shell has is matched above; the rest
+                // are errors rather than a bundle of `set` letters.
+                return Err(format!(
+                    "unknown option `{}`",
+                    String::from_utf8_lossy(other)
+                ));
+            }
             other if other.len() > 1 && (other[0] == b'-' || other[0] == b'+') => {
                 // A bundle of `set` letters: `-eu`, `+x`. The letters this CLI
                 // handles itself were matched above, so anything here is a
