@@ -641,6 +641,37 @@ glibc); `[[.ch.]]`/`[[=a=]]` are ordinary bracket members; bash's
 meaning); malformed extglob groups degrade to literal text; nesting is capped at
 128.
 
+### bsh-runtime additions (built-in cluster)
+
+- `AliasTable` lives in `ShellState`; a fork copies it and `exec` does not.
+- `CommandKind { Alias, Keyword, Function, Builtin(Tier), External }`,
+  `CommandInfo`, and `ResolveQuery { all, skip_functions, files_only,
+  classify, default_path, fresh }` with `EXECUTION`/`CLASSIFY` presets.
+- Five defaulted `ShellHost` seams: `resolve_command`, `run_builtin_direct`,
+  `run_command_direct`, `unset_function`, `function_source`. Anything that
+  answers "what would run" must go through these, so `type`, `command -v` and
+  execution cannot disagree.
+- `ShellError::reached_via_wrapper` plus `codes::NOT_FOUND` (511): a failing
+  special built-in reached through `command`/`builtin` must not exit the shell
+  (POSIX §2.8.1 note 1).
+- `OPTIND` is initialised to 1 by the VM at startup; assigning to it is
+  getopts' reset signal, which is why `Vars::optind_writes` exists.
+
+### bsh-vm additions
+
+`Interp::each_candidate` is the single resolution walk (alias → keyword →
+special → function → intrinsic → regular/extension → `PATH`); `resolve()` is
+gone. The `PATH`/hash table lives on `Interp`. `hash` and `mapfile`/`readarray`
+are executor bodies with registry stubs, like `read` and `cd`, because their
+state is the hash table and the descriptor table. `read::read_record` is the
+record reader `mapfile` shares with `read`.
+
+`Interp::pattern_flags()` answers from `shopt`: `extglob` and `nocasematch` are
+the pattern dialect, while `utf8` stays off (byte units, C locale — the policy
+`${#x}` counts with). `shopt` itself is a state-only runtime built-in over the
+option table, so an unknown name is an error rather than a silent no-op.
+
+
 ---
 
 ## Diagnostic codes

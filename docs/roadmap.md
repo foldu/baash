@@ -54,11 +54,11 @@ Measured by `array.test.sh` (78), `array-sparse.test.sh` (40),
 - [x] `-d delim`, `-n count`, `-N count`, `-p prompt`, `-s`, `-u fd`, `-t timeout`, `-a array`.
 - [x] EOF returns 1 with a partial line delivered; **never over-read** — a
       second reader must see the rest of the input.
-- [ ] `getopts` with `OPTIND`/`OPTARG`, silent and verbose modes.
-- [ ] `type`, `command -v`/`-V`, `hash`.
-- [ ] `alias`/`unalias`, including aliases applied only at command position and
-      not recursively to themselves.
-- [ ] `unset -f`, `unset -v`, `readonly -a`.
+- [x] `getopts` with `OPTIND`/`OPTARG` (28/31).
+- [x] `type`, `command -v`/`-V`, `hash`, `builtin` (42/68 type, 114/184 command).
+- [x] `alias`/`unalias` (47/63), applied only at command position and not
+      recursively to themselves.
+- [x] `unset -f`, `unset -v`, `readonly -a`.
 - [x] `kill` (also needed by the `trap` tests).
 - [ ] `builtin`, which several `kill -l` cases use (`builtin kill -l`).
 

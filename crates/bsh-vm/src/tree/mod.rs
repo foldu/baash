@@ -631,6 +631,18 @@ impl bsh_lang::Vars for Interp {
 }
 
 impl bsh_lang::Shell for Interp {
+    fn pattern_flags(&self) -> bsh_pattern::Flags {
+        // `utf8` stays at its default (byte units): expansion forces the C
+        // locale, the same policy `${#x}` uses. What comes from `shopt` is
+        // the pattern *dialect*.
+        bsh_pattern::Flags {
+            extglob: self.state.opts.extglob,
+            nocasematch: self.state.opts.nocasematch,
+            pathname: false,
+            utf8: false,
+        }
+    }
+
     fn command_substitution(
         &mut self,
         cmd: &bsh_lang::CommandSub,

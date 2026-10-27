@@ -395,7 +395,7 @@ fn builtin_names_are_unique_and_implemented_set_is_explicit() {
         implemented,
         [
             ":", "alias", "builtin", "command", "exit", "export", "false", "getopts", "readonly",
-            "set", "shift", "trap", "true", "type", "unalias", "unset",
+            "set", "shift", "shopt", "trap", "true", "type", "unalias", "unset",
         ]
     );
     assert_eq!(stubs_in(Tier::Special), 15 - 8);

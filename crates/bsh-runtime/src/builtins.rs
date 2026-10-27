@@ -161,6 +161,127 @@ impl BuiltinDef {
     }
 }
 
+/// `shopt [-s|-u] [-q] [-p] [name…]`.
+///
+/// Every name is a `shopt`-table option; the table is the single source of
+/// truth, so an unknown name is an error rather than a silently ignored word.
+fn bi_shopt(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
+    let mut on: Option<bool> = None;
+    let mut quiet = false;
+    let mut printable = false;
+    let mut names: Vec<&[u8]> = Vec::new();
+
+    for argument in &argv[1..] {
+        match *argument {
+            b"-s" => on = Some(true),
+            b"-u" => on = Some(false),
+            b"-q" => quiet = true,
+            b"-p" => printable = true,
+            b"--" => {}
+            other if other.starts_with(b"-") && other.len() > 1 => {
+                // `-su` and friends.
+                for letter in &other[1..] {
+                    match letter {
+                        b's' => on = Some(true),
+                        b'u' => on = Some(false),
+                        b'q' => quiet = true,
+                        b'p' => printable = true,
+                        _ => {
+                            host.diagnose(&Diagnostic::error(
+                                codes::USAGE,
+                                0..0,
+                                format!("shopt: -{}: invalid option", char::from(*letter)),
+                            ));
+                            return Status(2);
+                        }
+                    }
+                }
+            }
+            other => names.push(other),
+        }
+    }
+
+    let opts = &host.state().opts;
+    let known: Vec<&'static str> = opts.names(OptionKind::Shopt).collect();
+
+    if names.is_empty() {
+        if quiet {
+            return Status::SUCCESS;
+        }
+        let mut out = Vec::new();
+        for option in opts.options(OptionKind::Shopt) {
+            if printable {
+                out.extend_from_slice(b"shopt -");
+                out.push(if option.on { b's' } else { b'u' });
+                out.push(b' ');
+                out.extend_from_slice(option.name.as_bytes());
+                out.push(b'\n');
+            } else {
+                out.extend_from_slice(option.name.as_bytes());
+                out.extend_from_slice(if option.on { b"\ton\n" } else { b"\toff\n" });
+            }
+        }
+        host.write_out(&out);
+        return Status::SUCCESS;
+    }
+
+    let mut status = Status::SUCCESS;
+    for name in names {
+        let Some(_option) = known.iter().find(|known| known.as_bytes() == name) else {
+            host.diagnose(&Diagnostic::error(
+                codes::USAGE,
+                0..0,
+                format!(
+                    "shopt: {}: invalid shell option name",
+                    String::from_utf8_lossy(name)
+                ),
+            ));
+            status = Status::FAILURE;
+            continue;
+        };
+        match on {
+            Some(value) => {
+                if let Err(error) = host
+                    .state()
+                    .opts
+                    .set_by_name_in(OptionKind::Shopt, name, value)
+                {
+                    host.diagnose(&Diagnostic::error(
+                        codes::USAGE,
+                        0..0,
+                        format!("shopt: {error}"),
+                    ));
+                    status = Status::FAILURE;
+                    continue;
+                }
+                if printable {
+                    // `-p` with `-s` prints the resulting state.
+                    let mut out = b"shopt -".to_vec();
+                    out.push(if value { b's' } else { b'u' });
+                    out.push(b' ');
+                    out.extend_from_slice(name);
+                    out.push(b'\n');
+                    host.write_out(&out);
+                }
+            }
+            None => {
+                let current = host.state().opts.get_by_name(name).unwrap_or(false);
+                if printable {
+                    let mut out = b"shopt -".to_vec();
+                    out.push(if current { b's' } else { b'u' });
+                    out.push(b' ');
+                    out.extend_from_slice(name);
+                    out.push(b'\n');
+                    host.write_out(&out);
+                } else if quiet && !current {
+                    status = Status::FAILURE;
+                }
+            }
+        }
+    }
+    status
+}
+
 /// The registry. Fixed lists are asserted by tests; order within a tier is
 /// alphabetical for predictable listings.
 pub const BUILTINS: &[BuiltinDef] = &[
@@ -222,7 +343,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     def("popd", Tier::Extension, None),
     def("pushd", Tier::Extension, None),
     def("readarray", Tier::Extension, None),
-    def("shopt", Tier::Extension, None),
+    def("shopt", Tier::Extension, Some(bi_shopt)),
     def("source", Tier::Extension, None),
     def("typeset", Tier::Extension, None),
 ];

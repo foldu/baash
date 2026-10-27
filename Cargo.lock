@@ -121,6 +121,7 @@ dependencies = [
  "bsh-compile",
  "bsh-diag",
  "bsh-lang",
+ "bsh-pattern",
  "bsh-runtime",
  "bsh-syntax",
  "bsh-sys",
