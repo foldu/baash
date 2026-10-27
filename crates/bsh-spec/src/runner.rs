@@ -148,6 +148,14 @@ impl Report {
     pub fn passed(&self) -> usize {
         self.files.iter().map(FileResult::passed).sum()
     }
+    /// Passes counting only a case's primary expectation.
+    ///
+    /// A case that passed by matching an `## OK <shell>` alternative is not a
+    /// strict pass: an upstream runner given a shell name that appears in no
+    /// block would have judged it against the primary expectation alone.
+    pub fn passed_strict(&self) -> usize {
+        self.passed() - self.ok_overrides()
+    }
     pub fn skipped(&self) -> usize {
         self.files.iter().map(FileResult::skipped).sum()
     }
@@ -425,6 +433,23 @@ fn missing_helper(case: &Case) -> Option<String> {
         return Some("missing helper: python2".to_string());
     }
     None
+}
+
+/// Check that the suite's helper programs can actually run.
+///
+/// Every helper in `spec/oils/bin` is a `python2` script. When `python2` is
+/// absent the harness writes Python 3 equivalents, so `python3` is required
+/// instead. If neither exists, `argv.py` fails in 772 lines across 58 files
+/// *for every shell* — which would look like the shell regressing when in fact
+/// nothing could be measured. Callers turn this into a distinct exit code so
+/// "cannot measure" never looks like "got worse".
+pub fn require_helper_runtime() -> Result<(), String> {
+    if command_on_path("python2") || command_on_path("python3") {
+        return Ok(());
+    }
+    Err("the suite's helpers need python2 or python3 on PATH; \
+         without one, no case can be measured"
+        .to_string())
 }
 
 fn command_on_path(name: &str) -> bool {

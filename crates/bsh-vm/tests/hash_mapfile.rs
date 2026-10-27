@@ -63,6 +63,7 @@ fn write_script(dir: &Path, name: &str, status: i32) -> PathBuf {
 
 #[test]
 fn a_cached_path_wins_until_the_hash_is_cleared() {
+    let _serial = serial();
     let dir = temp_dir("hash-cache");
     let one = dir.join("one");
     let two = dir.join("two");
@@ -105,6 +106,7 @@ fn a_cached_path_wins_until_the_hash_is_cleared() {
 
 #[test]
 fn hash_d_forgets_one_name_and_hash_p_pins_a_path() {
+    let _serial = serial();
     let dir = temp_dir("hash-d");
     let one = dir.join("one");
     let two = dir.join("two");
@@ -148,6 +150,7 @@ fn hash_d_forgets_one_name_and_hash_p_pins_a_path() {
 
 #[test]
 fn hash_reports_a_name_it_cannot_find() {
+    let _serial = serial();
     let mut interp = shell();
     let status = interp.run_named("<hash>", b"hash definitely-not-a-program");
     assert_eq!(status.exit_code(), 1);

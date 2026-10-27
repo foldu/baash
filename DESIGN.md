@@ -1159,9 +1159,16 @@ The parser and the VM are the fun parts. Ranked by effective effort:
    scripts, and the harness substitutes python3 equivalents when python2 is
    absent — without them `argv.py` fails in 772 lines for *every* shell, bash
    included, which is why bash's 92.4% is the check that the substitution is
-   faithful. Second, `## OK <shell>` alternatives are accepted (worth 48
-   passes), as upstream intends; the harness prints that number separately so
-   it can never be mistaken for strict conformance.
+   faithful. If neither interpreter is available the harness refuses to run
+   and exits 2: "cannot measure" must never look like "got worse".
+
+   Second, two counts are recorded. `total` accepts every `## OK <shell>`
+   alternative the suite offers — fair for a new shell, whose name appears in
+   no block written before it existed — and `strict` counts only the primary
+   expectation, which is what an upstream runner would award us. The difference
+   is the leniency budget, and recording both means it cannot grow unnoticed: a
+   change that trades strict passes for alternatives shows up as a strict
+   regression even when the total rises.
 3. **Real-world corpus** `[oils]`: every autoconf `configure` script (brutally
    portable shell, the best corpus that exists), Debian maintainer scripts,
    `/etc/init.d`, plus `bash-completion`'s own function files. Gate: parse 100%,

@@ -45,13 +45,20 @@ conformance:
   stage: check
   tags: [nix]
   <<: *nix_cache
-  # allow_failure until a runner with a pinned environment exists: the number
-  # depends on python3 being present for the suite's helpers, and on the
-  # reference shells. The baseline in the dev environment is 1013/2787.
-  allow_failure: true
+  # A ratchet, not a dashboard: this job fails the pipeline when the pass count
+  # drops below crates/bsh-spec/baseline.txt. Re-record with `--record` only
+  # when a drop is intended, and commit the file with the change that caused it.
+  #
+  # The tolerance covers one known load-sensitive case (builtin-trap's
+  # "traps are cleared in subshell (started with &)" flips under parallel
+  # load); narrowing it to 0 is a TODO once that race is fixed.
+  #
+  # Exit codes: 1 = below baseline, 2 = cannot measure (no python2/python3 for
+  # the suite's helpers). The second is distinct on purpose: a runner that
+  # cannot measure must not look like a shell that got worse.
   script:
     - nix develop --command cargo build -p bsh
-    - nix develop --command cargo run -p bsh-spec -- --shell target/debug/bsh --min 1000
+    - nix develop --command cargo run -p bsh-spec -- --shell target/debug/bsh --ratchet --tolerance 5
 
 package:
   stage: package

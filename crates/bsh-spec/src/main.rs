@@ -24,6 +24,11 @@ OPTIONS
     --list-failures     Print each failing case with a short diff
     --json OUT          Write a machine-readable report to OUT
     --min N             Exit 1 when fewer than N cases pass
+    --baseline PATH     Baseline file (default: crates/bsh-spec/baseline.txt)
+    --record            Write this run's numbers to the baseline file
+    --ratchet           Exit 1 when the count falls below the baseline
+    --strict            Ratchet and --min use the primary-expectation count
+    --tolerance N       Allow a dip of N cases before the ratchet fails
     --timeout SECS      Per-case timeout (default: 10)
     --jobs N            Cases are run in parallel across files (default: 4)
     --keep-temp         Keep the per-run temp directory
@@ -50,6 +55,11 @@ fn main() -> std::process::ExitCode {
 
 #[derive(Debug)]
 struct Cli {
+    baseline: Option<PathBuf>,
+    record: bool,
+    ratchet: bool,
+    strict: bool,
+    tolerance: usize,
     shell: Option<PathBuf>,
     spec_dir: Option<PathBuf>,
     filter: Option<String>,
@@ -157,6 +167,9 @@ fn run(started: Instant) -> Result<std::process::ExitCode, String> {
         keep_temp: cli.keep_temp,
         compare: references,
     };
+    // Refuse to measure rather than report a number that means nothing.
+    bsh_spec::runner::require_helper_runtime()?;
+
     let report = bsh_spec::runner::run(&plans, &options)?;
 
     print_report(&report, cli.list_failures);
@@ -184,15 +197,62 @@ fn run(started: Instant) -> Result<std::process::ExitCode, String> {
         println!("SLOWEST FILES: {}", names.join(", "));
     }
 
+    let baseline_path = cli
+        .baseline
+        .clone()
+        .unwrap_or_else(|| workspace.join("crates/bsh-spec/baseline.txt"));
+
+    if cli.record {
+        let measured = bsh_spec::baseline::Baseline::of(&report);
+        measured.save(&baseline_path)?;
+        println!("RECORDED: {}", baseline_path.display());
+    }
+
     if let Some(min) = cli.min {
-        if report.passed() < min {
+        let measured = if cli.strict {
+            report.passed_strict()
+        } else {
+            report.passed()
+        };
+        if measured < min {
             eprintln!(
-                "bsh-spec: pass count {} is below --min {min}",
-                report.passed()
+                "bsh-spec: {} passes is below --min {min}",
+                if cli.strict { "strict" } else { "total" }
             );
             return Ok(std::process::ExitCode::from(1));
         }
     }
+
+    if cli.ratchet {
+        let baseline = bsh_spec::baseline::Baseline::load(&baseline_path)?;
+        let measure = if cli.strict {
+            bsh_spec::baseline::Measure::Strict
+        } else {
+            bsh_spec::baseline::Measure::Total
+        };
+        let recorded = match measure {
+            bsh_spec::baseline::Measure::Strict => baseline.strict,
+            bsh_spec::baseline::Measure::Total => baseline.total,
+        };
+        let measured = measure.of(&report);
+        let verdict = bsh_spec::baseline::check(recorded, measured, cli.tolerance);
+        let label = if cli.strict { "strict" } else { "total" };
+        match verdict {
+            bsh_spec::baseline::Verdict::Held { delta } => {
+                println!("RATCHET: {label} {measured} vs baseline {recorded} ({delta:+})");
+            }
+            bsh_spec::baseline::Verdict::Regressed { delta, missing } => {
+                eprintln!(
+                    "bsh-spec: {label} count {measured} is {missing} below the baseline \
+                     {recorded} (tolerance {}) — {delta}",
+                    cli.tolerance
+                );
+                eprintln!("Re-record only if the drop is intended: --record");
+                return Ok(std::process::ExitCode::from(1));
+            }
+        }
+    }
+
     Ok(std::process::ExitCode::SUCCESS)
 }
 
@@ -237,6 +297,14 @@ fn print_report(report: &Report, list_failures: bool) {
         }
         println!("{}", line.trim_end());
     }
+
+    println!(
+        "STRICT: {}/{} passes count only the primary expectation ({} rely on \
+         an `## OK <shell>` alternative)",
+        report.passed_strict(),
+        report.compared(),
+        report.ok_overrides()
+    );
 
     if list_failures {
         for file in &report.files {
@@ -390,6 +458,11 @@ fn parse_args() -> Result<Cli, String> {
         list_failures: false,
         json: None,
         min: None,
+        baseline: None,
+        record: false,
+        ratchet: false,
+        strict: false,
+        tolerance: 0,
         timeout: Duration::from_secs(10),
         jobs: 4,
         keep_temp: false,
@@ -424,6 +497,21 @@ fn parse_args() -> Result<Cli, String> {
             }
             "--list-failures" => cli.list_failures = true,
             "--json" => cli.json = Some(PathBuf::from(value("--json")?)),
+            "--baseline" => {
+                let raw = value("--baseline")?;
+                cli.baseline = Some(PathBuf::from(raw));
+            }
+            "--record" => cli.record = true,
+            "--ratchet" => cli.ratchet = true,
+            "--strict" => cli.strict = true,
+            "--tolerance" => {
+                let raw = value("--tolerance")?;
+                cli.tolerance = raw
+                    .to_str()
+                    .ok_or("--tolerance must be valid UTF-8")?
+                    .parse()
+                    .map_err(|_| "--tolerance requires a non-negative integer")?;
+            }
             "--min" => {
                 let raw = value("--min")?;
                 cli.min = Some(

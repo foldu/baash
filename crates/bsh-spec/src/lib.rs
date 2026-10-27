@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod baseline;
 pub mod diff;
 pub mod json;
 pub mod parse;
