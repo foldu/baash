@@ -88,6 +88,21 @@ pub trait Shell: Vars {
         let _ = user;
         None
     }
+
+    /// Options for the pattern operators `${x#pat}`-`${x,,pat}`.
+    ///
+    /// **The runtime owns these.** `shopt -s extglob` sets
+    /// [`bsh_pattern::Flags::extglob`], and `shopt -s nocasematch` sets
+    /// [`bsh_pattern::Flags::nocasematch`] for `${x/pat/rep}` and
+    /// `${x^^pat}`-style matching but *not* for the four strip operators,
+    /// which [`crate::expand`] forces caseless off. The default is both off,
+    /// which is what a shell without a `shopt` seam yet can honestly claim.
+    ///
+    /// [`bsh_pattern::Flags::utf8`] is ignored: expansion forces byte units
+    /// (the C locale), the same policy `${#x}` counts with.
+    fn pattern_flags(&self) -> bsh_pattern::Flags {
+        bsh_pattern::Flags::default()
+    }
 }
 
 /// A [`Vars`] with no variables at all.

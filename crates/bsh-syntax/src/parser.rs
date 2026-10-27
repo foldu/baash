@@ -29,7 +29,7 @@ use crate::lexer::{
 use crate::{Token, TokenKind};
 use bsh_diag::{Diagnostic, Label, SourceFile, Span};
 use bsh_lang::{
-    Arithmetic, CommandSub, Lit, LitKind, ParamExp, ParamName, ParamOp, Part, ProcSubDir,
+    Arithmetic, CaseHow, CommandSub, Lit, LitKind, ParamExp, ParamName, ParamOp, Part, ProcSubDir,
     ProcessSub, TildeSpec, UnsupportedOp, Word,
 };
 
@@ -2573,7 +2573,6 @@ impl<'a> Parser<'a, '_> {
 
         let rest = &text[i..];
         let op_start = inner.start + i;
-        let arg_span = op_start..inner.end;
         let list_param = matches!(name, ParamName::At | ParamName::Star);
         let array_param = matches!(name, ParamName::Elements { .. });
 
@@ -2617,37 +2616,26 @@ impl<'a> Parser<'a, '_> {
         } else if rest.starts_with(b"@") {
             ParamOp::Unsupported(UnsupportedOp::Transform)
         } else if rest.starts_with(b"^^") || rest.starts_with(b",,") {
-            let two = &rest[..2];
-            if two == b"^^" {
-                if list_param {
-                    ParamOp::Unsupported(UnsupportedOp::CaseOfList)
-                } else if rest.len() == 2 {
-                    ParamOp::Upper
-                } else {
-                    ParamOp::Unsupported(UnsupportedOp::CasePattern)
-                }
-            } else if list_param {
-                ParamOp::Unsupported(UnsupportedOp::CaseOfList)
-            } else if rest.len() == 2 {
-                ParamOp::Lower
+            let how = if rest.starts_with(b"^^") {
+                CaseHow::Upper
             } else {
-                ParamOp::Unsupported(UnsupportedOp::CasePattern)
+                CaseHow::Lower
+            };
+            if list_param || array_param {
+                ParamOp::Unsupported(UnsupportedOp::CaseOfList)
+            } else {
+                self.parse_case_op(how, op_start + 2, inner.end)
             }
-        } else if rest.starts_with(b"^") {
-            if list_param {
-                ParamOp::Unsupported(UnsupportedOp::CaseOfList)
-            } else if rest.len() == 1 {
-                ParamOp::UpperFirst
+        } else if rest.starts_with(b"^") || rest.starts_with(b",") {
+            let how = if rest.starts_with(b"^") {
+                CaseHow::UpperFirst
             } else {
-                ParamOp::Unsupported(UnsupportedOp::CasePattern)
-            }
-        } else if rest.starts_with(b",") {
-            if list_param {
+                CaseHow::LowerFirst
+            };
+            if list_param || array_param {
                 ParamOp::Unsupported(UnsupportedOp::CaseOfList)
-            } else if rest.len() == 1 {
-                ParamOp::LowerFirst
             } else {
-                ParamOp::Unsupported(UnsupportedOp::CasePattern)
+                self.parse_case_op(how, op_start + 1, inner.end)
             }
         } else if rest.starts_with(b":") {
             // Array and positional-list slices evaluate their bounds
@@ -2659,10 +2647,23 @@ impl<'a> Parser<'a, '_> {
                 substring_op(&src[(op_start + 1)..inner.end])
             }
         } else {
-            let _ = arg_span;
             ParamOp::Unsupported(UnsupportedOp::Other)
         };
         ParamExp { name, op, span }
+    }
+
+    /// `${x^pat}`, `${x^^pat}`, `${x,pat}`, `${x,,pat}`.
+    ///
+    /// The pattern is a word: `${x^^[a-c]}` matches a character class and
+    /// `${x^^"$p"}` compares literally. With no pattern written, `pattern` is
+    /// `None`, which bash treats as "every character".
+    fn parse_case_op(&mut self, how: CaseHow, start: usize, end: usize) -> ParamOp {
+        let pattern = if start < end {
+            Some(self.parse_word_span(start..end))
+        } else {
+            None
+        };
+        ParamOp::Case { how, pattern }
     }
 
     /// Parse a substitution body only to validate and to collect its

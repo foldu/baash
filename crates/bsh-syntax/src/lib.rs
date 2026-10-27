@@ -45,8 +45,8 @@ pub use ast::{
     SimpleCommand,
 };
 pub use bsh_lang::{
-    Arithmetic, CmdSubStyle, CommandSub, DoubleQ, Lit, LitKind, ParamExp, ParamName, ParamOp, Part,
-    ProcSubDir, ProcessSub, TildeSpec, UnsupportedOp, Word,
+    Arithmetic, CaseHow, CmdSubStyle, CommandSub, DoubleQ, Lit, LitKind, ParamExp, ParamName,
+    ParamOp, Part, ProcSubDir, ProcessSub, TildeSpec, UnsupportedOp, Word,
 };
 pub use lexer::{
     HereDoc, Lexed, OpenConstruct, Token, TokenKind, Unterminated, UnterminatedKind, lex, lex_full,

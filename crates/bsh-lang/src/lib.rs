@@ -90,8 +90,8 @@ pub use ifs::Ifs;
 pub use quote::{QuoteCtx, quote};
 pub use vars::{ArrayKind, ArrayValue, SetError, Vars};
 pub use word::{
-    Arithmetic, CmdSubStyle, CommandSub, DoubleQ, Lit, LitKind, ParamExp, ParamName, ParamOp, Part,
-    ProcSubDir, ProcessSub, TildeSpec, UnsupportedOp, Word,
+    Arithmetic, CaseHow, CmdSubStyle, CommandSub, DoubleQ, Lit, LitKind, ParamExp, ParamName,
+    ParamOp, Part, ProcSubDir, ProcessSub, TildeSpec, UnsupportedOp, Word,
 };
 
 #[cfg(test)]

@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, HashMap};
 use crate::host::Shell;
 use crate::vars::{ArrayValue, SetError, Vars};
 use crate::word::{
-    Arithmetic, CmdSubStyle, CommandSub, DoubleQ, Lit, ParamExp, ParamName, ParamOp, Part,
+    Arithmetic, CaseHow, CmdSubStyle, CommandSub, DoubleQ, Lit, ParamExp, ParamName, ParamOp, Part,
     TildeSpec, UnsupportedOp, Word,
 };
 use crate::{Error, ErrorKind, Field};
@@ -49,6 +49,8 @@ pub struct TestShell {
     pub set_calls: Vec<(Vec<u8>, Vec<u8>)>,
     /// When true, [`Vars::set`] refuses with [`SetError::ReadOnly`].
     pub read_only: bool,
+    /// `set -u`: expanding an unset parameter is an error.
+    pub nounset: bool,
     /// Arrays, by name. Separate from `vars` so a name cannot be both.
     pub indexed: HashMap<Vec<u8>, BTreeMap<i64, Vec<u8>>>,
     /// Associative arrays, in insertion order.
@@ -113,6 +115,13 @@ impl TestShell {
         self
     }
 
+    /// Turn `set -u` (nounset) on.
+    #[must_use]
+    pub fn nounset(mut self, on: bool) -> Self {
+        self.nounset = on;
+        self
+    }
+
     /// Refuse assignments.
     #[must_use]
     pub fn read_only(mut self) -> Self {
@@ -148,6 +157,10 @@ impl TestShell {
 }
 
 impl Vars for TestShell {
+    fn nounset(&self) -> bool {
+        self.nounset
+    }
+
     fn get(&self, name: &[u8]) -> Option<&[u8]> {
         self.vars.get(name).map(Vec::as_slice)
     }
@@ -725,6 +738,20 @@ fn parse_param(inner: &[u8]) -> Part {
     } else {
         op
     };
+    // Case conversion of a whole list is out of scope, exactly as the real
+    // front end reports it. The strip and replacement operators *are*
+    // vectorised, so only `Case` is downgraded.
+    let op = match &op {
+        ParamOp::Case { .. }
+            if matches!(
+                name,
+                ParamName::Elements { .. } | ParamName::At | ParamName::Star
+            ) =>
+        {
+            ParamOp::Unsupported(UnsupportedOp::CaseOfList)
+        }
+        _ => op,
+    };
     Part::Param(ParamExp::new(name, op, span))
 }
 
@@ -809,17 +836,17 @@ fn parse_op(rest: &[u8]) -> ParamOp {
     if let Some(body) = rest.strip_prefix(b":") {
         return parse_substring(body);
     }
-    if rest == b"^^" {
-        return ParamOp::Upper;
+    if let Some(body) = rest.strip_prefix(b"^^") {
+        return case_op(body, CaseHow::Upper);
     }
-    if rest == b",," {
-        return ParamOp::Lower;
+    if let Some(body) = rest.strip_prefix(b",,") {
+        return case_op(body, CaseHow::Lower);
     }
-    if rest == b"^" {
-        return ParamOp::UpperFirst;
+    if let Some(body) = rest.strip_prefix(b"^") {
+        return case_op(body, CaseHow::UpperFirst);
     }
-    if rest == b"," {
-        return ParamOp::LowerFirst;
+    if let Some(body) = rest.strip_prefix(b",") {
+        return case_op(body, CaseHow::LowerFirst);
     }
     let unsupported = match rest[0] {
         b'#' => UnsupportedOp::RemovePrefix,
@@ -827,10 +854,16 @@ fn parse_op(rest: &[u8]) -> ParamOp {
         b'/' => UnsupportedOp::Replace,
         b'@' => UnsupportedOp::Transform,
         b'[' => UnsupportedOp::ArraySubscript,
-        b'^' | b',' => UnsupportedOp::CasePattern,
         _ => UnsupportedOp::Other,
     };
     ParamOp::Unsupported(unsupported)
+}
+
+/// `${x^pat}` and the other case operators; `body` is what follows the
+/// operator, empty when no pattern was written.
+fn case_op(body: &[u8], how: CaseHow) -> ParamOp {
+    let pattern = (!body.is_empty()).then(|| parse_subword(body));
+    ParamOp::Case { how, pattern }
 }
 
 /// `${a[@]:off:len}` / `${@:off:len}`: the bounds stay words.

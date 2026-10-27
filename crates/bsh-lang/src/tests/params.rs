@@ -214,8 +214,9 @@ fn unsupported_operators_fail_instead_of_guessing() {
         ("${x/a/b}", UnsupportedOp::Replace),
         ("${!x}", UnsupportedOp::Indirect),
         ("${x@Q}", UnsupportedOp::Transform),
-        ("${x^^p}", UnsupportedOp::CasePattern),
+        ("${x@P}", UnsupportedOp::Transform),
         ("${@^^}", UnsupportedOp::CaseOfList),
+        ("${a[@]^^}", UnsupportedOp::CaseOfList),
     ];
     for (source, expected) in cases {
         let mut shell = TestShell::new().var(b"x", b"abc").positionals(&[b"a"]);
@@ -235,7 +236,7 @@ fn unsupported_error_has_the_expansion_span() {
         Part::lit(b"pre"),
         Part::Param(ParamExp::new(
             ParamName::var(b"x"),
-            ParamOp::Unsupported(UnsupportedOp::RemovePrefix),
+            ParamOp::Unsupported(UnsupportedOp::Transform),
             3..10,
         )),
         Part::lit(b"post"),

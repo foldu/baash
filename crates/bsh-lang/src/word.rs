@@ -421,14 +421,21 @@ pub enum ParamOp {
         /// The length expression; negative is an error, as bash reports.
         length: Option<Word>,
     },
-    /// `${x^^}`: ASCII upper-case the whole value.
-    Upper,
-    /// `${x,,}`: ASCII lower-case the whole value.
-    Lower,
-    /// `${x^}`: ASCII upper-case the first byte.
-    UpperFirst,
-    /// `${x,}`: ASCII lower-case the first byte.
-    LowerFirst,
+    /// `${x^pat}`, `${x^^pat}`, `${x,pat}`, `${x,,pat}`: ASCII case conversion
+    /// of the characters that match `pattern`.
+    ///
+    /// "Character" is a byte: ßhell matches in the C locale, the same unit
+    /// `${#x}` counts and `bsh-pattern` uses with `utf8: false`. A non-ASCII
+    /// byte is never converted, because `[A-Z]`/`[a-z]` are the only case
+    /// mappings the shell applies (bash in `LC_ALL=C` does the same).
+    Case {
+        /// The direction and reach of the conversion.
+        how: CaseHow,
+        /// The pattern matched against each character; `None` when the source
+        /// wrote none, which matches every character (`^`/`,` still apply to
+        /// the first one only).
+        pattern: Option<Word>,
+    },
     /// `${!a[@]}` / `${!a[*]}`: the array's indices (or keys), in the order
     /// [`crate::Vars::array`] reports them. `${!x}` on a plain variable stays
     /// [`ParamOp::Unsupported`] with [`UnsupportedOp::Indirect`].
@@ -465,6 +472,49 @@ impl ParamOp {
             _ => None,
         }
     }
+
+    /// Visit the pattern and replacement words of the pattern operators, in
+    /// source order.
+    ///
+    /// Tilde expansion walks these: bash expands a leading `~` in a pattern
+    /// (`HOME=/h; x=/h/foo; "${x#~}"` is `/foo`) and in a replacement
+    /// (`"${v/b/~/}"` is `a/h/c`), and it does so *inside double quotes*, where
+    /// `"${x:-~}"` stays literal. That is why these are expanded with the
+    /// quote context switched off while [`ParamOp::word_mut`] keeps it.
+    pub fn visit_pattern_words_mut(&mut self, visit: &mut impl FnMut(&mut Word)) {
+        if let ParamOp::Case {
+            pattern: Some(pattern),
+            ..
+        } = self
+        {
+            visit(pattern);
+        }
+    }
+}
+
+/// The direction and reach of a [`ParamOp::Case`] conversion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaseHow {
+    /// `${x^pat}`: upper-case the first character when it matches.
+    UpperFirst,
+    /// `${x^^pat}`: upper-case every matching character.
+    Upper,
+    /// `${x,pat}`: lower-case the first character when it matches.
+    LowerFirst,
+    /// `${x,,pat}`: lower-case every matching character.
+    Lower,
+}
+
+impl CaseHow {
+    /// Whether only the value's first character is considered.
+    pub fn first_only(self) -> bool {
+        matches!(self, CaseHow::UpperFirst | CaseHow::LowerFirst)
+    }
+
+    /// Whether matching characters are upper-cased rather than lower-cased.
+    pub fn to_upper(self) -> bool {
+        matches!(self, CaseHow::Upper | CaseHow::UpperFirst)
+    }
 }
 
 /// Bash operators that need pattern matching or re-parsing, left out of scope
@@ -483,8 +533,6 @@ pub enum UnsupportedOp {
     Indirect,
     /// `${x@Q}` and the other transformations.
     Transform,
-    /// `${x^^pat}`, `${x,,pat}`: case conversion driven by a pattern.
-    CasePattern,
     /// `${@^^}` / `${*^^}`: case conversion of a parameter list.
     CaseOfList,
     /// `${@:offset:length}`: substring of a parameter list.
@@ -510,7 +558,6 @@ impl UnsupportedOp {
             UnsupportedOp::Replace => "pattern substitution (`${x/pat/rep}`)",
             UnsupportedOp::Indirect => "indirect expansion (`${!x}`)",
             UnsupportedOp::Transform => "parameter transformation (`${x@Q}`)",
-            UnsupportedOp::CasePattern => "pattern case conversion",
             UnsupportedOp::CaseOfList => "case conversion of `$@`/`$*`",
             UnsupportedOp::SubstringOfList => "substring of `$@`/`$*`",
             UnsupportedOp::ArraySubscript => "array subscript",

@@ -58,6 +58,7 @@ name = "bsh-lang"
 version = "0.0.0"
 dependencies = [
  "bsh-diag",
+ "bsh-pattern",
  "smallvec",
 ]
 

@@ -4,8 +4,8 @@
 mod common;
 
 use bsh_syntax::{
-    AndOrOp, CaseTerm, CmdSubStyle, DoubleQ, Lit, LitKind, NodeKind, ParamExp, ParamName, ParamOp,
-    Part, PipeOp, RedirectOp, Separator, UnsupportedOp,
+    AndOrOp, CaseHow, CaseTerm, CmdSubStyle, DoubleQ, Lit, LitKind, NodeKind, ParamExp, ParamName,
+    ParamOp, Part, PipeOp, RedirectOp, Separator, UnsupportedOp,
 };
 
 fn first_simple(ast: &bsh_syntax::Ast) -> &bsh_syntax::SimpleCommand {
@@ -475,10 +475,34 @@ fn parameter_operators_map_to_bsh_lang() {
             b"echo ${x:1+2}",
             ParamOp::Unsupported(UnsupportedOp::ArithmeticSubstring),
         ),
-        (b"echo ${x^^}", ParamOp::Upper),
-        (b"echo ${x,,}", ParamOp::Lower),
-        (b"echo ${x^}", ParamOp::UpperFirst),
-        (b"echo ${x,}", ParamOp::LowerFirst),
+        (
+            b"echo ${x^^}",
+            ParamOp::Case {
+                how: CaseHow::Upper,
+                pattern: None,
+            },
+        ),
+        (
+            b"echo ${x,,}",
+            ParamOp::Case {
+                how: CaseHow::Lower,
+                pattern: None,
+            },
+        ),
+        (
+            b"echo ${x^}",
+            ParamOp::Case {
+                how: CaseHow::UpperFirst,
+                pattern: None,
+            },
+        ),
+        (
+            b"echo ${x,}",
+            ParamOp::Case {
+                how: CaseHow::LowerFirst,
+                pattern: None,
+            },
+        ),
         (
             b"echo ${x#p}",
             ParamOp::Unsupported(UnsupportedOp::RemovePrefix),

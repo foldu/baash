@@ -32,12 +32,14 @@
 use std::fmt;
 
 use bsh_diag::{Diagnostic, ErrCode, Span};
+use bsh_pattern::Flags;
 
 use crate::host::Shell;
 use crate::ifs::Ifs;
 use crate::vars::{ArrayKind, ArrayValue, SetError};
 use crate::word::{
-    DoubleQ, Lit, LitKind, ParamExp, ParamName, ParamOp, Part, TildeSpec, UnsupportedOp, Word,
+    CaseHow, DoubleQ, Lit, LitKind, ParamExp, ParamName, ParamOp, Part, TildeSpec, UnsupportedOp,
+    Word,
 };
 
 /// Diagnostic codes produced by this crate.
@@ -376,11 +378,17 @@ fn expand_tilde_part<S: Shell>(part: &mut Part, quoted: bool, assignment: bool, 
             }
         }
         Part::Param(ParamExp { op, .. }) => {
+            // A replacement word keeps the enclosing quote context: bash leaves
+            // `"${x:-~}"` literal.
             if let Some(word) = op.word_mut() {
-                // A replacement word is expanded like an assignment value:
-                // `${x:-~:~/b}` expands both tildes.
                 expand_tilde_word(word, quoted, assignment, shell);
             }
+            // A pattern or replacement of a pattern operator does not: bash
+            // expands `"${x#~}"` to `/foo` and `"${v/b/~/}"` to `a/h/c`, so
+            // these sub-words are expanded as if they were unquoted.
+            op.visit_pattern_words_mut(&mut |word| {
+                expand_tilde_word(word, false, assignment, shell)
+            });
         }
         _ => {}
     }
@@ -826,22 +834,17 @@ fn expand_param<S: Shell>(
             out.push(slice.to_vec(), quoted, !quoted);
             Ok(())
         }
-        ParamOp::Upper | ParamOp::Lower | ParamOp::UpperFirst | ParamOp::LowerFirst => {
-            if matches!(&exp.name, ParamName::At | ParamName::Star) {
-                return Err(Error::unsupported(UnsupportedOp::CaseOfList, span));
-            }
-            if let ParamName::Elements { .. } = &exp.name {
-                return Err(Error::unsupported(UnsupportedOp::CaseOfList, span));
-            }
-            if let ParamName::Element { name, subscript } = &exp.name {
-                let mut value = read_element(ctx, name, subscript).unwrap_or_default();
-                apply_case(&mut value, &exp.op);
-                out.push(value, quoted, !quoted);
-                return Ok(());
-            }
-            let mut value = ctx.value(&exp.name).unwrap_or_default();
-            apply_case(&mut value, &exp.op);
-            out.push(value, quoted, !quoted);
+        ParamOp::Case { how, pattern } => {
+            let pattern = match pattern {
+                Some(word) => Some(expand_pattern(word, ctx)?),
+                None => None,
+            };
+            let flags = match_flags(ctx);
+            let how = *how;
+            let mut convert = |value: &mut Vec<u8>| {
+                convert_case(value, how, pattern.as_deref(), flags);
+            };
+            map_parameter(ctx, &exp.name, quoted, out, &mut convert);
             Ok(())
         }
         ParamOp::Value => {
@@ -1190,11 +1193,16 @@ fn expand_word_field<S: Shell>(
     Ok(())
 }
 
-fn expand_word_to_scalar<S: Shell>(
+/// Expand a replacement word as a scalar context: no field splitting, no
+/// pathname expansion, and `$@` joined as an assignment value.
+///
+/// The chunks are kept rather than collapsed because pattern expansion needs
+/// the per-chunk quoting flags; [`Expanded::into_scalar`] is the string view.
+fn expand_word_to_chunks<S: Shell>(
     word: &Word,
     quoted: bool,
     ctx: &mut Ctx<'_, S>,
-) -> Result<Vec<u8>, Error> {
+) -> Result<Expanded, Error> {
     let mut expanded = Expanded::new();
     {
         // A scalar context: `${x:=word}` and `${x:?word}` never split or glob,
@@ -1205,24 +1213,131 @@ fn expand_word_to_scalar<S: Shell>(
         };
         expand_parts(&word.parts, quoted, true, &mut scalar, &mut expanded)?;
     }
-    Ok(expanded.into_scalar())
+    Ok(expanded)
 }
 
-fn apply_case(value: &mut [u8], op: &ParamOp) {
-    match op {
-        ParamOp::Upper => value.make_ascii_uppercase(),
-        ParamOp::Lower => value.make_ascii_lowercase(),
-        ParamOp::UpperFirst => {
-            if let Some(first) = value.first_mut() {
-                *first = first.to_ascii_uppercase();
+fn expand_word_to_scalar<S: Shell>(
+    word: &Word,
+    quoted: bool,
+    ctx: &mut Ctx<'_, S>,
+) -> Result<Vec<u8>, Error> {
+    Ok(expand_word_to_chunks(word, quoted, ctx)?.into_scalar())
+}
+
+/// The flags every pattern operator in this module matches with.
+///
+/// [`Flags::utf8`] is forced off, not taken from the runtime: the shell's unit
+/// policy is bytes (the C locale), the same policy `${#x}` counts with and what
+/// the conformance harness (`LC_ALL=C`) sees. A pattern operator that measured
+/// characters while `${#x}` counted bytes would disagree with itself.
+fn match_flags<S: Shell>(ctx: &Ctx<'_, S>) -> Flags {
+    Flags {
+        utf8: false,
+        ..ctx.shell.pattern_flags()
+    }
+}
+
+/// Apply `transform` to every value the expansion names, then emit the result.
+///
+/// bash vectorises these operators over `$@`, `$*` and `name[@]`/`name[*]`
+/// (`${a[@]#x}`, `${@%a}`, `${a[@]/x/y}`): each element is transformed and the
+/// usual list rules decide the fields, so `"${a[@]#x}"` keeps one field per
+/// element while `"${a[*]#x}"` joins them. A scalar is one value.
+fn map_parameter<S: Shell>(
+    ctx: &mut Ctx<'_, S>,
+    name: &ParamName,
+    quoted: bool,
+    out: &mut Expanded,
+    transform: &mut impl FnMut(&mut Vec<u8>),
+) {
+    match name {
+        ParamName::At | ParamName::Star => {
+            let mut values: Vec<Vec<u8>> = ctx.shell.positional().to_vec();
+            for value in &mut values {
+                transform(value);
             }
+            emit_values(ctx, &values, matches!(name, ParamName::Star), quoted, out);
         }
-        ParamOp::LowerFirst => {
-            if let Some(first) = value.first_mut() {
-                *first = first.to_ascii_lowercase();
+        ParamName::Elements { name, star } => {
+            let mut values = array_values(ctx, name);
+            for value in &mut values {
+                transform(value);
             }
+            emit_values(ctx, &values, *star, quoted, out);
         }
-        _ => {}
+        ParamName::Element { name, subscript } => {
+            let mut value = read_element(ctx, name, subscript).unwrap_or_default();
+            transform(&mut value);
+            out.push(value, quoted, !quoted);
+        }
+        _ => {
+            let mut value = ctx.value(name).unwrap_or_default();
+            transform(&mut value);
+            out.push(value, quoted, !quoted);
+        }
+    }
+}
+
+/// Expand a pattern word to the bytes handed to `bsh-pattern`.
+///
+/// `bsh-pattern` deliberately has no quote mask, so quoted bytes become
+/// backslash escapes: a quoted `*` reaches the matcher as `\*` and is literal,
+/// and a quoted backslash becomes `\\`. Unquoted bytes — including unquoted
+/// expansions — stay active, which is exactly bash's split:
+/// `p='a*'; ${x##$p}` matches a pattern while `${x##"$p"}` compares text.
+///
+/// The enclosing double quotes do *not* quote the pattern: bash expands the
+/// argument of `"${x##$p}"` exactly like the unquoted form, and only quoting
+/// written inside the pattern counts. That is why this expands with
+/// `quoted: false` even when the expansion itself is inside `"…"`.
+fn expand_pattern<S: Shell>(word: &Word, ctx: &mut Ctx<'_, S>) -> Result<Vec<u8>, Error> {
+    let expanded = expand_word_to_chunks(word, false, ctx)?;
+    let mut out = Vec::new();
+    let mut first = true;
+    for chunk in expanded.chunks {
+        if chunk.break_before && !first {
+            // A `$@` field boundary cannot survive in a pattern; a space is
+            // what the scalar forms of `$@` produce too.
+            out.push(b' ');
+        }
+        first = false;
+        if chunk.quoted {
+            for byte in chunk.bytes {
+                out.push(b'\\');
+                out.push(byte);
+            }
+        } else {
+            out.extend_from_slice(&chunk.bytes);
+        }
+    }
+    Ok(out)
+}
+
+/// `${x^^pat}` and friends: ASCII case conversion of the matching bytes.
+///
+/// bash matches the pattern against **one character at a time**, not against
+/// the rest of the string (verified against 5.3.20: `${x^^*[bB]}` upper-cases
+/// only the `b`s), so a pattern can never consume more than the byte it is
+/// tested on. With byte units a multi-byte character is several characters,
+/// and no byte above 0x7f has an ASCII case mapping, so non-ASCII text is
+/// never changed — `μ` stays `μ` exactly as bash's `LC_ALL=C` leaves it.
+fn convert_case(value: &mut [u8], how: CaseHow, pattern: Option<&[u8]>, flags: Flags) {
+    let compiled = pattern.map(|pattern| bsh_pattern::Pattern::new(pattern, flags));
+    for (index, byte) in value.iter_mut().enumerate() {
+        if index > 0 && how.first_only() {
+            break;
+        }
+        let matched = match &compiled {
+            None => true,
+            Some(pattern) => pattern.matches(&[*byte]),
+        };
+        if matched {
+            *byte = if how.to_upper() {
+                byte.to_ascii_uppercase()
+            } else {
+                byte.to_ascii_lowercase()
+            };
+        }
     }
 }
 
