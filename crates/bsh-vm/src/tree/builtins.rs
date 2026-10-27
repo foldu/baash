@@ -110,6 +110,18 @@ static VM_BUILTINS: &[VmBuiltin] = &[
         name: b"kill",
         run: super::Interp::bi_kill,
     },
+    VmBuiltin {
+        name: b"hash",
+        run: bi_hash,
+    },
+    VmBuiltin {
+        name: b"mapfile",
+        run: super::mapfile::bi_mapfile,
+    },
+    VmBuiltin {
+        name: b"readarray",
+        run: super::mapfile::bi_mapfile,
+    },
 ];
 
 fn diagnose(interp: &mut Interp, message: impl Into<String>) {
@@ -859,6 +871,141 @@ fn is_bare_word(bytes: &[u8]) -> bool {
                 b'_' | b'-' | b'.' | b'/' | b':' | b'@' | b'%' | b'+' | b',' | b'='
             )
     })
+}
+
+/// `hash`: the `PATH` table the executor resolves commands against.
+///
+/// The table itself is [`Interp`]'s (`path_cache`), which is why this body is
+/// here and not in `bsh-runtime`: `hash` exists to mutate executor state, and
+/// its whole observable effect is which path a later command word runs.
+fn bi_hash(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
+    let name = program(argv, "hash");
+    let mut clear = false;
+    let mut reusable = false;
+    let mut forget: Vec<Vec<u8>> = Vec::new();
+    let mut index = 1;
+    while index < argv.len() {
+        let argument = &argv[index];
+        if argument == b"--" {
+            index += 1;
+            break;
+        }
+        if argument.len() < 2 || argument[0] != b'-' {
+            break;
+        }
+        let mut position = 1;
+        while position < argument.len() {
+            let flag = argument[position];
+            match flag {
+                b'r' => {
+                    clear = true;
+                    position += 1;
+                }
+                b'l' => {
+                    reusable = true;
+                    position += 1;
+                }
+                b'd' | b'p' => {
+                    // `-dname` / `-d name`, and `-p pathname name`.
+                    let value = if position + 1 < argument.len() {
+                        argument[position + 1..].to_vec()
+                    } else {
+                        index += 1;
+                        match argv.get(index) {
+                            Some(value) => value.clone(),
+                            None => {
+                                diagnose(
+                                    interp,
+                                    format!(
+                                        "{name}: -{}: option requires an argument",
+                                        flag as char
+                                    ),
+                                );
+                                return Status(2);
+                            }
+                        }
+                    };
+                    if flag == b'd' {
+                        forget.push(value);
+                    } else {
+                        index += 1;
+                        match argv.get(index) {
+                            Some(target) => {
+                                interp.path_cache.insert(target.clone(), value);
+                            }
+                            None => {
+                                diagnose(interp, format!("{name}: -p: name required"));
+                                return Status(2);
+                            }
+                        }
+                    }
+                    position = argument.len();
+                }
+                other => {
+                    diagnose(
+                        interp,
+                        format!("{name}: -{}: invalid option", other as char),
+                    );
+                    return Status(2);
+                }
+            }
+        }
+        index += 1;
+    }
+
+    let operands: Vec<Vec<u8>> = argv[index.min(argv.len())..].to_vec();
+    if clear {
+        if !operands.is_empty() {
+            // bash refuses `hash -r name`; POSIX has no say, and the suite
+            // accepts either status, so this reports the usage error.
+            diagnose(interp, format!("{name}: -r: cannot be used with names"));
+            return Status::FAILURE;
+        }
+        interp.path_cache.clear();
+    }
+    for target in forget {
+        interp.path_cache.remove(&target);
+    }
+
+    if operands.is_empty() {
+        let mut out = Vec::new();
+        for (target, path) in &interp.path_cache {
+            if reusable {
+                out.extend_from_slice(b"builtin hash -p ");
+                out.extend_from_slice(path);
+                out.push(b' ');
+                out.extend_from_slice(target);
+                out.push(b'\n');
+            } else {
+                out.extend_from_slice(path);
+                out.push(b'\n');
+            }
+        }
+        return interp.write_out(&out);
+    }
+
+    let mut status = Status::SUCCESS;
+    for target in operands {
+        // `hash name` is a *search*: it must bypass the table, or a stale entry
+        // would make it a no-op after `PATH` changed.
+        let query = bsh_runtime::ResolveQuery {
+            fresh: true,
+            ..bsh_runtime::ResolveQuery::EXECUTION
+        };
+        match interp.path_hits_for_hash(&target, query) {
+            Some(path) => {
+                interp.path_cache.insert(target, path);
+            }
+            None => {
+                diagnose(
+                    interp,
+                    format!("{name}: {}: not found", String::from_utf8_lossy(&target)),
+                );
+                status = Status::FAILURE;
+            }
+        }
+    }
+    status
 }
 
 fn bi_local(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {

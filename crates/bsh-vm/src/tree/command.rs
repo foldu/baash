@@ -1228,6 +1228,15 @@ impl Interp {
         found
     }
 
+    /// One `PATH` hit, for `hash`'s "remember this name" search.
+    pub(crate) fn path_hits_for_hash(
+        &self,
+        name: &[u8],
+        query: bsh_runtime::ResolveQuery,
+    ) -> Option<Vec<u8>> {
+        self.path_hits(name, query).into_iter().next()
+    }
+
     /// Every `PATH` hit for `name`, in `PATH` order.
     ///
     /// A name containing `/` is used as written and never searched. The hash

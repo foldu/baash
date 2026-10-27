@@ -123,6 +123,7 @@ mod command;
 mod cond;
 mod eval;
 mod jobs;
+mod mapfile;
 mod read;
 mod redir;
 mod traps;

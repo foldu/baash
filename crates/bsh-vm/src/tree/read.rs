@@ -434,6 +434,72 @@ impl Interp {
     }
 }
 
+/// One record read by `mapfile`.
+pub(crate) struct Record {
+    /// The bytes, including the delimiter when one was seen.
+    pub(crate) bytes: Vec<u8>,
+    /// Whether the delimiter ended the record (false: end of file did).
+    pub(crate) terminated: bool,
+}
+
+/// Read one delimited record from `fd`, for `mapfile`.
+///
+/// This is `read`'s no-over-read discipline without the shell-quoting rules:
+/// mapfile takes bytes literally, keeps the delimiter, and must not steal the
+/// bytes a later reader needs. The buffer and the seek-or-buffer decision are
+/// shared with [`Interp::read_bytes`]; only the interpretation differs.
+pub(crate) fn read_record(
+    interp: &mut Interp,
+    fd: RawFd,
+    delim: u8,
+) -> Result<Option<Record>, std::io::Error> {
+    let seekable = bsh_sys::lseek(fd, 0, bsh_sys::fd::seek::CUR).is_ok();
+    let want = if seekable { 4096 } else { 1 };
+    let mut buffer = interp.read_buffers.remove(&fd).unwrap_or_default();
+    let mut consumed = 0usize;
+    let mut bytes = Vec::new();
+    let mut terminated = false;
+    let mut eof = false;
+    loop {
+        if consumed >= buffer.len() {
+            let mut chunk = [0u8; 4096];
+            match bsh_sys::read_fd(fd, &mut chunk[..want]) {
+                Ok(0) => {
+                    eof = true;
+                    break;
+                }
+                Ok(read) => {
+                    buffer.clear();
+                    consumed = 0;
+                    buffer.extend_from_slice(&chunk[..read]);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        let byte = buffer[consumed];
+        consumed += 1;
+        bytes.push(byte);
+        if byte == delim {
+            terminated = true;
+            break;
+        }
+    }
+    let leftover = buffer.len().saturating_sub(consumed);
+    if leftover > 0 {
+        let surplus = buffer[consumed..].to_vec();
+        let rewound =
+            seekable && bsh_sys::lseek(fd, -(leftover as i64), bsh_sys::fd::seek::CUR).is_ok();
+        if !rewound {
+            interp.read_buffers.insert(fd, surplus);
+        }
+    }
+    if eof && bytes.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Record { bytes, terminated }))
+}
+
 /// Assign the read line to the destination variables, bash's `assign_vars`.
 fn assign(interp: &mut Interp, options: &Options, line: &Line) -> Status {
     let ifs = effective_ifs(interp);
