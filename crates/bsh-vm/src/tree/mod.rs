@@ -678,13 +678,33 @@ impl bsh_lang::Shell for Interp {
         if self.state.opts.noglob {
             return Ok(None);
         }
-        let pattern = crate::glob::Pattern::new(&pattern.bytes, Some(&pattern.quoted));
-        match crate::glob::expand(&pattern) {
+        // `nocaseglob`, not `nocasematch`, folds case in pathnames; the rest
+        // of the dialect (`extglob`) comes from the shared flags.
+        //
+        // bash documents one part of `GLOBIGNORE` that is not a match filter:
+        // when it is set, `.` and `..` are always ignored. Full `GLOBIGNORE`
+        // filtering is not implemented, but honouring that rule keeps
+        // `shopt -u globskipdots` from reporting them when the variable is set.
+        let globignore = self
+            .state
+            .vars
+            .scalar(b"GLOBIGNORE")
+            .is_some_and(|value| !value.is_empty());
+        let options = crate::glob::Options {
+            flags: bsh_pattern::Flags {
+                nocasematch: self.state.opts.nocaseglob,
+                ..self.pattern_flags()
+            },
+            dotglob: self.state.opts.dotglob,
+            globstar: self.state.opts.globstar,
+            globskipdots: self.state.opts.globskipdots || globignore,
+        };
+        match crate::glob::expand(&pattern.bytes, &pattern.quoted, &options) {
             Some(matches) => Ok(Some(matches)),
             None if self.state.opts.nullglob => Ok(Some(Vec::new())),
             None if self.state.opts.failglob => Err(bsh_lang::Error::new(
                 bsh_lang::ErrorKind::Host {
-                    message: format!("no match: {}", String::from_utf8_lossy(pattern.bytes)),
+                    message: format!("no match: {}", String::from_utf8_lossy(&pattern.bytes)),
                 },
                 0..0,
             )),
