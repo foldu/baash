@@ -421,6 +421,26 @@ pub enum ParamOp {
         /// The length expression; negative is an error, as bash reports.
         length: Option<Word>,
     },
+    /// `${x#pat}` (`longest` false) or `${x##pat}` (`longest` true): remove
+    /// the shortest or longest matching prefix.
+    ///
+    /// The pattern is a [`Word`] because its quoting decides which
+    /// metacharacters are literal: `${x#"$y"}` compares `$y` literally while
+    /// `${x#$y}` matches it as a pattern.
+    RemovePrefix {
+        /// The pattern text, quoting included.
+        pattern: Word,
+        /// `true` for `##`: strip the longest match.
+        longest: bool,
+    },
+    /// `${x%pat}` (`longest` false) or `${x%%pat}` (`longest` true): remove
+    /// the shortest or longest matching suffix.
+    RemoveSuffix {
+        /// The pattern text, quoting included.
+        pattern: Word,
+        /// `true` for `%%`: strip the longest match.
+        longest: bool,
+    },
     /// `${x^pat}`, `${x^^pat}`, `${x,pat}`, `${x,,pat}`: ASCII case conversion
     /// of the characters that match `pattern`.
     ///
@@ -482,12 +502,15 @@ impl ParamOp {
     /// `"${x:-~}"` stays literal. That is why these are expanded with the
     /// quote context switched off while [`ParamOp::word_mut`] keeps it.
     pub fn visit_pattern_words_mut(&mut self, visit: &mut impl FnMut(&mut Word)) {
-        if let ParamOp::Case {
-            pattern: Some(pattern),
-            ..
-        } = self
-        {
-            visit(pattern);
+        match self {
+            ParamOp::RemovePrefix { pattern, .. } | ParamOp::RemoveSuffix { pattern, .. } => {
+                visit(pattern);
+            }
+            ParamOp::Case {
+                pattern: Some(pattern),
+                ..
+            } => visit(pattern),
+            _ => {}
         }
     }
 }
@@ -522,10 +545,6 @@ impl CaseHow {
 /// doing something subtly wrong.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsupportedOp {
-    /// `${x#pat}`, `${x##pat}`.
-    RemovePrefix,
-    /// `${x%pat}`, `${x%%pat}`.
-    RemoveSuffix,
     /// `${x/pat/rep}` and friends.
     Replace,
     /// `${!x}`, `${!prefix*}`: the argument is a variable *name*, which would
@@ -553,8 +572,6 @@ impl UnsupportedOp {
     /// A short, stable description for diagnostics.
     pub fn description(self) -> &'static str {
         match self {
-            UnsupportedOp::RemovePrefix => "prefix removal (`${x#pat}`)",
-            UnsupportedOp::RemoveSuffix => "suffix removal (`${x%pat}`)",
             UnsupportedOp::Replace => "pattern substitution (`${x/pat/rep}`)",
             UnsupportedOp::Indirect => "indirect expansion (`${!x}`)",
             UnsupportedOp::Transform => "parameter transformation (`${x@Q}`)",

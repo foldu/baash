@@ -836,6 +836,18 @@ fn parse_op(rest: &[u8]) -> ParamOp {
     if let Some(body) = rest.strip_prefix(b":") {
         return parse_substring(body);
     }
+    if let Some(body) = rest.strip_prefix(b"##") {
+        return strip_op(body, true, true);
+    }
+    if let Some(body) = rest.strip_prefix(b"#") {
+        return strip_op(body, false, true);
+    }
+    if let Some(body) = rest.strip_prefix(b"%%") {
+        return strip_op(body, true, false);
+    }
+    if let Some(body) = rest.strip_prefix(b"%") {
+        return strip_op(body, false, false);
+    }
     if let Some(body) = rest.strip_prefix(b"^^") {
         return case_op(body, CaseHow::Upper);
     }
@@ -849,14 +861,22 @@ fn parse_op(rest: &[u8]) -> ParamOp {
         return case_op(body, CaseHow::LowerFirst);
     }
     let unsupported = match rest[0] {
-        b'#' => UnsupportedOp::RemovePrefix,
-        b'%' => UnsupportedOp::RemoveSuffix,
         b'/' => UnsupportedOp::Replace,
         b'@' => UnsupportedOp::Transform,
         b'[' => UnsupportedOp::ArraySubscript,
         _ => UnsupportedOp::Other,
     };
     ParamOp::Unsupported(unsupported)
+}
+
+/// `${x#pat}`, `${x##pat}`, `${x%pat}`, `${x%%pat}`; `body` is the pattern.
+fn strip_op(body: &[u8], longest: bool, prefix: bool) -> ParamOp {
+    let pattern = parse_subword(body);
+    if prefix {
+        ParamOp::RemovePrefix { pattern, longest }
+    } else {
+        ParamOp::RemoveSuffix { pattern, longest }
+    }
 }
 
 /// `${x^pat}` and the other case operators; `body` is what follows the

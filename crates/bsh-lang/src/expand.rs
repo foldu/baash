@@ -834,6 +834,14 @@ fn expand_param<S: Shell>(
             out.push(slice.to_vec(), quoted, !quoted);
             Ok(())
         }
+        ParamOp::RemovePrefix { pattern, longest } => {
+            let prefix = true;
+            strip_parameter(exp, pattern, *longest, prefix, quoted, ctx, out)
+        }
+        ParamOp::RemoveSuffix { pattern, longest } => {
+            let prefix = false;
+            strip_parameter(exp, pattern, *longest, prefix, quoted, ctx, out)
+        }
         ParamOp::Case { how, pattern } => {
             let pattern = match pattern {
                 Some(word) => Some(expand_pattern(word, ctx)?),
@@ -1237,6 +1245,36 @@ fn match_flags<S: Shell>(ctx: &Ctx<'_, S>) -> Flags {
     }
 }
 
+/// Flags for the four strip operators.
+///
+/// bash 5.3.20 ignores `shopt -s nocasematch` for `${x#pat}`/`${x%pat}` even
+/// though it honours it for `${x/pat/rep}`, so caseless matching is forced off
+/// here rather than inherited from the runtime's options.
+fn strip_flags<S: Shell>(ctx: &Ctx<'_, S>) -> Flags {
+    Flags {
+        nocasematch: false,
+        ..match_flags(ctx)
+    }
+}
+
+/// `${x#pat}` and `${x%pat}`, including the array and `$@` forms.
+#[allow(clippy::too_many_arguments)]
+fn strip_parameter<S: Shell>(
+    exp: &ParamExp,
+    pattern: &Word,
+    longest: bool,
+    prefix: bool,
+    quoted: bool,
+    ctx: &mut Ctx<'_, S>,
+    out: &mut Expanded,
+) -> Result<(), Error> {
+    let pattern = expand_pattern(pattern, ctx)?;
+    let flags = strip_flags(ctx);
+    let mut strip = |value: &mut Vec<u8>| strip_value(value, &pattern, longest, prefix, flags);
+    map_parameter(ctx, &exp.name, quoted, out, &mut strip);
+    Ok(())
+}
+
 /// Apply `transform` to every value the expansion names, then emit the result.
 ///
 /// bash vectorises these operators over `$@`, `$*` and `name[@]`/`name[*]`
@@ -1275,6 +1313,25 @@ fn map_parameter<S: Shell>(
             transform(&mut value);
             out.push(value, quoted, !quoted);
         }
+    }
+}
+
+/// `${x#pat}` / `${x%pat}` on one value.
+///
+/// An empty pattern leaves the value alone, which is bash's rule for `${x##}`
+/// and `${x##""}`: the four operators never "strip everything" because there
+/// was nothing to match.
+fn strip_value(value: &mut Vec<u8>, pattern: &[u8], longest: bool, prefix: bool, flags: Flags) {
+    if pattern.is_empty() {
+        return;
+    }
+    let pattern = bsh_pattern::Pattern::new(pattern, flags);
+    if prefix {
+        if let Some(end) = pattern.prefix_end(value, longest) {
+            value.drain(..end);
+        }
+    } else if let Some(start) = pattern.suffix_start(value, longest) {
+        value.truncate(start);
     }
 }
 

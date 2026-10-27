@@ -14,6 +14,7 @@ mod at_star;
 mod params;
 mod pattern;
 mod pattern_case;
+mod pattern_strip;
 mod pipeline;
 mod quoting;
 mod splitting;

@@ -2607,10 +2607,26 @@ impl<'a> Parser<'a, '_> {
                 Some(self.parse_word_span(word_span))
             };
             ParamOp::Error { word, colon }
-        } else if rest.starts_with(b"##") || rest.starts_with(b"#") {
-            ParamOp::Unsupported(UnsupportedOp::RemovePrefix)
-        } else if rest.starts_with(b"%%") || rest.starts_with(b"%") {
-            ParamOp::Unsupported(UnsupportedOp::RemoveSuffix)
+        } else if rest.starts_with(b"##") {
+            ParamOp::RemovePrefix {
+                pattern: self.parse_word_span((op_start + 2)..inner.end),
+                longest: true,
+            }
+        } else if rest.starts_with(b"#") {
+            ParamOp::RemovePrefix {
+                pattern: self.parse_word_span((op_start + 1)..inner.end),
+                longest: false,
+            }
+        } else if rest.starts_with(b"%%") {
+            ParamOp::RemoveSuffix {
+                pattern: self.parse_word_span((op_start + 2)..inner.end),
+                longest: true,
+            }
+        } else if rest.starts_with(b"%") {
+            ParamOp::RemoveSuffix {
+                pattern: self.parse_word_span((op_start + 1)..inner.end),
+                longest: false,
+            }
         } else if rest.starts_with(b"/") {
             ParamOp::Unsupported(UnsupportedOp::Replace)
         } else if rest.starts_with(b"@") {

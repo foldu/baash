@@ -5,7 +5,7 @@ mod common;
 
 use bsh_syntax::{
     AndOrOp, CaseHow, CaseTerm, CmdSubStyle, DoubleQ, Lit, LitKind, NodeKind, ParamExp, ParamName,
-    ParamOp, Part, PipeOp, RedirectOp, Separator, UnsupportedOp,
+    ParamOp, Part, PipeOp, RedirectOp, Separator, UnsupportedOp, Word,
 };
 
 fn first_simple(ast: &bsh_syntax::Ast) -> &bsh_syntax::SimpleCommand {
@@ -446,6 +446,50 @@ fn parameter_name_mapping_is_exact() {
 }
 
 #[test]
+fn pattern_operators_keep_their_quoting() {
+    // The quoting written inside a pattern has to survive into the `Word`, or
+    // `${x#"$y"}` would silently match `$y` as a pattern instead of comparing
+    // it literally. The expansion side renders quoted bytes as backslash
+    // escapes, so this is where that information is preserved or lost.
+    let ast = common::ast(br#"echo ${x#"$y"} ${x#$y} ${x#'*'} ${x#\*}"#);
+    let cmd = first_simple(&ast);
+    let patterns: Vec<(&Vec<Part>, bool)> = cmd.words[1..]
+        .iter()
+        .map(|word| {
+            let Part::Param(p) = &word.parts[0] else {
+                panic!("expected a parameter, got {:?}", word.parts);
+            };
+            let ParamOp::RemovePrefix { pattern, longest } = &p.op else {
+                panic!("expected a prefix strip, got {:?}", p.op);
+            };
+            assert!(!longest);
+            (&pattern.parts, false)
+        })
+        .collect();
+    // `"$y"`: one double-quoted group containing the parameter.
+    assert!(matches!(
+        &patterns[0].0[0],
+        Part::DoubleQ(DoubleQ { parts })
+            if matches!(&parts[0], Part::Param(e) if e.name == ParamName::var(b"y"))
+    ));
+    // `$y`: a bare parameter part, which stays an active pattern.
+    assert!(matches!(
+        &patterns[1].0[0],
+        Part::Param(e) if e.name == ParamName::var(b"y")
+    ));
+    // `'*'`: a single-quoted literal.
+    assert!(matches!(
+        &patterns[2].0[0],
+        Part::Lit(Lit { kind: LitKind::SingleQuoted, bytes }) if bytes == b"*"
+    ));
+    // `\*`: a backslash-escaped byte.
+    assert!(matches!(
+        &patterns[3].0[0],
+        Part::Lit(Lit { kind: LitKind::Quoted, bytes }) if bytes == b"*"
+    ));
+}
+
+#[test]
 fn parameter_operators_map_to_bsh_lang() {
     let cases: &[(&[u8], ParamOp)] = &[
         (b"echo ${x}", ParamOp::Value),
@@ -504,12 +548,32 @@ fn parameter_operators_map_to_bsh_lang() {
             },
         ),
         (
-            b"echo ${x#p}",
-            ParamOp::Unsupported(UnsupportedOp::RemovePrefix),
+            b"echo ${x#[a-c]}",
+            ParamOp::RemovePrefix {
+                pattern: Word::lit(*b"[a-c]").with_span(9..14),
+                longest: false,
+            },
+        ),
+        (
+            b"echo ${x##p}",
+            ParamOp::RemovePrefix {
+                pattern: Word::lit(*b"p").with_span(10..11),
+                longest: true,
+            },
+        ),
+        (
+            b"echo ${x%p}",
+            ParamOp::RemoveSuffix {
+                pattern: Word::lit(*b"p").with_span(9..10),
+                longest: false,
+            },
         ),
         (
             b"echo ${x%%p}",
-            ParamOp::Unsupported(UnsupportedOp::RemoveSuffix),
+            ParamOp::RemoveSuffix {
+                pattern: Word::lit(*b"p").with_span(10..11),
+                longest: true,
+            },
         ),
         (
             b"echo ${x/p/r}",

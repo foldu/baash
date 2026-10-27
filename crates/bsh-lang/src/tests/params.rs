@@ -207,10 +207,6 @@ fn case_conversion_is_ascii() {
 #[test]
 fn unsupported_operators_fail_instead_of_guessing() {
     let cases = [
-        ("${x#p}", UnsupportedOp::RemovePrefix),
-        ("${x##p}", UnsupportedOp::RemovePrefix),
-        ("${x%p}", UnsupportedOp::RemoveSuffix),
-        ("${x%%p}", UnsupportedOp::RemoveSuffix),
         ("${x/a/b}", UnsupportedOp::Replace),
         ("${!x}", UnsupportedOp::Indirect),
         ("${x@Q}", UnsupportedOp::Transform),

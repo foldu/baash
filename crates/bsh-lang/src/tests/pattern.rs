@@ -2,7 +2,7 @@
 
 use crate::fixture::TestShell;
 
-use super::try_expand_line;
+use super::{expand_one, try_expand_line};
 
 #[test]
 fn pattern_operators_read_the_value_under_nounset() {
@@ -15,4 +15,8 @@ fn pattern_operators_read_the_value_under_nounset() {
             .unwrap_or_else(|| panic!("{source} should fail under nounset"));
         assert_eq!(err.code(), crate::codes::PARAMETER_UNSET, "{source}");
     }
+    // `${a[@]#x}` enumerates instead of reading, so an unset array is fine.
+    let mut shell = TestShell::new().nounset(true);
+    let got = expand_one("\"${a[@]#x}\"", &mut shell);
+    assert!(got.is_empty(), "unset array under nounset: {got:?}");
 }
