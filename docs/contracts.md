@@ -8,8 +8,8 @@ Each section is owned by the producing crate. If you are implementing a consumer
 (`bsh-vm`, `bsh-repl`, `bsh-tools`) read the relevant sections before you start,
 and treat every item here as a fact about the API you are calling.
 
-Status: `bsh-diag` and `bsh-sys` have landed. `bsh-syntax`, `bsh-lang` and
-`bsh-runtime` are in flight.
+Status: `bsh-diag`, `bsh-sys` and `bsh-runtime` have landed. `bsh-syntax` and
+`bsh-lang` are in flight.
 
 ---
 
@@ -82,6 +82,54 @@ POSIX.
 Known gap that affects `bsh-repl`: **`RawMode`, `window_size` and `tcsetpgrp`
 have no real-tty test.** The sandbox that built them has no controlling
 terminal. pty-based integration tests are owed before the editor is trusted.
+
+---
+
+## bsh-runtime
+
+**`ShellHost` is the VM's obligation.** It now *requires* `state()`,
+`run_source()`, `write_out()` and `write_err()`; `is_interactive()` and
+`diagnose()` have defaults. `state()` hands out `ShellState { opts, vars }`.
+
+**The per-command sequence is fixed, and the order matters:**
+
+```
+resolve the command's tier
+→ Vars::apply_prefix_assignments(assigns, tier)
+→ run the builtin (BuiltinDef::run(host, argv))
+→ Vars::finish_prefix_assignments()
+→ host.state().take_error() → consequence(error, interactive)
+→ check take_exit_request()
+```
+
+Skipping `finish_prefix_assignments` leaks a temporary local frame into every
+later command; running it before the builtin makes `FOO=1 export FOO` behave as
+if the assignment were discarded.
+
+**Prefix assignments persist for special built-ins in both profiles.** POSIX
+requires it; bash (non-posix) drops them and `bash --posix` persists them. We
+follow POSIX unconditionally — a deliberate deviation recorded in DESIGN §3.3
+Tier C.
+
+**`$@` and `$*` are not here.** `special_scalar` returns `None` for them because
+they are multi-field; expansion reads `positional().argv` and applies the
+quoting rules itself.
+
+**Integer attributes store raw bytes.** Arithmetic evaluation happens in
+`bsh-lang`/the VM *before* `assign`; the store does not parse numbers.
+
+**Construct `Opts` from the presets** (`Opts::POSIX`, `Opts::BASH`, `Default`).
+It carries ~70 flags now; an exhaustive struct literal outside this crate will
+break on the next flag.
+
+**Builtin tiers are exact and load-bearing** (DESIGN §2): 15 special, 16
+intrinsic, 7 regular, 18 bash extensions. `printf`, `test`, `[`, `echo`, `pwd`,
+`true` and `false` are regular, deliberately *not* intrinsic, because the
+standard requires them to remain exec-able. Search order comes from
+`Tier::search_priority`.
+
+**Diagnostic text is unstable; match the codes.** State errors are `BSH-E05xx`;
+an unimplemented builtin returns status 2 with `BSH-E0508`.
 
 ---
 

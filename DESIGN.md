@@ -62,9 +62,19 @@ Two 2024 facts that shape builtin tiering:
 - The **intrinsic** tier means a shell need not ship exec-able `cd`/`read`/
   `type`, and **functions override intrinsics** — but never special built-ins.
   `kill` is the one intrinsic that must still be exec-able.
-- `[spec]` **`pipefail` is still not POSIX.** I checked `set(1p)` directly; it
-  is absent, despite several 2024 write-ups claiming otherwise. It is a bash
-  extension: always available, never part of strict mode.
+- `[spec]` **`pipefail` IS POSIX in 2024.** §2.9.2 defines pipeline exit status
+  in terms of "whether or not the `pipefail` option (see `set`) is enabled", and
+  `set` lists `-o pipefail`. It therefore belongs to strict mode, not the bash
+  tier. (Earlier revisions of this document said the opposite. The error came
+  from grepping `utilities/set.html`, which in the online edition is a
+  JavaScript redirect stub that contains no prose at all — the real text is in
+  `utilities/V3_chap02.html`. Any "I checked the spec" claim has to say which
+  page it actually read.)
+- `[spec]` The pipeline rule has a trap the specification calls out explicitly:
+  *"The shell shall use the `pipefail` setting at the time it begins execution
+  of the pipeline, not the setting at the time it sets the exit status."* So in
+  `cmd1 | set -o pipefail`, `cmd1`'s failure does **not** affect that pipeline's
+  status. The flag must be sampled at pipeline start (§5.2).
 
 `[spec]` Still unspecified in 2024, and listed as such by name: `local`,
 `declare`, `typeset`, `source`, `shopt`, `pushd`/`popd`, `let`, `mapfile`,
@@ -167,6 +177,7 @@ Rows marked ✔ verified against bash 5.3.20 rather than from memory:
 | `declare -A x=(a b)` | n/a | alternating k/v ✔ | bash (Oils errors; its error is arguably better) |
 | `unset $lvalue`, `printf -v $lvalue`, `${!name}` | n/a | re-parses data as code | **opt-in only** (`shopt eval_unsafe_arith`) |
 | `trap '' INT` then child | `SIG_IGN` inherited | same | POSIX — see §4.5 |
+| prefix assignment before a special built-in | persists | bash (non-posix) drops it; `bash --posix` persists | **POSIX**, in both profiles — a deliberate, documented deviation |
 
 The last three rows are one bug class: bash re-parses strings as code, so
 `a[$(cmd)]=v` executes `cmd`. Oils refuses by default and exposes
@@ -603,6 +614,8 @@ Design rule, and it is the one that keeps the ISA small:
 ```rust
 enum Op {
     ExecSimple  { words: WordListId, redirs: RedirListId, assigns: AssignListId },
+    // `pipefail` is sampled when the pipeline STARTS, not when its
+    // status is computed (POSIX 2024 §2.9.2) — see §2.
     ExecPipeline{ stages: u8, negated: bool, pipefail: bool },
     JumpIfOk/PushStatus/Jump(u32)         // && || ; control flow
     ForEach  { var: NameId, words: WordListId, body: ChunkId },
