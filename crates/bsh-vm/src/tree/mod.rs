@@ -280,6 +280,17 @@ pub struct Interp {
     /// expansion pass over it would expand the value's first word against the
     /// alias that produced it — the recursion the expansion stack forbids.
     alias_eval_depth: usize,
+    /// `$PIPESTATUS`: the exit status of every stage of the last pipeline, and
+    /// of the last simple command (which is a one-stage pipeline). Empty at
+    /// startup, as in bash.
+    pipeline_status: std::collections::BTreeMap<i64, Vec<u8>>,
+    /// `$LINENO`: the 1-based line of the command being evaluated, and the
+    /// source file it belongs to. The offset cursor makes advancing through a
+    /// chunk amortized O(1) instead of a scan from byte zero per node.
+    line_source: Arc<SourceFile>,
+    line_offset: usize,
+    line_number: u32,
+    lineno: Vec<u8>,
 }
 
 /// One `name=(…)` argument in a declaration command.
@@ -342,6 +353,11 @@ impl Interp {
             path_cache: std::collections::BTreeMap::new(),
             empty_chunk,
             alias_eval_depth: 0,
+            pipeline_status: std::collections::BTreeMap::new(),
+            line_source: Arc::new(SourceFile::new("<none>", &b""[..])),
+            line_offset: 0,
+            line_number: 1,
+            lineno: b"1".to_vec(),
         };
         // POSIX initializes `OPTIND` to 1 at shell startup, and `getopts`
         // counts from there; a script that never mentions it still needs the
@@ -513,6 +529,51 @@ impl Interp {
         };
     }
 
+    /// Point `$LINENO` at `offset` in `source`, the chunk being evaluated.
+    ///
+    /// Node spans arrive mostly in source order, so the line counter advances
+    /// from the previous offset; a jump backwards (a loop body, a function
+    /// called twice) rescans from the top rather than reporting a stale line.
+    pub(crate) fn set_line(&mut self, source: &Arc<SourceFile>, offset: usize) {
+        if !Arc::ptr_eq(&self.line_source, source) {
+            self.line_source = source.clone();
+            self.line_offset = 0;
+            self.line_number = 1;
+        }
+        if offset < self.line_offset {
+            self.line_offset = 0;
+            self.line_number = 1;
+        }
+        let bytes = source.bytes();
+        let end = offset.min(bytes.len());
+        if end > self.line_offset {
+            let newlines = bytes[self.line_offset..end]
+                .iter()
+                .filter(|&&byte| byte == b'\n')
+                .count() as u32;
+            self.line_number += newlines;
+            self.line_offset = end;
+        }
+        let text = self.line_number.to_string();
+        if self.lineno != text.as_bytes() {
+            self.lineno = text.into_bytes();
+        }
+    }
+
+    /// `$LINENO` as an integer, for arithmetic.
+    pub(crate) fn line_number(&self) -> i64 {
+        i64::from(self.line_number)
+    }
+
+    /// Record one pipeline's per-stage statuses for `$PIPESTATUS`.
+    pub(crate) fn set_pipeline_status(&mut self, statuses: &[Status]) {
+        self.pipeline_status.clear();
+        for (index, status) in statuses.iter().enumerate() {
+            self.pipeline_status
+                .insert(index as i64, status.exit_code().to_string().into_bytes());
+        }
+    }
+
     /// Report a diagnostic at `span`, with an evaluator code (2xx).
     pub(crate) fn report(
         &mut self,
@@ -587,6 +648,13 @@ impl Interp {
 
 impl bsh_lang::Vars for Interp {
     fn get(&self, name: &[u8]) -> Option<&[u8]> {
+        if name == b"LINENO" {
+            return Some(&self.lineno);
+        }
+        // `$PIPESTATUS` is its element zero, like any array's scalar form.
+        if name == b"PIPESTATUS" {
+            return self.pipeline_status.get(&0).map(Vec::as_slice);
+        }
         if let [special] = name {
             match *special {
                 b'?' => return Some(&self.specials.status),
@@ -618,6 +686,9 @@ impl bsh_lang::Vars for Interp {
     }
 
     fn array(&self, name: &[u8]) -> Option<bsh_lang::ArrayValue<'_>> {
+        if name == b"PIPESTATUS" {
+            return Some(bsh_lang::ArrayValue::Indexed(&self.pipeline_status));
+        }
         match self.state.vars.value(name)? {
             bsh_runtime::VarValue::Indexed(elements) => {
                 Some(bsh_lang::ArrayValue::Indexed(elements))
@@ -715,6 +786,11 @@ impl bsh_lang::Shell for Interp {
 
 impl crate::arith::IntVars for Interp {
     fn get(&mut self, name: &[u8]) -> i64 {
+        // `LINENO` is a shell parameter, not a variable: `(( x = LINENO ))`
+        // must read the line the arithmetic is on.
+        if name == b"LINENO" {
+            return self.line_number();
+        }
         // A name of digits is a positional parameter, not a variable:
         // `$(( $1 + 1 ))` reads `$1`.
         if !name.is_empty() && name.iter().all(u8::is_ascii_digit) && name[0] != b'0' {

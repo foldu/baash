@@ -35,10 +35,33 @@ pub enum TrapKind {
 }
 
 impl Interp {
-    /// Evaluate one node, keeping `$?` up to date.
+    /// Evaluate one node, keeping `$?`, `$LINENO` and `$PIPESTATUS` current.
     pub(crate) fn eval_node(&mut self, chunk: &Arc<ParsedChunk>, id: NodeId, ctx: Ctx) -> Unwind {
+        // The innermost node visited while a command's words expand is that
+        // command, so `$LINENO` is its line. Compound nodes set the line of
+        // their keyword first; the simple commands inside overwrite it.
+        let node = chunk.ast.node(id);
+        self.set_line(&chunk.source, node.span.start);
+        // A command that is not a pipeline is a one-stage one for
+        // `$PIPESTATUS` (`false; echo ${PIPESTATUS[@]}` reports `1`).
+        // bash records only the commands themselves: `if`, `for`, `while`,
+        // `{ … }` and `case` leave the array alone, so the last command
+        // *inside* them is what a later `echo` sees. A subshell is a command
+        // in the parent; a function definition is not. `Pipeline` is excluded
+        // because `eval_pipeline` records the per-stage statuses, and negation
+        // must not replace them.
+        let command = matches!(
+            node.kind,
+            NodeKind::Simple(_)
+                | NodeKind::TestCommand { .. }
+                | NodeKind::ArithCommand { .. }
+                | NodeKind::Subshell { .. }
+        );
         let result = self.eval_kind(chunk, id, ctx);
         self.set_status(result.status());
+        if command {
+            self.set_pipeline_status(&[result.status()]);
+        }
         result
     }
 
@@ -236,12 +259,21 @@ impl Interp {
         // pipeline ran, must not change how this pipeline is judged.
         let pipefail = self.state.opts.pipefail;
 
+        // `$PIPESTATUS` is the per-stage status of this pipeline. A single
+        // command is a one-stage pipeline, which is what makes `false;
+        // echo ${PIPESTATUS[@]}` report `1`. The word expansions that ask for
+        // it run before this assignments, so they still see the previous
+        // pipeline — exactly bash's rule.
+        let mut stage_statuses = Vec::new();
         let status = match stages {
             [] => Status::SUCCESS,
             // `!` is an ignore context for the pipeline, so a compound command
             // under it must not exit the shell: `! { false; }` continues.
             [only] => match self.eval_node(chunk, *only, operand_ctx(ctx, !negated)) {
-                Unwind::Status(status) => status,
+                Unwind::Status(status) => {
+                    stage_statuses.push(status);
+                    status
+                }
                 other => return other,
             },
             _ => match self.run_pipeline(chunk, stages, links, ctx) {
@@ -251,14 +283,20 @@ impl Interp {
                     if let Some(exit) = self.after_foreground_wait() {
                         return Unwind::Exit(exit);
                     }
-                    combine_pipeline(&statuses, pipefail)
+                    let status = combine_pipeline(&statuses, pipefail);
+                    stage_statuses = statuses;
+                    status
                 }
                 Err(message) => {
                     self.report(crate::codes::INTERNAL, 0..0, message);
+                    stage_statuses.push(Status::FAILURE);
                     Status::FAILURE
                 }
             },
         };
+        if !stage_statuses.is_empty() {
+            self.set_pipeline_status(&stage_statuses);
+        }
         let status = if negated {
             if status.is_success() {
                 Status::FAILURE
@@ -420,6 +458,11 @@ impl Interp {
         }
         let mut last = Status::SUCCESS;
         loop {
+            // The header is re-evaluated on every iteration, and `$LINENO`
+            // inside it is the header's line even after the body moved the
+            // cursor (bash agrees; `for (( i = 0; i < $LINENO; i++ ))` runs
+            // until `i` reaches the header's line).
+            self.set_line(&chunk.source, header.start);
             if !condition.trim_ascii().is_empty() {
                 match crate::arith::eval(condition, self) {
                     Ok(0) => break,
@@ -442,6 +485,7 @@ impl Interp {
                 Unwind::Continue(count) => return Unwind::Continue(count - 1),
                 other => return other,
             }
+            self.set_line(&chunk.source, header.start);
             if let Err(message) = crate::arith::eval(update, self) {
                 self.report(
                     crate::codes::ARITHMETIC,
