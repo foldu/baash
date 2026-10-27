@@ -221,6 +221,11 @@ bsh           binary: dispatch, main loop
 reachable from `fork()` is then safe Rust, and the code that runs between
 `fork` and `exec` is auditable by reading one crate.
 
+Contracts that cross crate boundaries — and therefore outlive a single branch —
+are collected in `docs/contracts.md`: the global fork gate, spawn-plan
+environment and signal rules, how exec failures surface, and the renderer
+inventory.
+
 `bsh-repl` must not depend on `bsh-runtime`. The editor talks to traits
 (`Completer`, `Highlighter`), which keeps it testable headlessly and reusable.
 

@@ -25,6 +25,9 @@ crates/
   bsh            the binary
 ```
 
+Cross-crate contracts (fork gate, spawn plans, renderers) are in
+[docs/contracts.md](docs/contracts.md).
+
 Dependency direction follows DESIGN.md §4.1: `bsh-sys` is the only crate
 permitted `unsafe`, and everything else carries `#![forbid(unsafe_code)]`.
 `bsh-repl` does not depend on `bsh-runtime`, so the editor can be tested
