@@ -8,9 +8,10 @@ Each section is owned by the producing crate. If you are implementing a consumer
 (`bsh-vm`, `bsh-repl`, `bsh-tools`) read the relevant sections before you start,
 and treat every item here as a fact about the API you are calling.
 
-Status: everything except the editor and tooling has landed: `bsh-diag`,
-`bsh-sys`, `bsh-runtime`, `bsh-lang`, `bsh-syntax`, `bsh-complete` and the
-`bsh-vm` tree-walking executor.
+Status: everything except the tooling has landed: `bsh-diag`, `bsh-sys`,
+`bsh-runtime`, `bsh-lang`, `bsh-syntax`, `bsh-complete`, the `bsh-vm`
+tree-walking executor and the `bsh-repl` editor. `bsh-compile` still holds
+types only.
 
 ---
 
@@ -397,6 +398,57 @@ process substitution, `~user`, `$RANDOM`/`$SECONDS`/`$PIPESTATUS`, `set -x`.
 **Platform constants come from `bsh-sys`.** `bsh_sys::{flags, SIGPIPE, c_int,
 mode_t}` are re-exported so no other crate needs `libc`; `bsh-vm` has no `libc`
 dependency, which keeps "only `bsh-sys` touches the platform" true.
+
+---
+
+## bsh-repl
+
+**The editor takes bytes and a `Terminal`; it does not know about the shell.**
+`bsh-repl` deliberately depends on no interpreter crate — not even `bsh-syntax`.
+Two traits carry everything it needs from above:
+
+```rust
+pub trait Terminal {                       // the pty wave implements these five
+    fn read_byte(&mut self) -> io::Result<Option<u8>>;
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()>;
+    fn size(&mut self) -> Size;            // Size { columns, rows }
+    fn enter_raw(&mut self) -> io::Result<()>;
+    fn leave_raw(&mut self) -> io::Result<()>;
+}
+
+pub trait Syntax { fn needs_more_input(&self, line: &[u8]) -> bool; }
+```
+
+`RealTerminal` opens `/dev/tty` (falling back to stdio) and uses
+`bsh_sys::RawMode` plus `window_size_fd`, because `bsh_sys::window_size()` is
+wired to stdout. A pty harness needs only those five methods; no editor change.
+
+**Continuation goes through `Syntax`, implemented in the binary** with
+`bsh_syntax::parse_bytes`. The trait is deliberately thin, and that thinness has
+a visible cost: it can say "more input" but not "incomplete, and now the user
+wants to stop", so Ctrl-D on an empty `PS2` line abandons the command instead of
+reporting the syntax error the way bash does. Widening it to a three-state
+status (`Complete | Incomplete | Invalid`) would fix that; it is a seam, not a
+wall.
+
+**Raw mode is held only while `read_line` runs**, so a child command runs with
+the terminal cooked. That is a job-control prerequisite, not an accident.
+
+**Key semantics**: TAB and Enter accept a menu selection; Up/Down, Shift-Tab and
+Ctrl-P/Ctrl-N navigate; Esc cancels. One candidate is inserted through
+`Menu::apply` without opening a menu. Ghost text comes from history and is
+accepted with Right or End.
+
+**The editor owns the prompt** (`$PS1`/`$PS2` expanded from the environment only,
+so `PS1=…` typed at the prompt does not take effect until the runtime exposes
+shell variables to it), history (`$HISTFILE` appended, never rewritten) and the
+`cd`-driven `set_root` call, which the binary makes after each chunk.
+
+Deferred, with the list maintained at the top of `crates/bsh-repl/src/lib.rs`:
+Ctrl-R reverse search, vi mode, multi-column menus and the full-screen picker,
+a `poll(2)` key timeout (a lone Esc is only distinguishable at end of input),
+`SIGWINCH` reflow, mouse, incremental/semantic highlighting, `HISTCONTROL`, and
+automated pty tests.
 
 ---
 

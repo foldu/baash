@@ -3,9 +3,28 @@
 A POSIX- and bash-compatible interactive shell in Rust. The design rationale
 lives in [DESIGN.md](DESIGN.md); this file is the operator's manual.
 
-**Status: scaffold.** The workspace, crate graph, build and CI are in place.
-One feature is actually finished: `bsh --highlight`. Everything else parses,
-compiles and tests cleanly but is not implemented.
+**Status: it runs.** `bsh` executes scripts, and `bsh` with no arguments gives
+you an interactive editor with syntax highlighting, TAB completion and history.
+POSIX conformance is **not yet measured** — the Oils suite is vendored and the
+harness is in progress — so treat the pass count as unknown rather than assume
+it from the test count.
+
+What works today: expansion (words, `IFS`, `$@`/`$*`, quoting), redirections
+including here-documents, pipelines with `pipefail`, `if`/`for`/`while`/`until`/
+`case`, functions with `local`, subshells, command substitution, arithmetic,
+`[[ ]]`, globbing, `set -e`, `break`/`continue`/`return`/`exit`, `exec`, and
+the built-ins listed in `docs/contracts.md`.
+
+Not implemented yet: traps, job control, arrays, the pattern parameter operators
+(`${x#pat}`, `${x%pat}`, `${x//a/b}`), `[[ =~ ]]`, process substitution,
+`~user`, `$RANDOM`/`$SECONDS`/`$PIPESTATUS`, `set -x`, and several registered
+built-ins (`read`, `wait`, `trap`, `umask`, `command`, `type`, `shopt`, …) which
+currently return status 2 with `BSH-E0508`. The interactive editor's deferred
+list (Ctrl-R, the full-screen picker, vi mode, `SIGWINCH` reflow) is at the top
+of `crates/bsh-repl/src/lib.rs`.
+
+The bytecode backend is not written yet either: `bsh-vm` runs a tree-walking
+evaluator, which is kept afterwards as the reference backend for the compiler.
 
 ## Layout
 
@@ -39,7 +58,12 @@ without an interpreter.
 nix develop          # cargo, rustc, clippy, rustfmt, rust-analyzer
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- --deny warnings
-cargo run -p bsh -- -c 'echo hi'
+
+cargo run -p bsh -- -c 'echo hi'     # run a command
+cargo run -p bsh                     # interactive (on a terminal)
+cargo run -p bsh -- script.sh        # run a file
+cargo run -p bsh -- -n script.sh     # parse only, report diagnostics
+printf 'if x; then\n' | cargo run -p bsh -- --highlight   # paint stdin
 ```
 
 Use `--all-features` for both. `bsh-diag`'s `miette` adapter is behind the
