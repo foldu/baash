@@ -509,6 +509,55 @@ automated pty tests.
 
 ---
 
+## bsh-pattern
+
+One matcher for every pattern in the shell: `${x#pat}`, `${x%pat}`, `case`,
+`[[ x == pat ]]`, extglob, `${x/pat/rep}` and globbing (DESIGN §4.8).
+
+```rust
+pub struct Flags { pub extglob: bool, pub nocasematch: bool, pub pathname: bool }
+pub fn matches(pattern: &[u8], text: &[u8], flags: Flags) -> bool;
+pub fn prefix_end(pattern: &[u8], text: &[u8], longest: bool, flags: Flags) -> Option<usize>;
+pub fn suffix_start(pattern: &[u8], text: &[u8], longest: bool, flags: Flags) -> Option<usize>;
+pub struct Pattern;   // compile once, match many; for glob loops
+```
+
+`matches` is anchored at both ends. `Some(0)` / `Some(len)` are real empty
+matches; `None` is no match. Parsing is total — a malformed pattern is literal
+text, so a `case` pattern can never fail to compile.
+
+**Algorithm**: pattern → AST → Thompson NFA simulated as a set of states per
+text position, so it never backtracks. O(n·m) without `!(…)`, O(n²·m) worst
+case with it. bash's own matcher is exponential (`a*a*a*a*b` hangs it); this one
+is not, and there is a watchdog test to keep it that way.
+
+**Wiring rules the caller must get right** (each verified against bash 5.3.20,
+and each is surprising):
+
+- `[[ x == pat ]]` matches with **extglob semantics even when `shopt -u
+  extglob`**; `case` and `${…}` honour the option. Pass `extglob: true`
+  unconditionally for `[[ == ]]`.
+- `shopt -s nocasematch` affects `case`, `[[ ]]` and `${x/pat/rep}` but **not**
+  `${x#pat}`/`${x%pat}`. Pass `nocasematch: false` for the four strip
+  operators. Pathname expansion uses `nocaseglob`, which is a different flag.
+- `${x/pat/rep}` takes the **longest** match at the leftmost position:
+  `prefix_end(…, longest: true)` on the tail, offset added back. The empty-match
+  policy (`${x//""/X}` unchanged, `${x/#/X}` prepends) lives in the
+  substitution loop, not here.
+- Globbing compiles one `Pattern` per pattern and matches per path component
+  with `pathname: true`; dotfile rules, `globstar`, `nullglob` and sorting
+  belong to the caller.
+- There is no quote-mask API: a caller holding a per-byte quoting mask must
+  convert quoted bytes to backslash escapes (a quoted backslash becomes `\\`).
+
+Documented deviations: POSIX classes are ASCII-only (locale independence, unlike
+glibc); `[[.ch.]]`/`[[=a=]]` are ordinary bracket members; bash's
+`*@()`-matches-nothing quirk is not reproduced (we implement the compositional
+meaning); malformed extglob groups degrade to literal text; nesting is capped at
+128.
+
+---
+
 ## Diagnostic codes
 
 Each crate owns a hundred-range, so a code identifies the layer that produced
