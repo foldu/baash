@@ -21,6 +21,12 @@
 //! `echo -n` are *bash* behaviour, not the coreutils behaviour a `PATH` hit
 //! would give. It stops being used the moment `bsh-runtime` writes its body.
 //!
+//! Three more bodies are here because their effect *is* executor state, not
+//! shell state: `hash` (which path a later command word runs), and
+//! `mapfile`/`readarray` (the descriptor table and the per-descriptor read
+//! buffer that `read` already owns). Their registry entries stay stubs, which
+//! is the documented mechanism for "this body belongs to the executor".
+//!
 //! Deliberately *not* here: `printf`, `test`, `[` and `pwd` are regular
 //! utilities in POSIX terms — they must remain exec-able, their program forms
 //! are correct, and they are `bsh-runtime`'s bodies to write. Until it writes
@@ -31,7 +37,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 
 use bsh_diag::Diagnostic;
-use bsh_runtime::{CreateScope, ShellError, ShellHost, Status, Tier};
+use bsh_runtime::{CreateScope, ShellError, ShellHost, Status};
 
 use super::{Interp, Unwind};
 
@@ -45,11 +51,6 @@ pub(crate) struct VmBuiltin {
 
 pub(crate) fn lookup(name: &[u8]) -> Option<&'static VmBuiltin> {
     VM_BUILTINS.iter().find(|builtin| builtin.name == name)
-}
-
-/// The registry tier of a `name`, so prefix assignments behave correctly.
-pub(crate) fn tier_of(name: &[u8]) -> Tier {
-    bsh_runtime::tier_of(name).unwrap_or(Tier::Extension)
 }
 
 static VM_BUILTINS: &[VmBuiltin] = &[

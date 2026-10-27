@@ -40,6 +40,8 @@ pub mod codes {
     pub const BAD_NUMBER: ErrCode = ErrCode::new(509);
     /// A builtin was called with an unknown option or wrong operand count.
     pub const USAGE: ErrCode = ErrCode::new(510);
+    /// `type`/`command -v`/`hash` could not find the name.
+    pub const NOT_FOUND: ErrCode = ErrCode::new(511);
 }
 
 /// A failed shell-state operation.
@@ -269,6 +271,28 @@ impl ShellError {
                 status,
                 redirection: false,
             },
+        }
+    }
+}
+
+impl ShellError {
+    /// The same failure, reached through `command`/`builtin`.
+    ///
+    /// POSIX §2.8.1 note 1 exempts `command`: a special built-in that fails
+    /// through it must not exit the shell. `builtin` is the same wrapper in
+    /// bash's vocabulary ("run this built-in itself"), so both are rewritten
+    /// before the consequence table, which keeps the table itself unchanged.
+    pub fn reached_via_wrapper(self) -> ShellError {
+        match self {
+            ShellError::SpecialBuiltin { status, .. } => ShellError::SpecialBuiltin {
+                status,
+                via_command: true,
+            },
+            ShellError::SpecialBuiltinRedirection => ShellError::Utility {
+                status: Status::FAILURE,
+                redirection: true,
+            },
+            other => other,
         }
     }
 }

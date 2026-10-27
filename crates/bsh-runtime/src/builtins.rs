@@ -17,6 +17,9 @@
 //! emits a `BSH-E0508` diagnostic and returns status 2. Nothing panics.
 
 use crate::errors::{Error, ShellError, codes, display};
+
+mod getopts;
+mod meta;
 use crate::opts::OptionKind;
 use crate::vars::{ArrayShape, CreateScope, Vars};
 use crate::{Opts, ShellHost, Status};
@@ -178,21 +181,21 @@ pub const BUILTINS: &[BuiltinDef] = &[
     def("trap", Tier::Special, Some(bi_trap)),
     def("unset", Tier::Special, Some(bi_unset)),
     // POSIX 2024 §1.7 intrinsic utilities (16).
-    def("alias", Tier::Intrinsic, None),
+    def("alias", Tier::Intrinsic, Some(meta::bi_alias)),
     def("bg", Tier::Intrinsic, None),
     def("cd", Tier::Intrinsic, None),
-    def("command", Tier::Intrinsic, None),
+    def("command", Tier::Intrinsic, Some(meta::bi_command)),
     def("fc", Tier::Intrinsic, None),
     def("fg", Tier::Intrinsic, None),
-    def("getopts", Tier::Intrinsic, None),
+    def("getopts", Tier::Intrinsic, Some(getopts::bi_getopts)),
     def("hash", Tier::Intrinsic, None),
     def("jobs", Tier::Intrinsic, None),
     def("kill", Tier::Intrinsic, None),
     def("read", Tier::Intrinsic, None),
-    def("type", Tier::Intrinsic, None),
+    def("type", Tier::Intrinsic, Some(meta::bi_type)),
     def("ulimit", Tier::Intrinsic, None),
     def("umask", Tier::Intrinsic, None),
-    def("unalias", Tier::Intrinsic, None),
+    def("unalias", Tier::Intrinsic, Some(meta::bi_unalias)),
     def("wait", Tier::Intrinsic, None),
     // Standard utilities that must remain exec-able, so never intrinsic.
     def("[", Tier::Regular, None),
@@ -204,7 +207,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     def("true", Tier::Regular, Some(bi_true)),
     // Bash extensions (DESIGN.md §3.4); registered so search order and
     // "command not found" diagnostics can distinguish them.
-    def("builtin", Tier::Extension, None),
+    def("builtin", Tier::Extension, Some(meta::bi_builtin)),
     def("compgen", Tier::Extension, None),
     def("complete", Tier::Extension, None),
     def("compopt", Tier::Extension, None),
@@ -729,21 +732,34 @@ fn bi_readonly(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
 }
 
 fn bi_unset(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
+    /// Which namespace `unset` was pointed at.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mode {
+        /// Neither `-f` nor `-v`: the variable if it exists, else the function.
+        Default,
+        Function,
+        Variable,
+    }
+
+    let mut mode = Mode::Default;
     let mut index = 1;
-    let mut unsupported = None;
+    let mut nameref = false;
     while index < argv.len() {
         match argv[index] {
             b"--" => {
                 index += 1;
                 break;
             }
-            b"-v" => index += 1,
+            b"-v" => {
+                mode = Mode::Variable;
+                index += 1;
+            }
             b"-f" => {
-                unsupported = Some("function removal");
+                mode = Mode::Function;
                 index += 1;
             }
             b"-n" => {
-                unsupported = Some("nameref removal");
+                nameref = true;
                 index += 1;
             }
             option if option.len() > 1 && option[0] == b'-' => {
@@ -752,14 +768,15 @@ fn bi_unset(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
             _ => break,
         }
     }
-    if let Some(what) = unsupported {
-        // `unset -f` needs the function table, which lives in the VM; `-n`
-        // needs namerefs (deferred, DESIGN.md §3.4).
+    if nameref {
+        // `-n` removes the nameref itself rather than its target; namerefs are
+        // deferred (DESIGN.md §3.4), so the honest answer is that this is not
+        // implemented yet.
         diagnose(
             host,
             codes::NOT_IMPLEMENTED,
             format!(
-                "{}: {what} is not implemented yet",
+                "{}: nameref removal is not implemented yet",
                 program_name(argv, "unset")
             ),
         );
@@ -768,7 +785,7 @@ fn bi_unset(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
 
     let mut status = Status::SUCCESS;
     for &name in &argv[index..] {
-        if name.contains(&b'[') {
+        if mode != Mode::Function && name.contains(&b'[') {
             if let Some(element_status) = host.unset_array_element(name) {
                 if !element_status.is_success() {
                     status = element_status;
@@ -784,12 +801,33 @@ fn bi_unset(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
                     display(name)
                 ),
             );
-            status = Status(1);
+            status = Status::FAILURE;
             continue;
         }
-        if let Err(error) = host.state().vars.unset(name) {
-            let _ = report_error(host, argv, &error);
-            status = Status(1);
+        match mode {
+            Mode::Function => {
+                // A missing function is not an error: `unset -f nope` is 0.
+                host.unset_function(name);
+            }
+            Mode::Variable => {
+                if let Err(error) = host.state().vars.unset(name) {
+                    let _ = report_error(host, argv, &error);
+                    status = Status::FAILURE;
+                }
+            }
+            Mode::Default => {
+                // bash: the variable wins when it exists, and only then is the
+                // function considered, so `f=x; f() { …; }; unset f` keeps the
+                // function.
+                if host.state().vars.contains(name) {
+                    if let Err(error) = host.state().vars.unset(name) {
+                        let _ = report_error(host, argv, &error);
+                        status = Status::FAILURE;
+                    }
+                } else {
+                    host.unset_function(name);
+                }
+            }
         }
     }
     status

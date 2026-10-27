@@ -44,13 +44,23 @@
 //! * **`select`, `time`, `coproc`, `[[ x =~ re ]]`** — `select` and `time`
 //!   parse as command words (`bsh-syntax` documents that); `[[ … =~ … ]]`
 //!   reports a deferred-feature diagnostic rather than a wrong answer.
+//! * **`shopt -u expand_aliases`** — the flag is read at command position but
+//!   only `shopt` could change it, and `shopt` is a stub.
 //! * **`set -u`** — arrays themselves are implemented (storage, expansion,
 //!   literals, element assignment, `declare`/`local`/`unset`), but `nounset` is
 //!   not implemented at all, so a missing element under `set -u` behaves as
 //!   empty rather than as an error.
-//! * **`builtin`, `command`, `type`, `hash`, `getopts`, aliases, `mapfile`** —
-//!   registry stubs. `builtin kill -l` (four `kill.test.sh` cases) needs the
-//!   first of them.
+//! * **Alias substitution is per command, not per input line.** `alias e=echo`
+//!   followed by `e hi` on the *same* line expands here and does not in bash,
+//!   whose parser buffers a whole line before executing anything. The
+//!   substitution itself (including the "never into itself" rule and the
+//!   trailing-blank rule) matches bash; see `alias.rs`.
+//! * **Structural alias values** — `alias L='{'` and `alias f='for i in …; do`
+//!   — expand only when the rest of the value completes a command *within the
+//!   same simple command's text*. bash re-lexes the rest of the line, so a
+//!   value that needs the following `; done` fails here with a syntax error.
+//! * **`mapfile -C`/`-c`** (the per-record callback) is not implemented; the
+//!   rest of `mapfile`/`readarray` is.
 //! * **A shebang-less executable script** — POSIX says the shell retries an
 //!   `ENOEXEC` file as a shell script; today it is status 126. That is what
 //!   blocks the `$REPO_ROOT/spec/testdata/*.sh` trap cases together with
@@ -63,11 +73,11 @@
 //!   as `Unsupported` by `bsh-lang` (its documented boundary).
 //! * **Process substitution `<(…)`/`>(…)`** — `bsh-lang`'s default callback
 //!   errors, and this evaluator does not override it.
-//! * **`set -x`/`set -v`, `umask`, `shopt`, `getopts`, `alias`, `ulimit`** —
-//!   registry stubs; see `builtins.rs` for the executor-side set that *is*
-//!   implemented and why. `printf`/`test`/`[`/`pwd` are served from `PATH`
-//!   until `bsh-runtime` writes their bodies, which is where POSIX puts a
-//!   regular built-in.
+//! * **`set -x`/`set -v`, `umask`, `shopt`, `ulimit`** — registry stubs; see
+//!   `builtins.rs` for the executor-side set that *is* implemented and why.
+//!   `printf`/`test`/`[`/`pwd` are served from `PATH` until `bsh-runtime`
+//!   writes their bodies, which is where POSIX puts a regular built-in — which
+//!   is also why `type -t [` reports `file` rather than `builtin`.
 //! * **`~user`** — `bsh_lang::Shell::home_dir` has a default of `None` and
 //!   `bsh-sys` exposes no `getpwnam`, so `~root` is left as written. `~`,
 //!   `~+` and `~-` work.
@@ -107,6 +117,7 @@ use bsh_runtime::{Opts, ShellHost, ShellState, Status, consequence};
 use bsh_syntax::ArrayElement;
 use bsh_syntax::{Ast, NodeId, ParseOpts, ParseOutcome, parse_with};
 
+mod alias;
 mod builtins;
 mod command;
 mod cond;
@@ -245,6 +256,29 @@ pub struct Interp {
     /// The pending exit status while the `EXIT` trap runs, so a bare `exit`
     /// inside it keeps that status (bash's rule).
     exit_trap_status: Option<Status>,
+    /// `PATH` hits remembered by command name: bash's hash table.
+    ///
+    /// `hash` lists and edits it, `hash -r` empties it, and a remembered path
+    /// is used without touching the filesystem again — which is why a program
+    /// that appears earlier in `PATH` later does not take over until the table
+    /// is cleared, and why a deleted program still resolves and then fails to
+    /// spawn.
+    path_cache: std::collections::BTreeMap<Vec<u8>, Vec<u8>>,
+    /// A parsed empty chunk.
+    ///
+    /// `builtin`/`command` run a command that has no redirections and no
+    /// prefix assignments of its own, but the shared invocation path takes a
+    /// chunk (a redirection needs one for its spans and here-documents). One
+    /// parsed empty chunk, built once, is cheaper and clearer than an
+    /// `Option` threaded through every call site.
+    empty_chunk: Arc<ParsedChunk>,
+    /// True while the command produced by an alias substitution is being
+    /// evaluated.
+    ///
+    /// The replacement text is fully expanded before it is parsed, so a second
+    /// expansion pass over it would expand the value's first word against the
+    /// alias that produced it — the recursion the expansion stack forbids.
+    alias_eval_depth: usize,
 }
 
 /// One `name=(…)` argument in a declaration command.
@@ -275,6 +309,17 @@ impl Interp {
     /// A fresh shell with explicit options (a profile preset, per the runtime
     /// contract: never an exhaustive `Opts` literal).
     pub fn with_opts(opts: Opts, interactive: bool) -> Self {
+        let empty_source = Arc::new(SourceFile::new("<direct>", &b""[..]));
+        let empty_ast = match parse_with(&empty_source, &ParseOpts::DEFAULT) {
+            ParseOutcome::Ok(ast) => ast,
+            // Empty input always parses; a failure here would be a bug in the
+            // front end, not something a shell run can recover from.
+            _ => panic!("the empty chunk must parse"),
+        };
+        let empty_chunk = Arc::new(ParsedChunk {
+            ast: empty_ast,
+            source: empty_source,
+        });
         let mut interp = Self {
             state: ShellState::new(opts),
             interactive,
@@ -293,7 +338,14 @@ impl Interp {
             background: traps::Background::new(),
             jobs: Vec::new(),
             exit_trap_status: None,
+            path_cache: std::collections::BTreeMap::new(),
+            empty_chunk,
+            alias_eval_depth: 0,
         };
+        // POSIX initializes `OPTIND` to 1 at shell startup, and `getopts`
+        // counts from there; a script that never mentions it still needs the
+        // value (`echo $OPTIND` is `1`, not empty).
+        let _ = interp.state.vars.assign_scalar(b"OPTIND", b"1");
         // `$?`, `$$` and `$-` must answer before the first command runs.
         interp.sync_specials();
         interp
@@ -825,5 +877,63 @@ impl ShellHost for Interp {
         let mut line = rendered.into_bytes();
         line.push(b'\n');
         let _ = self.write_err(&line);
+    }
+
+    fn resolve_command(
+        &self,
+        name: &[u8],
+        query: bsh_runtime::ResolveQuery,
+    ) -> Vec<bsh_runtime::CommandInfo> {
+        let mut out = Vec::new();
+        self.each_candidate(name, query, &mut |candidate| {
+            out.push(self.candidate_info(candidate));
+            query.all
+        });
+        out
+    }
+
+    fn run_builtin_direct(&mut self, argv: &[Vec<u8>]) -> Option<Status> {
+        // `builtin NAME …`: the registry only, no function, alias or `PATH`
+        // lookup. A name that is not a builtin at all is the caller's to
+        // report, so `None` rather than a status.
+        let name = argv.first()?;
+        let def = bsh_runtime::lookup_builtin(name)?;
+        let resolution = self.registry_body(def);
+        Some(self.run_direct(resolution, argv))
+    }
+
+    fn run_command_direct(&mut self, argv: &[Vec<u8>], default_path: bool) -> Status {
+        let Some(name) = argv.first().cloned() else {
+            return Status::SUCCESS;
+        };
+        let query = bsh_runtime::ResolveQuery {
+            skip_functions: true,
+            default_path,
+            ..bsh_runtime::ResolveQuery::EXECUTION
+        };
+        let mut found = None;
+        self.each_candidate(&name, query, &mut |candidate| {
+            found = Some(candidate);
+            false
+        });
+        let Some(resolution) = found else {
+            return self.command_not_found(&name).status();
+        };
+        if let command::Resolution::External(path) = &resolution
+            && !name.contains(&b'/')
+        {
+            self.path_cache.insert(name.clone(), path.clone());
+        }
+        self.run_direct(resolution, argv)
+    }
+
+    fn unset_function(&mut self, name: &[u8]) -> bool {
+        let before = self.functions.len();
+        self.functions.retain(|function| function.name != name);
+        self.functions.len() != before
+    }
+
+    fn function_source(&self, name: &[u8]) -> Option<Vec<u8>> {
+        self.function_body(name)
     }
 }

@@ -15,6 +15,10 @@
 //!   parameters, special parameters and the `envp` encoding (DESIGN.md §4.6).
 //! * `builtins` — [`Tier`] and [`BUILTINS`], with POSIX 2024's special,
 //!   intrinsic and regular tiers plus bash extensions.
+//! * `alias` — [`AliasTable`], the textual substitutions `alias` defines. The
+//!   substitution itself is the VM's, because it re-enters the parser.
+//! * `command` — [`CommandKind`]/[`CommandInfo`]/[`ResolveQuery`], the
+//!   vocabulary `type`, `command -v` and `builtin` share with the executor.
 //! * `errors` — state errors and the POSIX §2.8.1 consequence table.
 //!
 //! Shell text is bytes throughout: names and values are `Vec<u8>`, never
@@ -23,7 +27,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod alias;
 mod builtins;
+mod command;
 mod errors;
 mod opts;
 mod traps;
@@ -32,11 +38,13 @@ mod vars;
 #[cfg(test)]
 mod tests;
 
+pub use alias::AliasTable;
 pub use builtins::{
     AssignPersistence, BUILTINS, BuiltinDef, Handler, Tier, builtin_names, declaration_scope,
     declare_array_from_flag, lookup as lookup_builtin, names_in, run_builtin, set_option_table,
     stubs_in, tier_of,
 };
+pub use command::{CommandInfo, CommandKind, ResolveQuery};
 pub use errors::{Action, Error, ShellError, codes, consequence, display as display_bytes};
 pub use opts::{ALL_FLAGS, Flag, NamedOption, OptionKind, Opts};
 pub use traps::{
@@ -90,8 +98,34 @@ pub struct ShellState {
     /// pseudo-signals. Signal *dispositions* are the VM's business: this table
     /// only records what `trap` was asked to do.
     pub traps: TrapTable,
+    /// Alias definitions. They are inherited by a forked subshell (bash copies
+    /// them) and, like every other piece of shell state, not by `exec`.
+    pub aliases: AliasTable,
+    /// Where `getopts` is in the argument it is scanning.
+    ///
+    /// `OPTIND` names the argument and this holds the character offset inside
+    /// a cluster (`-ab`: `OPTIND=1`, offset 1 after `a`). It is not a shell
+    /// variable, so it cannot be read or written by a script; when `OPTIND`
+    /// changes the offset is discarded, which is what makes `OPTIND=1` a
+    /// reset.
+    getopts: GetoptsState,
     error: Option<ShellError>,
     exit_request: Option<Status>,
+}
+
+/// The `getopts` scan position inside a clustered argument.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct GetoptsState {
+    /// The `OPTIND` this offset belongs to.
+    pub(crate) optind: i64,
+    /// How many bytes of that argument have been consumed.
+    pub(crate) offset: usize,
+    /// `Vars`'s `OPTIND` write counter when the offset was recorded.
+    ///
+    /// A script resets `getopts` by assigning `OPTIND`, and the *assignment*
+    /// is the signal, not the value: `OPTIND=1` twice re-parses the same
+    /// clustered argument, which a value comparison cannot see.
+    pub(crate) generation: u64,
 }
 
 impl ShellState {
@@ -101,9 +135,30 @@ impl ShellState {
             opts,
             vars: Vars::default(),
             traps: TrapTable::default(),
+            aliases: AliasTable::new(),
+            getopts: GetoptsState::default(),
             error: None,
             exit_request: None,
         }
+    }
+
+    /// The `getopts` scan position: `OPTIND`, the offset inside that argument,
+    /// and the `OPTIND` write counter the offset was recorded at.
+    pub(crate) fn getopts_position(&self) -> (i64, usize, u64) {
+        (
+            self.getopts.optind,
+            self.getopts.offset,
+            self.getopts.generation,
+        )
+    }
+
+    /// Record the `getopts` scan position.
+    pub(crate) fn set_getopts_position(&mut self, optind: i64, offset: usize, generation: u64) {
+        self.getopts = GetoptsState {
+            optind,
+            offset,
+            generation,
+        };
     }
 
     /// The error class recorded by the most recent failing operation, if any.
@@ -220,5 +275,58 @@ pub trait ShellHost {
         line.extend_from_slice(diagnostic.code.to_string().as_bytes());
         line.extend_from_slice(b"]\n");
         let _ = self.write_err(&line);
+    }
+
+    /// Every place `name` resolves to, in the shell's search order.
+    ///
+    /// This is the *executor's* resolution, not a second opinion: the VM
+    /// implements it once and uses it for both command execution and this
+    /// query, so `type` cannot disagree with what running the name would do.
+    /// `query.files_only` asks for executable files only (`type -p`/`-P`);
+    /// `query.classify` prepends aliases and reserved words, which the
+    /// executor never sees because they are handled before it.
+    ///
+    /// The default returns nothing, which makes `type` report "not found" on a
+    /// host with no search order.
+    fn resolve_command(&self, name: &[u8], query: ResolveQuery) -> Vec<CommandInfo> {
+        let _ = (name, query);
+        Vec::new()
+    }
+
+    /// Run `argv` as a built-in only, bypassing functions, aliases and `PATH`.
+    ///
+    /// This is `builtin NAME …`. `None` means `argv[0]` is not a built-in at
+    /// all, which the caller reports; a built-in that fails returns its status.
+    fn run_builtin_direct(&mut self, argv: &[Vec<u8>]) -> Option<Status> {
+        let _ = argv;
+        None
+    }
+
+    /// Run `argv` bypassing functions and aliases but keeping built-ins and
+    /// `PATH`, as `command NAME …` does.
+    ///
+    /// `default_path` is `command -p`: search the standard utility path
+    /// instead of `$PATH`. A special built-in run this way records its failure
+    /// as `via_command`, because POSIX §2.8.1 note 1 exempts `command`.
+    fn run_command_direct(&mut self, argv: &[Vec<u8>], default_path: bool) -> Status {
+        let _ = (argv, default_path);
+        Status::NOT_FOUND
+    }
+
+    /// Remove the shell function `name` (`unset -f`). Returns whether it
+    /// existed; the function table lives in the executor, not in this crate.
+    fn unset_function(&mut self, name: &[u8]) -> bool {
+        let _ = name;
+        false
+    }
+
+    /// The text `type` prints after `name is a shell function`.
+    ///
+    /// A function's body is the source it was parsed from, which only the
+    /// executor keeps, so the caller asks for it by name. `None` means the
+    /// host cannot render it and `type` prints the one-line form.
+    fn function_source(&self, name: &[u8]) -> Option<Vec<u8>> {
+        let _ = name;
+        None
     }
 }

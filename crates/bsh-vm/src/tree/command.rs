@@ -59,18 +59,97 @@ enum AssignmentAction {
 /// Where the shell finds commands when `PATH` is unset.
 const DEFAULT_PATH: &[u8] = b"/usr/local/bin:/usr/bin:/bin";
 
-/// What a command name resolved to.
-enum Target {
+/// One place a command name resolved to, in search order.
+///
+/// This is the single description of "what would this name run?", produced by
+/// [`Interp::each_candidate`]. The executor takes the first entry; `type`,
+/// `command -v` and `builtin` ask the same function through
+/// `ShellHost::resolve_command`, so the two can never disagree.
+pub(crate) enum Resolution {
+    /// A shell alias: text substituted at command position before parsing.
+    Alias(Vec<u8>),
+    /// A reserved word. Only a classification ever yields this; the parser
+    /// consumes keywords before the executor sees a command word.
+    Keyword,
+    /// A shell function, by index into the function table.
+    Function(usize),
     /// A body in the runtime's builtin registry.
     Builtin(&'static bsh_runtime::BuiltinDef, Tier),
     /// An executor-side built-in (see `builtins.rs`).
-    Vm(&'static super::builtins::VmBuiltin),
-    /// A shell function, by index into the function table.
-    Function(usize),
+    Vm(&'static super::builtins::VmBuiltin, Tier),
     /// An external program, already found through `PATH`.
     External(Vec<u8>),
-    /// Nothing at all.
-    NotFound,
+}
+
+/// Where the builtin registry puts a name, before `PATH` is consulted.
+#[derive(Clone, Copy)]
+enum Position {
+    /// A POSIX special built-in: searched before functions.
+    Special(&'static bsh_runtime::BuiltinDef),
+    /// A POSIX intrinsic utility: searched after functions.
+    Intrinsic(&'static bsh_runtime::BuiltinDef),
+    /// A regular/extension built-in whose body is the runtime's.
+    Body(&'static bsh_runtime::BuiltinDef),
+    /// A regular/extension built-in whose body is the executor's.
+    VmBody(&'static super::builtins::VmBuiltin, Tier),
+    /// A regular/extension stub: `PATH` decides, the stub is the fallback.
+    PathFirst(&'static bsh_runtime::BuiltinDef),
+    /// Not a builtin at all.
+    NotBuiltin,
+}
+
+/// Everything one resolved command needs, apart from its body.
+///
+/// Bundling these keeps [`Interp::invoke`] and [`Interp::run_builtin`] to a
+/// readable arity, and makes the one flag that changes *semantics* — `direct`,
+/// meaning "reached through `builtin`/`command`" — explicit at the call site
+/// instead of a bare trailing boolean.
+struct Invocation<'a> {
+    chunk: &'a Arc<ParsedChunk>,
+    redirects: &'a [Redirect],
+    assigns: &'a [(&'a [u8], &'a [u8])],
+    argv: &'a [Vec<u8>],
+    ctx: Ctx,
+    /// Reached through `builtin`/`command`: POSIX §2.8.1 note 1 says a special
+    /// built-in that fails there must not exit the shell.
+    direct: bool,
+}
+
+/// Reserved words, for `type`/`command -v` only.
+///
+/// `bsh-syntax` owns the *lexer's* table and it answers a different question:
+/// it over-classifies (`in`, `[[`, `]]` are coloured as keywords) and has no
+/// entry for `{`/`}`, which are operators there. This list is bash's `type`
+/// answer — `type -t '{'` is `keyword` — so it is spelled here rather than
+/// borrowed wrongly. It is a classification table; nothing dispatches on it.
+const KEYWORDS: &[&[u8]] = &[
+    b"!",
+    b"[[",
+    b"]]",
+    b"{",
+    b"}",
+    b"case",
+    b"coproc",
+    b"do",
+    b"done",
+    b"elif",
+    b"else",
+    b"esac",
+    b"fi",
+    b"for",
+    b"function",
+    b"if",
+    b"in",
+    b"select",
+    b"then",
+    b"time",
+    b"until",
+    b"while",
+];
+
+/// Whether `name` is a reserved word `type` reports.
+fn is_keyword(name: &[u8]) -> bool {
+    KEYWORDS.contains(&name)
 }
 
 impl Interp {
@@ -78,6 +157,7 @@ impl Interp {
         &mut self,
         chunk: &Arc<ParsedChunk>,
         command: &SimpleCommand,
+        span: &bsh_diag::Span,
         ctx: Ctx,
     ) -> Unwind {
         // A command boundary is a trap safe point (DESIGN.md §4.5): signals
@@ -96,6 +176,13 @@ impl Interp {
         self.state.clear_error();
         self.sync_specials();
         self.array_literals.clear();
+
+        // Alias substitution happens at command position *before* anything is
+        // expanded or resolved, because an alias value is shell text that may
+        // change the shape of the command (`echo hi | wc -c`).
+        if let Some(unwind) = self.exec_alias_command(chunk, span, ctx) {
+            return unwind;
+        }
 
         // Array-literal arguments (`local a=(1 2)`) keep the structured
         // elements; the `argv` entry is a quoted placeholder holding the raw
@@ -231,41 +318,69 @@ impl Interp {
 
         self.array_literals = array_literals;
         match self.resolve(&name) {
-            Target::Vm(builtin) => {
-                let tier = super::builtins::tier_of(builtin.name);
-                self.run_builtin(
+            Some(resolution) => self.invoke(
+                Invocation {
                     chunk,
-                    &command.redirects,
-                    &assign_views,
-                    tier,
-                    &argv,
-                    BuiltinBody::Vm(builtin),
-                )
-            }
-            Target::Builtin(def, tier) => self.run_builtin(
-                chunk,
-                &command.redirects,
-                &assign_views,
-                tier,
-                &argv,
-                BuiltinBody::Runtime(def),
+                    redirects: &command.redirects,
+                    assigns: &assign_views,
+                    argv: &argv,
+                    ctx,
+                    direct: false,
+                },
+                resolution,
             ),
-            Target::Function(index) => {
-                self.call_function(chunk, index, &command.redirects, &assign_views, &argv, ctx)
-            }
-            Target::External(path) => {
-                self.run_external(chunk, &path, &command.redirects, &assign_views, &argv)
-            }
-            Target::NotFound => {
-                let mut message = b"bsh: ".to_vec();
-                message.extend_from_slice(&name);
-                message.extend_from_slice(b": command not found\n");
-                let _ = self.write_err(&message);
-                self.state.record_error(ShellError::CommandNotFound);
-                let status = Status::NOT_FOUND;
-                self.apply_consequence(ShellError::CommandNotFound, status)
-            }
+            None => self.command_not_found(&name),
         }
+    }
+
+    /// Run one resolved command.
+    ///
+    /// `direct` marks a command reached through `builtin`/`command`: POSIX
+    /// §2.8.1 note 1 says a special built-in that fails there must not exit the
+    /// shell, so its error class is rewritten before the consequence table runs.
+    fn invoke(&mut self, invocation: Invocation<'_>, resolution: Resolution) -> Unwind {
+        match resolution {
+            Resolution::Vm(builtin, tier) => {
+                self.run_builtin(&invocation, tier, BuiltinBody::Vm(builtin))
+            }
+            Resolution::Builtin(def, tier) => {
+                self.run_builtin(&invocation, tier, BuiltinBody::Runtime(def))
+            }
+            Resolution::Function(index) => self.call_function(
+                invocation.chunk,
+                index,
+                invocation.redirects,
+                invocation.assigns,
+                invocation.argv,
+                invocation.ctx,
+            ),
+            Resolution::External(path) => self.run_external(
+                invocation.chunk,
+                &path,
+                invocation.redirects,
+                invocation.assigns,
+                invocation.argv,
+            ),
+            // Neither can reach here: alias substitution happens before
+            // parsing and keywords are consumed by the parser.
+            Resolution::Alias(_) | Resolution::Keyword => self.command_not_found(
+                invocation
+                    .argv
+                    .first()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            ),
+        }
+    }
+
+    /// The `command not found` diagnostic and its POSIX §2.8.1 class.
+    pub(crate) fn command_not_found(&mut self, name: &[u8]) -> Unwind {
+        let mut message = b"bsh: ".to_vec();
+        message.extend_from_slice(name);
+        message.extend_from_slice(b": command not found\n");
+        let _ = self.write_err(&message);
+        self.state.record_error(ShellError::CommandNotFound);
+        self.apply_consequence(ShellError::CommandNotFound, Status::NOT_FOUND)
     }
 
     /// Expand a simple command's words.
@@ -283,6 +398,11 @@ impl Interp {
         let source = chunk.source.bytes();
         let mut argv: Vec<Vec<u8>> = Vec::new();
         let mut declaration = false;
+        // True until the word that *names* the command has been seen. It is a
+        // live question because `builtin`/`command` wrap another command word:
+        // `command readonly c=$x` is a declaration just like `readonly c=$x`,
+        // and its operands are assignment words that must not be split.
+        let mut awaiting_command = true;
         for (index, word) in command.words.iter().enumerate() {
             let assignment_argument =
                 index > 0 && declaration && bsh_syntax::is_assignment_word(source, &word.span);
@@ -291,15 +411,25 @@ impl Interp {
             } else {
                 Mode::Command
             };
+            let before = argv.len();
             argv.extend(expand_word_with(word, self, mode)?);
-            if index == 0 {
-                declaration = argv.first().is_some_and(|name| {
-                    matches!(
-                        name.as_slice(),
-                        b"declare" | b"typeset" | b"local" | b"export" | b"readonly"
-                    )
-                });
+            if !awaiting_command || argv.len() == before {
+                continue;
             }
+            let expanded = argv[before].as_slice();
+            if matches!(expanded, b"builtin" | b"command") {
+                // The next word names the command again.
+                continue;
+            }
+            if index > 0 && expanded.len() > 1 && expanded[0] == b'-' {
+                // A flag of the wrapper (`command -p export x=1`).
+                continue;
+            }
+            declaration = matches!(
+                expanded,
+                b"declare" | b"typeset" | b"local" | b"export" | b"readonly"
+            );
+            awaiting_command = false;
         }
         Ok(argv)
     }
@@ -570,13 +700,18 @@ impl Interp {
     /// Apply the sequence around a built-in body.
     fn run_builtin(
         &mut self,
-        chunk: &Arc<ParsedChunk>,
-        redirects: &[Redirect],
-        assigns: &[(&[u8], &[u8])],
+        invocation: &Invocation<'_>,
         tier: Tier,
-        argv: &[Vec<u8>],
         body: BuiltinBody<'_>,
     ) -> Unwind {
+        let Invocation {
+            chunk,
+            redirects,
+            assigns,
+            argv,
+            direct,
+            ..
+        } = *invocation;
         let special = tier == Tier::Special;
         let saved = match self.apply_redirects(chunk, redirects) {
             Ok(saved) => saved,
@@ -627,7 +762,14 @@ impl Interp {
             self.state.clear_error();
             return Unwind::Exit(exit);
         }
-        if let Some(error) = self.state.take_error() {
+        if let Some(mut error) = self.state.take_error() {
+            if direct {
+                // POSIX §2.8.1 note 1: a special built-in reached through
+                // `command` does not take the shell down with it. `builtin` is
+                // the same escape hatch by construction — "run the built-in
+                // itself" — so it gets the same treatment.
+                error = error.reached_via_wrapper();
+            }
             if !status.is_success() || matches!(error, ShellError::SpecialBuiltin { .. }) {
                 let unwind = self.apply_consequence(error, status);
                 if let Unwind::Exit(_) = unwind {
@@ -933,70 +1075,187 @@ impl Interp {
         }
     }
 
-    /// POSIX search order, minus the function and special cases the caller
-    /// has already handled.
-    fn resolve(&mut self, name: &[u8]) -> Target {
-        if let Some(def) = lookup_builtin(name) {
-            if def.tier == Tier::Special {
-                return match super::builtins::lookup(name) {
-                    Some(builtin) if !def.is_implemented() => Target::Vm(builtin),
-                    _ => Target::Builtin(def, Tier::Special),
-                };
+    /// The executor's search order, as one walk.
+    ///
+    /// This is the *only* implementation of command resolution. Execution
+    /// takes the first candidate it yields; `type`, `command -v`/`-V` and
+    /// `bash`'s `builtin` ask for the same walk through `ShellHost`, so a
+    /// built-in's claim about what a name means cannot drift from what running
+    /// the name does.
+    ///
+    /// `f` returns false to stop the walk.
+    pub(crate) fn each_candidate(
+        &self,
+        name: &[u8],
+        query: bsh_runtime::ResolveQuery,
+        f: &mut dyn FnMut(Resolution) -> bool,
+    ) {
+        // Aliases and keywords are not part of the executor's order — alias
+        // substitution happens before parsing and the parser consumes
+        // keywords — but they come first in a *classification*.
+        if query.classify && !query.files_only {
+            if let Some(value) = self.state.aliases.get(name)
+                && (!f(Resolution::Alias(value.to_vec())) || !query.all)
+            {
+                return;
+            }
+            if is_keyword(name) && (!f(Resolution::Keyword) || !query.all) {
+                return;
             }
         }
-        if let Some(index) = self
-            .functions
-            .iter()
-            .rposition(|function| function.name == name)
-        {
-            return Target::Function(index);
+
+        let mut path_done = false;
+        if !query.files_only {
+            let position = self.position(name);
+            if let Position::Special(def) = position
+                && (!f(self.registry_body(def)) || !query.all)
+            {
+                return;
+            }
+            if !query.skip_functions
+                && let Some(index) = self.function_index(name)
+                && (!f(Resolution::Function(index)) || !query.all)
+            {
+                return;
+            }
+            match position {
+                Position::Special(_) | Position::NotBuiltin => {}
+                Position::Intrinsic(def) => {
+                    if !f(self.registry_body(def)) || !query.all {
+                        return;
+                    }
+                }
+                Position::Body(def) => {
+                    if !f(Resolution::Builtin(def, def.tier)) || !query.all {
+                        return;
+                    }
+                }
+                Position::VmBody(vm, tier) => {
+                    if !f(Resolution::Vm(vm, tier)) || !query.all {
+                        return;
+                    }
+                }
+                Position::PathFirst(def) => {
+                    // A regular/extension built-in with no body "sits where
+                    // `PATH` would": the program wins and the stub is only the
+                    // fallback that reports "not implemented".
+                    path_done = true;
+                    let hits = self.path_hits(name, query);
+                    if hits.is_empty() {
+                        if !f(Resolution::Builtin(def, def.tier)) || !query.all {
+                            return;
+                        }
+                    } else {
+                        for hit in hits {
+                            if !f(Resolution::External(hit)) {
+                                return;
+                            }
+                        }
+                        if !query.all {
+                            return;
+                        }
+                    }
+                }
+            }
         }
-        if let Some(def) = lookup_builtin(name) {
-            if def.tier == Tier::Intrinsic {
-                return match super::builtins::lookup(name) {
-                    Some(builtin) if !def.is_implemented() => Target::Vm(builtin),
-                    _ => Target::Builtin(def, Tier::Intrinsic),
-                };
+        if !path_done {
+            for hit in self.path_hits(name, query) {
+                if !f(Resolution::External(hit)) {
+                    return;
+                }
             }
-            if def.is_implemented() {
-                return Target::Builtin(def, def.tier);
-            }
-            if def.tier == Tier::Extension {
-                return match super::builtins::lookup(name) {
-                    Some(builtin) => Target::Vm(builtin),
-                    None => Target::Builtin(def, def.tier),
-                };
-            }
-            // A regular built-in "sits where PATH would be". An executor-side
-            // body (today only `echo`) shadows the program, as a bash built-in
-            // does; otherwise the real program is used, and if there is none
-            // the registry reports that the body is not written yet.
-            if let Some(builtin) = super::builtins::lookup(name) {
-                return Target::Vm(builtin);
-            }
-            return match self.search_path(name) {
-                Some(path) => Target::External(path),
-                None => Target::Builtin(def, def.tier),
-            };
-        }
-        match self.search_path(name) {
-            Some(path) => Target::External(path),
-            None => Target::NotFound,
         }
     }
 
-    /// `PATH` search. A name containing `/` is used as written; `PATH` is only
-    /// consulted for bare names. Empty entries mean the current directory.
-    pub(crate) fn search_path(&self, name: &[u8]) -> Option<Vec<u8>> {
-        if name.contains(&b'/') {
-            return executable(name).then(|| name.to_vec());
+    /// What the builtin registry says about `name`, excluding `PATH`.
+    fn position(&self, name: &[u8]) -> Position {
+        let Some(def) = lookup_builtin(name) else {
+            return Position::NotBuiltin;
+        };
+        match def.tier {
+            Tier::Special => Position::Special(def),
+            Tier::Intrinsic => Position::Intrinsic(def),
+            _ => {
+                if def.is_implemented() {
+                    Position::Body(def)
+                } else if let Some(vm) = super::builtins::lookup(name) {
+                    Position::VmBody(vm, def.tier)
+                } else {
+                    Position::PathFirst(def)
+                }
+            }
         }
-        let path = self
-            .state
-            .vars
-            .scalar(b"PATH")
-            .map(<[u8]>::to_vec)
-            .unwrap_or_else(|| DEFAULT_PATH.to_vec());
+    }
+
+    /// The body a `Special`/`Intrinsic` entry contributes.
+    ///
+    /// A runtime body wins; the executor's body runs only while the registry
+    /// entry has none, which is what keeps the ownership boundary honest.
+    pub(crate) fn registry_body(&self, def: &'static bsh_runtime::BuiltinDef) -> Resolution {
+        match super::builtins::lookup(def.name.as_bytes()) {
+            Some(vm) if !def.is_implemented() => Resolution::Vm(vm, def.tier),
+            _ => Resolution::Builtin(def, def.tier),
+        }
+    }
+
+    /// The newest definition of `name`, if any.
+    fn function_index(&self, name: &[u8]) -> Option<usize> {
+        self.functions
+            .iter()
+            .rposition(|function| function.name == name)
+    }
+
+    /// Resolve a command word for execution: the first candidate, and a
+    /// `PATH` hit is remembered in the hash table.
+    fn resolve(&mut self, name: &[u8]) -> Option<Resolution> {
+        let mut found = None;
+        self.each_candidate(
+            name,
+            bsh_runtime::ResolveQuery::EXECUTION,
+            &mut |candidate| {
+                found = Some(candidate);
+                false
+            },
+        );
+        if let Some(Resolution::External(path)) = &found
+            && !name.contains(&b'/')
+        {
+            // bash's hash table: a command found through `PATH` is remembered
+            // until `hash -r`, so a program that appears earlier in `PATH`
+            // later does not take over. `hash` exists to make that visible.
+            self.path_cache.insert(name.to_vec(), path.clone());
+        }
+        found
+    }
+
+    /// Every `PATH` hit for `name`, in `PATH` order.
+    ///
+    /// A name containing `/` is used as written and never searched. The hash
+    /// table answers first unless the caller asked for a fresh search
+    /// (`type -P`) or for every hit (`-a`).
+    fn path_hits(&self, name: &[u8], query: bsh_runtime::ResolveQuery) -> Vec<Vec<u8>> {
+        if name.contains(&b'/') {
+            return executable(name)
+                .then(|| name.to_vec())
+                .into_iter()
+                .collect();
+        }
+        if !query.fresh
+            && !query.all
+            && let Some(path) = self.path_cache.get(name)
+        {
+            return vec![path.clone()];
+        }
+        let path = match query.default_path {
+            true => DEFAULT_PATH.to_vec(),
+            false => self
+                .state
+                .vars
+                .scalar(b"PATH")
+                .map(<[u8]>::to_vec)
+                .unwrap_or_else(|| DEFAULT_PATH.to_vec()),
+        };
+        let mut hits = Vec::new();
         for directory in path.split(|&byte| byte == b':') {
             let mut candidate = if directory.is_empty() {
                 b".".to_vec()
@@ -1006,10 +1265,92 @@ impl Interp {
             candidate.push(b'/');
             candidate.extend_from_slice(name);
             if executable(&candidate) {
-                return Some(candidate);
+                hits.push(candidate);
+                if !query.all {
+                    break;
+                }
             }
         }
-        None
+        hits
+    }
+
+    /// `PATH` search for one program, as `exec`, `.`/`source` and pipelines
+    /// need it. The hash table is consulted, so `hash -r` matters here too.
+    pub(crate) fn search_path(&self, name: &[u8]) -> Option<Vec<u8>> {
+        self.path_hits(name, bsh_runtime::ResolveQuery::EXECUTION)
+            .into_iter()
+            .next()
+    }
+
+    /// One candidate described for `type`/`command -V`.
+    pub(crate) fn candidate_info(&self, candidate: Resolution) -> bsh_runtime::CommandInfo {
+        use bsh_runtime::{CommandInfo, CommandKind};
+        match candidate {
+            Resolution::Alias(value) => CommandInfo {
+                kind: CommandKind::Alias,
+                target: value,
+            },
+            Resolution::Keyword => CommandInfo::plain(CommandKind::Keyword),
+            Resolution::Function(index) => {
+                let name = self
+                    .functions
+                    .get(index)
+                    .map(|function| function.name.clone())
+                    .unwrap_or_default();
+                CommandInfo {
+                    kind: CommandKind::Function,
+                    target: self.function_body(&name).unwrap_or_default(),
+                }
+            }
+            Resolution::Builtin(def, _tier) => CommandInfo::plain(CommandKind::Builtin(def.tier)),
+            Resolution::Vm(_, tier) => CommandInfo::plain(CommandKind::Builtin(tier)),
+            Resolution::External(path) => CommandInfo {
+                kind: CommandKind::External,
+                target: path,
+            },
+        }
+    }
+
+    /// Run one resolved command with no redirections and no prefix
+    /// assignments, folding the unwind back into a status.
+    ///
+    /// This is the execution half of the `builtin`/`command` seams: the inner
+    /// command is not a separate shell command, so an unwind it produces
+    /// (`exit` inside `builtin exit`) is re-published rather than returned.
+    pub(crate) fn run_direct(&mut self, resolution: Resolution, argv: &[Vec<u8>]) -> Status {
+        let chunk = self.empty_chunk.clone();
+        let unwind = self.invoke(
+            Invocation {
+                chunk: &chunk,
+                redirects: &[],
+                assigns: &[],
+                argv,
+                ctx: Ctx::default(),
+                direct: true,
+            },
+            resolution,
+        );
+        match unwind {
+            Unwind::Status(status) => status,
+            Unwind::Exit(status) => {
+                self.state.request_exit(status);
+                status
+            }
+            // `break`/`continue`/`return` from a direct built-in still has to
+            // reach its handler in the enclosing loop or function.
+            other => {
+                self.pending = Some(other);
+                Status::SUCCESS
+            }
+        }
+    }
+
+    /// The text `type` prints for a function: the body as it was written.
+    pub(crate) fn function_body(&self, name: &[u8]) -> Option<Vec<u8>> {
+        let index = self.function_index(name)?;
+        let function = self.functions.get(index)?;
+        let span = function.chunk.ast.node(function.body).span.clone();
+        Some(function.chunk.source.bytes()[span].to_vec())
     }
 
     /// Reap finished children without blocking. `SIGCHLD` is a wakeup hint,

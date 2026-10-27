@@ -12,6 +12,11 @@ pub(crate) struct TestHost {
     pub diagnostics: Vec<Diagnostic>,
     pub sources: Vec<Vec<u8>>,
     pub interactive: bool,
+    /// Canned command classifications, so `type`/`command -v` can be tested
+    /// without a VM. The real resolution lives in `bsh-vm`.
+    pub resolutions: Vec<(Vec<u8>, Vec<CommandInfo>)>,
+    /// Function names the host knows about, for `unset -f`.
+    pub functions: Vec<Vec<u8>>,
 }
 
 impl TestHost {
@@ -23,7 +28,14 @@ impl TestHost {
             diagnostics: Vec::new(),
             sources: Vec::new(),
             interactive: false,
+            resolutions: Vec::new(),
+            functions: Vec::new(),
         }
+    }
+
+    /// Teach the host what `name` classifies to.
+    pub(crate) fn classify(&mut self, name: &[u8], infos: Vec<CommandInfo>) {
+        self.resolutions.push((name.to_vec(), infos));
     }
 
     /// Run a builtin, returning its status. Fails the test if the name is not
@@ -65,6 +77,32 @@ impl ShellHost for TestHost {
 
     fn diagnose(&mut self, diagnostic: &Diagnostic) {
         self.diagnostics.push(diagnostic.clone());
+    }
+
+    fn resolve_command(&self, name: &[u8], query: ResolveQuery) -> Vec<CommandInfo> {
+        let Some((_, infos)) = self
+            .resolutions
+            .iter()
+            .find(|(candidate, _)| candidate.as_slice() == name)
+        else {
+            return Vec::new();
+        };
+        let mut out: Vec<CommandInfo> = infos
+            .iter()
+            .filter(|info| !query.files_only || info.kind.is_external())
+            .filter(|info| !query.skip_functions || info.kind != CommandKind::Function)
+            .cloned()
+            .collect();
+        if !query.all {
+            out.truncate(1);
+        }
+        out
+    }
+
+    fn unset_function(&mut self, name: &[u8]) -> bool {
+        let before = self.functions.len();
+        self.functions.retain(|function| function != name);
+        self.functions.len() != before
     }
 }
 
@@ -356,11 +394,28 @@ fn builtin_names_are_unique_and_implemented_set_is_explicit() {
     assert_eq!(
         implemented,
         [
-            ":", "exit", "export", "false", "readonly", "set", "shift", "trap", "true", "unset",
+            ":", "alias", "builtin", "command", "exit", "export", "false", "getopts", "readonly",
+            "set", "shift", "trap", "true", "type", "unalias", "unset",
         ]
     );
     assert_eq!(stubs_in(Tier::Special), 15 - 8);
-    assert_eq!(stubs_in(Tier::Intrinsic), 16);
+    // `alias`, `command`, `getopts`, `type` and `unalias` are written; the
+    // rest (`bg`, `fc`, `fg`, `jobs`, `kill`, `read`, `ulimit`, `umask`,
+    // `wait`, `cd`) are the executor's or still stubs.
+    assert_eq!(stubs_in(Tier::Intrinsic), 16 - 5);
+    // `hash` and `mapfile`/`readarray` are executor-side bodies, so the
+    // registry still reports them as stubs: the executor's body runs only
+    // while the entry has none.
+    assert!(
+        !lookup_builtin(b"hash")
+            .expect("registered")
+            .is_implemented()
+    );
+    assert!(
+        !lookup_builtin(b"mapfile")
+            .expect("registered")
+            .is_implemented()
+    );
 }
 
 #[test]
@@ -889,10 +944,16 @@ fn export_and_unset_builtins() {
     assert_eq!(host.state.vars.scalar(b"x"), None);
     assert_eq!(host.run(&[b"unset", b"missing"]), Status::SUCCESS);
 
-    assert_eq!(host.run(&[b"unset", b"-f", b"f"]), Status(2));
+    // `unset -f` reaches the host's function table; a name that is not there
+    // is not an error.
+    host.functions.push(b"f".to_vec());
+    assert_eq!(host.run(&[b"unset", b"-f", b"f"]), Status::SUCCESS);
+    assert!(host.functions.is_empty());
+    assert_eq!(host.run(&[b"unset", b"-f", b"f"]), Status::SUCCESS);
+    // `unset -n` (nameref removal) is still deferred.
     assert_eq!(host.run(&[b"unset", b"-n", b"ref"]), Status(2));
     assert!(host.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == codes::NOT_IMPLEMENTED && diagnostic.message.contains("function removal")
+        diagnostic.code == codes::NOT_IMPLEMENTED && diagnostic.message.contains("nameref removal")
     }));
 }
 
@@ -1238,4 +1299,328 @@ fn associative_arrays_keep_insertion_order_and_removal() {
     assert_eq!(vars.array_len(b"m"), 1);
     // Removing an absent key succeeds.
     vars.unset_element_assoc(b"m", b"zzz").unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// type, command, builtin and aliases
+// ---------------------------------------------------------------------------
+
+fn classified(kind: CommandKind, target: &[u8]) -> CommandInfo {
+    CommandInfo {
+        kind,
+        target: target.to_vec(),
+    }
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn var(host: &TestHost, name: &[u8]) -> String {
+    host.state
+        .vars
+        .scalar(name)
+        .map(text)
+        .unwrap_or_else(|| "<unset>".to_owned())
+}
+
+/// The classifications every `type` test starts from.
+fn introspection_host() -> TestHost {
+    let mut host = TestHost::new();
+    host.classify(b"while", vec![CommandInfo::plain(CommandKind::Keyword)]);
+    host.classify(b"ll", vec![classified(CommandKind::Alias, b"ls -l")]);
+    host.classify(b"myfunc", vec![CommandInfo::plain(CommandKind::Function)]);
+    host.classify(
+        b"eval",
+        vec![CommandInfo::plain(CommandKind::Builtin(Tier::Special))],
+    );
+    host.classify(
+        b"cd",
+        vec![CommandInfo::plain(CommandKind::Builtin(Tier::Intrinsic))],
+    );
+    host.classify(
+        b"date",
+        vec![classified(CommandKind::External, b"/bin/date")],
+    );
+    host.classify(
+        b"pwd",
+        vec![
+            CommandInfo::plain(CommandKind::Function),
+            CommandInfo::plain(CommandKind::Builtin(Tier::Regular)),
+            classified(CommandKind::External, b"/bin/pwd"),
+            classified(CommandKind::External, b"/tmp/pwd"),
+        ],
+    );
+    host
+}
+
+#[test]
+fn type_names_each_class_the_way_the_suite_expects() {
+    let mut host = introspection_host();
+    let status = host.run(&[b"type", b"while", b"ll", b"myfunc", b"eval", b"cd", b"date"]);
+    assert_eq!(status, Status::SUCCESS);
+    assert_eq!(
+        text(&host.out),
+        "while is a shell keyword\n\
+         ll is an alias for \"ls -l\"\n\
+         myfunc is a shell function\n\
+         eval is a special shell builtin\n\
+         cd is a shell builtin\n\
+         date is /bin/date\n"
+    );
+}
+
+#[test]
+fn type_t_prints_one_word_and_stays_silent_when_a_name_is_missing() {
+    let mut host = introspection_host();
+    let status = host.run(&[b"type", b"-t", b"while", b"ll", b"eval", b"date"]);
+    assert_eq!(status, Status::SUCCESS);
+    assert_eq!(text(&host.out), "keyword\nalias\nbuiltin\nfile\n");
+
+    // `-t` answers through the status only: no diagnostic, no stdout.
+    host.out.clear();
+    host.diagnostics.clear();
+    assert_eq!(host.run(&[b"type", b"-t", b"zz", b"date"]), Status::FAILURE);
+    assert_eq!(text(&host.out), "file\n");
+    assert!(host.diagnostics.is_empty(), "type -t must not diagnose");
+
+    // The plain form does diagnose.
+    assert_eq!(host.run(&[b"type", b"zz"]), Status::FAILURE);
+    assert_eq!(host.diagnostics[0].code, codes::NOT_FOUND);
+    assert!(host.diagnostics[0].message.contains("zz: not found"));
+}
+
+#[test]
+fn type_a_lists_the_whole_search_order() {
+    let mut host = introspection_host();
+    assert_eq!(host.run(&[b"type", b"-a", b"pwd"]), Status::SUCCESS);
+    assert_eq!(
+        text(&host.out),
+        "pwd is a shell function\n\
+         pwd is a shell builtin\n\
+         pwd is /bin/pwd\n\
+         pwd is /tmp/pwd\n"
+    );
+
+    // `-f` skips the function; `-a -p` prints only files.
+    host.out.clear();
+    assert_eq!(host.run(&[b"type", b"-a", b"-f", b"pwd"]), Status::SUCCESS);
+    assert_eq!(
+        text(&host.out),
+        "pwd is a shell builtin\npwd is /bin/pwd\npwd is /tmp/pwd\n"
+    );
+    host.out.clear();
+    assert_eq!(host.run(&[b"type", b"-ap", b"pwd"]), Status::SUCCESS);
+    assert_eq!(text(&host.out), "/bin/pwd\n/tmp/pwd\n");
+    // `type -a` on a name with one match prints one line.
+    host.out.clear();
+    assert_eq!(host.run(&[b"type", b"-a", b"date"]), Status::SUCCESS);
+    assert_eq!(text(&host.out), "date is /bin/date\n");
+}
+
+#[test]
+fn command_v_reports_functions_and_files_differently() {
+    let mut host = introspection_host();
+    // A function is reported by name; an external by path. This is the
+    // distinction scripts actually rely on (`command -v f` vs `command -v ls`).
+    assert_eq!(
+        host.run(&[b"command", b"-v", b"myfunc", b"date"]),
+        Status::SUCCESS
+    );
+    assert_eq!(text(&host.out), "myfunc\n/bin/date\n");
+
+    host.out.clear();
+    assert_eq!(
+        host.run(&[b"command", b"-V", b"myfunc", b"date"]),
+        Status::SUCCESS
+    );
+    assert_eq!(
+        text(&host.out),
+        "myfunc is a shell function\ndate is /bin/date\n"
+    );
+
+    // An alias prints as a definition, which is the only re-input-safe form.
+    host.out.clear();
+    assert_eq!(host.run(&[b"command", b"-v", b"ll"]), Status::SUCCESS);
+    assert_eq!(text(&host.out), "alias ll='ls -l'\n");
+}
+
+#[test]
+fn command_v_fails_when_any_name_is_missing_but_still_prints_the_rest() {
+    let mut host = introspection_host();
+    assert_eq!(
+        host.run(&[b"command", b"-v", b"myfunc", b"ZZZ", b"date"]),
+        Status::FAILURE
+    );
+    assert_eq!(text(&host.out), "myfunc\n/bin/date\n");
+    // `-v` says nothing about the failure; `-V` does.
+    assert!(host.diagnostics.is_empty());
+    host.out.clear();
+    assert_eq!(host.run(&[b"command", b"-V", b"ZZZ"]), Status::FAILURE);
+    assert_eq!(text(&host.out), "");
+    assert_eq!(host.diagnostics[0].code, codes::NOT_FOUND);
+}
+
+#[test]
+fn alias_output_reparses_and_unalias_removes() {
+    let mut host = TestHost::new();
+    assert_eq!(
+        host.run(&[b"alias", b"ll=ls -l", b"e=echo"]),
+        Status::SUCCESS
+    );
+    assert_eq!(host.state.aliases.get(b"ll"), Some(&b"ls -l"[..]));
+
+    // Listing is name-sorted and always single-quoted, so feeding it back to
+    // the shell recreates exactly these definitions.
+    host.out.clear();
+    assert_eq!(host.run(&[b"alias"]), Status::SUCCESS);
+    assert_eq!(text(&host.out), "alias e='echo'\nalias ll='ls -l'\n");
+
+    // A value containing a quote stays re-input-safe.
+    assert_eq!(host.run(&[b"alias", b"q=it's"]), Status::SUCCESS);
+    host.out.clear();
+    assert_eq!(host.run(&[b"alias", b"q"]), Status::SUCCESS);
+    assert_eq!(text(&host.out), "alias q='it'\\''s'\n");
+
+    assert_eq!(host.run(&[b"alias", b"missing"]), Status::FAILURE);
+    assert_eq!(host.run(&[b"unalias", b"missing"]), Status::FAILURE);
+    assert_eq!(host.run(&[b"unalias", b"ll"]), Status::SUCCESS);
+    assert_eq!(host.state.aliases.get(b"ll"), None);
+    assert_eq!(host.run(&[b"unalias", b"-a"]), Status::SUCCESS);
+    assert!(host.state.aliases.is_empty());
+    // A bare `unalias` is a usage error.
+    assert_eq!(host.run(&[b"unalias"]), Status(2));
+}
+
+// ---------------------------------------------------------------------------
+// getopts
+// ---------------------------------------------------------------------------
+
+#[test]
+fn getopts_parses_a_cluster_lazily_then_advances() {
+    let mut host = TestHost::new();
+    host.state.vars.set_positional(vec![b"-ab".to_vec()]);
+
+    assert_eq!(host.run(&[b"getopts", b"ab", b"opt"]), Status::SUCCESS);
+    assert_eq!(var(&host, b"opt"), "a");
+    // The cluster is not exhausted, so `OPTIND` still names the argument.
+    assert_eq!(var(&host, b"OPTIND"), "1");
+
+    assert_eq!(host.run(&[b"getopts", b"ab", b"opt"]), Status::SUCCESS);
+    assert_eq!(var(&host, b"opt"), "b");
+    assert_eq!(var(&host, b"OPTIND"), "2");
+
+    // Past the end: status 1, and the variable is still assigned `?`.
+    assert_eq!(host.run(&[b"getopts", b"ab", b"opt"]), Status::FAILURE);
+    assert_eq!(var(&host, b"opt"), "?");
+}
+
+#[test]
+fn getopts_takes_a_fused_or_separate_argument() {
+    let mut host = TestHost::new();
+    host.state
+        .vars
+        .set_positional(vec![b"-c10".to_vec(), b"x".to_vec()]);
+    assert_eq!(host.run(&[b"getopts", b"c:", b"opt"]), Status::SUCCESS);
+    assert_eq!(var(&host, b"opt"), "c");
+    assert_eq!(var(&host, b"OPTARG"), "10");
+    assert_eq!(var(&host, b"OPTIND"), "2");
+
+    host.state.vars.assign_scalar(b"OPTIND", b"1").unwrap();
+    host.state
+        .vars
+        .set_positional(vec![b"-c".to_vec(), b"10".to_vec()]);
+    assert_eq!(host.run(&[b"getopts", b"c:", b"opt"]), Status::SUCCESS);
+    assert_eq!(var(&host, b"OPTARG"), "10");
+    // Both words were consumed.
+    assert_eq!(var(&host, b"OPTIND"), "3");
+}
+
+#[test]
+fn getopts_reports_a_missing_argument_verbosely_and_silently() {
+    let mut host = TestHost::new();
+    host.state.vars.set_positional(vec![b"-c".to_vec()]);
+    assert_eq!(host.run(&[b"getopts", b"c:", b"opt"]), Status::SUCCESS);
+    assert_eq!(var(&host, b"opt"), "?");
+    assert_eq!(var(&host, b"OPTARG"), "");
+    assert_eq!(var(&host, b"OPTIND"), "2");
+    assert!(
+        host.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("option requires an argument"))
+    );
+
+    // Leading `:`: the result is `:` with the option letter in `OPTARG`, and
+    // no diagnostic at all.
+    host.diagnostics.clear();
+    host.state.vars.assign_scalar(b"OPTIND", b"1").unwrap();
+    assert_eq!(host.run(&[b"getopts", b":c:", b"opt"]), Status::SUCCESS);
+    assert_eq!(var(&host, b"opt"), ":");
+    assert_eq!(var(&host, b"OPTARG"), "c");
+    assert!(host.diagnostics.is_empty());
+
+    // An unknown option in silent mode hands back the character.
+    host.state.vars.assign_scalar(b"OPTIND", b"1").unwrap();
+    host.state.vars.set_positional(vec![b"-Z".to_vec()]);
+    assert_eq!(host.run(&[b"getopts", b":c", b"opt"]), Status::SUCCESS);
+    assert_eq!(var(&host, b"opt"), "?");
+    assert_eq!(var(&host, b"OPTARG"), "Z");
+    assert!(host.diagnostics.is_empty());
+}
+
+#[test]
+fn getopts_consumes_double_dash_and_stops_at_an_operand() {
+    let mut host = TestHost::new();
+    host.state
+        .vars
+        .set_positional(vec![b"-a".to_vec(), b"--".to_vec(), b"-b".to_vec()]);
+    assert_eq!(host.run(&[b"getopts", b"a", b"opt"]), Status::SUCCESS);
+    assert_eq!(var(&host, b"opt"), "a");
+    assert_eq!(var(&host, b"OPTIND"), "2");
+
+    // `--` ends the options and is consumed, so `shift $((OPTIND-1))` leaves
+    // the operands exactly as written.
+    assert_eq!(host.run(&[b"getopts", b"a", b"opt"]), Status::FAILURE);
+    assert_eq!(var(&host, b"OPTIND"), "3");
+
+    // A non-option word stops the scan without being consumed.
+    host.state.vars.assign_scalar(b"OPTIND", b"1").unwrap();
+    host.state
+        .vars
+        .set_positional(vec![b"x".to_vec(), b"-a".to_vec()]);
+    assert_eq!(host.run(&[b"getopts", b"a", b"opt"]), Status::FAILURE);
+    assert_eq!(var(&host, b"OPTIND"), "1");
+}
+
+#[test]
+fn getopts_assigns_optind_back_into_range_and_optarg_is_always_set() {
+    let mut host = TestHost::new();
+    host.state
+        .vars
+        .set_positional(vec![b"a".to_vec(), b"b".to_vec()]);
+    host.state.vars.assign_scalar(b"OPTIND", b"9").unwrap();
+    assert_eq!(host.run(&[b"getopts", b"a", b"opt"]), Status::FAILURE);
+    // Parked at `$# + 1`, which is where bash leaves it.
+    assert_eq!(var(&host, b"OPTIND"), "3");
+
+    // A flag that takes no argument still sets `OPTARG` (to empty), so a
+    // `set -u` script can read it.
+    host.state.vars.assign_scalar(b"OPTIND", b"1").unwrap();
+    host.state.vars.unset(b"OPTARG").unwrap();
+    host.state.vars.set_positional(vec![b"-a".to_vec()]);
+    assert_eq!(host.run(&[b"getopts", b"a", b"opt"]), Status::SUCCESS);
+    assert_eq!(var(&host, b"OPTARG"), "");
+}
+
+#[test]
+fn getopts_rejects_an_invalid_option_variable_after_parsing() {
+    let mut host = TestHost::new();
+    host.state
+        .vars
+        .set_positional(vec![b"-c".to_vec(), b"foo".to_vec()]);
+    // The parse happens; only the assignment fails, and that is status 2.
+    assert_eq!(host.run(&[b"getopts", b"c:", b"opt-"]), Status(2));
+    assert_eq!(var(&host, b"OPTARG"), "foo");
+    assert_eq!(var(&host, b"OPTIND"), "3");
+    assert_eq!(var(&host, b"opt"), "<unset>");
 }

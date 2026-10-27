@@ -229,6 +229,14 @@ pub struct Vars {
     last_status: Status,
     shell_pid: u32,
     last_bg_pid: Option<i32>,
+    /// Bumped on every write to `OPTIND`.
+    ///
+    /// `getopts` keeps its scan position inside a clustered argument
+    /// (`-ab`: after `a`) out of band, and a script resets the scan by
+    /// assigning `OPTIND`. The assignment is the signal rather than the value,
+    /// because `OPTIND=1` written twice must re-parse the same argument, so
+    /// the counter is what makes a reset observable.
+    optind_writes: u64,
 }
 
 impl Default for Vars {
@@ -241,6 +249,7 @@ impl Default for Vars {
             last_status: Status::SUCCESS,
             shell_pid: std::process::id(),
             last_bg_pid: None,
+            optind_writes: 0,
         }
     }
 }
@@ -445,7 +454,19 @@ impl Vars {
     /// Resolve `name` for writing, creating it in `scope` if missing.
     pub fn resolve_in(&mut self, name: &[u8], scope: CreateScope) -> Result<&mut Var, Error> {
         let target = self.deref_name(name)?;
+        if target.as_ref() == b"OPTIND" {
+            self.optind_writes = self.optind_writes.wrapping_add(1);
+        }
         self.cell_mut(&target, scope, true)
+    }
+
+    /// How many times `OPTIND` has been written.
+    ///
+    /// `getopts` uses this to notice an assignment that was meant as a reset.
+    /// It counts writes through [`Vars::resolve_in`], which is the single
+    /// choke point for variable creation and scalar assignment.
+    pub fn optind_writes(&self) -> u64 {
+        self.optind_writes
     }
 
     /// Assign a complete value.

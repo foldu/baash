@@ -52,7 +52,10 @@ impl Interp {
                 stages,
                 links,
             } => self.eval_pipeline(chunk, *negated, stages, links, ctx),
-            NodeKind::Simple(command) => self.exec_simple(chunk, command, ctx),
+            NodeKind::Simple(command) => {
+                let span = node.span.clone();
+                self.exec_simple(chunk, command, &span, ctx)
+            }
             NodeKind::If {
                 branches,
                 else_body,
