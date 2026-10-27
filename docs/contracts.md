@@ -8,8 +8,8 @@ Each section is owned by the producing crate. If you are implementing a consumer
 (`bsh-vm`, `bsh-repl`, `bsh-tools`) read the relevant sections before you start,
 and treat every item here as a fact about the API you are calling.
 
-Status: all of wave 1 has landed — `bsh-diag`, `bsh-sys`, `bsh-runtime`,
-`bsh-lang` and `bsh-syntax`.
+Status: wave 1 (`bsh-diag`, `bsh-sys`, `bsh-runtime`, `bsh-lang`,
+`bsh-syntax`) and `bsh-complete` have landed. `bsh-vm` is in flight.
 
 ---
 
@@ -238,6 +238,45 @@ words; `$"…"` gets double-quote semantics without locale translation; the
 named `esac` can confuse it; CRLF scripts fail the way bash fails; and
 `a[$(cmd)]=v` is refused by design (DESIGN §3.3), so scripts relying on
 `shopt eval_unsafe_arith` will not parse.
+
+---
+
+## bsh-complete
+
+**Call `apply`, do not re-implement insertion.** `Menu::insertion(i)` returns
+already-quoted bytes (trailing `/` for a directory, trailing space for a unique
+non-directory), and `Menu::apply(&mut line, i)` splices it in and returns the new
+cursor position. The editor must use these: quoting comes from
+`bsh_lang::quote` with the context the parser derived, and a second
+implementation of that logic will disagree.
+
+**`replace` is not `word_span`.** `replace` starts *after* an opening quote,
+`${`, `((` or `=`, so inserting never deletes the opener. The editor replaces
+`replace`, not the word.
+
+**Ranking tiers are semantic, not advisory.** `tier` 0 = exact-case prefix,
+1 = caseless prefix, 2 = fuzzy (`score` holds the nucleo score). The vector is
+already ordered by (tier, frecency, score). If a consumer filters, it must
+preserve order; it must not re-sort, because typed-prefix matches outranking
+fuzzy ones is the product promise (§6.5).
+
+**The snapshot traits are `Send + Sync` and return owned data.** `VarNames::names`,
+`History::entries`, `ShellNames::functions`/`aliases` all return
+`Vec<Vec<u8>>`. `bsh-runtime` therefore cannot hand over a borrow of live
+interpreter state; it must supply a snapshot or a `Mutex`-backed view. This is
+deliberate: completion runs while the editor holds the terminal, and it must not
+observe a half-mutated shell.
+
+**After `cd`, call `set_root`.** `invalidate_commands` is only needed for the
+pathological case; the `PATH` index already notices changes.
+
+**`Candidate::display` is not sanitised.** A hostile filename can carry
+newlines or control bytes into the menu. The editor must flatten it when
+painting.
+
+Known copy: the builtin-name list is duplicated from `bsh-runtime` because the
+dependency runs the other way. Replace it with a runtime-supplied list once the
+runtime exposes one.
 
 ---
 

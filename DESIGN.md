@@ -853,6 +853,33 @@ pub fn expectations_at(src: &[u8], offset: usize, opts: &Opts) -> Vec<Expect>;
 the grammar rather than per-command special cases. The lexer must likewise
 treat EOF mid-token as normal, for both this and live syntax highlighting.
 
+**Reality check, after the first implementation.** The API as specified was not
+sufficient, and the completer now carries documented fallbacks in
+`bsh-complete/src/context.rs`. The gaps, in the order they hurt:
+
+1. `expectations_at` answers for the slot *after* the prefix it parsed, so a
+   half-typed command word reports `Word` rather than `Command`. It must answer
+   *at the cursor*.
+2. `[[ … ]]` and `${…}` bodies are lexed opaquely, so `Expect::TestOp` is never
+   produced. It is recovered by counting unbalanced `[[` tokens.
+3. `Expect::RedirectTarget` is only reported when the target is *missing*;
+   `echo > fi` reports `Word`.
+4. The lexer fuses a redirection with its target into one token and exposes no
+   split, so operator lengths are re-derived from a table.
+5. A substitution-containing word is one token, and `Unterminated` reports at
+   most one open construct — no nesting stack — so `echo "$(ls ` reports the
+   open quote, not the open `$(`. The completer re-enters substitution bodies
+   as fresh regions to compensate.
+6. `Unterminated` gives the opener's span but not where the *content* begins, so
+   per-kind opener widths are encoded by hand.
+7. `Expect::Then/Do/Done/Fi/Esac/In/FunctionBody` are effectively unreachable.
+8. There is no token-level "this is the command word" or "this is an
+   assignment", so simple-command boundaries are re-derived from token kinds.
+
+Every one of these is duplication this design set out to avoid, and the
+fallbacks are the price. They are cheap now and expensive later; the first four
+are additive API changes.
+
 ### 6.4 Completion pipeline
 
 ```
