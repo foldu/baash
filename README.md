@@ -7,12 +7,13 @@ lives in [DESIGN.md](DESIGN.md); this file is the operator's manual.
 and `bsh` with no arguments gives you an interactive editor with syntax
 highlighting, TAB completion and history.
 
-**1013 of 2787 comparable cases pass** in the vendored Oils suite (36.3%; 1184
+**1240 of 2787 comparable cases pass** in the vendored Oils suite (44.5%; 1184
 cases skipped as out of scope). For scale, bash passes 2574/2787 (92.4%) on the
-same run — so roughly 1579 cases are things bash does and we do not yet. Those
-are concentrated in arrays, `read`/`trap`/`getopts`/`type`, `${x#pat}`-family
-expansion, brace/extglob expansion, aliases, `[[ =~ ]]` and job control. Run it
-yourself with `cargo run -p bsh-spec -- --shell target/debug/bsh --compare bash`.
+same run — so 1357 cases are things bash does and we do not yet. Those are
+concentrated in `read`/`trap`/`getopts`/`type`, `${x#pat}`-family expansion,
+brace/extglob expansion, aliases, `[[ =~ ]]` and job control. `docs/roadmap.md`
+is the ordered work queue. Run it yourself with
+`cargo run -p bsh-spec -- --shell target/debug/bsh --compare bash`.
 
 Do not read the unit-test count as conformance: it is a different number
 measuring a different thing.

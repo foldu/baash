@@ -1147,11 +1147,11 @@ The parser and the VM are the fun parts. Ranked by effective effort:
 2. **Conformance ratchet.** Pass count per file; CI fails on a drop. Put the
    number in the README. It is the only real progress metric.
 
-   **First measurement** (`crates/bsh-spec`, which is the harness this item
-   asked for): **1013 of 2787 compared cases**, 1184 skipped, of 3971 total
-   (36.3% of comparable cases). For reference bash passes 2574/2787 (92.4%) on
-   the same run, so 1579 cases are ones bash passes and we do not — that list,
-   not the headline percentage, is the work queue. The skips are 1162 YSH
+   **Measurement** (`crates/bsh-spec`, the harness this item asked for):
+   **1240 of 2787 compared cases**, 1184 skipped, of 3971 total (44.5%). For
+   reference bash passes 2574/2787 (92.4%) on the same run, so 1357 cases are
+   ones bash passes and we do not — that list, not the headline percentage, is
+   the work queue, and `docs/roadmap.md` orders it by cases recovered. The skips are 1162 YSH
    cases (a language we do not implement) and 22 needing a missing helper; no
    case is skipped because we cannot run it.
 

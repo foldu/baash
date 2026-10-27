@@ -39,7 +39,7 @@ Measured by `array.test.sh` (78), `array-sparse.test.sh` (40),
       array listing, and `declare -p` output that is re-input safe.
 - [x] `${a[@]:offset:length}` slicing, including arithmetic bounds, plus
       `${@:offset:length}`.
-- [ ] `read -a` (with the `read` tranche).
+- [ ] `read -a` (with the `read` tranche, in flight).
 - [ ] `set -u` on a missing element; empty array under `"${a[@]}"` with `-u`
       (`nounset` itself is still unimplemented).
 
