@@ -345,6 +345,10 @@ Two corollaries that are easy to miss:
   written to a pipe deadlocks when the reader never reads. Use `memfd_create`/
   `O_TMPFILE` with an unlink-in-place fallback, and make sure `SIGPIPE` from an
   abandoned here-doc writer cannot kill the shell.
+
+  Implemented as written: here-doc bodies are unlinked files (`memfd_create`,
+  then `O_TMPFILE`, then a named temp unlinked immediately), and a 200 KB body
+  through a pipeline does not deadlock.
 - Redirect order is observable and left-to-right: `2>&1 >f` ≠ `>f 2>&1`. It is
   a list, never a set.
 

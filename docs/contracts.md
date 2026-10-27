@@ -77,12 +77,26 @@ or a stopped job will look like a failure.
 which is why the gate exists.
 
 Linux-only: `SignalFd` (elsewhere `new`/`read` return `Unsupported` and
-`as_raw_fd()` is `-1`), `memfd_create`, `O_TMPFILE`. Everything else is generic
+`as_raw_fd()` is `-1`), `memfd_create`, `O_TMPFILE`, and `ptsname`'s non-thread-
+safe static buffer on the non-Linux `open_pty` path. Everything else is generic
 POSIX.
 
-Known gap that affects `bsh-repl`: **`RawMode`, `window_size` and `tcsetpgrp`
-have no real-tty test.** The sandbox that built them has no controlling
-terminal. pty-based integration tests are owed before the editor is trusted.
+**`exec(plan) -> io::Error` replaces the process in place** and returns only on
+failure. The caveat is inherent to exec ordering: by the time `execve` fails,
+the plan's file actions, signal mask, `reset_signals` and process group have
+all been applied. The image is intact, but the *environment* is not — so the
+only sound response is to report 127/126 and exit. A caller that wanted to
+continue after a failed `exec` (bash does) would have to restore descriptors and
+signal dispositions itself. Also: keep the owned fds referenced by
+`FdAction::Dup2 { from }` alive across the call, or the actions fail `EBADF`.
+
+Terminal code is now tested on a real pty. `open_pty` opens the slave
+`O_NOCTTY` so a test can never steal the harness's controlling terminal; the
+tests install a known canonical `termios` state first, assert every flag raw
+mode clears, and assert full restoration on `Drop`; the foreground-pgrp test
+restores the terminal *from the background* with `SIGTTOU` at `SIG_DFL`, which
+is what proves `set_foreground_pgrp`'s block is load-bearing rather than
+incidental.
 
 ---
 
@@ -346,21 +360,18 @@ only when `BuiltinDef::is_implemented()` is false, so a runtime implementation
 takes over silently — deliberate, but it means whoever implements one of those
 in `bsh-runtime` must delete the executor's body in the same change.
 
-**`exec` is approximated.** There is no in-place `execve` in `bsh-sys` yet, so
-`exec cmd` is spawn + wait + `Exit`: same output, same status, but the pid
-differs and a *replaced* shell does not carry redirects into the command.
-Redirect-only `exec 3>f` is exact. A `bsh_sys::exec(plan) -> io::Error` would
-make it exact.
+**`exec` is a real `execve`.** `bsh_sys::exec(plan)` replaces the process; the
+VM maps its `io::Error` to 127/126 and exits. See the `bsh-sys` section for why
+a failed `exec` is not a rollback.
 
-**The VM owns `PWD`/`OLDPWD`** because `cd` goes through
-`std::env::set_current_dir` (no `chdir` wrapper in `bsh-sys`), and descriptors
-are saved by `dup2` to fds ≥ 20 (no `dup`/`fcntl` wrapper yet).
+**The VM owns `PWD`/`OLDPWD` around `bsh_sys::chdir`.** Descriptors saved while
+a built-in's redirects are applied are `CLOEXEC` copies above fd 20, so a child
+spawned from inside a redirected built-in cannot inherit the shell's saved copy.
 
-**Fragments are parsed by synthesis.** `[[ ]]` operands, `case` patterns and
-here-doc `$…` constructs are parsed as `": <fragment>"` and `words[1]` is taken.
-This reuses the real lexer so quoting is exact, but it is fragile: a fragment
-containing `;` or a newline changes the synthetic command. `bsh_syntax::parse_word`
-is the fix and is queued.
+**Fragments go through `bsh_syntax::parse_word`.** `[[ ]]` operands, `case`
+patterns and the `$…` constructs in a here-document body are single words, so
+they use the real front end with caller-relative spans. (An earlier revision
+synthesised `": <fragment>"` and took `words[1]`; that is gone.)
 
 **Here-document body expansion lives here**, as a double-quote-like scanner, and
 is a candidate to move into `bsh-lang` once a here-doc body has a word model.
@@ -369,9 +380,9 @@ is a candidate to move into `bsh-lang` once a here-doc body has a word model.
 because `Vars::get(&self)` cannot compute them. A runtime-owned `special()`
 accessor would remove the bookkeeping.
 
-**`fork_child`'s closure must call `std::process::exit`** to set the child's
-status; it runs libc atexit handlers in the forked child (safe here only because
-writes are flushed). An exit-status hook in `bsh-sys` would be better.
+**A forked child leaves through `bsh_sys::exit_child(status)`**, never
+`std::process::exit`: the latter runs libc `atexit` handlers inside a forked
+child. `fork_child_status(f: impl FnOnce() -> i32)` does this for you.
 
 **Status precedence**: an explicit exit request outranks the POSIX §2.8.1
 consequence table — `exit 7` is 7, not 1.

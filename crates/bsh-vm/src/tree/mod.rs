@@ -423,7 +423,7 @@ impl Interp {
                 Unwind::Status(status) | Unwind::Return(status) | Unwind::Exit(status) => status,
                 Unwind::Break(_) | Unwind::Continue(_) | Unwind::Trap(_) => Status::SUCCESS,
             };
-            std::process::exit(status.exit_code());
+            bsh_sys::exit_child(status.exit_code());
         })
     }
 }

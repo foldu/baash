@@ -497,24 +497,22 @@ impl Interp {
         plan.actions = actions;
         plan.sigmask = Some(bsh_sys::SignalSet::empty());
         plan.reset_signals = bsh_sys::SignalSet::of(&[bsh_sys::SIGPIPE]);
-        let result = bsh_sys::spawn(plan);
+        // In place: on success this never returns. On failure the process image
+        // is intact, but the plan's fd actions and signal attributes have
+        // already been applied — inherent to exec ordering — so the only sound
+        // response is to report and exit, which is what follows. `keep` must
+        // stay alive across the call: it holds the descriptors the actions
+        // reference.
+        let error = bsh_sys::exec(plan);
         drop(keep);
         let _ = self.state.vars.finish_prefix_assignments(applied);
-        match result {
-            Ok(child) => match bsh_sys::wait_pid(child.pid(), false) {
-                Ok(outcome) => Unwind::Exit(Status(outcome.exit_status())),
-                Err(_) => Unwind::Exit(Status::FAILURE),
-            },
-            Err(error) => {
-                let status = self.spawn_status(&error, &program);
-                self.report(
-                    crate::codes::EXEC,
-                    0..0,
-                    format!("{}: {error}", String::from_utf8_lossy(&program)),
-                );
-                Unwind::Exit(status)
-            }
-        }
+        let status = self.spawn_status(&error, &program);
+        self.report(
+            crate::codes::EXEC,
+            0..0,
+            format!("{}: {error}", String::from_utf8_lossy(&program)),
+        );
+        Unwind::Exit(status)
     }
 
     /// The `execve` failure table from `docs/contracts.md`.

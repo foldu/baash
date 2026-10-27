@@ -310,7 +310,7 @@ impl Interp {
                     let _ = bsh_sys::close(write);
                 }
                 let unwind = self.eval_node(chunk, *stage, ctx);
-                std::process::exit(unwind.status().exit_code());
+                bsh_sys::exit_child(unwind.status().exit_code());
             });
             match result {
                 Ok(child) => children.push(child),
@@ -578,7 +578,7 @@ impl Interp {
             let _ = bsh_sys::close(write);
             let _ = bsh_sys::close(read);
             let unwind = self.eval_node(&chunk, chunk.ast.root, Ctx::default());
-            std::process::exit(unwind.status().exit_code());
+            bsh_sys::exit_child(unwind.status().exit_code());
         })
         .map_err(|error| format!("cannot start a command substitution: {error}"))?;
 

@@ -390,8 +390,7 @@ fn bi_cd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
         Some(path) => path,
     };
 
-    let os = std::path::Path::new(OsStr::from_bytes(&target));
-    if let Err(error) = std::env::set_current_dir(os) {
+    if let Err(error) = bsh_sys::chdir(&target) {
         diagnose(
             interp,
             format!("{name}: {}: {error}", String::from_utf8_lossy(&target)),

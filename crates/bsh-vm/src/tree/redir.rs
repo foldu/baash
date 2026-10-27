@@ -431,14 +431,18 @@ fn save_descriptor(target: RawFd, reserved: &[RawFd]) -> Option<RawFd> {
     if !bsh_sys::fd_is_open(target) {
         return None;
     }
-    for candidate in 20..=255 {
-        if reserved.contains(&candidate) || bsh_sys::fd_is_open(candidate) {
-            continue;
+    // `dup_above` gives a CLOEXEC copy, so a command spawned from inside a
+    // redirected built-in cannot inherit the shell's saved descriptor — which
+    // a plain `dup2` allowed. Reserved numbers are skipped by hand because a
+    // reserved descriptor may be closed and therefore eligible.
+    let mut min = 20;
+    for _ in 0..64 {
+        let saved = bsh_sys::dup_above(target, min).ok()?;
+        let fd = std::os::fd::IntoRawFd::into_raw_fd(saved);
+        if !reserved.contains(&fd) {
+            return Some(fd);
         }
-        if bsh_sys::dup2(target, candidate).is_ok() {
-            return Some(candidate);
-        }
-        return None;
+        min = fd + 1;
     }
     None
 }
