@@ -552,6 +552,10 @@ impl bsh_lang::Vars for Interp {
         &self.state.vars.positional().argv
     }
 
+    fn nounset(&self) -> bool {
+        self.state.opts.nounset
+    }
+
     fn set(&mut self, name: &[u8], value: Vec<u8>) -> Result<(), bsh_lang::SetError> {
         match self.state.vars.assign_scalar(name, &value) {
             Ok(()) => Ok(()),

@@ -238,9 +238,12 @@ fn dash_flags_lists_enabled_short_options() {
     let mut opts = Opts::BASH;
     let flags = opts.dash_flags();
     assert!(flags.contains(&b'h'), "hashall is on in the bash profile");
+    // `braceexpand` is a bash default, but brace expansion is unimplemented,
+    // so the profile reports it off rather than putting a flag in `$-` that
+    // changes nothing. Flip this assertion when the expansion lands.
     assert!(
-        flags.contains(&b'B'),
-        "braceexpand is on in the bash profile"
+        !flags.contains(&b'B'),
+        "braceexpand stays off until brace expansion is implemented"
     );
     assert!(!flags.contains(&b'e'));
     opts.errexit = true;
@@ -1119,7 +1122,12 @@ fn nameref_hook_currently_resolves_identity() {
 fn set_option_table_is_printable() {
     let table = set_option_table(&Opts::BASH);
     assert!(table.iter().any(|(name, on)| *name == "pipefail" && !*on));
-    assert!(table.iter().any(|(name, on)| *name == "braceexpand" && *on));
+    // Off until brace expansion exists; see the note in `dash_flags_…`.
+    assert!(
+        table
+            .iter()
+            .any(|(name, on)| *name == "braceexpand" && !*on)
+    );
 }
 
 #[test]

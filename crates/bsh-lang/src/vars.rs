@@ -31,6 +31,16 @@ pub trait Vars {
     /// The positional parameters, starting at `$1`.
     fn positional(&self) -> &[Vec<u8>];
 
+    /// Whether `set -u` (nounset) is in effect.
+    ///
+    /// Expansion raises [`crate::ErrorKind::ParameterUnset`] instead of
+    /// substituting an empty value when this is true and a parameter the
+    /// operator requires is unset. Defaults to `false`, which is what a
+    /// read-only view (completion, the linter) wants.
+    fn nounset(&self) -> bool {
+        false
+    }
+
     /// Assign a variable, for `${x:=word}` and `${x=word}`.
     ///
     /// Read-only variables and invalid names are reported with [`SetError`];

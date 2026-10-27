@@ -826,3 +826,31 @@ fn shell_options_on_the_command_line_reach_the_shell() {
     let output = run_args(&["-e", "-c", "case $- in *e*) echo yes;; *) echo no;; esac"]);
     assert_eq!(stdout(&output), "yes\n");
 }
+
+#[test]
+fn nounset_errors_only_where_bash_does() {
+    // Reading an unset parameter is fatal in a non-interactive shell.
+    let output = run_args(&["-u", "-c", "echo \"$nope\""]);
+    assert_eq!(code(&output), 1);
+    assert!(stderr(&output).contains("parameter not set"));
+
+    // Operators that supply their own value are exempt.
+    let output = run_args(&["-u", "-c", "echo \"${nope:-fallback}\""]);
+    assert_eq!(stdout(&output), "fallback\n");
+
+    // Enumeration is never an unbound variable, even when it yields nothing:
+    // `set -u; unset a; echo "${a[@]}"` succeeds in bash.
+    for script in [
+        "set -u; set --; echo \"$@\"",
+        "set -u; echo \"$*\"",
+        "set -u; a=(); echo \"${a[@]}\"",
+        "set -u; unset a; echo \"${a[@]}\"",
+    ] {
+        let output = run_args(&["-c", script]);
+        assert_eq!(code(&output), 0, "{script}");
+    }
+
+    // A single unset element is an error, as in bash.
+    let output = run_args(&["-u", "-c", "a=(1); echo \"${a[5]}\""]);
+    assert_eq!(code(&output), 1);
+}

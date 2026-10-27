@@ -203,7 +203,11 @@ option_table! {
     Allexport => allexport, "allexport", Some(b'a'), [SetO], false, false, false, &[];
 
     /// `set -B` / `set -o braceexpand`: brace expansion (bash extension).
-    Braceexpand => braceexpand, "braceexpand", Some(b'B'), [SetO], true, false, true, &[];
+    ///
+    /// Off by default until brace expansion is implemented: `$-` reporting `B`
+    /// while `{a,b}` expands to nothing would be a lie, and a script that
+    /// turned it off would see no difference.
+    Braceexpand => braceexpand, "braceexpand", Some(b'B'), [SetO], true, false, false, &[];
 
     /// `set -o emacs`: emacs line editing (bash extension; `vi` is POSIX).
     Emacs => emacs, "emacs", None, [SetO], true, false, false, &[];

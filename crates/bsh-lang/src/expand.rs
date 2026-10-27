@@ -719,6 +719,23 @@ fn expand_param<S: Shell>(
     out: &mut Expanded,
 ) -> Result<(), Error> {
     let span = exp.span.clone();
+    // POSIX `set -u`: every operator that *consumes* a value must fail on an
+    // unset parameter. The operators that supply their own value (`-`, `:-`,
+    // `+`, `:+`, `=`, `:=`, `?`, `:?`) exist precisely to handle "unset", so
+    // they are exempt; `$@`/`$*`/`$#` are never unset.
+    if ctx.shell.nounset()
+        && needs_set_value(&exp.op)
+        && enumerable(&exp.name)
+        && !ctx.is_set(&exp.name)
+    {
+        return Err(Error::new(
+            ErrorKind::ParameterUnset {
+                name: exp.name.display_bytes(),
+                message: None,
+            },
+            span,
+        ));
+    }
     match &exp.op {
         ParamOp::Unsupported(op) => Err(Error::unsupported(*op, span)),
         ParamOp::Length => {
@@ -885,6 +902,33 @@ fn expand_param<S: Shell>(
             Err(Error::new(kind, span))
         }
     }
+}
+
+/// Whether an unset `name` is an error under `set -u` once the operator is
+/// known to read its value.
+///
+/// `$@`, `$*` and any `name[@]`/`name[*]` enumerate rather than read: bash
+/// treats an empty or unset one as no fields, not as an unbound variable
+/// (`set -u; unset a; echo "${a[@]}"` succeeds). A single element like
+/// `${a[5]}` *is* an error, which is why this is separate from the operator
+/// test.
+fn enumerable(name: &ParamName) -> bool {
+    !matches!(
+        name,
+        ParamName::At | ParamName::Star | ParamName::Count | ParamName::Elements { .. }
+    )
+}
+
+/// Whether `op` reads the parameter's value, making an unset parameter an
+/// error under `set -u`.
+fn needs_set_value(op: &ParamOp) -> bool {
+    !matches!(
+        op,
+        ParamOp::UseDefault { .. }
+            | ParamOp::UseAlternate { .. }
+            | ParamOp::AssignDefault { .. }
+            | ParamOp::Error { .. }
+    )
 }
 
 /// The elements of `name` in iteration order. A scalar is a one-element list;
