@@ -1148,8 +1148,8 @@ The parser and the VM are the fun parts. Ranked by effective effort:
    number in the README. It is the only real progress metric.
 
    **Measurement** (`crates/bsh-spec`, the harness this item asked for):
-   **1240 of 2787 compared cases**, 1184 skipped, of 3971 total (44.5%). For
-   reference bash passes 2574/2787 (92.4%) on the same run, so 1357 cases are
+   **1405 of 2787 compared cases**, 1184 skipped, of 3971 total (50.4%). For
+   reference bash passes 2574/2787 (92.4%) on the same run, so 1206 cases are
    ones bash passes and we do not — that list, not the headline percentage, is
    the work queue, and `docs/roadmap.md` orders it by cases recovered. The skips are 1162 YSH
    cases (a language we do not implement) and 22 needing a missing helper; no

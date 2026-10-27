@@ -44,7 +44,7 @@ Measured by `array.test.sh` (78), `array-sparse.test.sh` (40),
 - [ ] `set -u` on a missing element; empty array under `"${a[@]}"` with `-u`
       (`nounset` itself is still unimplemented).
 
-### `read` and the built-in cluster — 411 regressions (712 compared, 224 pass)
+### `read` and the built-in cluster — 411 regressions — read is **DONE** (83/115), built-ins in flight
 
 `builtin-read.test.sh` went 9/64 → **63/64** (the one left is `mapfile`), the
 `read` filter 24/115 → **83/115**, and `kill` 2/21 → **17/21**.
@@ -62,7 +62,7 @@ Measured by `array.test.sh` (78), `array-sparse.test.sh` (40),
 - [x] `kill` (also needed by the `trap` tests).
 - [ ] `builtin`, which several `kill -l` cases use (`builtin kill -l`).
 
-### `trap` — 38 cases in `builtin-trap.test.sh`, plus `trap-*.test.sh`
+### `trap` — **DONE: 0 → 43 of 84** (builtin-trap 32/38)
 
 `builtin-trap.test.sh` went 0/38 → **32/38**; the whole `trap` filter 0/84 →
 **43/84**. The six left in `builtin-trap.test.sh` need incremental parsing
