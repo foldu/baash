@@ -8,8 +8,8 @@ Each section is owned by the producing crate. If you are implementing a consumer
 (`bsh-vm`, `bsh-repl`, `bsh-tools`) read the relevant sections before you start,
 and treat every item here as a fact about the API you are calling.
 
-Status: `bsh-diag`, `bsh-sys`, `bsh-runtime` and `bsh-lang` have landed.
-`bsh-syntax` is in flight.
+Status: all of wave 1 has landed — `bsh-diag`, `bsh-sys`, `bsh-runtime`,
+`bsh-lang` and `bsh-syntax`.
 
 ---
 
@@ -189,6 +189,58 @@ bash 5.3.20.
 
 ---
 
+## bsh-syntax
+
+**Two entry points, and the difference matters.** `lex(src) -> Vec<Token>` is the
+token stream for highlighting and simple scans. `lex_full(src) -> Lexed` adds
+what the parser needs: `{ tokens, heredocs, unterminated }`. Here-document bodies
+and delimiters only appear as `TokenKind::HereDocBody` /`HereDocDelimiter` in
+the full form; a consumer that colours them must use `lex_full`. Bodies are
+**not** shell code and are styled as literal data, not as commands.
+
+**Words are `bsh_lang`'s types, re-exported.** `bsh-syntax` re-exports
+`Word`, `Part`, `Lit`, `LitKind`, `ParamExp`, `ParamName`, `ParamOp`,
+`CommandSub`, `Arithmetic`, `ProcessSub`, `TildeSpec`, `UnsupportedOp`. There is
+no parallel word model, deliberately.
+
+**The AST is owned and flat**: `Ast { root, nodes: Vec<Node>, heredocs, tokens }`
+with `NodeId` indices, not a boxed tree and not an arena. Two consequences:
+recursion on the AST is bounded by construction, and the parser enforces an
+explicit `max_depth` (default 200) that yields a diagnostic instead of a stack
+overflow. Node kinds: `Empty, List, AndOr, Pipeline, Simple, If, For,
+ForArith, While, Case, BraceGroup, Subshell, Function, Redirected, ArithCommand,
+TestCommand, Timed`.
+
+**`ParseOpts { posix_mode, extglob, max_depth }`** is local to the front end on
+purpose; the shell maps its own options onto it. `parse(&SourceFile)` is a
+default-profile wrapper over `parse_with`.
+
+**`NeedMoreInput` is the PS2 signal**, produced for an unterminated quote,
+substitution, `(`, `{`, `if`, `do`, `case`, here-doc, redirect target, and
+dangling pipeline/and-or tails — each with the opener's span and the `Expect`
+set. `expectations_at(src, offset, opts)` answers the same question at an
+arbitrary offset for the completer.
+
+**Arrays are a gap with a shape.** `bsh-lang` has no array-literal word part, so
+`local x=(a b)` parses with the word at that position replaced by a quoted
+placeholder and the elements carried in `SimpleCommand::array_args:
+Vec<ArrayArg>` (only after `local`/`declare`/`typeset`/`export`/`readonly`/
+`alias`/`eval`, matching bash). The VM must read `ArrayArg`, not the placeholder
+word. Giving arrays a real word part is deferred until bash arrays are
+implemented.
+
+**Codes (1xx)**: 1 unterminated, 2 need more input, 3 unexpected, 4 bashism,
+5 array subscript, 6 depth, 7 here-doc.
+
+Known limits, accepted rather than hidden: `select` and `time` parse as command
+words; `$"…"` gets double-quote semantics without locale translation; the
+`$( … )` end scanner tracks `case` state heuristically, so a *pattern* literally
+named `esac` can confuse it; CRLF scripts fail the way bash fails; and
+`a[$(cmd)]=v` is refused by design (DESIGN §3.3), so scripts relying on
+`shopt eval_unsafe_arith` will not parse.
+
+---
+
 ## Diagnostic codes
 
 Each crate owns a hundred-range, so a code identifies the layer that produced
@@ -209,5 +261,4 @@ text is not — anything matching on stderr should match the code.
 
 ## Pending
 
-`bsh-syntax` will add the `Expect` vocabulary, the `ParseOutcome` variants and
-the rule that it emits `bsh_lang::Word` rather than a parallel word model.
+Wave 2 (execution) and wave 3 (the editor) have not landed yet.

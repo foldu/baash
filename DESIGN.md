@@ -1009,7 +1009,10 @@ substitutions treated as ordinary token classes rather than errors.
   force a lossy conversion on every keystroke.
 - **Unterminated constructs get their own style**, which is why
   `TokenKind::WordUnterminated` exists: a dangling quote should look *open*, not
-  wrong, because the user is probably still typing it.
+  wrong, because the user is probably still typing it. Two more roles earn their keep once the lexer
+  distinguishes them: `TokenKind::ArithCommand` covers a whole `(( … ))` as one
+  opaque token (we do not lex arithmetic), and `HereDocBody`/`HereDocDelimiter`
+  are styled as literal data, because a here-document body is not shell code.
 - **Re-lex the buffer; don't diff it.** A command line is a few hundred bytes,
   and incremental highlighting would cost more in bookkeeping than it saves.
   Revisit only if a profile disagrees.

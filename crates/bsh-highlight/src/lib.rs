@@ -145,6 +145,11 @@ pub struct Theme {
     pub word: Style,
     /// A quote or substitution that was never closed.
     pub unterminated: Style,
+    /// A whole `(( … ))`. One token: we do not lex arithmetic, so the style
+    /// covers the expression and its delimiters alike.
+    pub arithmetic: Style,
+    /// A here-document body or its terminator. Literal data, never shell code.
+    pub heredoc: Style,
 }
 
 impl Theme {
@@ -156,6 +161,8 @@ impl Theme {
         comment: Style::PLAIN,
         word: Style::PLAIN,
         unterminated: Style::PLAIN,
+        arithmetic: Style::PLAIN,
+        heredoc: Style::PLAIN,
     };
 
     /// A readable theme for dark terminals, using only the 16 base colours so
@@ -192,6 +199,21 @@ impl Theme {
             italic: false,
             underline: true,
         },
+        // Not bold: an arithmetic command should read as an expression, not as
+        // a control keyword.
+        arithmetic: Style {
+            color: Color::BrightMagenta,
+            bold: false,
+            italic: false,
+            underline: false,
+        },
+        // String-like: a here-doc body is data pasted into the input.
+        heredoc: Style {
+            color: Color::Green,
+            bold: false,
+            italic: false,
+            underline: false,
+        },
     };
 }
 
@@ -219,6 +241,8 @@ fn style_for(kind: TokenKind, theme: &Theme) -> Style {
         TokenKind::WordUnterminated => theme.unterminated,
         TokenKind::Operator => theme.operator,
         TokenKind::Redirect => theme.redirect,
+        TokenKind::ArithCommand => theme.arithmetic,
+        TokenKind::HereDocBody | TokenKind::HereDocDelimiter => theme.heredoc,
     }
 }
 
@@ -319,6 +343,27 @@ mod tests {
         assert_eq!(keyword.style, Theme::DARK.keyword);
         assert_eq!(operator.style, Theme::DARK.operator);
         assert_ne!(keyword.style, operator.style);
+    }
+
+    #[test]
+    fn arithmetic_commands_and_heredocs_have_their_own_roles() {
+        let src = b"(( x + 1 ))\ncat <<EOF\nbody text\nEOF\n";
+        let spans = highlight(src, &Theme::DARK);
+
+        let arith = spans
+            .iter()
+            .find(|s| &src[s.span.clone()] == b"(( x + 1 ))")
+            .expect("an arithmetic command token");
+        assert_eq!(arith.style, Theme::DARK.arithmetic);
+
+        let body = spans
+            .iter()
+            .find(|s| src[s.span.clone()].starts_with(b"body text"))
+            .expect("a here-doc body token");
+        assert_eq!(body.style, Theme::DARK.heredoc);
+        // A here-doc body is data, not a comment and not an ordinary word.
+        assert_ne!(body.style, Theme::DARK.comment);
+        assert_ne!(body.style, Theme::DARK.word);
     }
 
     #[test]
