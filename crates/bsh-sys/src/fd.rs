@@ -108,6 +108,63 @@ pub fn dup2(from: RawFd, to: RawFd) -> io::Result<()> {
     }
 }
 
+/// Duplicate `fd` onto the lowest-numbered free descriptor, setting
+/// `FD_CLOEXEC` on the result.
+///
+/// The original descriptor is untouched and the duplicate is owned by the
+/// caller. `FD_CLOEXEC` is set by the kernel as part of the duplicate
+/// (`F_DUPFD_CLOEXEC`), so there is no window in which a concurrent `exec`
+/// could inherit the descriptor.
+///
+/// This is the primitive the shell needs to *save* a descriptor before
+/// redirecting it: [`dup2`] destroys the saved descriptor's identity, whereas
+/// a duplicate can be restored later.
+pub fn dup(fd: RawFd) -> io::Result<OwnedFd> {
+    dup_above(fd, 0)
+}
+
+/// Duplicate `fd` onto the lowest-numbered free descriptor at or above `min`,
+/// setting `FD_CLOEXEC` on the result.
+///
+/// The shell keeps its own plumbing at descriptors ≥ 10 and historically saved
+/// user descriptors by `dup2`-ing them to ≥ 20; this is the exact primitive
+/// that replaces the dance, because it never closes the caller's descriptor
+/// and the duplicate's number cannot collide with the saved one.
+///
+/// `min` must be non-negative; a negative value is rejected by the kernel with
+/// `EINVAL` rather than being clamped.
+pub fn dup_above(fd: RawFd, min: RawFd) -> io::Result<OwnedFd> {
+    // SAFETY: `F_DUPFD_CLOEXEC` duplicates a live descriptor and returns a new
+    // one; it reads only integers and retains no pointers.
+    let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, min) };
+    if duplicate < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the kernel just produced this descriptor and nothing else owns
+    // it; taking ownership closes it if the caller drops it.
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
+}
+
+/// Change the working directory to `path`, which is shell bytes.
+///
+/// Shell filenames are arbitrary non-NUL byte sequences, so this takes `&[u8]`
+/// rather than `&str`. An embedded NUL is rejected with
+/// [`NulByte`](crate::NulByte) instead of silently truncating the path (which
+/// would `chdir` somewhere unintended).
+///
+/// The change is process-wide, so a caller that is not the only thread in the
+/// process must serialise it with every other user of the working directory.
+pub fn chdir(path: &[u8]) -> io::Result<()> {
+    let path = cstring(path)?;
+    // SAFETY: `path` is NUL-terminated and lives until the call returns;
+    // `chdir` copies what it needs and retains no pointer.
+    if unsafe { libc::chdir(path.as_ptr()) } != 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 /// Close a descriptor the caller owns.
 ///
 /// On Linux `close` always releases the descriptor, including when it reports
@@ -314,6 +371,43 @@ mod tests {
         assert!(!fd_is_open(target));
         assert!(!fd_is_open(i32::MAX));
         assert!(!fd_is_cloexec(i32::MAX));
+    }
+
+    #[test]
+    fn dup_is_cloexec_and_shares_the_open_file_description() {
+        let pipe = Pipe::new().unwrap();
+        let duplicate = dup(pipe.read_fd()).unwrap();
+        assert_ne!(duplicate.as_raw_fd(), pipe.read_fd());
+        assert!(fd_is_cloexec(duplicate.as_raw_fd()));
+
+        // The duplicate is a second name for the same pipe, so a byte written
+        // on the write end is readable through it.
+        let mut write = std::fs::File::from(pipe.write);
+        write.write_all(b"x").unwrap();
+        let mut read = std::fs::File::from(duplicate);
+        let mut byte = [0u8; 1];
+        read.read_exact(&mut byte).unwrap();
+        assert_eq!(&byte, b"x");
+    }
+
+    #[test]
+    fn dup_above_honours_the_floor_and_leaves_the_source_open() {
+        let pipe = Pipe::new().unwrap();
+        // Anything from 600 upwards is far above the descriptors this test
+        // binary normally holds, so the duplicate lands at the floor without
+        // racing the fixed 900 used by the `dup2` test.
+        let duplicate = dup_above(pipe.read_fd(), 600).unwrap();
+        assert!(duplicate.as_raw_fd() >= 600);
+        assert!(fd_is_cloexec(duplicate.as_raw_fd()));
+        assert!(fd_is_open(pipe.read_fd()));
+    }
+
+    #[test]
+    fn dup_rejects_a_descriptor_that_is_not_open() {
+        let error = dup(i32::MAX).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EBADF));
+        let error = dup_above(i32::MAX, 600).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EBADF));
     }
 
     #[test]

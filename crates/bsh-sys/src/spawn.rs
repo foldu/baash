@@ -1,4 +1,4 @@
-//! Creating child processes.
+//! Creating child processes, and replacing the current one.
 //!
 //! Two mechanisms, chosen by [`spawn`]:
 //!
@@ -11,6 +11,10 @@
 //!   `posix_spawn` cannot express, and is the mechanism behind [`fork_child`],
 //!   which runs *shell code* rather than an external program and so cannot be
 //!   spawned at all.
+//!
+//! [`exec`] is the third case: no child at all. It applies a plan in place and
+//! calls `execve`, which is what the shell's `exec` built-in must do to keep
+//! its pid and carry redirections into the command.
 //!
 //! Everything a child needs is computed in the parent: argv/envp arrays,
 //! `CString`s, and the ordered file actions. Between `fork` and `exec` the
@@ -25,7 +29,8 @@
 //! the parent blocks reading it. EOF (no bytes) means the exec succeeded,
 //! because the close-on-exec flag closed the writer; four bytes mean failure.
 //! The fork path moves that writer above every descriptor the plan mentions so
-//! no redirect can close or overwrite it.
+//! no redirect can close or overwrite it. In-place [`exec`] needs no pipe: it
+//! returns the error to its own caller.
 
 use std::convert::Infallible;
 use std::ffi::CString;
@@ -376,9 +381,9 @@ pub fn spawn_forked(mut plan: SpawnPlan) -> io::Result<Child> {
                 std::mem::size_of::<libc::c_int>(),
             );
         }
-        // SAFETY: `_exit` terminates immediately, running no destructors,
-        // allocators or atexit handlers — exactly what a post-fork child needs.
-        unsafe { libc::_exit(127) }
+        // No destructors, allocator or atexit handlers: we are still in the
+        // post-fork window.
+        exit_child(127)
     }
 
     // Parent: close the writer so EOF on the read end means exec succeeded.
@@ -402,7 +407,84 @@ pub fn spawn_forked(mut plan: SpawnPlan) -> io::Result<Child> {
     }
 }
 
-/// Fork, then run `f` in the child, which is expected to finish with `_exit`.
+/// Replace the current process image with the program in `plan`.
+///
+/// This is `execve(2)` without a preceding `fork`, and it is what the shell's
+/// `exec` built-in needs: `exec cmd` must keep the shell's pid and must carry
+/// the requested redirections into the command, neither of which a
+/// spawn-and-wait approximation can do. It applies the plan's process
+/// attributes, then its ordered [`FdAction`] list (exactly as
+/// [`spawn_forked`] does), and finally calls `execve`.
+///
+/// **On success this function never returns**, and the process image is
+/// replaced: the caller must be prepared for its code, heap, signal handlers
+/// and address space to disappear. In particular, nothing after the call in
+/// the caller will run.
+///
+/// On failure it returns the `execve` error (`ENOENT`, `EACCES`, `ENOEXEC`, …)
+/// and the current process image is preserved, so the caller can report the
+/// failure, map it to 127/126 and exit. The descriptor actions and the
+/// process-group/signal settings have *already* been applied by then, because
+/// that is their position in the exec sequence; the caller must not assume the
+/// descriptor table is unchanged. Failing before `execve` (a bad redirect, an
+/// invalid signal) is likewise reported as an `io::Error`.
+///
+/// The plan's [`ReportPipe`] exists only to carry an exec failure from a
+/// forked child to its parent; an in-place exec reports through this return
+/// value, so the pipe is closed before the exec is attempted.
+///
+/// There is no `PATH` search and no shebang handling here; [`SpawnPlan`]
+/// carries an already-resolved path (the same contract as [`spawn`]).
+#[must_use = "exec returns only on failure; ignoring the error hides it"]
+pub fn exec(plan: SpawnPlan) -> io::Error {
+    let SpawnPlan {
+        program,
+        argv,
+        envp,
+        actions,
+        pgroup,
+        reset_signals,
+        sigmask,
+        report,
+    } = plan;
+    // No parent is waiting on a report pipe: this call reports synchronously.
+    drop(report);
+
+    let argv = cstr_ptrs(&argv);
+    let envp = cstr_ptrs(&envp);
+
+    let errno = apply_process_attributes(pgroup, &reset_signals, sigmask.as_ref());
+    if errno != 0 {
+        return io::Error::from_raw_os_error(errno);
+    }
+    for action in &actions {
+        let errno = apply_fd_action(action);
+        if errno != 0 {
+            return io::Error::from_raw_os_error(errno);
+        }
+    }
+
+    // SAFETY: `program` is NUL-terminated, both vectors are NULL-terminated
+    // and point at live `CString` buffers that outlive the call, and `execve`
+    // retains neither pointer.
+    unsafe {
+        libc::execve(
+            program.as_ptr(),
+            argv.as_ptr().cast::<*const libc::c_char>(),
+            envp.as_ptr().cast::<*const libc::c_char>(),
+        );
+    }
+    // `execve` returned, so it failed and set errno.
+    let error = io::Error::last_os_error();
+    if error.raw_os_error().is_none() {
+        io::Error::from_raw_os_error(libc::EIO)
+    } else {
+        error
+    }
+}
+
+/// Fork, then run `f` in the child, which is expected to finish with
+/// [`exit_child`].
 ///
 /// This is the only way to run *shell code* in a child: subshells, pipeline
 /// segments that are functions or compound commands, `$( … )` around shell
@@ -420,6 +502,10 @@ pub fn spawn_forked(mut plan: SpawnPlan) -> io::Result<Child> {
 /// the "this should not happen" path; the child makes no attempt to print a
 /// diagnostic (the caller owns diagnostics and should exit inside `f`) and
 /// exits with status 127. The returned [`Child`] must be reaped by the caller.
+/// A closure that wants a specific exit status should use
+/// [`fork_child_status`] instead; either way, the child must leave through
+/// [`exit_child`] (or the equivalent raw `_exit`), never
+/// [`std::process::exit`].
 ///
 /// # Panics
 ///
@@ -434,17 +520,65 @@ pub fn fork_child(f: impl FnOnce() -> io::Result<Infallible>) -> io::Result<Chil
         return Err(io::Error::last_os_error());
     }
     if pid == 0 {
-        let status = match f() {
+        exit_child(match f() {
             // The closure's contract says it never returns successfully.
             Ok(never) => match never {},
             Err(_) => 127,
-        };
-        // SAFETY: `_exit` runs no destructors; the child has made no
-        // allocations of its own by contract, and diagnostics belong to the
-        // closure.
-        unsafe { libc::_exit(status) }
+        })
     }
     Ok(Child { pid })
+}
+
+/// Fork, run `f` in the child, and exit with the status it returns.
+///
+/// This is [`fork_child`] for callers that need to set the child's exit status
+/// without reaching for [`std::process::exit`]. That matters: `exit(3)` runs
+/// libc `atexit` handlers inside a forked child, which is a hazard even when
+/// it happens to be harmless today (handlers may lock, flush shared buffers or
+/// free memory the child inherited mid-update). Here the closure simply
+/// returns an `i32` and bsh-sys calls raw `_exit`, so no handler runs.
+///
+/// The child may allocate, lock and unwind like any single-threaded process —
+/// see [`fork_child`] for why the gate makes that sound. What it must not do
+/// is rely on destructors or buffered I/O after `f` returns: `_exit` runs
+/// neither, so anything the parent must observe has to be flushed or written
+/// by `f` itself.
+///
+/// The returned [`Child`] must be reaped by the caller.
+///
+/// # Panics
+///
+/// Panics if [`fork_gate`] has live guards (DESIGN.md §4.3).
+pub fn fork_child_status(f: impl FnOnce() -> i32) -> io::Result<Child> {
+    fork_gate().assert_forkable();
+
+    // SAFETY: `fork` takes no arguments; the gate above guarantees no helper
+    // threads are live.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if pid == 0 {
+        exit_child(f())
+    }
+    Ok(Child { pid })
+}
+
+/// Leave a forked child immediately with `status`.
+///
+/// This is the only correct way to exit a child created by [`fork_child`],
+/// [`fork_child_status`] or [`spawn_forked`]: it calls raw `_exit(2)`, which
+/// terminates the process without running libc `atexit` handlers, Rust
+/// destructors, or flushing user-space buffers. All of those operate on state
+/// the child may have inherited in a half-updated condition.
+///
+/// The status is the low eight bits after the kernel's transformation, exactly
+/// as `waitpid(2)` reports it. This function never returns.
+pub fn exit_child(status: i32) -> ! {
+    // SAFETY: `_exit` is async-signal-safe and terminates the calling process
+    // without running atexit handlers, destructors or buffered I/O. No Rust
+    // value is used or dropped after this point.
+    unsafe { libc::_exit(status) }
 }
 
 fn spawn_posix_spawn(plan: SpawnPlan) -> io::Result<Child> {
@@ -623,6 +757,42 @@ fn spawn_result(rc: libc::c_int) -> io::Result<()> {
     }
 }
 
+/// Apply the process-group and signal setup shared by the fork fallback and
+/// the in-place [`exec`].
+///
+/// Returns the errno that stopped it, or `0` on success. Only raw syscalls:
+/// this runs in the post-`fork` window of [`spawn_forked`].
+fn apply_process_attributes(
+    pgroup: ProcessGroup,
+    reset_signals: &SignalSet,
+    sigmask: Option<&SignalSet>,
+) -> libc::c_int {
+    if let ProcessGroup::SetPgid { pgroup } = pgroup {
+        // SAFETY: `setpgid` takes only integers.
+        if unsafe { libc::setpgid(0, pgroup) } != 0 {
+            return last_errno();
+        }
+    }
+
+    for signal in reset_signals.iter() {
+        // SAFETY: `signal(2)` with `SIG_DFL` for a signal number; no pointers.
+        if unsafe { libc::signal(signal, libc::SIG_DFL) } == libc::SIG_ERR {
+            return last_errno();
+        }
+    }
+
+    if let Some(mask) = sigmask {
+        // SAFETY: `mask` is an initialised `sigset_t`; the call does not retain
+        // the pointer.
+        if unsafe { libc::sigprocmask(libc::SIG_SETMASK, mask.as_ptr(), std::ptr::null_mut()) } != 0
+        {
+            return last_errno();
+        }
+    }
+
+    0
+}
+
 /// Apply the process attributes, descriptor actions and `execve`.
 ///
 /// Returns the errno that stopped it. It never returns on success.
@@ -631,27 +801,9 @@ fn child_exec(
     argv: &[*mut libc::c_char],
     envp: &[*mut libc::c_char],
 ) -> libc::c_int {
-    if let ProcessGroup::SetPgid { pgroup } = plan.pgroup {
-        // SAFETY: `setpgid` takes only integers.
-        if unsafe { libc::setpgid(0, pgroup) } != 0 {
-            return last_errno();
-        }
-    }
-
-    for signal in plan.reset_signals.iter() {
-        // SAFETY: `signal(2)` with `SIG_DFL` for a signal number; no pointers.
-        if unsafe { libc::signal(signal, libc::SIG_DFL) } == libc::SIG_ERR {
-            return last_errno();
-        }
-    }
-
-    if let Some(mask) = &plan.sigmask {
-        // SAFETY: `mask` is an initialised `sigset_t`; the call does not retain
-        // the pointer.
-        if unsafe { libc::sigprocmask(libc::SIG_SETMASK, mask.as_ptr(), std::ptr::null_mut()) } != 0
-        {
-            return last_errno();
-        }
+    let errno = apply_process_attributes(plan.pgroup, &plan.reset_signals, plan.sigmask.as_ref());
+    if errno != 0 {
+        return errno;
     }
 
     for action in &plan.actions {

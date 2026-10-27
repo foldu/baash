@@ -8,21 +8,26 @@
 //!
 //! # What is here
 //!
-//! * [`spawn()`], [`spawn_forked`], [`fork_child`] and [`SpawnPlan`] — creating
-//!   children. External commands go through `posix_spawn` and are safe in a
-//!   threaded parent; shell code in a child uses `fork` and is gated by
-//!   [`fork_gate`].
+//! * [`spawn()`], [`spawn_forked`], [`fork_child`], [`fork_child_status`],
+//!   [`exit_child`], [`exec`] and [`SpawnPlan`] — creating children and
+//!   replacing this process. External commands go through `posix_spawn` and
+//!   are safe in a threaded parent; shell code in a child uses `fork` and is
+//!   gated by [`fork_gate`]. `exec` is the in-place `execve` the `exec`
+//!   built-in needs: it keeps the pid and carries the plan's redirections.
 //! * [`wait_pid`], [`wait_any_nohang`], [`WaitOutcome`] — reaping, with
 //!   `EINTR` retried and `SIGCHLD` treated as a wakeup hint, never as a
 //!   per-child event.
-//! * [`Pipe`], [`open_cloexec`], [`dup2`], [`close`], [`fd_is_open`],
-//!   [`create_unlinked_temp`] — descriptor plumbing, including here-doc
-//!   bodies as unlinked files.
+//! * [`Pipe`], [`open_cloexec`], [`dup`], [`dup_above`], [`dup2`], [`close`],
+//!   [`chdir`], [`fd_is_open`], [`create_unlinked_temp`] — descriptor plumbing,
+//!   including here-doc bodies as unlinked files and descriptor save/restore
+//!   without a `dup2`-to-a-high-number dance.
 //! * [`SignalSet`], [`MaskGuard`], [`SignalFd`] — masks and a pollable signal
 //!   source. `SignalFd` is Linux-only (`signalfd`); elsewhere its constructor
 //!   fails with [`std::io::ErrorKind::Unsupported`] rather than pretending.
-//! * [`RawMode`], [`window_size`], [`set_foreground_pgrp`] — terminal state
-//!   for the line editor and job control.
+//! * [`RawMode`], [`Pty`], [`open_pty`], [`window_size`],
+//!   [`set_foreground_pgrp`] — terminal state for the line editor and job
+//!   control, with an owned pty pair so that state can be tested without a
+//!   controlling terminal.
 //! * [`cstring`] — converting shell bytes for `exec`, failing with
 //!   [`NulByte`] instead of truncating.
 //!
@@ -37,6 +42,7 @@
 
 pub mod bytes;
 pub mod fd;
+pub mod pty;
 pub mod signal;
 pub mod spawn;
 pub mod term;
@@ -45,11 +51,14 @@ pub mod wait;
 
 pub use bytes::{NulByte, cstring, cstrings};
 pub use fd::{
-    Pipe, close, create_unlinked_temp, dup2, fd_is_cloexec, fd_is_open, open_cloexec, set_cloexec,
+    Pipe, chdir, close, create_unlinked_temp, dup, dup_above, dup2, fd_is_cloexec, fd_is_open,
+    open_cloexec, set_cloexec,
 };
+pub use pty::{Pty, open_pty};
 pub use signal::{MaskGuard, SignalEvent, SignalFd, SignalSet, send_group_signal, send_signal};
 pub use spawn::{
-    Child, FdAction, ProcessGroup, ReportPipe, SpawnPlan, fork_child, spawn, spawn_forked,
+    Child, FdAction, ProcessGroup, ReportPipe, SpawnPlan, exec, exit_child, fork_child,
+    fork_child_status, spawn, spawn_forked,
 };
 pub use term::{
     RawMode, get_foreground_pgrp, parent_pid, pid, process_group, set_foreground_pgrp,

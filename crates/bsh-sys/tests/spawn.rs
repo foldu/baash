@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bsh_sys::{
-    NulByte, ProcessGroup, SpawnPlan, WaitOutcome, fork_child, send_signal, spawn, spawn_forked,
-    wait_pid,
+    NulByte, ProcessGroup, SpawnPlan, WaitOutcome, exit_child, fork_child, fork_child_status,
+    send_signal, spawn, spawn_forked, wait_pid,
 };
 
 /// Resolve an executable the portable way: `/bin`, then `/usr/bin`, then
@@ -259,5 +259,31 @@ fn fork_child_runs_the_closure_in_a_real_child() {
     assert_eq!(
         wait_pid(child.pid(), false).unwrap(),
         WaitOutcome::Exited(0)
+    );
+}
+
+#[test]
+fn fork_child_status_sets_the_child_exit_status() {
+    let child = fork_child_status(|| 42).unwrap();
+    assert_eq!(
+        wait_pid(child.pid(), false).unwrap(),
+        WaitOutcome::Exited(42)
+    );
+
+    // Status 0 is a real value, not "no status"; the child still exits through
+    // the raw path.
+    let child = fork_child_status(|| 0).unwrap();
+    assert_eq!(
+        wait_pid(child.pid(), false).unwrap(),
+        WaitOutcome::Exited(0)
+    );
+}
+
+#[test]
+fn exit_child_is_usable_from_fork_child() {
+    let child = fork_child(|| exit_child(9)).unwrap();
+    assert_eq!(
+        wait_pid(child.pid(), false).unwrap(),
+        WaitOutcome::Exited(9)
     );
 }
