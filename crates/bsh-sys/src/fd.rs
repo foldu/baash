@@ -180,6 +180,91 @@ pub fn close(fd: RawFd) -> io::Result<()> {
     }
 }
 
+/// Read up to `buf.len()` bytes from `fd`.
+///
+/// Returns the number of bytes read; `0` means end of file. `EINTR` is
+/// retried. This is the byte source for the `read` built-in, which must not
+/// over-read: it reads exactly one buffer at a time and keeps any surplus
+/// itself, so a second reader on the same descriptor still sees the rest.
+pub fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
+    loop {
+        // SAFETY: `buf` is a valid writable slice of `buf.len()` bytes, and
+        // the kernel writes at most that many.
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if n >= 0 {
+            return Ok(n as usize);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+/// Write `buf` to `fd` in one call, returning the number of bytes accepted.
+///
+/// Short writes are the caller's problem; use [`write_all`] unless you are
+/// testing partial-write behaviour.
+pub fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
+    loop {
+        // SAFETY: `buf` is a valid readable slice of `buf.len()` bytes.
+        let n = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
+        if n >= 0 {
+            return Ok(n as usize);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+/// Write all of `buf` to `fd`, retrying short writes and `EINTR`.
+///
+/// Returns the number of bytes written (always `buf.len()` on success).
+pub fn write_all(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
+    let mut written = 0;
+    while written < buf.len() {
+        match write_fd(fd, &buf[written..])? {
+            0 => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "write returned zero bytes",
+                ));
+            }
+            n => written += n,
+        }
+    }
+    Ok(written)
+}
+
+/// Wait until `fd` is readable, or `timeout_ms` elapses.
+///
+/// Returns `true` when a read will not block, `false` on timeout. A negative
+/// timeout waits indefinitely. This is what `read -t` needs; it must not be
+/// used to poll anything but readability.
+pub fn poll_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: `pollfd` points at one initialised `pollfd`.
+        let result = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+        if result > 0 {
+            return Ok(true);
+        }
+        if result == 0 {
+            return Ok(false);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
 /// Whether `fd` currently names an open descriptor.
 ///
 /// The answer is a snapshot: another thread may close or reuse the descriptor
