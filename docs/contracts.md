@@ -82,6 +82,18 @@ Linux-only: `SignalFd` (elsewhere `new`/`read` return `Unsupported` and
 safe static buffer on the non-Linux `open_pty` path. Everything else is generic
 POSIX.
 
+**New in this wave, all thin and all unsafe-free at the API:** `lseek` (plus
+`fd::seek`) is how `read` rewinds the bytes it buffered but did not consume, and
+`ESPIPE` is how it discovers that a descriptor is a pipe; `NoEcho` is `read -s`
+(echo off, canonical mode and signal generation kept); `Disposition` /
+`set_disposition` / `ignore_signals` are the two places the shell changes a
+signal *action* rather than blocking it (`trap '' SIG` is `SIG_IGN`, which
+children inherit across `exec`, and `SIGINT`/`SIGQUIT` are ignored while the
+shell waits for a foreground job); `replace_signal_mask` is the permanent form
+of `SignalSet::set`, for a forked child that must not inherit the shell's
+blocked traps. `SIGALRM`, `SIGTERM`, `SIGINT`, `SIGQUIT` and `ECHILD` are
+re-exported so `bsh-vm` needs no `libc`.
+
 **`exec(plan) -> io::Error` replaces the process in place** and returns only on
 failure. The caveat is inherent to exec ordering: by the time `execve` fails,
 the plan's file actions, signal mask, `reset_signals` and process group have
@@ -161,6 +173,26 @@ intrinsic, 7 regular, 18 bash extensions. `printf`, `test`, `[`, `echo`, `pwd`,
 `true` and `false` are regular, deliberately *not* intrinsic, because the
 standard requires them to remain exec-able. Search order comes from
 `Tier::search_priority`.
+
+**Traps are state, and the table lives here.** `ShellState::traps` is a
+`TrapTable` keyed by `TrapKey` (`Exit`, `Signal(i32)`, `Err`, `Debug`,
+`Return`) with `TrapAction::{Command(Vec<u8>), Ignore}`. It parses and renders
+signal specifications (`signal_number`, `signal_short_name`, `signal_table`),
+iterates in bash's listing order (`EXIT`, signals ascending, then
+`ERR`/`DEBUG`/`RETURN`) and bumps a `generation` on every mutation so the VM
+knows when to re-sync process dispositions without diffing. `trap` itself is a
+state-only handler here. It implements bash's surprising surface rule: when the
+*first* operand is a signal specification there is no action, and every operand
+is a signal to reset (`trap 0 2`, `trap 2 EXIT`); otherwise the first operand is
+the action and `''`/`-` mean ignore/reset. A failing `trap` records a
+**utility** failure on purpose — the §2.8.1 special-built-in rule would
+otherwise exit the shell, and no shell does that for `trap 'x' SIGINVALID`.
+
+**`ShellHost` grew two seams for `trap`.** `check_syntax(src) -> bool` validates
+a handler at registration time (parsing is `bsh-syntax`'s, which this crate must
+not depend on), and `trap_saved_status() -> Option<Status>` answers the exit
+status a bare `exit` inside the `EXIT` trap must reuse. Both are defaulted, so a
+new host compiles without them.
 
 **Diagnostic text is unstable; match the codes.** State errors are `BSH-E05xx`;
 an unimplemented builtin returns status 2 with `BSH-E0508`.
@@ -400,12 +432,42 @@ runtime exposes one.
 ## bsh-vm (tree evaluator)
 
 **Which built-ins the executor owns.** `break`, `continue`, `return`, `exit`,
-`exec`, `eval`, `.`/`source`, `cd` and `echo` are implemented in `bsh_vm`. They
-unwind control flow or re-enter the interpreter, which a
+`exec`, `eval`, `.`/`source`, `cd`, `echo`, `read`, `wait` and `kill` are
+implemented in `bsh_vm`. They unwind control flow, re-enter the interpreter, or
+need the descriptor table, `lseek`, termios and signal delivery, which a
 `fn(host, argv) -> Status` signature cannot express. The executor consults them
 only when `BuiltinDef::is_implemented()` is false, so a runtime implementation
 takes over silently — deliberate, but it means whoever implements one of those
-in `bsh-runtime` must delete the executor's body in the same change.
+in `bsh-runtime` must delete the executor's body in the same change. `trap`, by
+contrast, *is* implemented in `bsh-runtime`: its work is table mutation, and the
+execution half stays here (see below).
+
+**Trap execution is a command-boundary poll.** Caught signals are blocked in the
+shell thread and drained from a `signalfd` at the start of each simple command,
+after a foreground child is reaped, and when the shell finishes; no native
+handler exists, so nothing can touch interpreter state (§4.5). Ignored signals
+are `SIG_IGN` (inherited by children, which is what `trap '' INT` promises).
+`reset_signals` on a spawn plan comes from `TrapTable::caught_signals`, and
+stays excluded for ignored signals. A forked child clears caught traps, keeps
+ignores and unblocks the parent's reader mask. `EXIT` runs at the end of the
+outermost `run_named` — inside the unwind, so `exit 42` in the handler decides
+the process status — and from `Drop` for an interactive shell, whose editor loop
+is outside the VM. `$?` inside `EXIT` is the pending status, every other handler
+preserves `$?`, a bare `exit` in `EXIT` reuses the saved status, and a trap never
+re-enters itself. `SIGINT`/`SIGQUIT` are ignored while waiting for a foreground
+job, and *discarded* if they were trapped (bash's rule: `kill -INT` during
+`sleep` runs no `INT` trap, while `USR1` runs afterwards).
+
+**`read` never over-reads.** A seekable descriptor is read in one chunk and
+rewound by the surplus with `lseek`; a pipe is read one byte at a time because
+bytes cannot be given back to it. `Interp::read_buffers` only holds a surplus
+whose rewind failed, and a forked child starts with it empty.
+
+**Background children are tracked by pid with their statuses** (`Interp`'s
+`background`/`jobs`), so `wait PID` can report a child reaped several commands
+ago, `%1`/`%%`/`%-` resolve against the pids this shell started, and a waited
+status is consumed (a second `wait PID` is 127). `wait` reports a signalled
+child's description (`Hangup`, …) on stderr, as bash's job notification does.
 
 **`exec` is a real `execve`.** `bsh_sys::exec(plan)` replaces the process; the
 VM maps its `io::Error` to 127/126 and exits. See the `bsh-sys` section for why
@@ -447,10 +509,14 @@ lvalues, so `(( a[99]=1 ))` and `${a[i+1]}` share one evaluator. A variable
 whose value is not a number is recursively evaluated as an expression, bounded
 by `MAX_RECURSION`.
 
-Deferred, and listed in `bsh_vm::tree`'s `# Deferred`: traps, job control,
-`select`, `time`, `coproc`, `read -a`, `set -u`/nounset, pattern parameter
-operators, `[[ =~ ]]`, process substitution, `~user`,
-`$RANDOM`/`$SECONDS`/`$PIPESTATUS`, `set -x`.
+Deferred, and listed in `bsh_vm::tree`'s `# Deferred`: job control (`jobs`,
+`fg`, `bg`, `set -m`), `select`, `time`, `coproc`, `set -u`/nounset,
+`$LINENO`/`$RANDOM`/`$SECONDS`/`$PIPESTATUS`, `command`/`type`/`hash`/`builtin`,
+`getopts`, aliases, `mapfile`/`readarray`, pattern parameter operators,
+`[[ =~ ]]`, process substitution, `~user`, and `set -x`. An executable text file
+without a shebang is reported as 126 instead of being retried as a shell script
+(POSIX requires the retry), which is what blocks the three
+`$REPO_ROOT/spec/testdata/*.sh` trap cases.
 
 **Platform constants come from `bsh-sys`.** `bsh_sys::{flags, SIGPIPE, c_int,
 mode_t}` are re-exported so no other crate needs `libc`; `bsh-vm` has no `libc`

@@ -1,7 +1,8 @@
-# Roadmap: the 1579-case gap
+# Roadmap: the 1186-case gap
 
-The conformance baseline (README, DESIGN §8.2) is **1013/2787**. bash passes
-2574/2787 on the same run, so 1579 cases are things bash does and we do not.
+The conformance baseline (README, DESIGN §8.2) was **1013/2787**; after the
+tranches below it is **1388/2787**. bash passes 2574/2787 on the same run, so
+1186 cases are things bash does and we do not.
 This file is the work queue, ordered by cases recovered per unit of work, with
 the suite file that measures each item.
 
@@ -45,31 +46,44 @@ Measured by `array.test.sh` (78), `array-sparse.test.sh` (40),
 
 ### `read` and the built-in cluster — 411 regressions (712 compared, 224 pass)
 
-- [ ] `read var`, IFS splitting into several names, last name takes the rest.
-- [ ] `-r`, backslash escaping and line continuation.
-- [ ] `-d delim`, `-n count`, `-N count`, `-p prompt`, `-s`, `-u fd`, `-t timeout`, `-a array`.
-- [ ] EOF returns 1 with a partial line delivered; **never over-read** — a
+`builtin-read.test.sh` went 9/64 → **63/64** (the one left is `mapfile`), the
+`read` filter 24/115 → **83/115**, and `kill` 2/21 → **17/21**.
+
+- [x] `read var`, IFS splitting into several names, last name takes the rest.
+- [x] `-r`, backslash escaping and line continuation.
+- [x] `-d delim`, `-n count`, `-N count`, `-p prompt`, `-s`, `-u fd`, `-t timeout`, `-a array`.
+- [x] EOF returns 1 with a partial line delivered; **never over-read** — a
       second reader must see the rest of the input.
 - [ ] `getopts` with `OPTIND`/`OPTARG`, silent and verbose modes.
 - [ ] `type`, `command -v`/`-V`, `hash`.
 - [ ] `alias`/`unalias`, including aliases applied only at command position and
       not recursively to themselves.
 - [ ] `unset -f`, `unset -v`, `readonly -a`.
-- [ ] `kill` (also needed by the `trap` tests).
+- [x] `kill` (also needed by the `trap` tests).
+- [ ] `builtin`, which several `kill -l` cases use (`builtin kill -l`).
 
 ### `trap` — 38 cases in `builtin-trap.test.sh`, plus `trap-*.test.sh`
 
-- [ ] `trap 'code' LIST`, several signals in one call, symbolic and numeric.
-- [ ] `trap '' SIG` ignore (survives `exec`), `trap - SIG` reset.
-- [ ] `trap` and `trap -p` print in re-input-safe form; `trap -l` lists names.
-- [ ] `EXIT` runs on every exit path, with `$?` visible and its own status
+`builtin-trap.test.sh` went 0/38 → **32/38**; the whole `trap` filter 0/84 →
+**43/84**. The six left in `builtin-trap.test.sh` need incremental parsing
+(`trap EXIT` and then a parse error), `$SH -e` on the command line (the CLI
+does not accept `-e`), or a script executed by path with no shebang (the shell
+does not yet retry `ENOEXEC` as a script) plus `command -v`.
+
+- [x] `trap 'code' LIST`, several signals in one call, symbolic and numeric.
+- [x] `trap '' SIG` ignore (survives `exec`), `trap - SIG` reset.
+- [x] `trap` and `trap -p` print in re-input-safe form; `trap -l` lists names.
+- [x] `EXIT` runs on every exit path, with `$?` visible and its own status
       preserved when it does not call `exit`.
-- [ ] `ERR` with and without `set -e`, and the ignore-context rules (§4.7).
-- [ ] `DEBUG` and `RETURN`.
-- [ ] Signal traps delivered at command boundaries, never mid-built-in; a trap
+- [x] `ERR` with and without `set -e`, and the ignore-context rules (§4.7).
+- [x] `DEBUG` and `RETURN` (bash's inheritance rules: `-o errtrace`,
+      `-o functrace`).
+- [x] Signal traps delivered at command boundaries, never mid-built-in; a trap
       that arrives during a foreground child runs after it.
-- [ ] Traps reset in subshells, except ignored ones; a trap in a pipeline
+- [x] Traps reset in subshells, except ignored ones; a trap in a pipeline
       member affects only that member.
+- [ ] The bash DEBUG `$LINENO` cases: they need `$LINENO` (tranche 2) and
+      bash's exact trap-count quirks, and are not worth chasing before it.
 
 ## Tranche 2 — expansion and pattern work
 

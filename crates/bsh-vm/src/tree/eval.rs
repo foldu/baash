@@ -17,10 +17,10 @@ use super::{Ctx, Function, Interp, ParsedChunk, Unwind};
 
 /// Which trap a [`Unwind::Trap`] is asking for.
 ///
-/// Traps are deferred in this wave (see the module-level `# Deferred` list),
-/// so nothing constructs a `Trap` yet. The type exists so the next wave can
-/// add `trap`/`trap ERR`/`trap DEBUG` without reshaping every signature — the
-/// unwinding machinery already has somewhere to put the request.
+/// Nothing constructs a `Trap` any more: traps are dispatched from the trap
+/// table at command boundaries (`traps.rs`), which is where they belong, and
+/// the variant stays as the unwinding channel of last resort rather than being
+/// deleted from a public enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrapKind {
     /// `trap … EXIT`, run by the top level before it returns.

@@ -37,19 +37,24 @@
 //! Deliberately not implemented in this wave, so the next one inherits an
 //! honest list rather than a surprise:
 //!
-//! * **Traps** — `trap` is a stub. [`Unwind::Trap`]/[`TrapKind`] exist so the
-//!   next wave can carry a trap kind without reshaping signatures; nothing
-//!   constructs them yet, and no signal handling runs.
-//! * **Job control** — no process groups, no `fg`/`bg`/`jobs`, no `%` names.
-//!   `&` forks, sets `$!` and does not reap; stopped children are not
-//!   tracked.
+//! * **Job control** — no process groups, no `jobs`/`fg`/`bg`/`set -m`, and no
+//!   `%` *notation* beyond the pids this shell started (which `wait`/`kill`
+//!   resolve). `&` forks, tracks the pid and keeps the child's status for
+//!   `wait`; stopped children are not tracked.
 //! * **`select`, `time`, `coproc`, `[[ x =~ re ]]`** — `select` and `time`
 //!   parse as command words (`bsh-syntax` documents that); `[[ … =~ … ]]`
 //!   reports a deferred-feature diagnostic rather than a wrong answer.
-//! * **`read -a` and `set -u`** — arrays themselves are implemented (storage,
-//!   expansion, literals, element assignment, `declare`/`local`/`unset`), but
-//!   `read` has no body yet and `nounset` is not implemented at all, so a
-//!   missing element under `set -u` behaves as empty rather than as an error.
+//! * **`set -u`** — arrays themselves are implemented (storage, expansion,
+//!   literals, element assignment, `declare`/`local`/`unset`), but `nounset` is
+//!   not implemented at all, so a missing element under `set -u` behaves as
+//!   empty rather than as an error.
+//! * **`builtin`, `command`, `type`, `hash`, `getopts`, aliases, `mapfile`** —
+//!   registry stubs. `builtin kill -l` (four `kill.test.sh` cases) needs the
+//!   first of them.
+//! * **A shebang-less executable script** — POSIX says the shell retries an
+//!   `ENOEXEC` file as a shell script; today it is status 126. That is what
+//!   blocks the `$REPO_ROOT/spec/testdata/*.sh` trap cases together with
+//!   `command -v`.
 //! * **Assignment-before-command ordering** — the values of a simple command's
 //!   prefix assignments are all expanded before any is applied, so
 //!   `FOO=1 BAR=$FOO cmd` does not see `FOO` in `BAR`. bash applies each
@@ -58,12 +63,11 @@
 //!   as `Unsupported` by `bsh-lang` (its documented boundary).
 //! * **Process substitution `<(…)`/`>(…)`** — `bsh-lang`'s default callback
 //!   errors, and this evaluator does not override it.
-//! * **`trap`, `set -x`/`set -v`, `command`, `type`, `hash`, `read`, `wait`,
-//!   `umask`, `shopt`, `builtin`, `getopts`, `alias`, `kill`, `ulimit`** —
-//!   registry stubs; see `builtins.rs` for the small executor-side set that
-//!   *is* implemented and why. `printf`/`test`/`[`/`pwd` are served from
-//!   `PATH` until `bsh-runtime` writes their bodies, which is where POSIX puts
-//!   a regular built-in.
+//! * **`set -x`/`set -v`, `umask`, `shopt`, `getopts`, `alias`, `ulimit`** —
+//!   registry stubs; see `builtins.rs` for the executor-side set that *is*
+//!   implemented and why. `printf`/`test`/`[`/`pwd` are served from `PATH`
+//!   until `bsh-runtime` writes their bodies, which is where POSIX puts a
+//!   regular built-in.
 //! * **`~user`** — `bsh_lang::Shell::home_dir` has a default of `None` and
 //!   `bsh-sys` exposes no `getpwnam`, so `~root` is left as written. `~`,
 //!   `~+` and `~-` work.
@@ -134,9 +138,9 @@ pub enum Unwind {
     Return(Status),
     /// `exit n`: unwind everything, then exit the shell.
     Exit(Status),
-    /// A trap to run at the next safe point. Traps are deferred in this wave
-    /// (see the module docs), so nothing constructs this yet; the variant is
-    /// here so the next wave does not have to reshape every signature.
+    /// A trap to run at the next safe point. Traps are executed directly at
+    /// command boundaries, so nothing constructs this today; the variant is
+    /// kept so the enum does not have to change shape later.
     Trap(TrapKind),
 }
 
