@@ -1028,10 +1028,14 @@ The parser and the VM are the fun parts. Ranked by effective effort:
 
 ## 8. Conformance strategy
 
-1. **Vendor `spec/` immediately.** 3971 cases, 223 files, `#### name` +
-   `## STDOUT:` / `## OK dash STDOUT:` / `## status:`. Apache-2.0. Write a Rust
-   harness that runs our shell plus the reference shells on `$PATH`. The
-   per-shell override mechanism *is* the ambiguity budget made executable.
+1. **Vendor `spec/` immediately.** Done: `spec/oils/` is an unmodified copy of
+   the upstream `spec/` tree (223 files, 3971 cases, Apache-2.0, commit recorded
+   in `spec/README.md`). Cases use `#### name` plus a `## STDOUT:` block, with
+   per-shell overrides like `## OK dash STDOUT:` and annotations such as
+   `## compare_shells:` and `## our_shell:`. Write a Rust harness that runs our
+   shell plus the reference shells on `$PATH`; the per-shell override mechanism
+   *is* the ambiguity budget made executable. Skip `## our_shell: ysh` cases —
+   80 files cover a language we are not implementing.
 2. **Conformance ratchet.** Pass count per file; CI fails on a drop. Put the
    number in the README. It is the only real progress metric.
 3. **Real-world corpus** `[oils]`: every autoconf `configure` script (brutally

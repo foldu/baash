@@ -70,9 +70,12 @@ exported as an artifact. The repository must be public.
 
 ## Conformance
 
-Not started. The plan is to vendor the [Oils](https://oilshell.org) spec suite
-(3971 cases in 223 files, Apache-2.0) and track the pass count as the project's
-only real progress metric (DESIGN.md §8).
+The [Oils](https://oilshell.org) spec suite is vendored unmodified under
+[spec/oils/](spec/README.md) — 223 files, 3971 cases, Apache-2.0, with the
+upstream commit recorded alongside it. The harness is not written yet; it will
+run each case against `bsh` and against the reference shells on `PATH`, honour
+the per-shell override blocks, and report a pass count per file. That count is
+the project's only real progress metric (DESIGN.md §8).
 
 ## License
 
