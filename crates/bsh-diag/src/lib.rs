@@ -1,12 +1,16 @@
 //! Diagnostic IR for ßhell: what went wrong, where, and how to fix it.
 //!
-//! This crate is deliberately dependency-free and knows nothing about
-//! rendering backends. The front end produces [`Diagnostic`]s; a renderer
-//! decides how they look — compact at the prompt, graphical for `-n`/`lint`,
-//! JSON for editors. See `DESIGN.md` §4.10 and §4.11.
+//! This crate owns the IR and the renderers; `bsh-syntax` and friends produce
+//! [`Diagnostic`]s, and the caller decides how they look — compact at the
+//! prompt ([`render_compact`]), a multi-line report for `-n`/lint
+//! ([`render_report`]), one greppable line ([`Diagnostic::render_line`],
+//! [`render_line_with_help`]), or JSON for editors ([`render_json`]). The
+//! optional `fancy` feature exposes a miette 7 adapter in the `fancy` module
+//! when miette is available. See `DESIGN.md` §4.10 and §4.11.
 //!
-//! Not yet implemented: the compact and graphical renderers, labels with
-//! secondary spans, machine-applicable fixes, and the miette adapter.
+//! Shell text is bytes. Every renderer is byte-oriented and substitutes a
+//! visible replacement for invalid UTF-8 and control characters, so an excerpt
+//! cannot corrupt the terminal or shift a caret.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -14,6 +18,19 @@
 use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
+
+mod compact;
+mod json;
+mod report;
+mod text;
+
+pub use compact::render_compact;
+pub use json::{json_escape, render_json};
+pub use report::{CONTEXT_LINES, MAX_DIAGNOSTICS, render_report};
+pub use text::TAB_WIDTH;
+
+#[cfg(feature = "fancy")]
+pub mod fancy;
 
 /// Byte offsets into a [`SourceFile`].
 pub type Span = Range<usize>;
@@ -89,6 +106,43 @@ impl SourceFile {
         let rest = &self.bytes[start..];
         let end = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
         &rest[..end]
+    }
+
+    /// Byte offset at which a 1-based `line` starts.
+    ///
+    /// Clamped to [`len`](Self::len) when `line` is past the end, which makes
+    /// it safe to pair with [`line`](Self::line) for an off-by-one cursor.
+    pub fn line_start(&self, line: u32) -> usize {
+        if line <= 1 {
+            return 0;
+        }
+        let mut current = 1u32;
+        let mut start = 0usize;
+        while current < line {
+            match self.bytes[start..].iter().position(|&b| b == b'\n') {
+                Some(newline) => {
+                    start += newline + 1;
+                    current += 1;
+                }
+                None => return self.bytes.len(),
+            }
+        }
+        start
+    }
+
+    /// Number of logical lines, counting a trailing newline as the start of an
+    /// empty final line.
+    ///
+    /// This matches [`line_col`](Self::line_col): for `b"a\n"` the count is 2
+    /// and `line_col(2)` is `(2, 1)`. An empty file still has one (empty) line.
+    pub fn line_count(&self) -> u32 {
+        let mut count = 1u32;
+        for &byte in self.bytes.iter() {
+            if byte == b'\n' {
+                count += 1;
+            }
+        }
+        count
     }
 }
 
@@ -196,16 +250,52 @@ impl Diagnostic {
 
     /// One line, greppable, for non-tty output and logs:
     /// `file.sh:3:5: error[BSH-E0102]: unclosed '('`.
+    ///
+    /// The result is always exactly one line: newlines and tabs in the name or
+    /// message collapse to spaces, and control characters (including ANSI
+    /// escapes) become U+FFFD. That matters because scripts match this format.
     pub fn render_line(&self, src: &SourceFile) -> String {
         let (line, col) = src.line_col(self.span.start);
-        format!(
-            "{}:{line}:{col}: {}[{}]: {}",
-            src.name(),
-            self.severity.as_str(),
-            self.code,
-            self.message
-        )
+        let mut out = String::new();
+        text::push_one_line(&mut out, src.name().as_bytes());
+        out.push(':');
+        out.push_str(&line.to_string());
+        out.push(':');
+        out.push_str(&col.to_string());
+        out.push_str(": ");
+        out.push_str(self.severity.as_str());
+        out.push('[');
+        out.push_str(&self.code.to_string());
+        out.push_str("]: ");
+        text::push_one_line(&mut out, self.message.as_bytes());
+        out
     }
+
+    /// One line with advice appended when present:
+    /// `file.sh:3:5: error[BSH-E0102]: …; help: …`.
+    ///
+    /// Identical to [`render_line`](Self::render_line) when there is no help.
+    /// This variant is for non-tty stderr and logs where a script may want the
+    /// advice in the same record, but must still be able to match on one line:
+    /// newlines and tabs collapse to spaces, and control characters (including
+    /// ANSI escapes) become U+FFFD.
+    pub fn render_line_with_help(&self, src: &SourceFile) -> String {
+        render_line_with_help(self, src)
+    }
+}
+
+/// One line, greppable, with `help` appended only when present.
+///
+/// See [`Diagnostic::render_line_with_help`]. The free function is provided for
+/// callers that hold a diagnostic behind a reference and prefer not to use
+/// method syntax.
+pub fn render_line_with_help(diag: &Diagnostic, src: &SourceFile) -> String {
+    let mut out = diag.render_line(src);
+    if let Some(help) = &diag.help {
+        out.push_str("; help: ");
+        text::push_one_line(&mut out, help.as_bytes());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -253,5 +343,77 @@ mod tests {
         assert_eq!(d.labels.len(), 1);
         assert_eq!(d.labels[0].span, 3..4);
         assert_eq!(d.help.as_deref(), Some("close it"));
+    }
+
+    #[test]
+    fn line_starts_and_line_count_agree_with_line_col() {
+        assert_eq!(src().line_start(1), 0);
+        assert_eq!(src().line_start(2), 4);
+        assert_eq!(src().line_start(3), 8);
+        assert_eq!(src().line_start(4), 15);
+        assert_eq!(src().line_start(99), src().len());
+        assert_eq!(src().line_count(), 4);
+        assert_eq!(SourceFile::new("e", &b""[..]).line_count(), 1);
+    }
+
+    #[test]
+    fn one_line_with_help_matches_plain_when_absent() {
+        let src = src();
+        let plain = Diagnostic::error(ErrCode::new(102), 5..8, "unexpected `then`");
+        assert_eq!(
+            plain.render_line_with_help(&src),
+            plain.render_line(&src),
+            "the variant must not change the no-help format"
+        );
+    }
+
+    #[test]
+    fn one_line_with_help_appends_advice() {
+        let src = src();
+        let d = Diagnostic::error(ErrCode::new(7), 0..1, "boom").with_help("close it");
+        assert_eq!(
+            d.render_line_with_help(&src),
+            "t.sh:1:1: error[BSH-E0007]: boom; help: close it"
+        );
+        assert_eq!(
+            render_line_with_help(&d, &src),
+            d.render_line_with_help(&src)
+        );
+    }
+
+    #[test]
+    fn one_line_never_emits_a_newline_or_ansi() {
+        let src = src();
+        let d = Diagnostic::error(ErrCode::new(1), 0..1, "a\nb\x1bc").with_help("h\ni\x1b[0m");
+        let plain = d.render_line(&src);
+        assert_eq!(plain.lines().count(), 1);
+        assert!(!plain.contains('\u{1b}'));
+        let rendered = d.render_line_with_help(&src);
+        assert_eq!(rendered.lines().count(), 1);
+        assert!(!rendered.contains('\u{1b}'));
+        assert!(!rendered.contains('\n'));
+    }
+
+    #[test]
+    fn every_renderer_agrees_on_the_same_diagnostic() {
+        let src = SourceFile::new("t.sh", &b"if (echo hi; then\n"[..]);
+        let d = Diagnostic::error(ErrCode::new(102), 3..4, "unclosed '('")
+            .with_label(0..2, "opened here")
+            .with_help("add ')'");
+
+        let compact = render_compact(&d, &src);
+        let report = render_report(std::slice::from_ref(&d), &src);
+        let line = d.render_line_with_help(&src);
+        let json = render_json(std::slice::from_ref(&d), &src);
+
+        for rendered in [&compact, &report, &line, &json] {
+            assert!(rendered.contains("BSH-E0102"), "{rendered}");
+            assert!(!rendered.contains('\u{1b}'), "{rendered}");
+        }
+        assert_eq!(compact.lines().count(), 3);
+        assert_eq!(line.lines().count(), 1);
+        assert!(report.contains("help: add ')'"));
+        assert!(json.starts_with('['));
+        assert!(json.contains("\"code\": \"BSH-E0102\""));
     }
 }
