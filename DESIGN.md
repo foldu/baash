@@ -542,7 +542,7 @@ Consequences to design in now:
 
 | context | output |
 |---|---|
-| interactive, stderr is a tty | ≤ 3 lines, no box drawing: `bsh: 3:5: unclosed '(' [BSH-E0102]`, plus one caret line |
+| interactive, stderr is a tty | ≤ 3 lines, no box drawing: `bsh: 3:4: unclosed '(' [BSH-E0102]`, plus one caret line |
 | `bsh -n`, `lint`, `fmt` | full report: labels, "opened here", help, machine-applicable fix |
 | stderr is not a tty | one line, greppable: `file:3:5: error[BSH-E0102]: …` |
 
@@ -554,6 +554,16 @@ reason; do not let the pretty renderer become the default interactive one.
 `url()` ties `BSH-E0102` to the catalog from §4.10, and with miette's
 `supports-hyperlinks` the code becomes clickable in terminals that speak OSC 8 —
 the stable-code decision paying off twice.
+
+**Current state.** miette 7.6 gates `GraphicalReportHandler` behind its
+`fancy-base` feature, which pulls `owo-colors`, `textwrap`, `terminal_size` and
+the `supports-*` crates. The adapter therefore uses `NarratableReportHandler`,
+available unconditionally, and the `fancy` feature stays dependency-free; the
+borrowed-view adapter is handler-agnostic, so switching to graphical output is
+one handler construction plus a feature declaration. Revisit once `-n`/lint
+output is wired up and there is a real report to compare against the
+hand-written one — colour and OSC 8 hyperlinks are the only things the
+narratable handler does not give us.
 
 Dependency discipline: `default-features = false`, enabling only colour/unicode
 support and the handler actually used. Leave `syntect`, `backtrace` and
