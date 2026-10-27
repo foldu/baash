@@ -2,71 +2,50 @@
 //! expectation.
 //!
 //! Everything here comes from the front end. [`bsh_syntax::lex_full`] supplies
-//! the token spans and the open constructs at the cursor;
-//! [`bsh_syntax::expectations_at`] supplies the production the cursor is in.
-//! The completer never splits a line on whitespace or guesses a word boundary.
+//! the token spans, [`bsh_syntax::open_constructs_at`] the nesting stack of
+//! open quotes and substitutions at the cursor, and
+//! [`bsh_syntax::expectations_at`] the production the cursor is in. The
+//! completer never splits a line on whitespace, never guesses a word boundary,
+//! and never re-enters a substitution body by hand.
 //!
 //! # How the context is derived
 //!
-//! 1. Lex `line[..cursor]` and find the innermost construct still open at the
-//!    cursor. The lexer reports one entry per open construct it scanned, so an
-//!    open quote hides a substitution inside it; the completer therefore
-//!    re-enters the content of an open quote or `${…}` when that content holds
-//!    an open `$(`, backtick or `<(`, and treats that substitution as a fresh
-//!    shell-code region.
-//! 2. In the innermost shell-code region, take the word token under the
-//!    cursor. A redirection token carries its target when no space separates
-//!    them, so the target span starts after the operator.
-//! 3. Ask [`expectations_at`] about the *region* — not always the whole line,
-//!    because a command substitution body is a separate parse.
-//! 4. Walk the region's tokens backwards to the start of the simple command to
-//!    find the command word and the argument index.
+//! 1. Ask the lexer for the chain of open constructs at the cursor, innermost
+//!    first. `echo "$(ls ` yields `[CmdSub, DoubleQuote]`, so the innermost
+//!    entry names the shell-code region the cursor is in and its
+//!    `content_start` says where that region begins — no per-kind opener
+//!    widths are encoded here.
+//! 2. Lex that region and take the word token under the cursor. A redirection
+//!    token carries its target when no space separates them;
+//!    [`bsh_syntax::Token::redirect_op_len`] splits them.
+//! 3. Ask [`expectations_at`] at the *cursor*. The parser answers for the slot
+//!    the cursor is in, including `[[ -` → `TestOp` and `echo > fi` →
+//!    `RedirectTarget`, and reports the innermost open construct for a cursor
+//!    inside a quote or substitution.
+//! 4. Classify the region's tokens into simple-command roles
+//!    ([`bsh_syntax::classify_tokens`]) to find the command word and the
+//!    argument index; the roles come from the grammar, not from a keyword
+//!    table here.
 //!
-//! # Why the region trick is needed
+//! # Fallbacks that remain
 //!
-//! `bsh-syntax`'s lexer scans a substitution's body but does not emit tokens
-//! for it, and it reports only the first construct it finds still open. For
-//! `echo "$(ls <TAB>` the lexer reports an open double quote, and
-//! `expectations_at` answers `Word`, while the truth is "argument of `ls`
-//! inside a command substitution". Re-lexing the quote's content restores the
-//! right answer. The cost is that the completer has to know each construct's
-//! opening delimiter length (see [`content_start`]), which the lexer does not
-//! expose.
-//!
-//! # Documented fallbacks
-//!
-//! * [`expectations_at`] reports `Operator` inside `[[ … ]]` (the parser keeps
-//!   the test body opaque), so an unclosed `[[` is detected from the tokens
-//!   and the expectation is refined to [`Expect::TestOp`].
-//! * [`expectations_at`] reports `Word` when a redirection target is already
-//!   being typed. The preceding redirection operator is detected from the
-//!   token stream and the expectation is refined to [`Expect::RedirectTarget`].
-//! * A word that contains *closed* quotes before the cursor (for example
+//! * A word containing *closed* quotes before the cursor (for example
 //!   `"a b"c`) is completed as one opaque word: the whole word is replaced and
-//!   the raw text (quotes included) is matched. Only open quotes are tracked
-//!   precisely.
-//! * Shell keywords that the lexer classifies as plain words (such as the `in`
-//!   of a `for` list) are not treated as command boundaries. The expectation
-//!   already selects the right providers for those positions.
-//! * The lexer keeps a redirection with its target as one token (`>foo`,
-//!   `2>&1`), so the completer has to split the operator from the target
-//!   itself ([`redirect_op_len`]) to know where the target word starts.
-//! * [`expectations_at`] answers about the slot *after* the prefix it parses,
-//!   so a partially typed word at command position (`ec`) is reported as
-//!   `Word`, as if `ec` were already a finished command name. The completer
-//!   asks about the word's start offset instead, which reports the slot the
-//!   word occupies (`Command`), and only then applies its own refinements.
+//!   the raw text (quotes included) is matched. The parser exposes only open
+//!   constructs at the cursor, which is exactly what insertion needs; quoting
+//!   *inside* a closed prefix of the same word is not tracked.
+//! * A reserved word that the lexer cannot classify (the `in` of a `for` list
+//!   is lexed as a plain word because it does not sit in command position) is
+//!   not a command boundary. The expectation already selects the right
+//!   providers for that slot, so the command word found there is unused.
 
 use bsh_lang::QuoteCtx;
-use bsh_syntax::{Expect, ParseOpts, TokenKind, UnterminatedKind, expectations_at, lex_full};
+use bsh_syntax::{
+    Expect, ParseOpts, Token, TokenKind, TokenRole, UnterminatedKind, classify_tokens,
+    expectations_at, lex_full, open_constructs_at,
+};
 
 use crate::candidate::Span;
-
-/// How deep the completer will follow open substitutions.
-///
-/// A pathological line like `$($($($(…` would otherwise recurse once per
-/// nesting level. Eight levels is far past anything a person types.
-const MAX_NESTING: usize = 8;
 
 /// Where in the grammar the cursor is, and what has been typed there.
 ///
@@ -74,12 +53,14 @@ const MAX_NESTING: usize = 8;
 /// parts it needs through [`crate::Menu`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ctx {
-    /// The primary expectation, i.e. what may legally be typed at the cursor.
+    /// The expectation the completer acts on: the innermost slot the cursor is
+    /// in, i.e. the last entry of [`Ctx::expects`].
     pub expect: Expect,
-    /// Every expectation [`expectations_at`] reported, outermost first.
+    /// Every expectation [`expectations_at`] reported, most specific first.
     ///
-    /// This is the parser's raw answer; [`Ctx::expect`] is the completer's
-    /// refinement of it (redirect target, `[[` operator, quote context).
+    /// A compound command's own keyword comes before the generic command slot
+    /// (`if true; ` → `[Then, Command]`), so the first entry is the headline
+    /// and the last is the slot the cursor is actually in.
     pub expects: Vec<Expect>,
     /// The full byte span of the word being completed.
     ///
@@ -112,8 +93,8 @@ pub struct Ctx {
     pub assign: bool,
     /// The shell-code region the cursor is in.
     ///
-    /// The whole line for top-level code; the body of a substitution when the
-    /// cursor is inside one.
+    /// The whole line for top-level code; the content of the innermost
+    /// substitution when the cursor is inside one.
     pub code: Span,
 }
 
@@ -133,101 +114,109 @@ impl Ctx {
 /// the prompt.
 pub fn context(line: &[u8], cursor: usize, opts: &ParseOpts) -> Ctx {
     let cursor = cursor.min(line.len());
-    let located = locate_from(line, cursor, 0, 0);
-    let in_construct =
-        located.quote.is_some() || located.param.is_some() || located.arith.is_some();
+    let chain = open_constructs_at(line, cursor);
+    let innermost = chain.first();
+
+    // The shell-code region the cursor is in: the content of the innermost
+    // substitution, or the whole line.
+    let code_start = chain
+        .iter()
+        .find(|open| {
+            matches!(
+                open.kind,
+                UnterminatedKind::CmdSub | UnterminatedKind::Backtick | UnterminatedKind::ProcSub
+            )
+        })
+        .map_or(0, |open| open.content_start);
+    let in_construct = innermost.is_some();
     // Only top-level plain code can have text after the cursor; an open
     // construct extends to the end of the line by definition.
-    let future = !in_construct && located.code.start == 0;
+    let future = !in_construct && code_start == 0;
 
-    let prefix_tokens = lex_region(line, located.code.start, cursor);
-    let word_tokens = if future {
-        lex_region(line, located.code.start, line.len())
-    } else {
-        prefix_tokens.clone()
-    };
+    // What the grammar expects at the cursor. The parser answers for the
+    // cursor position itself, so a half-typed command word reports `Command`
+    // and a half-typed redirect target reports `RedirectTarget`.
+    let expects = expectations_at(line, cursor, opts);
+
+    let word_tokens = lex_region(line, code_start, if future { line.len() } else { cursor });
     let hit = word_hit(&word_tokens, line, cursor);
 
-    let (word, mut redirect) = match hit {
-        Some(hit) => (hit.span, hit.redirect),
-        None => (cursor..cursor, false),
+    let (word, mut redirect, assign_start) = match &hit {
+        Some(hit) => (hit.span.clone(), hit.redirect, hit.assignment_value),
+        None => (cursor..cursor, false, None),
     };
-    if !redirect {
-        // The word itself ends at the cursor, so look for the redirect operator
-        // *before* the word starts.
-        redirect = follows_redirect(&prefix_tokens, line, word.start);
-    }
+    redirect = redirect || expects.contains(&Expect::RedirectTarget);
 
     let mut replace_start = word.start;
-    if let Some((_, content)) = located.quote {
-        replace_start = content;
-    } else if let Some(content) = located.param {
-        replace_start = content;
-    } else if let Some(content) = located.arith {
-        replace_start = content;
+    if let Some(open) = innermost {
+        match open.kind {
+            UnterminatedKind::SingleQuote
+            | UnterminatedKind::DoubleQuote
+            | UnterminatedKind::AnsiCQuote
+            | UnterminatedKind::ParamExp
+            | UnterminatedKind::Arith
+            | UnterminatedKind::ArithCommand => replace_start = open.content_start,
+            _ => {}
+        }
     }
     // A quotation cannot begin after the cursor, but clamp anyway so that a
     // malformed line can never produce a reversed span.
-    let mut replace_start = replace_start.min(cursor);
+    replace_start = replace_start.min(cursor);
 
     // The command the cursor is an argument of comes from the tokens *before*
     // this word.
     let empty_word = word.start == cursor && word.end == cursor;
     let up_to = if empty_word { cursor } else { word.start };
-    let command_tokens = lex_region(line, located.code.start, up_to);
+    let command_tokens: Vec<Token> = word_tokens
+        .iter()
+        .take_while(|token| token.span.end <= up_to)
+        .cloned()
+        .collect();
     let (command_name, arg_index) = command_info(&command_tokens, line);
 
     // `FOO=/us<TAB>` completes the value, not the assignment name.
     let mut assign = false;
     if !in_construct && !redirect && arg_index == 0 && command_name.is_none() {
-        let from = word.start.min(cursor);
-        if let Some(offset) = assignment_value_start(&line[from..cursor]) {
-            replace_start = (from + offset).min(cursor);
-            assign = replace_start > from;
+        if let Some(value) = assign_start {
+            if value <= cursor {
+                replace_start = value;
+                assign = value > word.start;
+            }
         }
     }
 
-    // What the grammar expects here. The parse runs on the innermost code
-    // region, which is the whole prefix unless the cursor is inside a
-    // substitution.
-    // Ask what may appear at the *start* of the word being completed, not at
-    // the cursor: `expectations_at` parses the prefix it is given, so asking
-    // about the cursor reports the slot *after* the partial word (`ec` would
-    // answer `Word`, as if `ec` were already a finished command name). Asking
-    // about the word's start reports the slot the word occupies.
-    let asks_at = word.start.max(located.code.start) - located.code.start;
-    let expects = expectations_at(&line[located.code.start..cursor], asks_at, opts);
     let mut expect = expects.last().copied().unwrap_or(Expect::Command);
-    if located.quote.is_some() {
+    let quote = quote_context(&chain);
+    let param = innermost.is_some_and(|open| open.kind == UnterminatedKind::ParamExp);
+    let arith = innermost.is_some_and(|open| {
+        matches!(
+            open.kind,
+            UnterminatedKind::Arith | UnterminatedKind::ArithCommand
+        )
+    });
+    let heredoc = innermost.is_some_and(|open| open.kind == UnterminatedKind::HereDoc);
+    if quote != QuoteCtx::Unquoted && !param && !arith {
         expect = Expect::Word;
     }
-    if located.param.is_some() {
+    if param {
         expect = Expect::ParamOp;
     }
-    if located.arith.is_some() {
+    if arith {
         expect = Expect::ArithExpr;
     }
-    if located.heredoc {
+    if heredoc {
         expect = Expect::HereDocDelimiter;
     }
-    if redirect {
+    // Inside a redirection target's quotes a file name is still what is being
+    // completed; inside a substitution in the target, the command slot wins.
+    if redirect && expect == Expect::Word {
         expect = Expect::RedirectTarget;
     }
     if assign {
         expect = Expect::Word;
     }
-    // The parser keeps a `[[ … ]]` body opaque and reports `Operator` inside
-    // it; recover the real expectation from the tokens. In POSIX mode the
-    // construct itself is rejected, so offering test operators would be wrong.
-    if expect == Expect::Operator && !opts.posix_mode && in_test_command(&prefix_tokens, line) {
-        expect = Expect::TestOp;
-    }
 
     let prefix = line[replace_start..cursor].to_vec();
-    let quote = located
-        .quote
-        .map(|(ctx, _)| ctx)
-        .unwrap_or(QuoteCtx::Unquoted);
 
     Ctx {
         expect,
@@ -240,176 +229,45 @@ pub fn context(line: &[u8], cursor: usize, opts: &ParseOpts) -> Ctx {
         arg_index,
         has_suffix: word.end > cursor,
         redirect,
-        param: located.param.is_some(),
-        arith: located.arith.is_some(),
-        heredoc: located.heredoc,
+        param,
+        arith,
+        heredoc,
         assign,
-        code: located.code,
+        code: code_start..cursor,
     }
 }
 
-/// The innermost context the cursor is in.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Located {
-    /// Start of the enclosing shell-code region; `0..cursor` for top-level.
-    code: Span,
-    /// Quote kind and the byte offset just after the opening delimiter.
-    quote: Option<(QuoteCtx, usize)>,
-    /// Byte offset just after `${` when inside a parameter expansion.
-    param: Option<usize>,
-    /// Byte offset just after the arithmetic opener.
-    arith: Option<usize>,
-    /// Whether the cursor is on a here-document delimiter line.
-    heredoc: bool,
-}
-
-impl Located {
-    fn code(start: usize, cursor: usize) -> Self {
-        Self {
-            code: start..cursor,
-            quote: None,
-            param: None,
-            arith: None,
-            heredoc: false,
-        }
-    }
-}
-
-/// `start` is the beginning of the shell-code region under consideration.
-fn locate_from(line: &[u8], cursor: usize, start: usize, depth: usize) -> Located {
-    if depth > MAX_NESTING {
-        return Located::code(start, cursor);
-    }
-    let Some(open) = innermost_open(line, start, cursor) else {
-        return Located::code(start, cursor);
-    };
-    match open.kind {
-        UnterminatedKind::CmdSub | UnterminatedKind::Backtick | UnterminatedKind::ProcSub => {
-            let body = content_start(open.kind, open.opener.end).min(cursor);
-            locate_from(line, cursor, body, depth + 1)
-        }
-        UnterminatedKind::ParamExp => {
-            let body = content_start(open.kind, open.opener.end).min(cursor);
-            match find_substitution(line, body, cursor, depth + 1) {
-                Some(sub) => locate_from(line, cursor, sub, depth + 1),
-                None => Located {
-                    param: Some(body),
-                    ..Located::code(start, cursor)
-                },
+/// The quote context at the cursor.
+///
+/// A substitution starts a fresh quoting context, so a quote *outside* the
+/// innermost substitution does not apply: in `echo "$(ls ` the body is
+/// unquoted even though the word is inside `"…"`.
+fn quote_context(chain: &[bsh_syntax::OpenConstruct]) -> QuoteCtx {
+    for open in chain {
+        match open.kind {
+            UnterminatedKind::CmdSub | UnterminatedKind::Backtick | UnterminatedKind::ProcSub => {
+                return QuoteCtx::Unquoted;
             }
-        }
-        UnterminatedKind::SingleQuote
-        | UnterminatedKind::DoubleQuote
-        | UnterminatedKind::AnsiCQuote => {
-            let body = content_start(open.kind, open.opener.end).min(cursor);
-            match find_substitution(line, body, cursor, depth + 1) {
-                Some(sub) => locate_from(line, cursor, sub, depth + 1),
-                None => Located {
-                    quote: Some((quote_ctx(open.kind), body)),
-                    ..Located::code(start, cursor)
-                },
+            UnterminatedKind::DoubleQuote => return QuoteCtx::DoubleQuoted,
+            UnterminatedKind::SingleQuote | UnterminatedKind::AnsiCQuote => {
+                return QuoteCtx::SingleQuoted;
             }
-        }
-        UnterminatedKind::Arith | UnterminatedKind::ArithCommand => Located {
-            arith: Some(content_start(open.kind, open.opener.end).min(cursor)),
-            ..Located::code(start, cursor)
-        },
-        UnterminatedKind::HereDoc => Located {
-            heredoc: true,
-            ..Located::code(start, cursor)
-        },
-    }
-}
-
-/// An open construct with absolute byte offsets.
-#[derive(Clone, Debug)]
-struct Open {
-    kind: UnterminatedKind,
-    opener: Span,
-}
-
-/// The innermost construct still open at the end of `line[start..cursor]`.
-///
-/// A here-document is included: its body is not shell code, so the completer
-/// must know it is there in order to offer nothing. Its opener is reported at
-/// the `<<`, which is before any body the cursor can be in.
-fn innermost_open(line: &[u8], start: usize, cursor: usize) -> Option<Open> {
-    if start >= cursor {
-        return None;
-    }
-    let lexed = lex_full(&line[start..cursor]);
-    lexed
-        .unterminated
-        .into_iter()
-        .map(|u| Open {
-            kind: u.kind,
-            opener: (u.opener.start + start)..(u.opener.end + start),
-        })
-        .max_by_key(|open| open.opener.start)
-}
-
-/// Look for an open substitution inside a quoted or `${…}` body.
-///
-/// Only substitutions are followed here: a quote reported inside an open
-/// double quote is an escaped `\"`, not a nested string, and following it would
-/// move the insertion point past the escape.
-fn find_substitution(line: &[u8], start: usize, cursor: usize, depth: usize) -> Option<usize> {
-    if depth > MAX_NESTING || start >= cursor {
-        return None;
-    }
-    let open = innermost_open(line, start, cursor)?;
-    match open.kind {
-        UnterminatedKind::CmdSub | UnterminatedKind::Backtick | UnterminatedKind::ProcSub => {
-            Some(content_start(open.kind, open.opener.end).min(cursor))
-        }
-        UnterminatedKind::ParamExp
-        | UnterminatedKind::SingleQuote
-        | UnterminatedKind::DoubleQuote
-        | UnterminatedKind::AnsiCQuote => {
-            let body = content_start(open.kind, open.opener.end).min(cursor);
-            find_substitution(line, body, cursor, depth + 1)
-        }
-        UnterminatedKind::Arith | UnterminatedKind::ArithCommand | UnterminatedKind::HereDoc => {
-            None
+            _ => {}
         }
     }
+    QuoteCtx::Unquoted
 }
 
-/// The byte offset just after an open construct's opening delimiter.
-///
-/// `opener_end` is the end of [`bsh_syntax::Unterminated::opener`], which is
-/// the `$` of `${`, `$(` and `$((`, the quote byte of `'`/`"`, the backtick of
-/// `` ` ``, the `<`/`>` of a process substitution, and the whole `((` of an
-/// arithmetic command. This mismatch is the parser API's sharpest edge for
-/// completion: the lexer reports *where* a construct opened but not where its
-/// content begins.
-fn content_start(kind: UnterminatedKind, opener_end: usize) -> usize {
-    opener_end
-        + match kind {
-            UnterminatedKind::SingleQuote
-            | UnterminatedKind::DoubleQuote
-            | UnterminatedKind::Backtick
-            | UnterminatedKind::ArithCommand
-            | UnterminatedKind::HereDoc => 0,
-            UnterminatedKind::AnsiCQuote
-            | UnterminatedKind::ParamExp
-            | UnterminatedKind::CmdSub
-            | UnterminatedKind::ProcSub => 1,
-            UnterminatedKind::Arith => 2,
-        }
-}
-
-fn quote_ctx(kind: UnterminatedKind) -> QuoteCtx {
-    match kind {
-        UnterminatedKind::DoubleQuote => QuoteCtx::DoubleQuoted,
-        // `$'…'` is quote-removed like a single-quoted string; the `'\''`
-        // dance that [`bsh_lang::quote`] emits for it still works because
-        // adjacent quoted parts concatenate.
-        UnterminatedKind::SingleQuote | UnterminatedKind::AnsiCQuote => QuoteCtx::SingleQuoted,
-        // `find_substitution` only follows substitutions, so these cannot be
-        // reported here.
-        _ => QuoteCtx::Unquoted,
+/// Lex `line[start..end]`, returning tokens with absolute spans.
+fn lex_region(line: &[u8], start: usize, end: usize) -> Vec<Token> {
+    let end = end.min(line.len());
+    let start = start.min(end);
+    let mut tokens = lex_full(&line[start..end]).tokens;
+    for token in &mut tokens {
+        token.span.start += start;
+        token.span.end += start;
     }
+    tokens
 }
 
 /// A word token under the cursor.
@@ -417,232 +275,80 @@ fn quote_ctx(kind: UnterminatedKind) -> QuoteCtx {
 struct WordHit {
     span: Span,
     redirect: bool,
-}
-
-/// Lex `line[start..end]`, returning absolute spans.
-fn lex_region(line: &[u8], start: usize, end: usize) -> Vec<(TokenKind, Span)> {
-    let end = end.min(line.len());
-    let start = start.min(end);
-    lex_full(&line[start..end])
-        .tokens
-        .into_iter()
-        .map(|token| {
-            (
-                token.kind,
-                (token.span.start + start)..(token.span.end + start),
-            )
-        })
-        .collect()
+    /// The offset just past the `=` when the token is a `NAME=value` word.
+    assignment_value: Option<usize>,
 }
 
 /// Find the word token the cursor is completing.
-fn word_hit(tokens: &[(TokenKind, Span)], line: &[u8], cursor: usize) -> Option<WordHit> {
+fn word_hit(tokens: &[Token], line: &[u8], cursor: usize) -> Option<WordHit> {
     // A token that begins exactly at the cursor wins: the cursor is at the
     // start of a word that already has text after it.
-    if let Some((kind, span)) = tokens
+    if let Some(token) = tokens
         .iter()
-        .find(|(kind, span)| span.start == cursor && !kind.is_trivia())
+        .find(|token| token.span.start == cursor && !token.kind.is_trivia())
     {
-        return hit_of(*kind, span, line);
+        return hit_of(token, line);
     }
     // Otherwise a token that strictly contains the cursor.
-    if let Some((kind, span)) = tokens
-        .iter()
-        .find(|(kind, span)| span.start < cursor && cursor < span.end && !kind.is_trivia())
-    {
-        return hit_of(*kind, span, line);
+    if let Some(token) = tokens.iter().find(|token| {
+        token.span.start < cursor && cursor < token.span.end && !token.kind.is_trivia()
+    }) {
+        return hit_of(token, line);
     }
     // A token ending at the cursor, but only when nothing (not even
     // whitespace) starts there: at `echo ` the cursor is at a boundary and a
     // new word begins, while at the end of `echo` it is inside the word.
-    if tokens.iter().any(|(_, span)| span.start == cursor) {
+    if tokens.iter().any(|token| token.span.start == cursor) {
         return None;
     }
-    let (kind, span) = tokens
+    let token = tokens
         .iter()
         .rev()
-        .find(|(kind, span)| span.end == cursor && !kind.is_trivia())?;
-    hit_of(*kind, span, line)
+        .find(|token| token.span.end == cursor && !token.kind.is_trivia())?;
+    hit_of(token, line)
 }
 
-fn hit_of(kind: TokenKind, span: &Span, line: &[u8]) -> Option<WordHit> {
-    match kind {
+fn hit_of(token: &Token, line: &[u8]) -> Option<WordHit> {
+    match token.kind {
         TokenKind::Word | TokenKind::WordUnterminated | TokenKind::Keyword => Some(WordHit {
-            span: span.clone(),
+            span: token.span.clone(),
             redirect: false,
+            assignment_value: token.assignment_value_start(line),
         }),
         TokenKind::Redirect => {
-            let text = &line[span.clone()];
-            let op = redirect_op_len(text);
-            if op >= text.len() {
-                // The operator is the whole token: the target goes after it.
-                Some(WordHit {
-                    span: span.end..span.end,
-                    redirect: true,
-                })
-            } else {
-                Some(WordHit {
-                    span: (span.start + op)..span.end,
-                    redirect: true,
-                })
-            }
+            // The operator and a target written hard against it share one
+            // token; the lexer owns the split.
+            let op = token.redirect_op_len(line)?;
+            Some(WordHit {
+                span: token.span.start + op..token.span.end,
+                redirect: true,
+                assignment_value: None,
+            })
         }
         _ => None,
     }
 }
 
-/// Whether the empty word at the cursor follows a redirection operator.
-fn follows_redirect(tokens: &[(TokenKind, Span)], line: &[u8], before: usize) -> bool {
-    let previous = tokens
-        .iter()
-        .rev()
-        .find(|(kind, span)| !kind.is_trivia() && span.end <= before);
-    let Some((TokenKind::Redirect, span)) = previous else {
-        return false;
-    };
-    let text = &line[span.clone()];
-    redirect_op_len(text) >= text.len()
-}
-
-/// Length of a redirection token's operator prefix.
-///
-/// The lexer keeps `>foo` as one token, with the file descriptor, the operator
-/// and (optionally) the target fused. This splits them.
-fn redirect_op_len(text: &[u8]) -> usize {
-    let mut i = 0;
-    while i < text.len() && text[i].is_ascii_digit() {
-        i += 1;
-    }
-    let rest = &text[i..];
-    const OPS: &[&[u8]] = &[
-        b"<<<", b"<<-", b"<<", b"<&", b"<>", b"<", b">>", b">&", b">|", b">", b"&>>", b"&>",
-    ];
-    for op in OPS {
-        if rest.starts_with(op) {
-            return i + op.len();
-        }
-    }
-    text.len()
-}
-
-/// The offset just past the `=` of a `NAME=` prefix, if the text is one.
-fn assignment_value_start(text: &[u8]) -> Option<usize> {
-    let eq = text.iter().position(|&b| b == b'=')?;
-    let name = &text[..eq];
-    if name.is_empty() {
-        return None;
-    }
-    let mut bytes = name.iter();
-    let first = bytes.next()?;
-    if !(first.is_ascii_alphabetic() || *first == b'_') {
-        return None;
-    }
-    if !bytes.all(|b| b.is_ascii_alphanumeric() || *b == b'_') {
-        return None;
-    }
-    Some(eq + 1)
-}
-
-/// Whether the cursor is inside an unclosed `[[ … ]]`.
-fn in_test_command(tokens: &[(TokenKind, Span)], line: &[u8]) -> bool {
-    let mut depth = 0usize;
-    for (kind, span) in tokens {
-        let text = &line[span.clone()];
-        if *kind == TokenKind::Keyword && text == b"[[" {
-            depth += 1;
-        } else if text == b"]]" && depth > 0 {
-            depth -= 1;
-        }
-    }
-    depth > 0
-}
-
 /// The command word and argument index for the tokens before the completion
 /// word.
-fn command_info(tokens: &[(TokenKind, Span)], line: &[u8]) -> (Option<Vec<u8>>, usize) {
-    let mut boundary = 0;
-    for (index, (kind, span)) in tokens.iter().enumerate() {
-        if starts_new_command(*kind, &line[span.clone()]) {
-            boundary = index + 1;
-        }
-    }
+fn command_info(tokens: &[Token], line: &[u8]) -> (Option<Vec<u8>>, usize) {
+    let roles = classify_tokens(tokens, line);
+    let start = roles
+        .iter()
+        .rposition(|role| *role == TokenRole::Boundary)
+        .map_or(0, |index| index + 1);
 
     let mut command: Option<Vec<u8>> = None;
     let mut arguments = 0usize;
-    let mut after_redirect = false;
-    for (kind, span) in &tokens[boundary..] {
-        if kind.is_trivia() || *kind == TokenKind::Comment {
-            continue;
-        }
-        let text = &line[span.clone()];
-        match kind {
-            TokenKind::Redirect => {
-                // A redirect that carries its target (`>file`) has no separate
-                // target word to skip.
-                after_redirect = redirect_op_len(text) >= text.len();
-                continue;
-            }
-            TokenKind::Operator | TokenKind::Newline => {
-                after_redirect = false;
-                continue;
-            }
+    for (role, token) in roles[start..].iter().zip(&tokens[start..]) {
+        match role {
+            TokenRole::CommandWord => command = Some(token.text(line).to_vec()),
+            TokenRole::Argument => arguments += 1,
             _ => {}
         }
-        if after_redirect {
-            after_redirect = false;
-            continue;
-        }
-        if !is_word_token(*kind) {
-            continue;
-        }
-        if command.is_none() && assignment_value_start(text).is_some() {
-            continue;
-        }
-        if command.is_none() {
-            command = Some(text.to_vec());
-        } else {
-            arguments += 1;
-        }
     }
-
     let arg_index = if command.is_some() { arguments + 1 } else { 0 };
     (command, arg_index)
-}
-
-fn is_word_token(kind: TokenKind) -> bool {
-    matches!(
-        kind,
-        TokenKind::Word | TokenKind::WordUnterminated | TokenKind::Keyword
-    )
-}
-
-/// Whether a token begins a new simple command.
-fn starts_new_command(kind: TokenKind, text: &[u8]) -> bool {
-    match kind {
-        TokenKind::Newline => true,
-        TokenKind::Operator => matches!(
-            text,
-            b";" | b"&" | b"|" | b"||" | b"&&" | b"(" | b")" | b";;" | b";&" | b";;&" | b"{" | b"}"
-        ),
-        TokenKind::Keyword => matches!(
-            text,
-            b"if"
-                | b"then"
-                | b"else"
-                | b"elif"
-                | b"while"
-                | b"until"
-                | b"do"
-                | b"for"
-                | b"case"
-                | b"select"
-                | b"function"
-                | b"time"
-                | b"!"
-                | b"[["
-        ),
-        _ => false,
-    }
 }
 
 #[cfg(test)]
@@ -962,15 +668,110 @@ mod tests {
     }
 
     #[test]
-    fn redirect_op_lengths() {
-        assert_eq!(redirect_op_len(b">"), 1);
-        assert_eq!(redirect_op_len(b">>"), 2);
-        assert_eq!(redirect_op_len(b"2>&1"), 3);
-        assert_eq!(redirect_op_len(b"&>>"), 3);
-        assert_eq!(redirect_op_len(b"<<-"), 3);
-        assert_eq!(redirect_op_len(b"<<<"), 3);
-        assert_eq!(redirect_op_len(b"<fi"), 1);
-        assert_eq!(redirect_op_len(b">out"), 1);
+    fn redirect_op_lengths_come_from_the_lexer() {
+        // The split lives in bsh-syntax (gap 4): the completer must not carry
+        // its own operator table.
+        use bsh_syntax::redirect_op_len;
+        assert_eq!(redirect_op_len(b">"), Some(1));
+        assert_eq!(redirect_op_len(b">>"), Some(2));
+        assert_eq!(redirect_op_len(b"2>&1"), Some(3));
+        assert_eq!(redirect_op_len(b"&>>"), Some(3));
+        assert_eq!(redirect_op_len(b"<<-"), Some(3));
+        assert_eq!(redirect_op_len(b"<<<"), Some(3));
+        assert_eq!(redirect_op_len(b"<fi"), Some(1));
+        assert_eq!(redirect_op_len(b">out"), Some(1));
+        assert_eq!(redirect_op_len(b"fi"), None);
+    }
+
+    // ------------------------------------------------ parser API, no fallbacks
+
+    #[test]
+    fn test_operator_comes_from_the_parser() {
+        use bsh_syntax::expectations_at;
+        // Gap 2: the parser reports `TestOp` inside `[[ … ]]`; the completer no
+        // longer counts unbalanced `[[` tokens.
+        assert!(
+            expectations_at(b"[[ x == ", 9, &ParseOpts::DEFAULT).contains(&Expect::TestOp),
+            "the parser must report the operator slot"
+        );
+        let c = ctx_at_end("[[ x == ");
+        assert_eq!(c.expect, Expect::TestOp);
+        assert_eq!(c.prefix, b"");
+    }
+
+    #[test]
+    fn redirect_target_comes_from_the_parser() {
+        // Gap 3: a present target is still a target.
+        let c = ctx_at_end("echo > fi");
+        assert_eq!(c.expect, Expect::RedirectTarget);
+        assert!(c.redirect);
+        assert!(c.expects.contains(&Expect::RedirectTarget));
+
+        let fused = ctx_at_end("echo 2>&1");
+        assert_eq!(fused.expect, Expect::RedirectTarget);
+        assert_eq!(fused.word, 8..9);
+        assert_eq!(fused.replace, 8..9);
+        assert_eq!(fused.prefix, b"1");
+    }
+
+    #[test]
+    fn nested_constructs_need_no_region_reentry() {
+        // Gap 5: the lexer's nesting stack names the region; the completer does
+        // not re-enter substitution bodies by hand.
+        let c = ctx_at_end("echo \"$(ls ");
+        assert_eq!(c.expect, Expect::Word);
+        assert_eq!(c.code.start, 8);
+        assert_eq!(c.quote, QuoteCtx::Unquoted);
+        assert_eq!(c.command_name.as_deref(), Some(&b"ls"[..]));
+        assert_eq!(c.arg_index, 1);
+
+        let c = ctx_at_end("echo \"$(l");
+        assert_eq!(c.expect, Expect::Command);
+        assert_eq!(c.code.start, 8);
+        assert_eq!(c.prefix, b"l");
+
+        // `${` inside `"…"` keeps the quote context for insertion.
+        let c = ctx_at_end("echo \"${x");
+        assert_eq!(c.expect, Expect::ParamOp);
+        assert_eq!(c.quote, QuoteCtx::DoubleQuoted);
+        assert_eq!(c.replace, 8..9);
+    }
+
+    #[test]
+    fn closing_keywords_are_reported_alongside_the_slot() {
+        // Gap 7: the parser now reports the compound's own keyword. The
+        // completer keeps the innermost list slot as the primary expectation,
+        // so command completion still works inside the body.
+        let c = ctx_at_end("if true; ");
+        assert!(c.expects.contains(&Expect::Then));
+        assert_eq!(c.expect, Expect::Command);
+
+        let c = ctx_at_end("if true; then echo; ");
+        assert!(c.expects.contains(&Expect::Fi));
+        assert_eq!(c.expect, Expect::Command);
+
+        let c = ctx_at_end("while true; ");
+        assert!(c.expects.contains(&Expect::Do));
+
+        let c = ctx_at_end("for x in a; ");
+        assert_eq!(c.expect, Expect::Do);
+
+        let c = ctx_at_end("case x ");
+        assert_eq!(c.expect, Expect::In);
+    }
+
+    #[test]
+    fn unterminated_content_start_drives_the_replacement() {
+        // Gap 6: no per-kind opener widths in the completer.
+        let c = ctx_at_end("echo $'ab");
+        assert_eq!(c.replace, 7..9);
+        assert_eq!(c.prefix, b"ab");
+
+        let c = ctx_at_end("echo ${x");
+        assert_eq!(c.replace, 7..8);
+
+        let c = ctx_at_end("echo $((x");
+        assert_eq!(c.replace, 8..9);
     }
 
     #[test]

@@ -37,6 +37,7 @@
 mod ast;
 mod lexer;
 mod parser;
+mod role;
 
 pub use ast::{
     AndOrLink, AndOrOp, ArrayArg, Assignment, Ast, CaseArm, CaseTerm, IfBranch, ListItem, Node,
@@ -46,10 +47,15 @@ pub use bsh_lang::{
     Arithmetic, CmdSubStyle, CommandSub, DoubleQ, Lit, LitKind, ParamExp, ParamName, ParamOp, Part,
     ProcSubDir, ProcessSub, TildeSpec, UnsupportedOp, Word,
 };
-pub use lexer::{HereDoc, Lexed, Token, TokenKind, Unterminated, UnterminatedKind, lex, lex_full};
-pub use parser::{
-    Expect, ParseOpts, ParseOutcome, expectations_at, parse, parse_bytes, parse_with,
+pub use lexer::{
+    HereDoc, Lexed, OpenConstruct, Token, TokenKind, Unterminated, UnterminatedKind, lex, lex_full,
+    open_constructs_at, redirect_op_len,
 };
+pub use parser::{
+    Expect, ExpectSite, ParseOpts, ParseOutcome, ParseWordError, expectation_sites_at,
+    expectations_after, expectations_at, parse, parse_bytes, parse_with, parse_word, parse_word_at,
+};
+pub use role::{TokenRole, classify_tokens};
 
 /// Diagnostic codes produced by this crate.
 ///

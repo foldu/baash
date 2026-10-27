@@ -219,8 +219,54 @@ default-profile wrapper over `parse_with`.
 **`NeedMoreInput` is the PS2 signal**, produced for an unterminated quote,
 substitution, `(`, `{`, `if`, `do`, `case`, here-doc, redirect target, and
 dangling pipeline/and-or tails — each with the opener's span and the `Expect`
-set. `expectations_at(src, offset, opts)` answers the same question at an
-arbitrary offset for the completer.
+set.
+
+**Expectations answer for the cursor.** `expectations_at(src, offset, opts)`
+reports what may be typed *at* `offset`, not after the token that ends there:
+`ec` at 2 is `Command`, `ls ` at 3 is `Word`, `for f in ` at 9 is `ForList`.
+Ordering is most-specific first: a compound's own keyword precedes the generic
+command slot (`if true; ` → `[Then, Command]`), so read the first entry for the
+headline and the last for the innermost slot the cursor is in.
+`expectation_sites_at` is the same answer with the span that governs each
+expectation. `expectations_after` keeps the old "slot after the prefix" answer
+for callers that need it. Inside an unclosed `[[ … ]]` the answer is
+`Expect::TestOp`, and its site's span is the operator just typed (or being
+typed) — no consumer counts unbalanced `[[`. A redirection target reports
+`Expect::RedirectTarget` whether the target has been typed or not. The closing
+keywords are reachable: `Then`, `Do`, `Done`, `Fi`, `Esac`, `In` and
+`FunctionBody` appear once a list boundary makes them legal.
+
+**Open constructs are a stack.** `lex_full` returns
+`Lexed { tokens, heredocs, unterminated, open }`; `open` is the chain of
+constructs still open at end of input, **innermost first**, each with its
+opener span and `content_start` (the first byte of the construct's content).
+`open_constructs_at(src, offset)` is the same chain at an arbitrary offset.
+`Unterminated` carries the same `content_start`, and its `opener` is the whole
+opening delimiter (`$'`, `${`, `$(`, `$((`, `<(`, `((`, the quote byte, the
+backtick). No consumer encodes opener widths, and a word containing a
+substitution is still one token: the chain is the nested view.
+
+**Redirections carry their split.** A redirection is still one token, but
+`redirect_op_len(text)` (and `Token::redirect_op_len`) give the length of the
+file-descriptor prefix plus the operator, and `Token::redirect_target` returns
+the fused target's span. The operator set is defined once, in `bsh-syntax`;
+consumers must not carry their own.
+
+**Tokens have simple-command roles.** `classify_tokens(tokens, src)` returns a
+`TokenRole` per token, in order: `Assignment`, `CommandWord`, `Argument`,
+`RedirectOperator`, `RedirectTarget`, `Boundary` (an operator, newline or
+reserved word that ends the command) or `Filler` (layout, comments,
+here-document data). Command boundaries come from the grammar, not from a
+keyword table in the consumer, and a separate redirect target is not an
+argument.
+
+**One word can be parsed on its own.** `parse_word(src, opts)` and
+`parse_word_at(src, offset, opts)` consume exactly one word — for `[[ … ]]`
+operands, `case` patterns (without the terminating `)`) and `$…` constructs
+inside here-document data — and reject a second word or an operator with
+`ParseWordError::{Missing, Trailing, Unterminated, Invalid}`. Every span and
+diagnostic is relative to the caller's `src`; nothing is synthetic. Leading
+layout is skipped, trailing layout allowed.
 
 **Arrays are a gap with a shape.** `bsh-lang` has no array-literal word part, so
 `local x=(a b)` parses with the word at that position replaced by a quoted
@@ -274,6 +320,15 @@ pathological case; the `PATH` index already notices changes.
 **`Candidate::display` is not sanitised.** A hostile filename can carry
 newlines or control bytes into the menu. The editor must flatten it when
 painting.
+
+**The context is derived, not guessed.** `context` uses
+`open_constructs_at` for the nesting stack, `expectations_at` for the slot at
+the cursor, `Token::redirect_op_len` for a fused redirection, and
+`classify_tokens` for the command word and argument index. It does not
+re-enter substitution bodies, count `[[` tokens, or carry a redirection
+operator table. `Ctx::expect` is the last entry of `Ctx::expects` (the
+innermost slot); the earlier entries are the construct's own keyword
+candidates.
 
 Known copy: the builtin-name list is duplicated from `bsh-runtime` because the
 dependency runs the other way. Replace it with a runtime-supplied list once the

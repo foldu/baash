@@ -219,9 +219,9 @@ fn keywords_are_offered_for_closing_contexts() {
     let menu = engine.complete(b"if true; then echo hi; fi", 23);
     assert_eq!(menu.expect, Expect::Command);
 
-    // `then` itself is not reachable through `expectations_at` today (it
-    // reports `Command` after `if true; `), so this documents the current
-    // parser answer rather than keyword completion.
+    // The parser reports `[Then, Command]` after `if true; `: the compound's
+    // own keyword first, the list continuation last. The completer acts on the
+    // innermost slot, so command completion inside the condition still works.
     let menu = engine.complete(b"if true; ", 9);
     assert_eq!(menu.expect, Expect::Command);
 }

@@ -23,7 +23,9 @@
 
 use crate::ast::*;
 use crate::codes;
-use crate::lexer::{self, HereDoc, Unterminated, UnterminatedKind};
+use crate::lexer::{
+    self, HereDoc, Unterminated, UnterminatedKind, find_assignment_eq, is_valid_name,
+};
 use crate::{Token, TokenKind};
 use bsh_diag::{Diagnostic, Label, SourceFile, Span};
 use bsh_lang::{
@@ -79,6 +81,36 @@ pub enum Expect {
 }
 
 impl Expect {
+    /// How specific this expectation is: smaller values are more specific.
+    ///
+    /// One slot can admit several productions (`if true; ` may be followed by
+    /// another condition command *or* by `then`). [`expectations_at`] reports
+    /// the construct's own continuation first and the generic command/word
+    /// slot last, so a consumer that wants the "headline" answer reads the
+    /// first entry and one that wants the slot the cursor is actually in reads
+    /// the last.
+    pub(crate) fn rank(self) -> u8 {
+        match self {
+            // The compound command's own keyword or body: the most specific
+            // thing that can appear.
+            Expect::FunctionBody | Expect::Then | Expect::Do | Expect::Done | Expect::In => 0,
+            // The closing keyword of an open compound.
+            Expect::Fi | Expect::Esac => 1,
+            // A word or expression slot.
+            Expect::RedirectTarget
+            | Expect::ForList
+            | Expect::CasePattern
+            | Expect::ParamOp
+            | Expect::TestOp
+            | Expect::ArithExpr
+            | Expect::HereDocDelimiter => 2,
+            // A command or argument slot.
+            Expect::Command | Expect::Word => 3,
+            // A closing or separating operator.
+            Expect::Operator => 4,
+        }
+    }
+
     /// A short human description, used in diagnostics and by pickers that have
     /// no better label.
     pub fn describe(self) -> &'static str {
@@ -102,6 +134,28 @@ impl Expect {
             Expect::HereDocDelimiter => "a here-document delimiter",
         }
     }
+}
+
+/// One expectation together with the source span it governs.
+///
+/// [`expectation_sites_at`] returns these; [`expectations_at`] is the same
+/// answer with the spans dropped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpectSite {
+    /// What may appear here.
+    pub expect: Expect,
+    /// Where the completion applies.
+    ///
+    /// * For a word slot this is the word being typed, which may extend past
+    ///   the cursor (`git che|ckout` → `4..12`).
+    /// * For [`Expect::TestOp`] it is the operator's span: the complete
+    ///   operator just typed (`[[ x == ` → `5..7`) or the partial one under
+    ///   the cursor (`[[ -` → `3..4`), and an empty slot when no operator has
+    ///   been typed yet.
+    /// * For [`Expect::RedirectTarget`] it is the target word, or an empty
+    ///   slot where the target belongs when none has been typed.
+    /// * Otherwise it is an empty span at the cursor.
+    pub span: Span,
 }
 
 /// Parser options.
@@ -164,6 +218,153 @@ pub enum ParseOutcome {
     Failed(Vec<Diagnostic>),
 }
 
+/// Why [`parse_word`] or [`parse_word_at`] did not return exactly one word.
+#[derive(Clone, Debug)]
+pub enum ParseWordError {
+    /// No word starts at the requested offset: input ended, or an operator, a
+    /// redirection or here-document data is there instead.
+    Missing {
+        /// The offset that was asked about (clamped to the input).
+        at: usize,
+    },
+    /// A non-layout token follows the word: the fragment is more than one
+    /// word, or contains an operator such as `;` or `|`.
+    Trailing {
+        /// The span of the first such token.
+        span: Span,
+    },
+    /// The word's token is an unterminated quote or substitution.
+    Unterminated {
+        /// The opening delimiter of the innermost construct left open.
+        opener: Span,
+        /// Where that construct's content begins.
+        content_start: usize,
+    },
+    /// The parser rejected the word. Every diagnostic span is relative to the
+    /// caller's `src`; nothing is synthetic.
+    Invalid(Vec<Diagnostic>),
+}
+
+/// Parse exactly one word, starting at the first non-layout byte of `src`.
+///
+/// This is the entry point for fragments that are words but not commands —
+/// `[[ … ]]` operands, `case` patterns (without their terminating `)`) and the
+/// `$…` constructs inside a here-document body. It consumes the word's token,
+/// rejects anything that would be a second word or an operator, and returns
+/// spans relative to `src`: no synthetic command is built and no offset is
+/// rewritten, so a diagnostic points at the caller's own bytes.
+///
+/// Leading layout (spaces, tabs, newlines, comments) is skipped; trailing
+/// layout is allowed. The profile in `opts` applies, so a POSIX profile
+/// rejects `$'…'` and other bashisms as [`ParseWordError::Invalid`].
+///
+/// See [`parse_word_at`] to start at an offset and learn where the word ended.
+pub fn parse_word(src: &[u8], opts: &ParseOpts) -> Result<Word, ParseWordError> {
+    parse_word_at(src, 0, opts).map(|(word, _)| word)
+}
+
+/// Parse exactly one word starting at `offset`, returning it and the offset
+/// just past it (before any trailing layout).
+///
+/// `offset` must be the start of a word, or inside leading layout before one;
+/// an offset in the middle of a word is [`ParseWordError::Missing`]. The same
+/// contract as [`parse_word`] applies: exactly one word, spans relative to
+/// `src`.
+pub fn parse_word_at(
+    src: &[u8],
+    offset: usize,
+    opts: &ParseOpts,
+) -> Result<(Word, usize), ParseWordError> {
+    let offset = offset.min(src.len());
+    let lexed = lexer::lex_full(src);
+    let mut index = None;
+    for (i, token) in lexed.tokens.iter().enumerate() {
+        if matches!(
+            token.kind,
+            TokenKind::Whitespace | TokenKind::Newline | TokenKind::Comment
+        ) {
+            continue;
+        }
+        if token.span.end <= offset {
+            continue;
+        }
+        if token.span.start < offset {
+            return Err(ParseWordError::Missing { at: offset });
+        }
+        index = Some(i);
+        break;
+    }
+    let Some(index) = index else {
+        return Err(ParseWordError::Missing { at: offset });
+    };
+    let token = lexed.tokens[index].clone();
+
+    match token.kind {
+        TokenKind::Word | TokenKind::Keyword => {}
+        TokenKind::WordUnterminated => {
+            let open = lexed
+                .unterminated
+                .iter()
+                .rev()
+                .find(|u| u.span.start >= token.span.start && u.span.end <= token.span.end)
+                .map(|u| (u.opener.clone(), u.content_start))
+                .or_else(|| {
+                    lexed
+                        .open
+                        .first()
+                        .map(|o| (o.opener.clone(), o.content_start))
+                });
+            return match open {
+                Some((opener, content_start)) => Err(ParseWordError::Unterminated {
+                    opener,
+                    content_start,
+                }),
+                None => Err(ParseWordError::Missing {
+                    at: token.span.start,
+                }),
+            };
+        }
+        _ => {
+            return Err(ParseWordError::Missing {
+                at: token.span.start,
+            });
+        }
+    }
+
+    if let Some(trailing) = lexed.tokens[index + 1..].iter().find(|t| {
+        !matches!(
+            t.kind,
+            TokenKind::Whitespace | TokenKind::Newline | TokenKind::Comment
+        )
+    }) {
+        return Err(ParseWordError::Trailing {
+            span: trailing.span.clone(),
+        });
+    }
+
+    let mut sh = Shared::default();
+    let mut p = Parser {
+        src,
+        toks: lexed.tokens,
+        pos: index + 1,
+        opts: *opts,
+        depth: 0,
+        sh: &mut sh,
+        expects: Vec::new(),
+        open: Vec::new(),
+        pending_heredocs: 0,
+        next_heredoc: 0,
+        lexed_heredocs: lexed.heredocs,
+        unterminated: lexed.unterminated,
+    };
+    let word = p.parse_word_span(token.span.clone());
+    let errors = std::mem::take(&mut sh.errors);
+    if !errors.is_empty() {
+        return Err(ParseWordError::Invalid(errors));
+    }
+    Ok((word, token.span.end))
+}
+
 /// Parse with the default profile.
 pub fn parse(src: &SourceFile) -> ParseOutcome {
     parse_with(src, &ParseOpts::DEFAULT)
@@ -181,53 +382,223 @@ pub fn parse_bytes(src: &[u8], opts: &ParseOpts) -> ParseOutcome {
 
 /// Report what could legally be typed at `offset` in `src`.
 ///
-/// `offset` is clamped to the input. The parse is run on the prefix ending at
-/// `offset`, so a cursor inside an unterminated quote or `${ … }` reports the
-/// context inside it rather than the surrounding word.
+/// `offset` is clamped to the input, and the answer is for **the cursor**:
+/// when it sits in a word that is still being typed, that word's own slot is
+/// reported rather than the slot after it. `ec` at offset 2 answers
+/// [`Expect::Command`], `ls ` at 3 answers [`Expect::Word`], and
+/// `for f in ` at 9 answers [`Expect::ForList`].
+///
+/// A cursor inside an unterminated quote, substitution or here-document
+/// reports the **innermost** open construct (see [`expectations_after`] for
+/// the pre-cursor-semantics answer). Inside `[[ … ]]` the answer is
+/// [`Expect::TestOp`].
+///
+/// The vector is ordered most-specific first: a compound command's own
+/// keyword comes before the generic command slot, so `if true; ` yields
+/// `[Then, Command]`.
 pub fn expectations_at(src: &[u8], offset: usize, opts: &ParseOpts) -> Vec<Expect> {
+    expectation_sites_at(src, offset, opts)
+        .into_iter()
+        .map(|site| site.expect)
+        .collect()
+}
+
+/// [`expectations_at`] with the source span each expectation governs.
+pub fn expectation_sites_at(src: &[u8], offset: usize, opts: &ParseOpts) -> Vec<ExpectSite> {
+    sites_at(src, offset, opts, 0)
+}
+
+fn sites_at(src: &[u8], offset: usize, opts: &ParseOpts, depth: usize) -> Vec<ExpectSite> {
     let offset = offset.min(src.len());
     let prefix = &src[..offset];
     let lexed = lexer::lex_full(prefix);
-    if let Some(idx) = lexed
-        .tokens
-        .iter()
-        .rposition(|t| t.kind == TokenKind::WordUnterminated)
-    {
-        let tok = &lexed.tokens[idx];
-        // Inside a redirection target the useful answer is "a file", not
-        // "a word", even when the target is an unterminated quote.
-        let after_redirect = lexed.tokens[..idx]
-            .iter()
-            .rev()
-            .find(|t| !t.kind.is_trivia())
-            .is_some_and(|t| t.kind == TokenKind::Redirect);
-        if after_redirect {
-            return vec![Expect::RedirectTarget];
-        }
-        if let Some(open) = lexed
-            .unterminated
-            .iter()
-            .rev()
-            .find(|u| u.span.start >= tok.span.start && u.span.end <= tok.span.end)
-        {
-            return vec![expect_for_unterminated(open.kind)];
-        }
-        return vec![Expect::Word];
+
+    // 1. A construct is still open at the cursor: the lexer's nesting stack is
+    //    the answer, innermost first.
+    if !lexed.open.is_empty() {
+        return sites_for_open(&lexed, src, offset, opts, depth);
     }
-    let (outcome, expects) = parse_inner(prefix, opts);
-    match outcome {
-        ParseOutcome::NeedMoreInput { expected, .. } if !expected.is_empty() => expected,
-        _ => dedup(&expects),
+
+    // 2. The cursor is in a word that is still being typed, or in a
+    //    redirection. Ask about the slot that token occupies.
+    if let Some(token) = token_under_cursor(src, offset, &lexed) {
+        match token.kind {
+            TokenKind::Word | TokenKind::WordUnterminated | TokenKind::Keyword => {
+                let up_to = &src[..token.span.start];
+                let mut sites = parse_inner(up_to, opts).1;
+                if sites.is_empty() {
+                    sites.push(ExpectSite {
+                        expect: Expect::Command,
+                        span: token.span.clone(),
+                    });
+                }
+                for site in &mut sites {
+                    site.span = token.span.clone();
+                }
+                return sites;
+            }
+            TokenKind::Redirect => {
+                let op_len = token.redirect_op_len(src).unwrap_or(0);
+                let op_end = token.span.start + op_len;
+                return if offset >= op_end {
+                    vec![ExpectSite {
+                        expect: Expect::RedirectTarget,
+                        span: op_end..token.span.end,
+                    }]
+                } else {
+                    vec![ExpectSite {
+                        expect: Expect::Operator,
+                        span: token.span.clone(),
+                    }]
+                };
+            }
+            _ => {}
+        }
     }
+
+    // 3. The slot after the prefix.
+    let mut sites = parse_inner(prefix, opts).1;
+    if sites.is_empty() {
+        sites.push(ExpectSite {
+            expect: Expect::Command,
+            span: offset..offset,
+        });
+    }
+    sites
 }
 
-fn parse_inner(src: &[u8], opts: &ParseOpts) -> (ParseOutcome, Vec<Expect>) {
-    let lexed = lexer::lex_full(src);
+/// The expectations for the innermost open construct at the cursor.
+///
+/// A substitution body is shell code of its own, so the answer is computed for
+/// that region and shifted back into the caller's coordinates. Only a quote,
+/// `${ … }`, arithmetic or a here-document is a leaf: there the innermost
+/// construct itself names the slot.
+///
+/// The enclosing word is reported as a redirection target when it is one, so
+/// `echo > "abc` yields `[RedirectTarget, Word]` rather than losing the fact
+/// that the word names a file.
+fn sites_for_open(
+    lexed: &lexer::Lexed,
+    src: &[u8],
+    offset: usize,
+    opts: &ParseOpts,
+    depth: usize,
+) -> Vec<ExpectSite> {
+    let open = lexed
+        .open
+        .first()
+        .expect("caller checked that something is open");
+    let mut sites = Vec::with_capacity(2);
+
+    // The outer slot: a construct inside a redirection target is still part of
+    // that target's word.
+    let word = lexed.tokens.iter().rev().find(|t| {
+        matches!(
+            t.kind,
+            TokenKind::Word | TokenKind::WordUnterminated | TokenKind::Keyword
+        ) && t.span.start <= open.opener.start
+            && open.opener.start < t.span.end
+    });
+    if let Some(word) = word {
+        let before = lexed
+            .tokens
+            .iter()
+            .rev()
+            .find(|t| !is_ignorable(t.kind) && t.span.end <= word.span.start);
+        if before.is_some_and(|t| t.kind == TokenKind::Redirect) {
+            sites.push(ExpectSite {
+                expect: Expect::RedirectTarget,
+                span: word.span.clone(),
+            });
+        }
+    }
+
+    // A substitution body is a fresh code region; answer for it directly.
+    if depth < lexer::MAX_NEST {
+        if let Some(code) = lexed.open.iter().find(|open| {
+            matches!(
+                open.kind,
+                UnterminatedKind::CmdSub | UnterminatedKind::Backtick | UnterminatedKind::ProcSub
+            )
+        }) {
+            if code.content_start <= offset {
+                let mut inner = sites_at(
+                    &src[code.content_start..offset],
+                    offset - code.content_start,
+                    opts,
+                    depth + 1,
+                );
+                for site in &mut inner {
+                    site.span = (site.span.start + code.content_start)
+                        ..(site.span.end + code.content_start);
+                }
+                sites.extend(inner);
+                return sites;
+            }
+        }
+    }
+
+    sites.push(ExpectSite {
+        expect: expect_for_unterminated(open.kind),
+        span: open.content_start.min(offset)..offset,
+    });
+    sites
+}
+
+/// The significant token the cursor is inside, when that token is still being
+/// typed.
+///
+/// A token ending at a cursor that is not at end of input has finished (the
+/// next byte is layout or a metacharacter), so the cursor is between words.
+fn token_under_cursor(src: &[u8], offset: usize, prefix: &lexer::Lexed) -> Option<Token> {
+    if offset < src.len() {
+        // The prefix lexer truncates the token the cursor is in; lex the whole
+        // input to find its real extent.
+        return lexer::lex_full(src)
+            .tokens
+            .into_iter()
+            .find(|t| !is_ignorable(t.kind) && t.span.start < offset && offset < t.span.end);
+    }
+    prefix
+        .tokens
+        .iter()
+        .rev()
+        .find(|t| !is_ignorable(t.kind) && t.span.start < offset && t.span.end == offset)
+        .cloned()
+}
+
+/// What may follow the prefix `src[..offset]`, ignoring a token that is still
+/// being typed at the cursor.
+///
+/// This is the behaviour [`expectations_at`] had before it learned cursor
+/// semantics: `ec` at 2 answers [`Expect::Word`] (the argument slot after the
+/// command word) rather than [`Expect::Command`], and `echo > fi` at 9 answers
+/// [`Expect::Word`] rather than [`Expect::RedirectTarget`]. Completion should
+/// use [`expectations_at`]; this stays available for callers that want to look
+/// past the current token.
+pub fn expectations_after(src: &[u8], offset: usize, opts: &ParseOpts) -> Vec<Expect> {
+    let offset = offset.min(src.len());
+    let prefix = &src[..offset];
+    parse_inner(prefix, opts)
+        .1
+        .into_iter()
+        .map(|site| site.expect)
+        .collect()
+}
+
+fn parse_inner(src: &[u8], opts: &ParseOpts) -> (ParseOutcome, Vec<ExpectSite>) {
+    parse_lexed(src, opts, lexer::lex_full(src))
+}
+
+fn parse_lexed(
+    src: &[u8],
+    opts: &ParseOpts,
+    lexed: lexer::Lexed,
+) -> (ParseOutcome, Vec<ExpectSite>) {
     let mut sh = Shared::default();
-    let mut toks = lexed.tokens;
     let mut p = Parser {
         src,
-        toks: std::mem::take(&mut toks),
+        toks: lexed.tokens,
         pos: 0,
         opts: *opts,
         depth: 0,
@@ -243,15 +614,18 @@ fn parse_inner(src: &[u8], opts: &ParseOpts) -> (ParseOutcome, Vec<Expect>) {
     let tokens = std::mem::take(&mut p.toks);
     drop(p);
 
-    let mut eof_expect = std::mem::take(&mut sh.eof_expect);
-    if eof_expect.is_empty() {
-        eof_expect = vec![Expect::Command];
+    let mut sites = std::mem::take(&mut sh.sites);
+    if sites.is_empty() {
+        sites.push(ExpectSite {
+            expect: Expect::Command,
+            span: src.len()..src.len(),
+        });
     }
     let outcome = if !sh.errors.is_empty() {
         ParseOutcome::Failed(std::mem::take(&mut sh.errors))
     } else if let Some(inc) = sh.incomplete.take() {
         let expected = if inc.expected.is_empty() {
-            eof_expect.clone()
+            sites.iter().map(|site| site.expect).collect()
         } else {
             inc.expected
         };
@@ -267,7 +641,7 @@ fn parse_inner(src: &[u8], opts: &ParseOpts) -> (ParseOutcome, Vec<Expect>) {
             tokens,
         })
     };
-    (outcome, eof_expect)
+    (outcome, sites)
 }
 
 fn expect_for_unterminated(kind: UnterminatedKind) -> Expect {
@@ -284,23 +658,16 @@ fn expect_for_unterminated(kind: UnterminatedKind) -> Expect {
     }
 }
 
-fn dedup(expects: &[Expect]) -> Vec<Expect> {
-    let mut out: Vec<Expect> = Vec::with_capacity(expects.len());
-    for &e in expects {
-        if !out.contains(&e) {
-            out.push(e);
-        }
-    }
-    out
-}
-
 #[derive(Default)]
 struct Shared {
     b: Builder,
     errors: Vec<Diagnostic>,
     incomplete: Option<Incomplete>,
-    eof_expect: Vec<Expect>,
-    eof_depth: usize,
+    /// Expectations recorded at end of input, most specific first.
+    sites: Vec<ExpectSite>,
+    /// Whether `incomplete` was recorded by this parser rather than adopted
+    /// from a command-substitution body (whose cursor context differs).
+    incomplete_local: bool,
 }
 
 #[derive(Default)]
@@ -332,7 +699,7 @@ struct Parser<'a, 's> {
     opts: ParseOpts,
     depth: usize,
     sh: &'s mut Shared,
-    expects: Vec<Expect>,
+    expects: Vec<ExpectSite>,
     /// Spans of constructs currently open, innermost last.
     open: Vec<Span>,
     pending_heredocs: usize,
@@ -512,51 +879,106 @@ impl<'a> Parser<'a, '_> {
 
     // -------------------------------------------------------- expectations
 
+    /// Record `e` as the expectation for the current slot without consuming
+    /// anything.
     fn record_expect_only(&mut self, e: Expect) {
-        self.expects.push(e);
-        self.record_eof();
-        self.expects.pop();
+        let span = self.slot_span();
+        self.record_site(e, span);
+        self.create_incomplete();
     }
 
-    /// Snapshot the expectation stack at end of input. Deeper stacks win, so
-    /// the innermost slot (the one the cursor is actually in) is reported.
-    fn record_eof(&mut self) {
-        let depth = self.expects.len();
-        if depth > self.sh.eof_depth {
-            self.sh.eof_depth = depth;
-            self.sh.eof_expect = dedup(&self.expects);
-        }
+    /// Remember that input ended inside the innermost construct still open.
+    fn create_incomplete(&mut self) {
         if self.sh.incomplete.is_none() {
             if let Some(open) = self.open.last().cloned() {
                 self.sh.incomplete = Some(Incomplete {
                     open,
-                    expected: dedup(&self.expects),
+                    expected: self.sites_expects(),
                 });
+                self.sh.incomplete_local = true;
             }
         }
     }
 
+    /// Record `e` for a slot whose span is already known.
+    fn record_site(&mut self, e: Expect, span: Span) {
+        self.offer_site(ExpectSite { expect: e, span });
+    }
+
+    /// The span the next token would occupy: the next significant token's
+    /// span, or an empty slot at end of input.
+    fn slot_span(&mut self) -> Span {
+        self.skip_trivia();
+        match self.toks.get(self.pos) {
+            Some(t) => t.span.clone(),
+            None => {
+                let at = self.src.len();
+                at..at
+            }
+        }
+    }
+
+    fn sites_expects(&self) -> Vec<Expect> {
+        self.sh.sites.iter().map(|site| site.expect).collect()
+    }
+
+    /// Add one expectation to the end-of-input answer, keeping the vector
+    /// ordered most-specific first and free of duplicates.
+    fn offer_site(&mut self, site: ExpectSite) {
+        if self
+            .sh
+            .sites
+            .iter()
+            .any(|candidate| candidate.expect == site.expect)
+        {
+            return;
+        }
+        let rank = site.expect.rank();
+        let at = self
+            .sh
+            .sites
+            .iter()
+            .position(|candidate| candidate.expect.rank() > rank)
+            .unwrap_or(self.sh.sites.len());
+        self.sh.sites.insert(at, site);
+        if self.sh.incomplete_local {
+            let expected = self.sites_expects();
+            if let Some(inc) = self.sh.incomplete.as_mut() {
+                inc.expected = expected;
+            }
+        }
+    }
+
+    /// Snapshot the expectation stack at end of input.
+    fn record_eof(&mut self) {
+        let frames = std::mem::take(&mut self.expects);
+        for frame in &frames {
+            self.offer_site(frame.clone());
+        }
+        self.expects = frames;
+        self.create_incomplete();
+    }
+
     fn incomplete_at(&mut self, open: Span) {
         if self.sh.incomplete.is_none() {
-            let expected = dedup(&self.expects);
-            self.sh.incomplete = Some(Incomplete { open, expected });
+            self.sh.incomplete = Some(Incomplete {
+                open,
+                expected: self.sites_expects(),
+            });
+            self.sh.incomplete_local = true;
         }
     }
 
     fn incomplete_at_expect(&mut self, open: Span, e: Expect) {
-        if self.sh.incomplete.is_none() {
-            let mut expected = self.expects.clone();
-            expected.push(e);
-            self.sh.incomplete = Some(Incomplete {
-                open,
-                expected: dedup(&expected),
-            });
-        }
+        let span = self.slot_span();
+        self.record_site(e, span);
+        self.incomplete_at(open);
     }
 
     fn peek_expect(&mut self, e: Expect) -> Option<Token> {
-        self.expects.push(e);
         self.skip_trivia();
+        let span = self.slot_span();
+        self.expects.push(ExpectSite { expect: e, span });
         let t = self.toks.get(self.pos).cloned();
         if t.is_none() {
             self.record_eof();
@@ -793,6 +1215,27 @@ impl<'a> Parser<'a, '_> {
         }
     }
 
+    /// Whether a list node ended at a separator, so a reserved word may follow
+    /// it immediately. An empty list does not qualify: `if ` still needs a
+    /// condition command before `then`.
+    fn list_ends_with_separator(&self, id: NodeId) -> bool {
+        match &self.sh.b.nodes[id as usize].kind {
+            NodeKind::List { items } => items.last().is_some_and(|item| item.sep.is_some()),
+            _ => false,
+        }
+    }
+
+    /// Whether a reserved word may follow a list node: it is empty, or its
+    /// last item ended at a separator.
+    fn list_allows_keyword(&self, id: NodeId) -> bool {
+        match &self.sh.b.nodes[id as usize].kind {
+            NodeKind::List { items } => {
+                items.is_empty() || items.last().is_some_and(|item| item.sep.is_some())
+            }
+            _ => false,
+        }
+    }
+
     // ------------------------------------------------------- and-or / pipes
 
     fn parse_and_or(&mut self) -> Option<NodeId> {
@@ -977,8 +1420,14 @@ impl<'a> Parser<'a, '_> {
     }
 
     fn parse_simple_or_function(&mut self) -> Option<NodeId> {
+        let before = self.pos;
         if let Some(node) = self.try_function_def() {
             return Some(node);
+        }
+        if self.pos != before {
+            // A function definition was attempted and consumed its header; do
+            // not re-read those tokens as a simple command.
+            return None;
         }
         self.parse_simple_command()
     }
@@ -1099,7 +1548,11 @@ impl<'a> Parser<'a, '_> {
     }
 
     fn parse_compound_body(&mut self) -> Option<NodeId> {
-        let t = self.peek_sig()?;
+        let Some(t) = self.peek_sig() else {
+            // End of input where the body belongs: report the body slot.
+            self.record_expect_only(Expect::FunctionBody);
+            return None;
+        };
         let text = self.text_of(&t);
         match t.kind {
             TokenKind::Keyword => match text {
@@ -1134,7 +1587,13 @@ impl<'a> Parser<'a, '_> {
         while let Some(t) = self.peek_expect(Expect::Word) {
             match t.kind {
                 TokenKind::Redirect => {
-                    redirects.push(self.parse_redirect(&t));
+                    let redirect = self.parse_redirect(&t);
+                    let target_missing = redirect.target.is_none();
+                    redirects.push(redirect);
+                    if target_missing && self.at_end() {
+                        // The next word would be the target, not an argument.
+                        break;
+                    }
                 }
                 TokenKind::Word | TokenKind::WordUnterminated => {
                     let text = self.text_of(&t);
@@ -1320,11 +1779,9 @@ impl<'a> Parser<'a, '_> {
                 | UnterminatedKind::DoubleQuote
                 | UnterminatedKind::AnsiCQuote
         );
-        if quote && self.sh.incomplete.is_none() {
-            self.sh.incomplete = Some(Incomplete {
-                open: u.opener,
-                expected: vec![Expect::RedirectTarget],
-            });
+        if quote {
+            self.record_site(Expect::RedirectTarget, tok.span.clone());
+            self.incomplete_at(u.opener);
         }
     }
 
@@ -1337,12 +1794,8 @@ impl<'a> Parser<'a, '_> {
             .cloned();
         if let Some(u) = found {
             let expected = expect_for_unterminated(u.kind);
-            if self.sh.incomplete.is_none() {
-                self.sh.incomplete = Some(Incomplete {
-                    open: u.opener,
-                    expected: vec![expected],
-                });
-            }
+            self.record_site(expected, span);
+            self.incomplete_at(u.opener);
         }
     }
 
@@ -1363,7 +1816,10 @@ impl<'a> Parser<'a, '_> {
             None
         };
         let rest = &text[k..];
-        let (op, oplen) = match_redirect_op(rest);
+        let (op, oplen) = match lexer::match_redirect_op(rest) {
+            Some((op, len)) => (Some(op), len),
+            None => (None, 1),
+        };
         let op_span = (t.span.start + k)..(t.span.start + k + oplen);
         let target_in_token = k + oplen < text.len();
         let mut redirect = Redirect {
@@ -1761,7 +2217,7 @@ impl<'a> Parser<'a, '_> {
             }
             Some(b'(') => {
                 if src.get(i + 2) == Some(&b'(') {
-                    match lexer::scan_arith(src, i + 3, self.depth) {
+                    match lexer::scan_arith(src, i + 3, self.depth, &mut Vec::new()) {
                         Some(close) => {
                             let expr_end = close.saturating_sub(2).max(i + 3);
                             let mut arith = Arithmetic::new(src[i + 3..expr_end].to_vec());
@@ -1795,7 +2251,7 @@ impl<'a> Parser<'a, '_> {
                     }
                 }
             }
-            Some(b'{') => match lexer::skip_param(src, i + 2, self.depth) {
+            Some(b'{') => match lexer::skip_param(src, i + 2, self.depth, &mut Vec::new()) {
                 Some(close) => {
                     let exp = self.parse_param_exp(i..close, (i + 2)..(close - 1));
                     parts.push(Part::Param(exp));
@@ -2087,6 +2543,8 @@ impl<'a> Parser<'a, '_> {
         if self.sh.incomplete.is_none() {
             if let Some(inc) = inner_sh.incomplete.take() {
                 self.sh.incomplete = Some(inc);
+                // The body's slot is not the outer cursor's slot.
+                self.sh.incomplete_local = false;
             }
         }
     }
@@ -2104,7 +2562,11 @@ impl<'a> Parser<'a, '_> {
             let cond = self.parse_list(Stop::IfBody);
             self.skip_newlines();
             if self.at_end() {
-                self.record_expect_only(Expect::Then);
+                // `then` may follow only once the condition list has ended at
+                // a separator; without one the list slot is still open.
+                if self.list_ends_with_separator(cond) {
+                    self.record_expect_only(Expect::Then);
+                }
                 break;
             }
             if !self.eat_keyword(b"then", Expect::Then) {
@@ -2129,7 +2591,9 @@ impl<'a> Parser<'a, '_> {
                 break;
             }
             if self.at_end() {
-                self.record_expect_only(Expect::Fi);
+                if self.list_ends_with_separator(body) {
+                    self.record_expect_only(Expect::Fi);
+                }
                 break;
             }
             self.expected_current(Expect::Fi);
@@ -2195,13 +2659,30 @@ impl<'a> Parser<'a, '_> {
         self.open.push(start_tok.span.clone());
         let cond = self.parse_list(Stop::LoopBody);
         self.skip_newlines();
-        if !self.eat_keyword(b"do", Expect::Do) {
+        if self.at_end() {
+            // Nothing more can arrive. Report `do` when the condition ended at
+            // a separator, and do not invent the body or `done` slot.
+            if self.list_ends_with_separator(cond) {
+                self.record_expect_only(Expect::Do);
+            }
+            let at = self.prev_end();
+            let body = self.empty_node(at..at);
+            let end = self.prev_end();
+            self.open.pop();
+            return self.new_node(NodeKind::While { until, cond, body }, start..end);
+        }
+        let have_do = self.eat_keyword(b"do", Expect::Do);
+        if !have_do {
             self.label_last(start_tok.span.clone(), "loop opened here");
             self.recover_to_keyword(&[b"done"]);
         }
         let body = self.parse_list(Stop::LoopBody);
         self.skip_newlines();
-        if !self.eat_keyword(b"done", Expect::Done) {
+        if self.at_end() {
+            if self.list_ends_with_separator(body) {
+                self.record_expect_only(Expect::Done);
+            }
+        } else if !self.eat_keyword(b"done", Expect::Done) {
             self.label_last(start_tok.span.clone(), "loop opened here");
             self.recover_to_keyword(&[b"done"]);
             if self.is_keyword(b"done") {
@@ -2232,12 +2713,25 @@ impl<'a> Parser<'a, '_> {
                 self.advance_exact();
             }
             self.skip_newlines();
+            if self.at_end() {
+                self.record_expect_only(Expect::Do);
+                let at = self.prev_end();
+                let body = self.empty_node(at..at);
+                let end = self.prev_end();
+                self.open.pop();
+                let header = (arith.span.start + 2)..arith.span.end.saturating_sub(2);
+                return self.new_node(NodeKind::ForArith { header, body }, start..end);
+            }
             if !self.eat_keyword(b"do", Expect::Do) {
                 self.recover_to_keyword(&[b"done"]);
             }
             let body = self.parse_list(Stop::LoopBody);
             self.skip_newlines();
-            if !self.eat_keyword(b"done", Expect::Done) {
+            if self.at_end() {
+                if self.list_ends_with_separator(body) {
+                    self.record_expect_only(Expect::Done);
+                }
+            } else if !self.eat_keyword(b"done", Expect::Done) {
                 self.recover_to_keyword(&[b"done"]);
                 if self.is_keyword(b"done") {
                     self.advance_exact();
@@ -2268,6 +2762,7 @@ impl<'a> Parser<'a, '_> {
 
         self.skip_trivia();
         let mut in_list = None;
+        let mut eof_in_list = false;
         if self.is_text_keyword(b"in") {
             self.advance_exact();
             let mut words = Vec::new();
@@ -2275,6 +2770,7 @@ impl<'a> Parser<'a, '_> {
                 self.skip_trivia();
                 if self.at_end() {
                     self.record_expect_only(Expect::ForList);
+                    eof_in_list = true;
                     break;
                 }
                 let is_end = match self.peek_sig() {
@@ -2298,6 +2794,16 @@ impl<'a> Parser<'a, '_> {
                 }
             }
             in_list = Some(words);
+        }
+
+        if eof_in_list {
+            // The word list itself is still open: no separator has ended it,
+            // so `do` here would be the word `do`, not the keyword.
+            let at = self.prev_end();
+            let body = self.empty_node(at..at);
+            let end = self.prev_end();
+            self.open.pop();
+            return self.new_node(NodeKind::For { var, in_list, body }, start..end);
         }
 
         self.skip_trivia();
@@ -2327,13 +2833,28 @@ impl<'a> Parser<'a, '_> {
                 self.advance_exact();
                 have_do = true;
             }
-            None => {
-                self.record_expect_only(Expect::Do);
-            }
+            None => {}
             Some(_) => {
                 self.expected_current(Expect::Do);
                 self.recover_to_keyword(&[b"do", b"done"]);
             }
+        }
+
+        if !have_do && self.at_end() {
+            // The header ended at a separator (or there was no `in` list).
+            if in_list.is_some() {
+                self.record_expect_only(Expect::Do);
+            } else {
+                self.record_expect_only(Expect::In);
+                self.record_expect_only(Expect::Do);
+            }
+        }
+        if self.at_end() && !have_do {
+            let at = self.prev_end();
+            let body = self.empty_node(at..at);
+            let end = self.prev_end();
+            self.open.pop();
+            return self.new_node(NodeKind::For { var, in_list, body }, start..end);
         }
 
         if !have_do && !self.eat_keyword(b"do", Expect::Do) {
@@ -2341,7 +2862,11 @@ impl<'a> Parser<'a, '_> {
         }
         let body = self.parse_list(Stop::LoopBody);
         self.skip_newlines();
-        if !self.eat_keyword(b"done", Expect::Done) {
+        if self.at_end() {
+            if self.list_ends_with_separator(body) {
+                self.record_expect_only(Expect::Done);
+            }
+        } else if !self.eat_keyword(b"done", Expect::Done) {
             self.recover_to_keyword(&[b"done"]);
             if self.is_keyword(b"done") {
                 self.advance_exact();
@@ -2370,11 +2895,19 @@ impl<'a> Parser<'a, '_> {
             }
         };
         self.skip_newlines();
-        if !self.eat_text_keyword(b"in", Expect::In) {
+        let have_in = self.eat_text_keyword(b"in", Expect::In);
+        if !have_in {
             self.label_last(start_tok.span.clone(), "`case` opened here");
             self.recover_to_keyword(&[b"esac"]);
         }
         self.skip_newlines();
+        if !have_in && self.at_end() {
+            // `in` itself is what is missing; a pattern slot would be a lie.
+            let arms = Vec::new();
+            let end = self.prev_end();
+            self.open.pop();
+            return self.new_node(NodeKind::Case { word, arms }, start..end);
+        }
         let mut arms: Vec<CaseArm> = Vec::new();
         loop {
             self.skip_newlines();
@@ -2436,9 +2969,19 @@ impl<'a> Parser<'a, '_> {
                 term,
             });
         }
+        let term_allows_esac = arms.last().is_some_and(|arm| match arm.term {
+            CaseTerm::None => self.list_allows_keyword(arm.body),
+            _ => true,
+        });
         if self.is_text_keyword(b"esac") {
             self.advance_exact();
-        } else if !self.at_end() {
+        } else if self.at_end() {
+            // `esac` closes a case that has at least one arm, once that arm is
+            // at a boundary. With no arms the pattern slot stays primary.
+            if !arms.is_empty() && term_allows_esac {
+                self.record_expect_only(Expect::Esac);
+            }
+        } else {
             self.expected_current(Expect::Esac);
             self.recover_to_keyword(&[b"esac"]);
             if self.is_keyword(b"esac") {
@@ -2498,7 +3041,11 @@ impl<'a> Parser<'a, '_> {
             }
             self.advance_exact();
         } else if self.at_end() {
-            self.record_expect_only(Expect::Operator);
+            // `}` is a reserved word only at a list boundary: `{ echo ` needs
+            // a word, not a brace.
+            if self.list_ends_with_separator(body) {
+                self.record_expect_only(Expect::Operator);
+            }
         } else {
             self.expected_current(Expect::Operator);
             self.recover();
@@ -2533,7 +3080,9 @@ impl<'a> Parser<'a, '_> {
             }
             self.advance_exact();
         } else if self.at_end() {
-            self.record_expect_only(Expect::Operator);
+            if self.list_ends_with_separator(body) {
+                self.record_expect_only(Expect::Operator);
+            }
         } else {
             self.expected_current(Expect::Operator);
             self.recover();
@@ -2549,17 +3098,14 @@ impl<'a> Parser<'a, '_> {
         self.advance_exact();
         let open = t.span.start;
         let expr = (open + 2)..t.span.end.saturating_sub(2);
-        if let Some(u) = self
+        let arith_open = self
             .unterminated
             .iter()
             .find(|u| u.opener.start == open && u.kind == UnterminatedKind::ArithCommand)
-        {
-            if self.sh.incomplete.is_none() {
-                self.sh.incomplete = Some(Incomplete {
-                    open: u.opener.clone(),
-                    expected: vec![Expect::Operator],
-                });
-            }
+            .map(|u| u.opener.clone());
+        if let Some(arith_open) = arith_open {
+            self.record_site(Expect::ArithExpr, t.span.clone());
+            self.incomplete_at(arith_open);
         }
         self.posix(
             t.span.clone(),
@@ -2579,21 +3125,29 @@ impl<'a> Parser<'a, '_> {
             "`[[ … ]]` is a bash conditional",
             "POSIX: use `[` … `]` or `test`",
         );
+        self.open.push(start_tok.span.clone());
         let body_start = self.prev_end();
-        let mut depth = 0usize;
         let mut body_end = body_start;
+        // The position of the last `[[ … ]]` operator seen. Reporting it lets
+        // a consumer offer operator completions without counting unbalanced
+        // `[[` tokens, and tells it which operator the cursor follows.
+        let mut last_op: Option<Span> = None;
         loop {
             self.skip_trivia();
-            if self.pos >= self.toks.len() {
-                if self.sh.incomplete.is_none() {
-                    self.sh.incomplete = Some(Incomplete {
-                        open: start_tok.span.clone(),
-                        expected: vec![Expect::Operator],
-                    });
-                }
+            let Some(t) = self.toks.get(self.pos).cloned() else {
+                // Inside an unclosed `[[ … ]]` the cursor is in the operator
+                // slot; in POSIX mode the construct is rejected instead.
+                let expect = if self.opts.posix_mode {
+                    Expect::Operator
+                } else {
+                    Expect::TestOp
+                };
+                let at = self.src.len();
+                let span = last_op.clone().unwrap_or(at..at);
+                self.record_site(expect, span);
+                self.incomplete_at(start_tok.span.clone());
                 break;
-            }
-            let t = self.toks[self.pos].clone();
+            };
             if t.kind == TokenKind::Newline {
                 self.advance_exact();
                 continue;
@@ -2604,17 +3158,14 @@ impl<'a> Parser<'a, '_> {
                 self.advance_exact();
                 break;
             }
-            if t.kind == TokenKind::Operator {
-                if text == b"(" {
-                    depth += 1;
-                } else if text == b")" {
-                    depth = depth.saturating_sub(1);
-                }
+            if is_test_operator(text) {
+                last_op = Some(t.span.clone());
             }
             body_end = t.span.end;
             self.advance_exact();
         }
         let end = self.prev_end();
+        self.open.pop();
         self.new_node(
             NodeKind::TestCommand {
                 body: body_start..body_end,
@@ -2925,6 +3476,60 @@ fn shift_span(span: &mut Span, by: usize) {
     span.end += by;
 }
 
+/// The operators of a `[[ … ]]` conditional, used only to locate the operator
+/// slot for completion. Evaluation belongs to the language layer.
+fn is_test_operator(text: &[u8]) -> bool {
+    matches!(
+        text,
+        b"=="
+            | b"="
+            | b"!="
+            | b"=~"
+            | b"<"
+            | b">"
+            | b"!"
+            | b"&&"
+            | b"||"
+            | b"("
+            | b")"
+            | b"-a"
+            | b"-b"
+            | b"-c"
+            | b"-d"
+            | b"-e"
+            | b"-ef"
+            | b"-eq"
+            | b"-f"
+            | b"-g"
+            | b"-G"
+            | b"-ge"
+            | b"-gt"
+            | b"-h"
+            | b"-k"
+            | b"-le"
+            | b"-lt"
+            | b"-L"
+            | b"-n"
+            | b"-N"
+            | b"-ne"
+            | b"-nt"
+            | b"-o"
+            | b"-O"
+            | b"-ot"
+            | b"-p"
+            | b"-r"
+            | b"-R"
+            | b"-s"
+            | b"-S"
+            | b"-t"
+            | b"-u"
+            | b"-v"
+            | b"-w"
+            | b"-x"
+            | b"-z"
+    )
+}
+
 /// The tokens the parser may look past freely. Newlines are deliberately not
 /// included: a newline is a command separator, not layout.
 fn is_ignorable(kind: TokenKind) -> bool {
@@ -2936,40 +3541,6 @@ fn is_reserved_stop(text: &[u8]) -> bool {
         text,
         b"then" | b"elif" | b"else" | b"fi" | b"do" | b"done" | b"esac"
     )
-}
-
-/// Names in assignments and `for` variables.
-pub(crate) fn is_valid_name(bytes: &[u8]) -> bool {
-    let Some((&first, rest)) = bytes.split_first() else {
-        return false;
-    };
-    if !lexer::is_name_start(first) {
-        return false;
-    }
-    rest.iter().all(|&b| lexer::is_name(b))
-}
-
-/// Find the first unquoted, unsubstituted `=` in a word.
-fn find_assignment_eq(src: &[u8], span: &Span) -> Option<usize> {
-    let mut i = span.start;
-    while i < span.end {
-        match src[i] {
-            b'\\' => i += 2,
-            b'\'' => i = lexer::skip_squote(src, i + 1)?,
-            b'"' => i = lexer::skip_dquote(src, i + 1, 0)?,
-            b'`' => i = lexer::skip_backtick(src, i + 1)?,
-            b'$' => {
-                let skip = lexer::skip_dollar(src, i, 0);
-                if skip.opener.is_some() {
-                    return None;
-                }
-                i = skip.end;
-            }
-            b'=' => return Some(i),
-            _ => i += 1,
-        }
-    }
-    None
 }
 
 /// Detect the `a[1 + 2]=v` trap: a word that starts like an array assignment
@@ -2995,29 +3566,6 @@ fn memrchr_byte(src: &[u8], needle: u8, from: usize, to: usize) -> Option<usize>
         .iter()
         .rposition(|&b| b == needle)
         .map(|p| p + from)
-}
-
-fn match_redirect_op(rest: &[u8]) -> (Option<RedirectOp>, usize) {
-    const OPS: &[(&[u8], RedirectOp)] = &[
-        (b"<<<", RedirectOp::HereString),
-        (b"<<-", RedirectOp::HereDocStrip),
-        (b"&>>", RedirectOp::BothAppend),
-        (b"<<", RedirectOp::HereDoc),
-        (b">>", RedirectOp::Append),
-        (b">&", RedirectOp::DupWrite),
-        (b"<&", RedirectOp::DupRead),
-        (b"<>", RedirectOp::ReadWrite),
-        (b">|", RedirectOp::Clobber),
-        (b"&>", RedirectOp::Both),
-        (b"<", RedirectOp::Read),
-        (b">", RedirectOp::Write),
-    ];
-    for (bytes, op) in OPS {
-        if rest.starts_with(bytes) {
-            return (Some(*op), bytes.len());
-        }
-    }
-    (None, 1)
 }
 
 fn show_token(text: &[u8], kind: TokenKind) -> String {

@@ -2,10 +2,20 @@
 //!
 //! The lexer is **tolerant**. It never fails, never reports an error and never
 //! gives up on a token: a quote that runs to end of input becomes a
-//! [`TokenKind::WordUnterminated`] spanning the rest of the buffer, and the
-//! position of the byte that opened it is recorded in [`Lexed::unterminated`].
-//! That is what lets the highlighter and the completer run on every keystroke
-//! of a half-typed line (`DESIGN.md` §6.10, §6.3).
+//! [`TokenKind::WordUnterminated`] spanning the rest of the buffer, and every
+//! construct left open is recorded in [`Lexed::unterminated`] and, as a nesting
+//! stack, in [`Lexed::open`]. That is what lets the highlighter and the
+//! completer run on every keystroke of a half-typed line (`DESIGN.md` §6.10,
+//! §6.3).
+//!
+//! The nesting stack is maintained during the one lexing pass: when a
+//! construct opens it is pushed, and when it closes it is popped. At end of
+//! input what remains is the chain of open constructs, innermost first, each
+//! with its opener's span and the byte where its content begins. So
+//! `echo "$(ls ` gives `[CmdSub, DoubleQuote]`: the cursor is in a command
+//! substitution inside a quoted word. A word containing a substitution is
+//! still *one token* — the stack is the nested view, not a second token
+//! stream.
 //!
 //! Two invariants hold for every input, including invalid UTF-8:
 //!
@@ -33,6 +43,8 @@
 use bsh_diag::Span;
 use memchr::memchr;
 
+use crate::ast::RedirectOp;
+
 /// Deepest nesting of substitutions the lexer will follow before treating the
 /// word as unterminated. This is a stack-overflow guard, not a grammar limit.
 pub(crate) const MAX_NEST: usize = 64;
@@ -49,6 +61,19 @@ pub struct Lexed {
     /// normally at most one entry from a word; an unterminated here-document
     /// adds its own entry.
     pub unterminated: Vec<Unterminated>,
+    /// The chain of constructs still open at end of input, **innermost
+    /// first**.
+    ///
+    /// This is the nesting stack the lexer maintains during its single pass:
+    /// for `echo "$(ls ` it is `[CmdSub(…), DoubleQuote(…)]`, so a consumer can
+    /// see that the cursor is inside a command substitution that is itself
+    /// inside a double-quoted word. The chain is empty when the input is
+    /// complete.
+    ///
+    /// Each entry carries the opener's span and the offset where the
+    /// construct's *content* begins, so no consumer has to encode per-kind
+    /// opener widths.
+    pub open: Vec<OpenConstruct>,
 }
 
 /// A here-document as found by the lexer.
@@ -85,11 +110,37 @@ pub struct HereDoc {
 pub struct Unterminated {
     /// The span of the affected token (normally the rest of the input).
     pub span: Span,
-    /// Where the open construct began: the quote byte, the `$` of a
-    /// substitution, the `<<` of a here-document.
+    /// Where the open construct began: the full opening delimiter — the quote
+    /// byte of `'`/`"`, or the `$'`, `$"`, `${`, `$(`, `$((`, `<(` or `>(`
+    /// digraph, the whole `((` of an arithmetic command, or the `<<`/`<<-`
+    /// operator of a here-document (including any file-descriptor prefix).
     pub opener: Span,
+    /// Where the construct's content begins: the byte just past the opening
+    /// delimiter. A consumer needs no per-kind width table.
+    pub content_start: usize,
     /// What kind of construct is open.
+    ///
+    /// When one construct contains another (`echo "$(ls `), this is the
+    /// **innermost** one; [`Lexed::open`] carries the whole chain.
     pub kind: UnterminatedKind,
+}
+
+/// One construct still open at end of input, with the byte where its content
+/// begins.
+///
+/// Returned by [`open_constructs_at`] and [`Lexed::open`], innermost first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenConstruct {
+    /// What is open.
+    pub kind: UnterminatedKind,
+    /// The full opening delimiter: `'`, `"`, `$'`, `$"`, `${`, `$(`, `$((`,
+    /// `<(`/`>(`, `((`, a backtick, or a here-document's `<<`/`<<-` operator.
+    pub opener: Span,
+    /// The byte just past the opening delimiter: the first byte of the
+    /// construct's content. For a quote this is the first quoted byte; for a
+    /// substitution it is the first byte of the body; for a here-document it
+    /// is the first byte of the body (or end of input when no body started).
+    pub content_start: usize,
 }
 
 /// Which construct [`Unterminated`] describes.
@@ -131,6 +182,88 @@ impl Token {
     pub fn text<'s>(&self, src: &'s [u8]) -> &'s [u8] {
         &src[self.span.start..self.span.end]
     }
+
+    /// For a [`TokenKind::Redirect`] token, the byte length of its
+    /// file-descriptor prefix plus its redirection operator.
+    ///
+    /// The lexer keeps a redirection and a target written hard against it
+    /// (`>out`, `2>&1`, `&>>log`) in one token. This accessor is the one place
+    /// that knows where the operator ends, so consumers never re-derive the
+    /// operator set:
+    ///
+    /// * `src[span.start .. span.start + len]` is the descriptor and operator;
+    /// * `src[span.start + len .. span.end]` is the target, empty when it was
+    ///   written separately.
+    ///
+    /// Returns `None` for every other token kind.
+    ///
+    /// ```
+    /// use bsh_syntax::{TokenKind, lex};
+    /// let src = b"echo 2>&1";
+    /// let token = &lex(src)[2];
+    /// assert_eq!(token.kind, TokenKind::Redirect);
+    /// assert_eq!(token.redirect_op_len(src), Some(3));
+    /// assert_eq!(token.redirect_target(src), Some(8..9));
+    /// ```
+    pub fn redirect_op_len(&self, src: &[u8]) -> Option<usize> {
+        if self.kind != TokenKind::Redirect {
+            return None;
+        }
+        redirect_op_len(self.text(src))
+    }
+
+    /// For a [`TokenKind::Redirect`] token, the span of the target written
+    /// hard against the operator, if there is one.
+    ///
+    /// `None` means the token is only the operator and any target is a
+    /// separate word.
+    pub fn redirect_target(&self, src: &[u8]) -> Option<Span> {
+        let op = self.redirect_op_len(src)?;
+        let start = self.span.start + op;
+        (start < self.span.end).then_some(start..self.span.end)
+    }
+
+    /// For a word token, the offset just past an assignment's `=`, when the
+    /// word is a valid `NAME=value`, `NAME+=value` or `NAME[sub]=value`
+    /// assignment.
+    ///
+    /// `None` for non-word tokens and for words that are not assignments.
+    pub fn assignment_value_start(&self, src: &[u8]) -> Option<usize> {
+        if !matches!(
+            self.kind,
+            TokenKind::Word | TokenKind::WordUnterminated | TokenKind::Keyword
+        ) {
+            return None;
+        }
+        assignment_value_start(src, &self.span)
+    }
+}
+
+/// The byte length of the file-descriptor prefix plus the redirection
+/// operator at the start of `text`, or `None` when `text` does not begin with
+/// one.
+///
+/// This is the single definition of the redirection operator set; both the
+/// lexer and [`Token::redirect_op_len`] use it.
+///
+/// ```
+/// use bsh_syntax::redirect_op_len;
+/// assert_eq!(redirect_op_len(b">>"), Some(2));
+/// assert_eq!(redirect_op_len(b"2>&1"), Some(3));
+/// assert_eq!(redirect_op_len(b"&>>"), Some(3));
+/// assert_eq!(redirect_op_len(b"<<-"), Some(3));
+/// assert_eq!(redirect_op_len(b"foo"), None);
+/// ```
+pub fn redirect_op_len(text: &[u8]) -> Option<usize> {
+    let mut digits = 0;
+    while digits < text.len() && text[digits].is_ascii_digit() {
+        digits += 1;
+    }
+    let rest = &text[digits..];
+    REDIRECT_OPS
+        .iter()
+        .find(|(bytes, _)| rest.starts_with(bytes))
+        .map(|(bytes, _)| digits + bytes.len())
 }
 
 /// A token class.
@@ -156,7 +289,8 @@ pub enum TokenKind {
     /// `{`, `}`.
     Operator,
     /// A redirection, e.g. `>`, `>>`, `2>&1`, `<<EOF`. A target written with no
-    /// intervening whitespace is part of the same token.
+    /// intervening whitespace is part of the same token; use
+    /// [`Token::redirect_op_len`] or [`Token::redirect_target`] to split them.
     Redirect,
     /// A whole arithmetic command, `(( … ))`, including both closing
     /// parentheses. `((` always starts arithmetic (`DESIGN.md` §3.3).
@@ -240,23 +374,40 @@ pub fn lex(src: &[u8]) -> Vec<Token> {
 pub fn lex_full(src: &[u8]) -> Lexed {
     let mut lx = Lexer::new(src, 0, 0, None);
     lx.run();
+    let mut open = lx.nest;
+    open.reverse();
     Lexed {
         tokens: lx.tokens,
         heredocs: lx.heredocs,
         unterminated: lx.unterminated,
+        open,
     }
+}
+
+/// The chain of constructs still open at `offset`, **innermost first**.
+///
+/// This is [`lex_full`] run on `src[..offset]`, reporting the lexer's nesting
+/// stack: for `echo "$(ls ` at the end it answers
+/// `[CmdSub, DoubleQuote]`, so a consumer knows the cursor is inside a command
+/// substitution that is itself inside a quoted word. Each entry carries the
+/// opener's span and the offset where its content begins.
+///
+/// `offset` is clamped to the input. The stack is maintained during the single
+/// lexing pass; this function does not re-scan regions with a second scanner.
+pub fn open_constructs_at(src: &[u8], offset: usize) -> Vec<OpenConstruct> {
+    let offset = offset.min(src.len());
+    if offset == 0 {
+        return Vec::new();
+    }
+    lex_full(&src[..offset]).open
 }
 
 /// The result of scanning one word.
 pub(crate) struct WordScan {
+    /// Where the word ends, or `src.len()` when it is unterminated.
     pub end: usize,
-    pub unterminated: Option<(usize, UnterminatedKind)>,
-}
-
-/// Where a `$` (or a quote) construct ends.
-pub(crate) struct Skip {
-    pub end: usize,
-    pub opener: Option<(usize, UnterminatedKind)>,
+    /// The innermost construct left open, when the word is unterminated.
+    pub unterminated: Option<OpenConstruct>,
 }
 
 fn is_meta(b: u8) -> bool {
@@ -274,6 +425,83 @@ pub(crate) fn is_name_start(b: u8) -> bool {
 /// Whether `b` can continue a name (`[A-Za-z0-9_]`).
 pub(crate) fn is_name(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Whether `bytes` is a valid shell name.
+pub(crate) fn is_valid_name(bytes: &[u8]) -> bool {
+    let Some((&first, rest)) = bytes.split_first() else {
+        return false;
+    };
+    if !is_name_start(first) {
+        return false;
+    }
+    rest.iter().all(|&b| is_name(b))
+}
+
+/// Redirection operators, longest first, with the descriptor prefix handled
+/// separately.
+///
+/// Order matters: `<<<` must be tried before `<<`, `&>>` before `&>`.
+pub(crate) const REDIRECT_OPS: &[(&[u8], RedirectOp)] = &[
+    (b"<<<", RedirectOp::HereString),
+    (b"<<-", RedirectOp::HereDocStrip),
+    (b"&>>", RedirectOp::BothAppend),
+    (b"<<", RedirectOp::HereDoc),
+    (b">>", RedirectOp::Append),
+    (b">&", RedirectOp::DupWrite),
+    (b"<&", RedirectOp::DupRead),
+    (b"<>", RedirectOp::ReadWrite),
+    (b">|", RedirectOp::Clobber),
+    (b"&>", RedirectOp::Both),
+    (b"<", RedirectOp::Read),
+    (b">", RedirectOp::Write),
+];
+
+/// Match a redirection operator at the start of `text`, returning it and its
+/// length.
+pub(crate) fn match_redirect_op(text: &[u8]) -> Option<(RedirectOp, usize)> {
+    REDIRECT_OPS
+        .iter()
+        .find(|(bytes, _)| text.starts_with(bytes))
+        .map(|(bytes, op)| (*op, bytes.len()))
+}
+
+/// Find the first unquoted, unsubstituted `=` in a word.
+pub(crate) fn find_assignment_eq(src: &[u8], span: &Span) -> Option<usize> {
+    let mut i = span.start;
+    while i < span.end {
+        match src[i] {
+            b'\\' => i += 2,
+            b'\'' => i = skip_squote(src, i + 1)?,
+            b'"' => i = skip_dquote(src, i + 1, 0, &mut Vec::new())?,
+            b'`' => i = skip_backtick(src, i + 1)?,
+            b'$' => i = scan_dollar(src, i, 0, false, &mut Vec::new())?,
+            b'=' => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// The offset just past the `=` of a valid `NAME=value` assignment word,
+/// `NAME+=value` included. `NAME[sub]=value` also qualifies.
+pub(crate) fn assignment_value_start(src: &[u8], span: &Span) -> Option<usize> {
+    let eq = find_assignment_eq(src, span)?;
+    let mut name_end = eq;
+    if src.get(eq.wrapping_sub(1)) == Some(&b'+') {
+        name_end -= 1;
+    }
+    if let Some(open) = src[span.start..name_end].iter().position(|&b| b == b'[') {
+        let open = span.start + open;
+        if !src[open + 1..name_end].contains(&b']') {
+            return None;
+        }
+        name_end = open;
+    }
+    if name_end <= span.start || !is_valid_name(&src[span.start..name_end]) {
+        return None;
+    }
+    Some(eq + 1)
 }
 
 /// Skip a single-quoted string; `from` is just past the opening quote.
@@ -319,14 +547,35 @@ pub(crate) fn skip_backtick(src: &[u8], from: usize) -> Option<usize> {
 }
 
 /// Skip a double-quoted string; `from` is just past the opening quote.
-pub(crate) fn skip_dquote(src: &[u8], from: usize, depth: usize) -> Option<usize> {
+///
+/// On success every construct opened inside the string has been closed and
+/// popped from `nest`; on failure the string and whatever is open inside it
+/// remain on the stack, innermost last.
+pub(crate) fn skip_dquote(
+    src: &[u8],
+    from: usize,
+    depth: usize,
+    nest: &mut Vec<OpenConstruct>,
+) -> Option<usize> {
     let mut i = from;
     while i < src.len() {
         match src[i] {
             b'\\' => i += 2,
             b'"' => return Some(i + 1),
-            b'`' => i = skip_backtick(src, i + 1)?,
-            b'$' => i = skip_dollar_ctx(src, i, depth, true).end,
+            b'`' => {
+                push_backtick(nest, i);
+                match skip_backtick(src, i + 1) {
+                    Some(end) => {
+                        nest.pop();
+                        i = end;
+                    }
+                    None => {
+                        scan_backtick_body(src, i + 1, depth, nest);
+                        return None;
+                    }
+                }
+            }
+            b'$' => i = scan_dollar(src, i, depth, true, nest)?,
             _ => i += 1,
         }
     }
@@ -334,33 +583,49 @@ pub(crate) fn skip_dquote(src: &[u8], from: usize, depth: usize) -> Option<usize
 }
 
 /// Skip `${ … }`; `from` is just past the opening brace.
-pub(crate) fn skip_param(src: &[u8], from: usize, depth: usize) -> Option<usize> {
+pub(crate) fn skip_param(
+    src: &[u8],
+    from: usize,
+    depth: usize,
+    nest: &mut Vec<OpenConstruct>,
+) -> Option<usize> {
     if depth >= MAX_NEST {
         return None;
     }
     let mut i = from;
-    let mut braces = 1usize;
     while i < src.len() {
         match src[i] {
             b'\\' => i += 2,
             b'\'' => i = skip_squote(src, i + 1)?,
-            b'"' => i = skip_dquote(src, i + 1, depth)?,
-            b'`' => i = skip_backtick(src, i + 1)?,
+            b'"' => i = skip_dquote(src, i + 1, depth, nest)?,
+            b'`' => {
+                push_backtick(nest, i);
+                match skip_backtick(src, i + 1) {
+                    Some(end) => {
+                        nest.pop();
+                        i = end;
+                    }
+                    None => {
+                        scan_backtick_body(src, i + 1, depth, nest);
+                        return None;
+                    }
+                }
+            }
             b'$' => {
                 if src.get(i + 1) == Some(&b'{') {
-                    braces += 1;
-                    i += 2;
+                    nest.push(OpenConstruct {
+                        kind: UnterminatedKind::ParamExp,
+                        opener: i..i + 2,
+                        content_start: i + 2,
+                    });
+                    let end = skip_param(src, i + 2, depth + 1, nest)?;
+                    nest.pop();
+                    i = end;
                 } else {
-                    i = skip_dollar(src, i, depth).end;
+                    i = scan_dollar(src, i, depth, false, nest)?;
                 }
             }
-            b'}' => {
-                braces -= 1;
-                i += 1;
-                if braces == 0 {
-                    return Some(i);
-                }
-            }
+            b'}' => return Some(i + 1),
             _ => i += 1,
         }
     }
@@ -368,7 +633,12 @@ pub(crate) fn skip_param(src: &[u8], from: usize, depth: usize) -> Option<usize>
 }
 
 /// Skip `$(( … ))`; `from` is just past the two opening parentheses.
-pub(crate) fn scan_arith(src: &[u8], from: usize, depth: usize) -> Option<usize> {
+pub(crate) fn scan_arith(
+    src: &[u8],
+    from: usize,
+    depth: usize,
+    nest: &mut Vec<OpenConstruct>,
+) -> Option<usize> {
     if depth >= MAX_NEST {
         return None;
     }
@@ -378,13 +648,32 @@ pub(crate) fn scan_arith(src: &[u8], from: usize, depth: usize) -> Option<usize>
         match src[i] {
             b'\\' => i += 2,
             b'\'' => i = skip_squote(src, i + 1)?,
-            b'"' => i = skip_dquote(src, i + 1, depth)?,
-            b'`' => i = skip_backtick(src, i + 1)?,
+            b'"' => i = skip_dquote(src, i + 1, depth, nest)?,
+            b'`' => {
+                push_backtick(nest, i);
+                match skip_backtick(src, i + 1) {
+                    Some(end) => {
+                        nest.pop();
+                        i = end;
+                    }
+                    None => {
+                        scan_backtick_body(src, i + 1, depth, nest);
+                        return None;
+                    }
+                }
+            }
             b'$' => {
                 if src.get(i + 1) == Some(&b'(') && src.get(i + 2) == Some(&b'(') {
-                    i = scan_arith(src, i + 3, depth + 1)?;
+                    nest.push(OpenConstruct {
+                        kind: UnterminatedKind::Arith,
+                        opener: i..i + 3,
+                        content_start: i + 3,
+                    });
+                    let end = scan_arith(src, i + 3, depth + 1, nest)?;
+                    nest.pop();
+                    i = end;
                 } else {
-                    i = skip_dollar(src, i, depth).end;
+                    i = scan_dollar(src, i, depth, false, nest)?;
                 }
             }
             b'(' => {
@@ -407,74 +696,121 @@ pub(crate) fn scan_arith(src: &[u8], from: usize, depth: usize) -> Option<usize>
     None
 }
 
-/// Skip one `$`-introduced construct. `from` points at the `$`.
-pub(crate) fn skip_dollar(src: &[u8], from: usize, depth: usize) -> Skip {
-    skip_dollar_ctx(src, from, depth, false)
-}
-
-/// Like [`skip_dollar`], but knows whether it is inside double quotes.
+/// Scan one `$`-introduced construct. `from` points at the `$`.
 ///
-/// Inside `"…"`, `$'` and `$"` are *not* quote openers: the `$` is a literal
-/// dollar and the quote character is ordinary text (for `"` it closes the
-/// enclosing string). Treating them as openers is how a `"${x}$"` word
-/// swallows the rest of the line.
-fn skip_dollar_ctx(src: &[u8], from: usize, depth: usize, in_dquote: bool) -> Skip {
+/// `Some(end)` is just past the construct (or just past the `$` when it
+/// introduces nothing). `None` means the construct runs to end of input and
+/// has been left open on `nest`.
+pub(crate) fn scan_dollar(
+    src: &[u8],
+    from: usize,
+    depth: usize,
+    in_dquote: bool,
+    nest: &mut Vec<OpenConstruct>,
+) -> Option<usize> {
     let next = src.get(from + 1).copied();
     if in_dquote && matches!(next, Some(b'\'') | Some(b'"')) {
-        return Skip {
-            end: from + 1,
-            opener: None,
-        };
+        return Some(from + 1);
     }
     match next {
-        Some(b'\'') => match skip_ansic(src, from + 2) {
-            Some(end) => Skip { end, opener: None },
-            None => Skip {
-                end: src.len(),
-                opener: Some((from, UnterminatedKind::AnsiCQuote)),
-            },
-        },
-        Some(b'"') => match skip_dquote(src, from + 2, depth) {
-            Some(end) => Skip { end, opener: None },
-            None => Skip {
-                end: src.len(),
-                opener: Some((from, UnterminatedKind::DoubleQuote)),
-            },
-        },
-        Some(b'(') => {
-            if src.get(from + 2) == Some(&b'(') {
-                match scan_arith(src, from + 3, depth) {
-                    Some(end) => Skip { end, opener: None },
-                    None => Skip {
-                        end: src.len(),
-                        opener: Some((from, UnterminatedKind::Arith)),
-                    },
+        Some(b'\'') => {
+            nest.push(OpenConstruct {
+                kind: UnterminatedKind::AnsiCQuote,
+                opener: from..from + 2,
+                content_start: from + 2,
+            });
+            match skip_ansic(src, from + 2) {
+                Some(end) => {
+                    nest.pop();
+                    Some(end)
                 }
-            } else {
-                match region_end(src, from + 2, depth) {
-                    Some(rparen) => Skip {
-                        end: rparen + 1,
-                        opener: None,
-                    },
-                    None => Skip {
-                        end: src.len(),
-                        opener: Some((from, UnterminatedKind::CmdSub)),
-                    },
+                None => None,
+            }
+        }
+        Some(b'"') => {
+            nest.push(OpenConstruct {
+                kind: UnterminatedKind::DoubleQuote,
+                opener: from..from + 2,
+                content_start: from + 2,
+            });
+            match skip_dquote(src, from + 2, depth, nest) {
+                Some(end) => {
+                    nest.pop();
+                    Some(end)
+                }
+                None => None,
+            }
+        }
+        Some(b'(') if src.get(from + 2) == Some(&b'(') => {
+            nest.push(OpenConstruct {
+                kind: UnterminatedKind::Arith,
+                opener: from..from + 3,
+                content_start: from + 3,
+            });
+            match scan_arith(src, from + 3, depth, nest) {
+                Some(end) => {
+                    nest.pop();
+                    Some(end)
+                }
+                None => None,
+            }
+        }
+        Some(b'(') => {
+            nest.push(OpenConstruct {
+                kind: UnterminatedKind::CmdSub,
+                opener: from..from + 2,
+                content_start: from + 2,
+            });
+            match scan_region(src, from + 2, depth) {
+                Region {
+                    end: Some(rparen), ..
+                } => {
+                    nest.pop();
+                    Some(rparen + 1)
+                }
+                Region { end: None, open } => {
+                    nest.extend(open);
+                    None
                 }
             }
         }
-        Some(b'{') => match skip_param(src, from + 2, depth) {
-            Some(end) => Skip { end, opener: None },
-            None => Skip {
-                end: src.len(),
-                opener: Some((from, UnterminatedKind::ParamExp)),
-            },
-        },
-        _ => Skip {
-            end: from + 1,
-            opener: None,
-        },
+        Some(b'{') => {
+            nest.push(OpenConstruct {
+                kind: UnterminatedKind::ParamExp,
+                opener: from..from + 2,
+                content_start: from + 2,
+            });
+            match skip_param(src, from + 2, depth, nest) {
+                Some(end) => {
+                    nest.pop();
+                    Some(end)
+                }
+                None => None,
+            }
+        }
+        _ => Some(from + 1),
     }
+}
+
+/// Push a backtick construct. The body is not lexed while the closing
+/// backtick is still ahead: [`skip_backtick`] only has to find it.
+fn push_backtick(nest: &mut Vec<OpenConstruct>, at: usize) {
+    nest.push(OpenConstruct {
+        kind: UnterminatedKind::Backtick,
+        opener: at..at + 1,
+        content_start: at + 1,
+    });
+}
+
+/// Lex the body of a backtick substitution that never closed, so constructs
+/// opened inside it join the nesting chain.
+fn scan_backtick_body(src: &[u8], from: usize, depth: usize, nest: &mut Vec<OpenConstruct>) {
+    if depth >= MAX_NEST {
+        return;
+    }
+    let mut inner = Lexer::new(src, from, depth + 1, None);
+    inner.run();
+    nest.extend(inner.nest);
 }
 
 /// Scan a word, returning where it ends and whether something is left open.
@@ -482,22 +818,36 @@ fn skip_dollar_ctx(src: &[u8], from: usize, depth: usize, in_dquote: bool) -> Sk
 /// The word stops at an unquoted metacharacter. `<(` and `>(` are process
 /// substitution only at the very start of the word, which is where a shell
 /// would recognise them.
-pub(crate) fn scan_word(src: &[u8], start: usize, depth: usize) -> WordScan {
+pub(crate) fn scan_word(
+    src: &[u8],
+    start: usize,
+    depth: usize,
+    nest: &mut Vec<OpenConstruct>,
+) -> WordScan {
     let mut i = start;
     while i < src.len() {
         let b = src[i];
         if is_meta(b) {
             let proc_sub = (b == b'<' || b == b'>') && i == start && src.get(i + 1) == Some(&b'(');
             if proc_sub {
-                match region_end(src, i + 2, depth) {
-                    Some(rparen) => {
+                nest.push(OpenConstruct {
+                    kind: UnterminatedKind::ProcSub,
+                    opener: i..i + 2,
+                    content_start: i + 2,
+                });
+                match scan_region(src, i + 2, depth) {
+                    Region {
+                        end: Some(rparen), ..
+                    } => {
+                        nest.pop();
                         i = rparen + 1;
                         continue;
                     }
-                    None => {
+                    Region { end: None, open } => {
+                        nest.extend(open);
                         return WordScan {
                             end: src.len(),
-                            unterminated: Some((i, UnterminatedKind::ProcSub)),
+                            unterminated: nest.last().cloned(),
                         };
                     }
                 }
@@ -508,41 +858,62 @@ pub(crate) fn scan_word(src: &[u8], start: usize, depth: usize) -> WordScan {
             b'\'' => match skip_squote(src, i + 1) {
                 Some(end) => i = end,
                 None => {
+                    nest.push(OpenConstruct {
+                        kind: UnterminatedKind::SingleQuote,
+                        opener: i..i + 1,
+                        content_start: i + 1,
+                    });
                     return WordScan {
                         end: src.len(),
-                        unterminated: Some((i, UnterminatedKind::SingleQuote)),
+                        unterminated: nest.last().cloned(),
                     };
                 }
             },
-            b'"' => match skip_dquote(src, i + 1, depth) {
-                Some(end) => i = end,
-                None => {
-                    return WordScan {
-                        end: src.len(),
-                        unterminated: Some((i, UnterminatedKind::DoubleQuote)),
-                    };
+            b'"' => {
+                nest.push(OpenConstruct {
+                    kind: UnterminatedKind::DoubleQuote,
+                    opener: i..i + 1,
+                    content_start: i + 1,
+                });
+                match skip_dquote(src, i + 1, depth, nest) {
+                    Some(end) => {
+                        nest.pop();
+                        i = end;
+                    }
+                    None => {
+                        return WordScan {
+                            end: src.len(),
+                            unterminated: nest.last().cloned(),
+                        };
+                    }
                 }
-            },
-            b'\\' => i = (i + 2).min(src.len()),
-            b'`' => match skip_backtick(src, i + 1) {
-                Some(end) => i = end,
-                None => {
-                    return WordScan {
-                        end: src.len(),
-                        unterminated: Some((i, UnterminatedKind::Backtick)),
-                    };
-                }
-            },
-            b'$' => {
-                let skip = skip_dollar(src, i, depth);
-                if let Some((opener, kind)) = skip.opener {
-                    return WordScan {
-                        end: src.len(),
-                        unterminated: Some((opener, kind)),
-                    };
-                }
-                i = skip.end;
             }
+            b'\\' => i = (i + 2).min(src.len()),
+            b'`' => {
+                push_backtick(nest, i);
+                match skip_backtick(src, i + 1) {
+                    Some(end) => {
+                        nest.pop();
+                        i = end;
+                    }
+                    None => {
+                        scan_backtick_body(src, i + 1, depth, nest);
+                        return WordScan {
+                            end: src.len(),
+                            unterminated: nest.last().cloned(),
+                        };
+                    }
+                }
+            }
+            b'$' => match scan_dollar(src, i, depth, false, nest) {
+                Some(end) => i = end,
+                None => {
+                    return WordScan {
+                        end: src.len(),
+                        unterminated: nest.last().cloned(),
+                    };
+                }
+            },
             _ => i += 1,
         }
     }
@@ -552,19 +923,47 @@ pub(crate) fn scan_word(src: &[u8], start: usize, depth: usize) -> WordScan {
     }
 }
 
+/// The result of scanning a `$( … )` or `<( … )` body.
+pub(crate) struct Region {
+    /// Just past the closing `)` when the region closed.
+    pub end: Option<usize>,
+    /// Constructs still open inside the region, innermost last, when it did
+    /// not close.
+    pub open: Vec<OpenConstruct>,
+}
+
 /// Find the `)` that closes a `$( … )` or `<( … )` whose body starts at
 /// `start`.
 ///
 /// This runs a full lexer pass over the body with a stop mode, so quotes,
 /// nested substitutions and here-document bodies cannot end the substitution
-/// early. `None` means the substitution runs to end of input.
-pub(crate) fn region_end(src: &[u8], start: usize, depth: usize) -> Option<usize> {
+/// early. When the region never closes, its nesting stack is returned so the
+/// caller can extend its own.
+pub(crate) fn scan_region(src: &[u8], start: usize, depth: usize) -> Region {
     if depth >= MAX_NEST {
-        return None;
+        return Region {
+            end: None,
+            open: Vec::new(),
+        };
     }
     let mut lx = Lexer::new(src, start, depth + 1, Some(StopMode { depth: 0 }));
     lx.run();
-    if lx.stopped { Some(lx.i) } else { None }
+    if lx.stopped {
+        Region {
+            end: Some(lx.i),
+            open: Vec::new(),
+        }
+    } else {
+        Region {
+            end: None,
+            open: lx.nest,
+        }
+    }
+}
+
+/// [`scan_region`] when only the close position is needed.
+pub(crate) fn region_end(src: &[u8], start: usize, depth: usize) -> Option<usize> {
+    scan_region(src, start, depth).end
 }
 
 /// Quote-remove a here-document delimiter word.
@@ -657,6 +1056,9 @@ struct Lexer<'a> {
     stop: Option<StopMode>,
     cases: Vec<CaseState>,
     stopped: bool,
+    /// Constructs open while scanning, outermost first. Reversed into
+    /// [`Lexed::open`] when the pass ends.
+    nest: Vec<OpenConstruct>,
 }
 
 impl<'a> Lexer<'a> {
@@ -675,6 +1077,7 @@ impl<'a> Lexer<'a> {
             stop,
             cases: Vec::new(),
             stopped: false,
+            nest: Vec::new(),
         }
     }
 
@@ -688,8 +1091,14 @@ impl<'a> Lexer<'a> {
             let op = self.heredocs[idx].op.clone();
             self.unterminated.push(Unterminated {
                 span: op.clone(),
-                opener: op,
+                opener: op.clone(),
+                content_start: self.src.len(),
                 kind: UnterminatedKind::HereDoc,
+            });
+            self.nest.push(OpenConstruct {
+                kind: UnterminatedKind::HereDoc,
+                opener: op,
+                content_start: self.src.len(),
             });
         }
     }
@@ -838,8 +1247,14 @@ impl<'a> Lexer<'a> {
             if !terminated {
                 self.unterminated.push(Unterminated {
                     span: op.clone(),
-                    opener: op,
+                    opener: op.clone(),
+                    content_start: body_start,
                     kind: UnterminatedKind::HereDoc,
+                });
+                self.nest.push(OpenConstruct {
+                    kind: UnterminatedKind::HereDoc,
+                    opener: op,
+                    content_start: body_start,
                 });
             }
             // The delimiter line's newline is a real separator; any further
@@ -851,8 +1266,14 @@ impl<'a> Lexer<'a> {
     fn lparen(&mut self) {
         let start = self.i;
         if self.src.get(self.i + 1) == Some(&b'(') {
-            match scan_arith(self.src, self.i + 2, self.depth) {
+            self.nest.push(OpenConstruct {
+                kind: UnterminatedKind::ArithCommand,
+                opener: start..start + 2,
+                content_start: start + 2,
+            });
+            match scan_arith(self.src, self.i + 2, self.depth, &mut self.nest) {
                 Some(end) => {
+                    self.nest.pop();
                     self.i = end;
                     self.push(TokenKind::ArithCommand, start, end);
                     self.observe_case(TokenKind::ArithCommand, b"((..))");
@@ -865,6 +1286,7 @@ impl<'a> Lexer<'a> {
                     self.unterminated.push(Unterminated {
                         span: start..self.i,
                         opener: start..start + 2,
+                        content_start: start + 2,
                         kind: UnterminatedKind::ArithCommand,
                     });
                     self.cmd_pos = false;
@@ -942,43 +1364,28 @@ impl<'a> Lexer<'a> {
 
     fn redirect(&mut self) {
         let start = self.i;
-        let mut j = start;
-        while j < self.src.len() && self.src[j].is_ascii_digit() {
-            j += 1;
-        }
-        let rest = &self.src[j..];
-        let len = if rest.starts_with(b"&>>") {
-            3
-        } else if rest.starts_with(b"&>") {
-            2
-        } else if rest.starts_with(b"<<<") || rest.starts_with(b"<<-") {
-            3
-        } else if rest.starts_with(b"<<")
-            || rest.starts_with(b">>")
-            || rest.starts_with(b">&")
-            || rest.starts_with(b"<&")
-            || rest.starts_with(b"<>")
-            || rest.starts_with(b">|")
-        {
-            2
-        } else if rest.starts_with(b"<") || rest.starts_with(b">") {
-            1
-        } else {
+        let Some(op_len) = redirect_op_len(&self.src[start..]) else {
             // Should not happen: callers only route real redirects here.
             self.word();
             return;
         };
-        let op_end = j + len;
-        let op_text = &self.src[j..op_end];
+        let op_end = start + op_len;
+        let mut digits = 0;
+        while digits < op_len && self.src[start + digits].is_ascii_digit() {
+            digits += 1;
+        }
+        let op_text = &self.src[start + digits..op_end];
         let heredoc = op_text == b"<<" || op_text == b"<<-";
         let strip_tabs = op_text == b"<<-";
 
         // A target written hard against the operator is part of this token.
+        // The scan is speculative: a target that is itself unterminated is
+        // left for `word` to scan (and report) in its own right.
         let mut end = op_end;
         let mut target: Option<Span> = None;
         if let Some(&b) = self.src.get(op_end) {
             if !is_meta(b) {
-                let scan = scan_word(self.src, op_end, self.depth);
+                let scan = scan_word(self.src, op_end, self.depth, &mut Vec::new());
                 if scan.unterminated.is_none() {
                     end = scan.end;
                     target = Some(op_end..end);
@@ -1029,7 +1436,7 @@ impl<'a> Lexer<'a> {
 
     fn word(&mut self) {
         let start = self.i;
-        let scan = scan_word(self.src, start, self.depth);
+        let scan = scan_word(self.src, start, self.depth, &mut self.nest);
         self.i = scan.end;
         let text = &self.src[start..scan.end];
         if scan.unterminated.is_none() && text == b"\\\n" {
@@ -1039,12 +1446,13 @@ impl<'a> Lexer<'a> {
             self.push(TokenKind::Whitespace, start, scan.end);
             return;
         }
-        if let Some((opener, kind)) = scan.unterminated {
+        if let Some(open) = scan.unterminated {
             self.push(TokenKind::WordUnterminated, start, scan.end);
             self.unterminated.push(Unterminated {
                 span: start..scan.end,
-                opener: opener..opener + 1,
-                kind,
+                opener: open.opener,
+                content_start: open.content_start,
+                kind: open.kind,
             });
             self.finish_delimiter(start, scan.end);
             self.cmd_pos = false;
