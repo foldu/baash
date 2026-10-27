@@ -8,8 +8,8 @@ Each section is owned by the producing crate. If you are implementing a consumer
 (`bsh-vm`, `bsh-repl`, `bsh-tools`) read the relevant sections before you start,
 and treat every item here as a fact about the API you are calling.
 
-Status: `bsh-diag`, `bsh-sys` and `bsh-runtime` have landed. `bsh-syntax` and
-`bsh-lang` are in flight.
+Status: `bsh-diag`, `bsh-sys`, `bsh-runtime` and `bsh-lang` have landed.
+`bsh-syntax` is in flight.
 
 ---
 
@@ -133,9 +133,81 @@ an unimplemented builtin returns status 2 with `BSH-E0508`.
 
 ---
 
+## bsh-lang
+
+**One object implements both traits.** `Vars` (read variables, positional
+parameters, write) and `Shell` (the callbacks expansion needs) must be
+implemented on the same type, because expansion takes `&mut S` where
+`S: Vars + Shell`.
+
+```rust
+pub trait Vars  { fn get(&self, name: &[u8]) -> Option<&[u8]>;
+                  fn positional(&self) -> &[Vec<u8>];
+                  fn set(&mut self, name: &[u8], value: Vec<u8>) -> Result<(), SetError>; }
+pub trait Shell: Vars {
+    fn command_substitution(&CommandSub) -> Result<Vec<u8>, Error>;
+    fn arithmetic(&Arithmetic) -> Result<Vec<u8>, Error>;
+    fn pathname(&Field) -> Result<Option<Vec<Vec<u8>>>, Error>;
+    // defaulted: process_substitution -> Unsupported, home_dir
+}
+```
+
+- `get` must serve the specials `?`, `-`, `$`, `!`, `0` as ordinary lookups;
+  `$#` is computed from `positional()`. `None` (unset) and `Some(b"")` (null) are
+  different values and the difference is observable under `${x-}`, `${x:-}` and
+  `set -u`.
+- `pathname` returning `None` means *no match* — leave the word alone. Returning
+  `Some(vec![])` would mean "matched nothing and vanished", which is `nullglob`
+  behaviour and not the default.
+- `expand_words` returns `Vec<Vec<u8>>`. If the VM wants `SmallVec` argv it
+  collects into it; the expansion layer does not guess the allocation strategy.
+- `quote(bytes, ctx)` covers `Unquoted`, `DoubleQuoted` and `SingleQuoted`, and
+  emits `$'\n'` for an unquoted newline (a bare backslash-newline is a line
+  continuation and would corrupt the line). `bsh-complete` must use this rather
+  than its own escaping.
+
+**Two properties, deliberately separate.** A part is *quoted* (glob-inert) or
+not, and separately a part's bytes are *expansion results* (splittable) or not.
+Literal source text is unquoted but never field-split — `IFS=:; a:b` is one
+word — while unquoted literal text inside a parameter replacement word is
+splittable — `${x:-a:b}` is two fields. Collapsing these into one boolean is the
+classic way to get IFS subtly wrong.
+
+**Unsupported is an error, not a guess.** `${x#pat}`, `${x%pat}`, `${x/p/r}`,
+`${!x}`, `${x@Q}`, `${x^^pat}`, `${@:o:l}`, arrays and process substitution
+return `ErrorKind::Unsupported` with the operator's span. The parser must map
+those surface forms to the corresponding `ParamOp`, so the error can point at
+the right place instead of failing later.
+
+**Errors** are `bsh_lang::Error { kind, span }` with `Display`, `code()` and
+`diagnostic() -> bsh_diag::Diagnostic`. Codes 301–306 are provisional.
+
+Documented deviation: for unquoted `$@` inside a `${…}` replacement word we
+apply the ordinary unquoted rules, where bash space-joins and suppresses
+splitting. Every DESIGN §3.3 Tier C case, including `${x:-"$@"}`, matches
+bash 5.3.20.
+
+---
+
+## Diagnostic codes
+
+Each crate owns a hundred-range, so a code identifies the layer that produced
+it and never has to be looked up to be disambiguated. Codes are stable; message
+text is not — anything matching on stderr should match the code.
+
+| range | owner | examples |
+|---|---|---|
+| 1xx | `bsh-syntax` | 1 unterminated, 2 need more input, 3 unexpected token |
+| 2xx | `bsh-vm` (reserved) | the POSIX §2.8.1 consequence layer |
+| 3xx | `bsh-lang` | 301 unsupported operator, 302 parameter null, 303 unset |
+| 4xx | reserved | redirection and I/O |
+| 5xx | `bsh-runtime` | 508 builtin not implemented yet, other state errors |
+
+`bsh-diag` produces no codes of its own; it renders them.
+
+---
+
 ## Pending
 
-`bsh-syntax` (the `Expect` vocabulary and `ParseOutcome` a completer depends on),
-`bsh-lang` (the `Vars` trait and expansion seams), `bsh-runtime` (the builtin
-tier table and assignment-persistence rule) will each add a section when they
-land.
+`bsh-syntax` will add the `Expect` vocabulary, the `ParseOutcome` variants and
+the rule that it emits `bsh_lang::Word` rather than a parallel word model.
