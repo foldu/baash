@@ -1,0 +1,9 @@
+[package]
+name = "bsh-pattern"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shell pattern matching for ßhell: one engine for case, [[ == ]], ${x#pat} and globbing"
+
+[dependencies]
