@@ -265,6 +265,38 @@ pub fn poll_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
     }
 }
 
+/// `whence` values for [`lseek`].
+pub mod seek {
+    /// From the start of the file.
+    pub const SET: i32 = libc::SEEK_SET;
+    /// From the current offset.
+    pub const CUR: i32 = libc::SEEK_CUR;
+    /// From the end of the file.
+    pub const END: i32 = libc::SEEK_END;
+}
+
+/// Reposition the file offset of `fd`, returning the new offset.
+///
+/// The `read` built-in needs this to give back the bytes it read but did not
+/// consume: a chunked read from a seekable descriptor is rewound by the
+/// surplus, so a later command sees exactly the input the shell did not take
+/// (DESIGN.md §4.4). On a pipe the call fails with `ESPIPE`, which is also how
+/// a caller discovers that the descriptor is not seekable.
+pub fn lseek(fd: RawFd, offset: i64, whence: i32) -> io::Result<i64> {
+    loop {
+        // SAFETY: `lseek` only reads and writes the descriptor's offset and
+        // dereferences no pointer.
+        let result = unsafe { libc::lseek(fd, offset, whence) };
+        if result >= 0 {
+            return Ok(result);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
 /// Whether `fd` currently names an open descriptor.
 ///
 /// The answer is a snapshot: another thread may close or reuse the descriptor

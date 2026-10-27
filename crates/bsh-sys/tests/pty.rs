@@ -18,7 +18,7 @@ use std::io;
 use std::os::fd::{AsRawFd, RawFd};
 
 use bsh_sys::{
-    RawMode, WaitOutcome, dup2, fork_child_status, get_foreground_pgrp, is_tty, open_pty,
+    NoEcho, RawMode, WaitOutcome, dup2, fork_child_status, get_foreground_pgrp, is_tty, open_pty,
     process_group, send_signal, set_foreground_pgrp, set_foreground_pgrp_fd, wait_pid,
     window_size_fd,
 };
@@ -278,4 +278,31 @@ fn foreground_pgrp_round_trips_in_a_child_that_owns_the_pty() {
         WaitOutcome::Exited(0),
         "the pty child failed at step {outcome:?}; see the STEP_* constants"
     );
+}
+
+#[test]
+fn no_echo_clears_echo_only_and_restores_it() {
+    // `read -s` turns echo off but must leave canonical mode alone: disabling
+    // canonical mode would also stop line editing and signal generation, which
+    // is what `RawMode` is for.
+    let pty = open_pty().unwrap();
+    let slave = pty.slave.as_raw_fd();
+    let before = canonical_slave(slave);
+    assert_ne!(before.c_lflag & libc::ECHO, 0, "test starts with echo on");
+
+    {
+        let guard = NoEcho::enable(slave).expect("disable echo");
+        let quiet = termios(slave);
+        assert_eq!(quiet.c_lflag & (libc::ECHO | libc::ECHONL), 0, "echo off");
+        assert_ne!(quiet.c_lflag & libc::ICANON, 0, "canonical mode is kept");
+        assert_ne!(quiet.c_lflag & libc::ISIG, 0, "signal generation is kept");
+        guard.restore().expect("explicit restore");
+    }
+    assert_same_termios(&termios(slave), &before);
+
+    // Dropping the guard restores too, including on an early return.
+    {
+        let _guard = NoEcho::enable(slave).expect("disable echo");
+    }
+    assert_same_termios(&termios(slave), &before);
 }

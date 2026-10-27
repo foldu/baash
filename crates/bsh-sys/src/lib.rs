@@ -52,16 +52,19 @@ pub mod wait;
 pub use bytes::{NulByte, cstring, cstrings};
 pub use fd::{
     Pipe, chdir, close, create_unlinked_temp, dup, dup_above, dup2, fd_is_cloexec, fd_is_open,
-    open_cloexec, poll_readable, read_fd, set_cloexec, write_all, write_fd,
+    lseek, open_cloexec, poll_readable, read_fd, set_cloexec, write_all, write_fd,
 };
 pub use pty::{Pty, open_pty};
-pub use signal::{MaskGuard, SignalEvent, SignalFd, SignalSet, send_group_signal, send_signal};
+pub use signal::{
+    Disposition, MaskGuard, SignalEvent, SignalFd, SignalGuard, SignalSet, ignore_signals,
+    replace_signal_mask, send_group_signal, send_signal, set_disposition,
+};
 pub use spawn::{
     Child, FdAction, ProcessGroup, ReportPipe, SpawnPlan, exec, exit_child, fork_child,
     fork_child_status, spawn, spawn_forked,
 };
 pub use term::{
-    RawMode, get_foreground_pgrp, parent_pid, pid, process_group, set_foreground_pgrp,
+    NoEcho, RawMode, get_foreground_pgrp, parent_pid, pid, process_group, set_foreground_pgrp,
     set_foreground_pgrp_fd, set_process_group, window_size, window_size_fd,
 };
 pub use threadgate::{ThreadGate, ThreadGuard, fork_gate};
@@ -94,6 +97,15 @@ pub mod flags {
 
 /// `SIGPIPE`, for building a [`SignalSet`] that resets it in children.
 pub const SIGPIPE: c_int = libc::SIGPIPE;
+
+/// `SIGALRM`: the status of a `read -t` timeout is `128 + SIGALRM`.
+pub const SIGALRM: c_int = libc::SIGALRM;
+
+/// `SIGINT`: ignored by the shell while it waits for a foreground job.
+pub const SIGINT: c_int = libc::SIGINT;
+
+/// `SIGQUIT`: ignored by the shell while it waits for a foreground job.
+pub const SIGQUIT: c_int = libc::SIGQUIT;
 
 /// Whether `fd` refers to a terminal.
 ///

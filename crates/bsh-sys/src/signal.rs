@@ -210,6 +210,142 @@ pub fn send_group_signal(pgroup: libc::pid_t, signal: libc::c_int) -> io::Result
     send_signal(-pgroup, signal)
 }
 
+/// A signal disposition the shell sets on itself rather than through a
+/// handler.
+///
+/// `trap '' SIG` is `Ignore`, and resetting a trap is `Default`. There is
+/// deliberately no `Catch`: caught signals are never handled by a native
+/// handler in this shell (DESIGN.md §4.5) — they are blocked and read from a
+/// [`SignalFd`] at command boundaries instead, so no handler can ever touch
+/// interpreter state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Disposition {
+    /// `SIG_DFL`: the default action (terminate, stop, or ignore).
+    Default,
+    /// `SIG_IGN`: the signal is discarded, and children inherit that across
+    /// `exec` (which is exactly why `trap '' INT` leaks a Ctrl-C-proof child
+    /// unless the shell means it).
+    Ignore,
+}
+
+/// Set the disposition of `signal`, replacing whatever was there.
+pub fn set_disposition(signal: libc::c_int, disposition: Disposition) -> io::Result<()> {
+    let handler = match disposition {
+        Disposition::Default => libc::SIG_DFL,
+        Disposition::Ignore => libc::SIG_IGN,
+    };
+    // SAFETY: a zeroed `sigaction` is a valid starting point, `sigemptyset`
+    // initialises `sa_mask`, and `sigaction` copies the struct rather than
+    // retaining the pointer.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = handler;
+        action.sa_flags = 0;
+        libc::sigemptyset(&mut action.sa_mask);
+        if libc::sigaction(signal, &action, std::ptr::null_mut()) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// Restores a set of signal dispositions when dropped.
+///
+/// Used around a foreground `wait`: bash ignores `SIGINT`/`SIGQUIT` delivered
+/// to the *shell* while it waits for a job (the job has its own copy of the
+/// signal), so a stray `kill -INT <shell>` does not kill the shell in the
+/// middle of `trap … EXIT; sleep 1`. The previous actions — possibly `SIG_IGN`
+/// from `trap ''` — are put back on drop, so a panic cannot leak an ignore.
+pub struct SignalGuard {
+    saved: Vec<(libc::c_int, libc::sigaction)>,
+}
+
+impl std::fmt::Debug for SignalGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignalGuard")
+            .field(
+                "signals",
+                &self
+                    .saved
+                    .iter()
+                    .map(|(signal, _)| *signal)
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+impl SignalGuard {
+    /// Restore explicitly, reporting the first failure.
+    pub fn restore(self) -> io::Result<()> {
+        let this = std::mem::ManuallyDrop::new(self);
+        let mut result = Ok(());
+        for (signal, action) in &this.saved {
+            // SAFETY: `action` was filled in by a successful `sigaction` call
+            // for `signal`; the call retains no pointer.
+            if unsafe { libc::sigaction(*signal, action, std::ptr::null_mut()) } != 0
+                && result.is_ok()
+            {
+                result = Err(io::Error::last_os_error());
+            }
+        }
+        result
+    }
+}
+
+impl Drop for SignalGuard {
+    fn drop(&mut self) {
+        for (signal, action) in &self.saved {
+            // SAFETY: as in `restore`; errors are ignored on the drop path.
+            unsafe { libc::sigaction(*signal, action, std::ptr::null_mut()) };
+        }
+    }
+}
+
+/// Ignore `signals` until the returned guard is dropped.
+///
+/// This is the `SIGINT`/`SIGQUIT` rule around a foreground wait, not a trap:
+/// the shell's own trap/block machinery never uses native handlers.
+pub fn ignore_signals(signals: &[libc::c_int]) -> io::Result<SignalGuard> {
+    let mut saved: Vec<(libc::c_int, libc::sigaction)> = Vec::with_capacity(signals.len());
+    for &signal in signals {
+        // SAFETY: `action` is valid for writes; `sigaction` fills it in and
+        // retains no pointer.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            let mut previous: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = libc::SIG_IGN;
+            action.sa_flags = 0;
+            libc::sigemptyset(&mut action.sa_mask);
+            if libc::sigaction(signal, &action, &mut previous) != 0 {
+                let error = io::Error::last_os_error();
+                // Put back whatever this call already changed before failing.
+                for (signal, action) in &saved {
+                    libc::sigaction(*signal, action, std::ptr::null_mut());
+                }
+                return Err(error);
+            }
+            saved.push((signal, previous));
+        }
+    }
+    Ok(SignalGuard { saved })
+}
+
+/// Replace the calling thread's blocked-signal mask and keep it.
+///
+/// [`SignalSet::set`] returns a guard that restores the previous mask; a forked
+/// child that must not inherit the shell's blocked trap signals needs the
+/// change to persist for its whole life, which is this function.
+pub fn replace_signal_mask(set: &SignalSet) -> io::Result<()> {
+    // SAFETY: `set` is an initialised `sigset_t`; `sigprocmask` retains no
+    // pointer.
+    if unsafe { libc::sigprocmask(libc::SIG_SETMASK, set.as_ptr(), std::ptr::null_mut()) } != 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 /// One signal notification read from a [`SignalFd`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SignalEvent {

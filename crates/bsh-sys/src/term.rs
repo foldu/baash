@@ -91,6 +91,71 @@ impl Drop for RawMode {
     }
 }
 
+/// A saved `termios` with echo turned off, restored when the guard is dropped.
+///
+/// This is `read -s`: the terminal stays in canonical mode (line editing and
+/// signal generation keep working) but the typed characters are not echoed.
+/// The full raw mode [`RawMode`] would also disable canonical mode, which is
+/// wrong for a line read. As with `RawMode`, the descriptor must keep referring
+/// to the same terminal for the guard's lifetime.
+#[derive(Debug)]
+pub struct NoEcho {
+    fd: RawFd,
+    saved: libc::termios,
+}
+
+impl NoEcho {
+    /// Turn echo off on `fd`, returning a guard that restores the settings.
+    ///
+    /// `fd` must be a terminal; on anything else `tcgetattr` fails with
+    /// `ENOTTY` and the caller degrades to reading without echo control.
+    pub fn enable(fd: RawFd) -> io::Result<Self> {
+        let mut saved = MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: `saved` is valid for writes; `tcgetattr` does not retain it.
+        if unsafe { libc::tcgetattr(fd, saved.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: success initialises `saved`.
+        let saved = unsafe { saved.assume_init() };
+
+        let mut quiet = saved;
+        quiet.c_lflag &= !(libc::ECHO | libc::ECHONL);
+
+        // SAFETY: `quiet` is an initialised `termios` and `fd` is a terminal
+        // (or the call fails); `tcsetattr` does not retain the pointer.
+        if unsafe { libc::tcsetattr(fd, libc::TCSADRAIN, &quiet) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { fd, saved })
+    }
+
+    /// The descriptor this guard controls.
+    pub fn fd(&self) -> RawFd {
+        self.fd
+    }
+
+    /// Restore explicitly, reporting a failure instead of ignoring it.
+    pub fn restore(self) -> io::Result<()> {
+        let fd = self.fd;
+        let saved = self.saved;
+        std::mem::forget(self);
+        // SAFETY: `saved` came from `tcgetattr` on this descriptor.
+        if unsafe { libc::tcsetattr(fd, libc::TCSADRAIN, &saved) } != 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for NoEcho {
+    fn drop(&mut self) {
+        // SAFETY: `self.saved` came from `tcgetattr` on `self.fd`. Errors are
+        // ignored: the guard's Drop runs on every path, including a panic.
+        unsafe { libc::tcsetattr(self.fd, libc::TCSADRAIN, &self.saved) };
+    }
+}
+
 /// The terminal size of standard output, if it is a terminal.
 ///
 /// Returns `(columns, rows)`. A zero in either dimension is treated as "not a
