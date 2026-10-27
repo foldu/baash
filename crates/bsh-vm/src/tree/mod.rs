@@ -107,6 +107,7 @@ mod builtins;
 mod command;
 mod cond;
 mod eval;
+mod read;
 mod redir;
 mod words;
 
@@ -213,6 +214,12 @@ pub struct Interp {
     /// `bi_declare` drains it. The literal is structural so it cannot be
     /// confused with the textual placeholder `argv` carries.
     array_literals: Vec<ArrayLiteral>,
+    /// Bytes a `read` pulled from a descriptor but could not give back.
+    ///
+    /// Only a descriptor that is not seekable can end up here; on a regular
+    /// file the surplus is rewound with `lseek` instead, so no second reader
+    /// ever sees a stale buffer.
+    read_buffers: std::collections::BTreeMap<std::os::fd::RawFd, Vec<u8>>,
 }
 
 /// One `name=(…)` argument in a declaration command.
@@ -253,6 +260,7 @@ impl Interp {
             pending: None,
             depth: 0,
             array_literals: Vec::new(),
+            read_buffers: std::collections::BTreeMap::new(),
         };
         // `$?`, `$$` and `$-` must answer before the first command runs.
         interp.sync_specials();

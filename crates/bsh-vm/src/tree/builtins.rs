@@ -97,6 +97,10 @@ static VM_BUILTINS: &[VmBuiltin] = &[
         name: b"typeset",
         run: bi_declare,
     },
+    VmBuiltin {
+        name: b"read",
+        run: super::read::bi_read,
+    },
 ];
 
 fn diagnose(interp: &mut Interp, message: impl Into<String>) {
