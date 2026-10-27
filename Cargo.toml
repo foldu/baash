@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+bsh-diag = { path = "crates/bsh-diag" }
+bsh-syntax = { path = "crates/bsh-syntax" }
+bsh-highlight = { path = "crates/bsh-highlight" }
+bsh-lang = { path = "crates/bsh-lang" }
+bsh-compile = { path = "crates/bsh-compile" }
+bsh-runtime = { path = "crates/bsh-runtime" }
+bsh-vm = { path = "crates/bsh-vm" }
+bsh-sys = { path = "crates/bsh-sys" }
+bsh-complete = { path = "crates/bsh-complete" }
+bsh-repl = { path = "crates/bsh-repl" }
+bsh-tools = { path = "crates/bsh-tools" }
+
+libc = "0.2"
+
+[profile.release]
+# Interactive shell: startup latency matters more than peak throughput.
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

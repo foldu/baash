@@ -1,0 +1,11 @@
+[package]
+name = "bsh-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shell state: options, variables, builtin host"
+
+[dependencies]
+bsh-lang.workspace = true
+bsh-diag.workspace = true

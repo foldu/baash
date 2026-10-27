@@ -1,0 +1,9 @@
+[package]
+name = "bsh-diag"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Diagnostic IR and renderers for ßhell"
+
+[dependencies]

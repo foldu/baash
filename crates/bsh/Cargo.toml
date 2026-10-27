@@ -1,0 +1,20 @@
+[package]
+name = "bsh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The ßhell binary"
+
+[dependencies]
+bsh-diag.workspace = true
+bsh-syntax.workspace = true
+bsh-highlight.workspace = true
+bsh-lang.workspace = true
+bsh-compile.workspace = true
+bsh-runtime.workspace = true
+bsh-vm.workspace = true
+bsh-sys.workspace = true
+bsh-complete.workspace = true
+bsh-repl.workspace = true
+bsh-tools.workspace = true

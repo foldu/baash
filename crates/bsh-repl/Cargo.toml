@@ -1,0 +1,13 @@
+[package]
+name = "bsh-repl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Line editor and terminal rendering"
+
+[dependencies]
+bsh-highlight.workspace = true
+bsh-complete.workspace = true
+bsh-diag.workspace = true
+bsh-sys.workspace = true

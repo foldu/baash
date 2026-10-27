@@ -1,0 +1,53 @@
+workflow:
+  rules:
+    # The usual pair: run for a merge request, and for a branch with no merge request open.
+    # Without the middle rule a branch with an open MR runs the pipeline twice.
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+stages:
+  - check
+  - package
+
+variables:
+  CARGO_TERM_COLOR: always
+  GIT_DEPTH: "1"
+
+default:
+  interruptible: true
+
+# Everything is built through the flake, so every job needs the nix runner:
+# untagged jobs get a bare ubuntu image with no nix daemon.
+.nix-cache: &nix_cache
+  cache:
+    key: "$CI_JOB_NAME-$CI_COMMIT_REF_SLUG"
+    paths:
+      - target/
+
+lint:
+  stage: check
+  tags: [nix]
+  <<: *nix_cache
+  script:
+    - nix develop --command cargo fmt --all -- --check
+    - nix develop --command cargo clippy --workspace --all-targets -- --deny warnings
+
+test:
+  stage: check
+  tags: [nix]
+  <<: *nix_cache
+  script:
+    - nix develop --command cargo test --workspace
+
+package:
+  stage: package
+  tags: [nix]
+  script:
+    - nix build --print-build-logs .#default
+    - mkdir -p dist
+    - cp -L result/bin/bsh dist/
+  artifacts:
+    paths:
+      - dist/

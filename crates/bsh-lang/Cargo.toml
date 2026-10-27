@@ -1,0 +1,10 @@
+[package]
+name = "bsh-lang"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Words, quoting and expansion"
+
+[dependencies]
+bsh-diag.workspace = true

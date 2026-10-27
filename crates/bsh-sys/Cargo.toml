@@ -1,0 +1,10 @@
+[package]
+name = "bsh-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Syscall boundary: fds, tty, fork gate"
+
+[dependencies]
+libc.workspace = true
