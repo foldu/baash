@@ -598,8 +598,17 @@ impl Interp {
     }
 
     /// Report an expansion error and classify it.
+    ///
+    /// A failed glob is the one expansion error that must not escalate: with
+    /// `shopt -s failglob`, bash fails the command and a script carries on
+    /// (`shopt -s failglob; echo *.ZZ; echo status=$?` prints `status=1`),
+    /// while a `${x:?}` error does end a non-interactive shell. Splitting the
+    /// kind here is what keeps those two apart.
     pub(crate) fn expansion_failed(&mut self, error: bsh_lang::Error) -> Unwind {
         self.diagnose(&error.diagnostic());
+        if matches!(error.kind, bsh_lang::ErrorKind::GlobNoMatch { .. }) {
+            return Unwind::Status(Status(1));
+        }
         self.apply_consequence(bsh_runtime::ShellError::Expansion, Status(1))
     }
 
@@ -774,8 +783,8 @@ impl bsh_lang::Shell for Interp {
             Some(matches) => Ok(Some(matches)),
             None if self.state.opts.nullglob => Ok(Some(Vec::new())),
             None if self.state.opts.failglob => Err(bsh_lang::Error::new(
-                bsh_lang::ErrorKind::Host {
-                    message: format!("no match: {}", String::from_utf8_lossy(&pattern.bytes)),
+                bsh_lang::ErrorKind::GlobNoMatch {
+                    pattern: pattern.bytes.clone(),
                 },
                 0..0,
             )),

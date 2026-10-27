@@ -862,3 +862,18 @@ fn case_conversion_applies_to_lists() {
     let output = run("a=(xy zz); echo \"${a[@]^^}\"");
     assert_eq!(stdout(&output), "XY ZZ\n");
 }
+
+#[test]
+fn failglob_fails_the_command_but_not_the_shell() {
+    // `shopt -s failglob; echo *.ZZ; echo status=$?` must print status=1 and
+    // keep going, which is what bash does in a script. Only a `${x:?}` error
+    // ends a non-interactive shell.
+    let output = run("shopt -s failglob; echo *.ZZ; echo status=$?");
+    assert_eq!(stdout(&output), "status=1\n");
+    assert_eq!(code(&output), 0);
+    assert!(stderr(&output).contains("no match"));
+
+    let output = run("echo \"${nope:?gone}\"; echo after");
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "");
+}

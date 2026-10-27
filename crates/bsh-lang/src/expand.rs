@@ -62,6 +62,8 @@ pub mod codes {
     pub const SUBSTRING_RANGE: ErrCode = ErrCode::new(305);
     /// A runtime callback (command substitution, arithmetic or glob) failed.
     pub const HOST: ErrCode = ErrCode::new(306);
+    /// A glob matched nothing under `shopt -s failglob`.
+    pub const GLOB_NO_MATCH: ErrCode = ErrCode::new(307);
 }
 
 /// An expansion failure.
@@ -109,7 +111,15 @@ pub enum ErrorKind {
         /// The length expression bash reports in its message.
         value: i64,
     },
-    /// A [`Shell`] callback failed.
+    /// A glob with `shopt -s failglob` matched nothing.
+    ///
+    /// Distinct from [`ErrorKind::Host`] because the shell must not exit on it:
+    /// bash fails the *command* and a script continues.
+    GlobNoMatch {
+        /// The pattern that matched nothing.
+        pattern: Vec<u8>,
+    },
+    /// A [`Shell`] callback failed (command substitution, arithmetic, globbing).
     Host {
         /// Human-readable detail from the runtime.
         message: String,
@@ -140,6 +150,9 @@ impl Error {
             ErrorKind::ParameterUnset { .. } => codes::PARAMETER_UNSET,
             ErrorKind::CannotAssign { .. } => codes::CANNOT_ASSIGN,
             ErrorKind::SubstringRange { .. } => codes::SUBSTRING_RANGE,
+            // A glob that matched nothing under `failglob` is its own code:
+            // the shell reports it and fails the command, rather than exiting.
+            ErrorKind::GlobNoMatch { .. } => codes::GLOB_NO_MATCH,
             ErrorKind::Host { .. } => codes::HOST,
         }
     }
@@ -176,6 +189,9 @@ impl fmt::Display for Error {
             }
             ErrorKind::SubstringRange { value } => {
                 write!(f, "{value}: substring expression < 0")
+            }
+            ErrorKind::GlobNoMatch { pattern } => {
+                write!(f, "no match: {}", text(pattern))
             }
             ErrorKind::Host { message } => f.write_str(message),
         }
