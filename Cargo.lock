@@ -32,6 +32,7 @@ name = "bsh-complete"
 version = "0.0.0"
 dependencies = [
  "bsh-diag",
+ "bsh-lang",
  "bsh-syntax",
  "nucleo-matcher",
 ]

@@ -1,51 +1,83 @@
 //! Completion: candidates, context and ranking.
 //!
-//! Not implemented. The contract (DESIGN.md §6.4, §6.5): the parser's
-//! expectation at the cursor selects the provider set, and ranking is
-//! two-tier — typed prefix always outranks a fuzzy match, so `git ch<TAB>` can
-//! never lose to noise. `nucleo-matcher` (no threadpool, unlike the high-level
-//! `nucleo` crate) is the intended fuzzy scorer.
+//! The contract is `DESIGN.md` §6.3–§6.9. Three commitments shape this crate:
+//!
+//! * **The parser decides the context.** [`context`] takes the line and a
+//!   cursor byte offset, asks [`bsh_syntax::lex_full`] for the word span and
+//!   the quote context, and [`bsh_syntax::expectations_at`] for what the
+//!   grammar allows there. There is no whitespace splitting and no word-break
+//!   heuristic.
+//! * **Ranking is two-tier.** Typed-prefix matches always outrank fuzzy ones,
+//!   so `git ch<TAB>` can never lose to a fuzzy match on something else
+//!   ([`Ranker`]). Fuzzy scoring is `nucleo-matcher` directly — a matcher with
+//!   no threadpool — with `prefer_prefix` on and `match_paths()` for paths.
+//! * **Shell text is bytes.** [`Candidate::insert`] is authoritative and may be
+//!   invalid UTF-8; [`Candidate::display`] is a lossy projection for rendering.
+//!   Insertion goes through [`bsh_lang::quote`] and never through `String`.
+//!
+//! # How a completion is produced
+//!
+//! ```
+//! use bsh_complete::{Completer, CompletionEngine};
+//! let engine = CompletionEngine::new();
+//! let menu = engine.complete(b"ls ", 3);
+//! // Every candidate knows which span it replaces and how to quote itself.
+//! assert_eq!(menu.replace, 3..3);
+//! if menu.candidates.first().is_some() {
+//!     let bytes = menu.insertion(0).expect("insertion bytes");
+//!     let _ = bytes; // splice into the line with `menu.apply`.
+//! }
+//! ```
+//!
+//! The pipeline is: [`context`] → the expectation-to-provider table
+//! ([`providers_for`]) → providers ([`PathProvider`], [`CommandProvider`], …)
+//! → [`Ranker`] → [`Menu`].
+//!
+//! # What the editor sees
+//!
+//! [`Menu`] carries the ranked candidates, the full word span, the span to
+//! replace, the quote context and a [`Menu::insertion`] helper. `bsh-repl` owns
+//! rendering, key handling and the line editor; this crate owns the data.
+//!
+//! # Wiring up state that lives elsewhere
+//!
+//! Variables, history, functions and aliases are traits here
+//! ([`VarNames`], [`History`], [`ShellNames`]) so `bsh-runtime` can implement
+//! them without a dependency edge pointing back into this crate. They are
+//! `Send + Sync` because the full picker may run providers on a worker thread
+//! (`DESIGN.md` §6.8); a runtime store with interior mutability should hand
+//! over a snapshot or a `Mutex`-backed view.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use bsh_syntax::Expect;
+mod candidate;
+mod commands;
+mod context;
+mod engine;
+mod menu;
+mod names;
+mod ops;
+mod paths;
+mod rank;
+mod sources;
+mod text;
 
-/// What kind of thing a candidate is; drives the icon and the fallback order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CandKind {
-    /// A path, matched by component prefix.
-    Path,
-    /// A command from the `PATH` index.
-    Command,
-    /// A variable or parameter operator.
-    Variable,
-    /// A command-line option.
-    Option,
-    /// Anything else.
-    Other,
-}
+pub use bsh_lang::QuoteCtx;
 
-/// One thing the user could insert.
-#[derive(Clone, Debug)]
-pub struct Candidate {
-    /// Bytes to insert; authoritative, and not necessarily UTF-8.
-    pub insert: Vec<u8>,
-    /// UTF-8 text to show, which may be a lossy projection of `insert`.
-    pub display: String,
-    /// A description column, e.g. "branch, 3 days ago".
-    pub desc: Option<String>,
-    /// What kind of candidate this is.
-    pub kind: CandKind,
-    /// Frequency-times-recency weight.
-    pub frecency: f32,
-}
+pub use candidate::{CandKind, Candidate, Insertion, Span};
+pub use commands::CommandProvider;
+pub use context::{Ctx, context};
+pub use engine::{Completer, CompletionEngine, Config};
+pub use menu::Menu;
+pub use names::{
+    AliasProvider, BuiltinProvider, FunctionProvider, History, HistoryProvider, ShellNames,
+    VarNames, VarProvider,
+};
+pub use ops::{CaseTagProvider, KeywordProvider, ParamOpProvider, TestOpProvider};
+pub use paths::PathProvider;
+pub use rank::Ranker;
+pub use sources::{Op, PARAM_OPS, PROVIDERS, Provider, ProviderId, TEST_OPS, providers_for};
 
-/// Where in the grammar the cursor is, and what has been typed there.
-#[derive(Clone, Debug)]
-pub struct CompletionCtx {
-    /// The parser's expectation at the cursor.
-    pub expect: Expect,
-    /// Bytes already typed in the word being completed.
-    pub prefix: Vec<u8>,
-}
+/// The default number of entries one directory may contribute.
+pub const ENTRY_CAP: usize = paths::DEFAULT_ENTRY_CAP;
