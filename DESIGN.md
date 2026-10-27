@@ -859,20 +859,34 @@ PS2 continuation and completion, in that order of seniority. This section is
 about the third consumer.
 
 ```rust
-pub enum Expect { Command, Word, RedirectTarget, ForList, CasePattern,
-                  ParamOp, TestOp, ArithExpr, … }
+/// Answers for the cursor: which slot does the word being typed occupy?
+pub fn expectations_at(src: &[u8], offset: usize, opts: &ParseOpts) -> Vec<Expect>;
+/// The same, with the span of each slot, most specific first.
+pub fn expectation_sites_at(..) -> Vec<ExpectSite>;
 
-/// Parse a possibly-truncated line and report what is valid at `offset`.
-pub fn expectations_at(src: &[u8], offset: usize, opts: &Opts) -> Vec<Expect>;
+/// The chain of constructs still open at `offset`, innermost first,
+/// each with its opener and where its content begins.
+pub fn open_constructs_at(src: &[u8], offset: usize) -> Vec<OpenConstruct>;
+
+/// Is this token the command word, an assignment, an argument, …?
+pub fn classify_tokens(tokens: &[Token], src: &[u8]) -> Vec<TokenRole>;
+
+/// One word, for `[[ ]]` operands, `case` patterns and here-doc constructs.
+pub fn parse_word(src: &[u8], opts: &ParseOpts) -> Result<Word, ParseWordError>;
 ```
 
 `Expect` maps 1:1 to a provider set (§6.4), so completion is data-driven from
 the grammar rather than per-command special cases. The lexer must likewise
 treat EOF mid-token as normal, for both this and live syntax highlighting.
 
-**Reality check, after the first implementation.** The API as specified was not
-sufficient, and the completer now carries documented fallbacks in
-`bsh-complete/src/context.rs`. The gaps, in the order they hurt:
+**Reality check, after the first implementation.** The API as originally
+specified was *not* sufficient. The first completer carried six workarounds —
+re-lexing substitution bodies by hand, re-deriving redirection operator lengths,
+counting unbalanced `[[` tokens, encoding per-kind opener widths, and
+re-deriving simple-command boundaries from token text. All eight gaps below are
+now closed, and the workarounds are deleted, but the episode is worth recording
+because the design claim outran the implementation by a wide margin. The gaps,
+in the order they hurt:
 
 1. `expectations_at` answers for the slot *after* the prefix it parsed, so a
    half-typed command word reports `Word` rather than `Command`. It must answer
@@ -893,9 +907,24 @@ sufficient, and the completer now carries documented fallbacks in
 8. There is no token-level "this is the command word" or "this is an
    assignment", so simple-command boundaries are re-derived from token kinds.
 
-Every one of these is duplication this design set out to avoid, and the
-fallbacks are the price. They are cheap now and expensive later; the first four
-are additive API changes.
+Every one of these was duplication this design set out to avoid, and the
+fallbacks were the price. All eight are closed: `expectations_at` answers at the
+cursor (the old answer survives as `expectations_after`), `TestOp` and
+`RedirectTarget` are produced when the cursor is in them, `redirect_op_len` /
+`Token::redirect_target` split the fused token, the lexer maintains a nesting
+stack during its single pass (`open_constructs_at`, `Lexed::open`), `Unterminated`
+reports the innermost construct and its content start, all seventeen `Expect`
+variants are reachable, and `classify_tokens` gives token roles.
+
+A ninth gap was found by the executor rather than the completer: there was no
+word-level parse entry point, so `bsh-vm` synthesised `": <fragment>"` and took
+`words[1]` to parse `[[ ]]` operands, `case` patterns and here-doc constructs.
+`parse_word` closes it, and the executor now calls it directly.
+
+The remaining known limitation is deliberate: a here-document body is not a
+`Word`, so its expansion stays a scanner in `bsh-vm` (a candidate to move into
+`bsh-lang` once a body has a word model), and `${…}` bodies after `:-` are still
+not parsed as nested word slots.
 
 ### 6.4 Completion pipeline
 

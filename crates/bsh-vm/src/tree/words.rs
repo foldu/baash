@@ -1,14 +1,11 @@
 //! The seams back into `bsh-lang` and `bsh-syntax`.
 //!
-//! Two things live here because neither landed crate exposes them:
+//! Two things live here:
 //!
-//! * **a word fragment expander.** `bsh-syntax` parses *chunks*, not words, and
-//!   `bsh-lang` expands `Word`s, so `[[ … ]]` operands, `case` patterns and
-//!   here-document bodies have no direct entry point. [`Interp::parse_fragment`]
-//!   parses `: <fragment>` and takes the second word, which reuses the real
-//!   lexer (quoting, `$'…'`, substitutions) instead of reimplementing quoting
-//!   here and diverging from it. This is a documented contract gap: a
-//!   `bsh_syntax::parse_word` would be better and should replace it.
+//! * **a word fragment expander.** `[[ … ]]` operands, `case` patterns and the
+//!   `$…` constructs inside a here-document body are words, not chunks, so they
+//!   are parsed with [`bsh_syntax::parse_word`] — the real front end, with the
+//!   real quoting rules, and caller-relative spans.
 //! * **here-document body expansion.** A body is not code, so it cannot be
 //!   parsed as one. The scanner below copies literal bytes and hands each
 //!   `$…`/`` `…` `` construct to the fragment expander, which is exactly the
@@ -22,38 +19,9 @@ use super::Interp;
 
 impl Interp {
     /// Parse one word fragment out of shell text, or `None` when the text is
-    /// not exactly one word after the prefix command.
+    /// not exactly one word.
     pub(crate) fn parse_fragment(&self, text: &[u8]) -> Option<Word> {
-        let mut source = Vec::with_capacity(text.len() + 2);
-        source.extend_from_slice(b": ");
-        source.extend_from_slice(text);
-        let file = bsh_diag::SourceFile::new("<word>", source.as_slice());
-        let parsed = bsh_syntax::parse_with(&file, &self.parse_opts());
-        let bsh_syntax::ParseOutcome::Ok(ast) = parsed else {
-            return None;
-        };
-        // `list → and-or → pipeline? → simple → words[1]`. The parser omits a
-        // single-stage `Pipeline` node, so both shapes have to be accepted.
-        let bsh_syntax::NodeKind::List { items } = &ast.node(ast.root).kind else {
-            return None;
-        };
-        let [item] = items.as_slice() else {
-            return None;
-        };
-        let bsh_syntax::NodeKind::AndOr { first, rest } = &ast.node(item.node).kind else {
-            return None;
-        };
-        if !rest.is_empty() {
-            return None;
-        }
-        let stage = match &ast.node(*first).kind {
-            bsh_syntax::NodeKind::Pipeline { stages, .. } => *stages.first()?,
-            _ => *first,
-        };
-        let bsh_syntax::NodeKind::Simple(command) = &ast.node(stage).kind else {
-            return None;
-        };
-        command.words.get(1).cloned()
+        bsh_syntax::parse_word(text, &self.parse_opts()).ok()
     }
 
     /// Expand a fragment as a scalar (tilde + parameter + quote removal, with
