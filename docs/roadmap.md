@@ -14,31 +14,34 @@ cargo run -p bsh-spec -- --shell target/debug/bsh --filter <file>
 
 ## Tranche 1 — the three biggest clusters (584 cases of the gap)
 
-### Arrays — 173 regressions (207 compared, 9 pass today)
+### Arrays — 67 regressions (207 compared, 140 pass today)
 
 Measured by `array.test.sh` (78), `array-sparse.test.sh` (40),
 `array-literal.test.sh` (19), `array-basic.test.sh`, `array-assoc*.test.sh`,
 `array-elem.test.sh`, `array-compat.test.sh`, `assign.test.sh`,
 `var-sub-quote.test.sh`.
 
-- [ ] Sparse storage. `a[100]=x` must not allocate 101 slots, and `unset 'a[0]'`
-      must leave a hole that `${a[@]}` skips. `VarValue::Indexed(Vec<…>)` cannot
-      express this; it needs an ordered sparse map.
-- [ ] `${a[i]}` element read, including arithmetic in the subscript.
-- [ ] `${a[@]}` / `${a[*]}`, and the quoted forms: `"${a[@]}"` is one field per
+- [x] Sparse storage. `a[100]=x` must not allocate 101 slots, and `unset 'a[0]'`
+      must leave a hole that `${a[@]}` skips. `VarValue::Indexed` is a
+      `BTreeMap<i64, Vec<u8>>` now.
+- [x] `${a[i]}` element read, including arithmetic in the subscript.
+- [x] `${a[@]}` / `${a[*]}`, and the quoted forms: `"${a[@]}"` is one field per
       element (none when empty), `"${a[*]}"` is one field joined by the first
       `IFS` character.
-- [ ] `${#a[@]}` count, `${#a[i]}` element length.
-- [ ] `${!a[@]}` indices (sorted numerically for indexed, insertion order for
+- [x] `${#a[@]}` count, `${#a[i]}` element length.
+- [x] `${!a[@]}` indices (sorted numerically for indexed, insertion order for
       associative).
-- [ ] `a=(1 '2 3' $x)` literal, `a+=(…)` append, `a=()` empty.
-- [ ] `a[i]=v`, `a[i]+=v`, and subscript assignment through `declare`/`local`.
-- [ ] `unset 'a[i]'`, `unset a`.
-- [ ] `declare -a`, `declare -A`, `local -a`, and `declare -p` output that is
-      re-input safe.
-- [ ] `${a[@]:offset:length}` slicing.
+- [x] `a=(1 '2 3' $x)` literal, `a+=(…)` append, `a=()` empty, plus the
+      `[k]=v` / `[k]+=v` element forms and bare-element index continuity.
+- [x] `a[i]=v`, `a[i]+=v`, and subscript assignment through `declare`/`local`.
+- [x] `unset 'a[i]'`, `unset a`.
+- [x] `declare -a`, `declare -A`, `local -a`, `local -A`, `readonly -a`/`-A`,
+      array listing, and `declare -p` output that is re-input safe.
+- [x] `${a[@]:offset:length}` slicing, including arithmetic bounds, plus
+      `${@:offset:length}`.
 - [ ] `read -a` (with the `read` tranche).
-- [ ] `set -u` on a missing element; empty array under `"${a[@]}"` with `-u`.
+- [ ] `set -u` on a missing element; empty array under `"${a[@]}"` with `-u`
+      (`nounset` itself is still unimplemented).
 
 ### `read` and the built-in cluster — 411 regressions (712 compared, 224 pass)
 

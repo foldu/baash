@@ -127,6 +127,24 @@ requires it; bash (non-posix) drops them and `bash --posix` persists them. We
 follow POSIX unconditionally — a deliberate deviation recorded in DESIGN §3.3
 Tier C.
 
+**`VarValue::Indexed` is sparse, keyed by `i64`.** An ordered
+`BTreeMap<i64, Vec<u8>>`, not a `Vec`: `a[100]=x` costs one entry, and
+`unset 'a[0]'` leaves a hole that iteration skips. The key is `i64` even though
+subscripts are non-negative after resolution, because bash subscripts are
+machine integers (the suite exercises `a[0x7FFFFFFFFFFFFFFF]`). Reading it is
+`Vars::element_indexed`/`element_assoc`; writing is `set_indexed`/`set_assoc`
+or `append_indexed`/`append_assoc`; `unset_element_indexed`/`unset_element_assoc`
+remove one element. `VarValue::Assoc` remains an insertion-ordered
+`Vec<(Vec<u8>, Vec<u8>)>`. A scalar converts to either shape with the old value
+at element/key zero; indexed↔associative conversion is
+`Error::ArrayShapeMismatch` (bash refuses it).
+
+**Array element removal needs word work, so the VM supplies it.** `unset
+'a[$i]'` re-parses its operand as an assignment word, which is expansion, not
+state. `ShellHost::unset_array_element(&mut self, operand) -> Option<Status>`
+is the seam: the default returns `None` and `unset` keeps its "not implemented"
+diagnostic; the VM expands the subscript and calls back into the store.
+
 **`$@` and `$*` are not here.** `special_scalar` returns `None` for them because
 they are multi-field; expansion reads `positional().argv` and applies the
 quoting rules itself.
@@ -189,11 +207,30 @@ word — while unquoted literal text inside a parameter replacement word is
 splittable — `${x:-a:b}` is two fields. Collapsing these into one boolean is the
 classic way to get IFS subtly wrong.
 
+**Arrays are part of the word model.** `ParamName::Element { name, subscript }`
+is `${a[i]}` and `ParamName::Elements { name, star }` is `${a[@]}`/`${a[*]}`;
+both carry the array's name. The subscript is a `Word` because it is expanded
+first; for an indexed array the result is then evaluated with
+`Shell::arithmetic_value`, for an associative array it is the key verbatim.
+`ParamOp::Length` covers `${#a[@]}` and `${#a[i]}`, `ParamOp::Indices` is
+`${!a[@]}`, `ParamOp::Indirect` is `${!a[i]}` (the element names a variable),
+and `ParamOp::ArraySlice` carries the two bounds as words. `Vars::array(name)
+-> Option<ArrayValue<'_>>` is how expansion sees the storage: an
+`ArrayValue::Indexed(&BTreeMap<i64, Vec<u8>>)` in index order or
+`ArrayValue::Assoc(&[(Vec<u8>, Vec<u8>)])` in insertion order. A scalar is a
+one-element array for reads, and a bare `${a}` decays to element/key zero.
+
+**Quoted and splittable, also for arrays.** `"${a[@]}"` uses the same
+`Expanded::break_field` boundaries as `"$@"` — one field per element, zero
+fields when empty — and `"${a[*]}"` joins with the first `IFS` character.
+Unquoted forms are a single splittable expansion result. No third path was
+introduced.
+
 **Unsupported is an error, not a guess.** `${x#pat}`, `${x%pat}`, `${x/p/r}`,
-`${!x}`, `${x@Q}`, `${x^^pat}`, `${@:o:l}`, arrays and process substitution
-return `ErrorKind::Unsupported` with the operator's span. The parser must map
-those surface forms to the corresponding `ParamOp`, so the error can point at
-the right place instead of failing later.
+`${!x}` (on a non-array), `${x@Q}`, `${x^^pat}`, `${@^^}` and process
+substitution return `ErrorKind::Unsupported` with the operator's span. The
+parser must map those surface forms to the corresponding `ParamOp`, so the
+error can point at the right place instead of failing later.
 
 **Errors** are `bsh_lang::Error { kind, span }` with `Display`, `code()` and
 `diagnostic() -> bsh_diag::Diagnostic`. Codes 301–306 are provisional.
@@ -283,13 +320,22 @@ inside here-document data — and reject a second word or an operator with
 diagnostic is relative to the caller's `src`; nothing is synthetic. Leading
 layout is skipped, trailing layout allowed.
 
-**Arrays are a gap with a shape.** `bsh-lang` has no array-literal word part, so
-`local x=(a b)` parses with the word at that position replaced by a quoted
-placeholder and the elements carried in `SimpleCommand::array_args:
-Vec<ArrayArg>` (only after `local`/`declare`/`typeset`/`export`/`readonly`/
-`alias`/`eval`, matching bash). The VM must read `ArrayArg`, not the placeholder
-word. Giving arrays a real word part is deferred until bash arrays are
-implemented.
+**Array literals are structured.** `Assignment.array:
+Option<Vec<ArrayElement>>` and `SimpleCommand::array_args: Vec<ArrayArg>` carry
+`ArrayElement { span, index: Option<ArrayIndex>, value: Word }`;
+`ArrayIndex { subscript: Word, append }` is the `[k]` / `[k]+=` prefix. The
+distinction is structural on purpose: `[k]=$v` is one scalar element while a
+bare `$v` field-splits. `ArrayArg` additionally carries the variable `name`
+span and its own `append`, and the argument in `words` is still a quoted
+placeholder holding the raw text (the VM matches it). The parser only accepts
+array-literal arguments after `local`/`declare`/`typeset`/`export`/`readonly`/
+`alias`/`eval`, matching bash.
+
+**Subscripts may contain spaces and `=`.** `a[1 + 2]=v` is stitched back
+together from several tokens (bash's parser does the same), and
+`a[x=1]=v`'s assignment `=` is found after the closing bracket.
+`a[$(cmd)]=v` is still refused by design (DESIGN §3.3), but `${a[$(cmd)]}` is
+not: the expansion subscript is an ordinary word.
 
 **Codes (1xx)**: 1 unterminated, 2 need more input, 3 unexpected, 4 bashism,
 5 array subscript, 6 depth, 7 here-doc.
@@ -391,9 +437,20 @@ consequence table — `exit 7` is 7, not 1.
 **`pipefail` takes the *rightmost* failing status**, and is sampled at pipeline
 start (DESIGN §2).
 
+**Arrays are executed here.** The parser's `ArrayElement`s reach the executor
+through `AssignmentAction`; `exec_simple` keeps declaration-command literals on
+an `Interp` side channel (`ArrayLiteral`, keyed by the placeholder text) so
+`local`/`declare` can apply `-a`/`-A` first. `Interp` also implements
+`bsh_lang::Vars::array` (a view over `VarValue`) and
+`ShellHost::unset_array_element`, and its arithmetic `IntVars` exposes element
+lvalues, so `(( a[99]=1 ))` and `${a[i+1]}` share one evaluator. A variable
+whose value is not a number is recursively evaluated as an expression, bounded
+by `MAX_RECURSION`.
+
 Deferred, and listed in `bsh_vm::tree`'s `# Deferred`: traps, job control,
-`select`, `time`, `coproc`, arrays, pattern parameter operators, `[[ =~ ]]`,
-process substitution, `~user`, `$RANDOM`/`$SECONDS`/`$PIPESTATUS`, `set -x`.
+`select`, `time`, `coproc`, `read -a`, `set -u`/nounset, pattern parameter
+operators, `[[ =~ ]]`, process substitution, `~user`,
+`$RANDOM`/`$SECONDS`/`$PIPESTATUS`, `set -x`.
 
 **Platform constants come from `bsh-sys`.** `bsh_sys::{flags, SIGPIPE, c_int,
 mode_t}` are re-exported so no other crate needs `libc`; `bsh-vm` has no `libc`
