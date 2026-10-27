@@ -37,6 +37,70 @@ impl Interp {
         self.expand_operand(&word)
     }
 
+    /// Expand one `[[ … == PAT ]]` right-hand operand.
+    ///
+    /// The conditional's body is raw text, so an extglob group never became a
+    /// parsed word: `parse_word` stops at the `(`. When the text holds one,
+    /// split it at the group's structural bytes, expand each literal stretch
+    /// through the ordinary pipeline, and stitch the operators back in with no
+    /// quoting — so `@(a|b)` reaches the matcher as an active extglob while
+    /// `'@(a|b)'` still becomes a quoted literal.
+    pub(crate) fn expand_pattern_fragment(
+        &mut self,
+        text: &[u8],
+    ) -> Result<Field, bsh_lang::Error> {
+        let Some(segments) = pattern_segments(text) else {
+            return self.expand_fragment(text);
+        };
+        let mut bytes = Vec::new();
+        let mut quoted = Vec::new();
+        for segment in segments {
+            match segment {
+                Segment::Raw(raw) => {
+                    bytes.extend_from_slice(raw);
+                    quoted.resize(quoted.len() + raw.len(), false);
+                }
+                Segment::Text(range) => {
+                    let field = self.expand_pattern_text(&text[range])?;
+                    bytes.extend_from_slice(&field.bytes);
+                    quoted.extend_from_slice(&field.quoted);
+                }
+            }
+        }
+        Ok(Field::new(bytes, quoted))
+    }
+
+    /// Expand one literal stretch of a `[[ … ]]` pattern.
+    ///
+    /// A pattern arm may contain unquoted spaces (`@(a b|foo)`), which the
+    /// fragment parser reads as the end of the word. Expand each run between
+    /// them separately and keep the separator bytes active: a space is a
+    /// literal in a pattern, so it needs no quoting.
+    fn expand_pattern_text(&mut self, text: &[u8]) -> Result<Field, bsh_lang::Error> {
+        if text.is_empty() || self.parse_fragment(text).is_some() {
+            return self.expand_fragment(text);
+        }
+        let mut bytes = Vec::new();
+        let mut quoted = Vec::new();
+        let mut index = 0usize;
+        while index < text.len() {
+            let start = index;
+            while index < text.len() && !text[index].is_ascii_whitespace() {
+                index += 1;
+            }
+            if start == index {
+                bytes.push(text[index]);
+                quoted.push(false);
+                index += 1;
+                continue;
+            }
+            let field = self.expand_fragment(&text[start..index])?;
+            bytes.extend_from_slice(&field.bytes);
+            quoted.extend_from_slice(&field.quoted);
+        }
+        Ok(Field::new(bytes, quoted))
+    }
+
     /// Expand a [`Word`] to one [`Field`]: stages 1, 2 and 5 of the expansion
     /// pipeline, with no splitting and no globbing.
     pub(crate) fn expand_operand(&mut self, word: &Word) -> Result<Field, bsh_lang::Error> {
@@ -223,9 +287,17 @@ fn skip_double(rest: &[u8], open: usize) -> Option<usize> {
 
 /// Split a `[[ … ]]` body into conditional tokens. Words keep their raw
 /// source text so the caller can expand them with the word pipeline.
-pub(crate) fn conditional_tokens(body: &[u8]) -> Vec<CondToken> {
+///
+/// The tokenizer tracks one bit of context: after `==`/`!=` bash reads the
+/// right-hand side as a *pattern*, where `@(…)`, `?(…)`, `*(…)`, `+(…)` and
+/// `!(…)` are extglob groups — the parentheses belong to the word, not to a
+/// `[[ ]]` grouping. With `extglob` on, the same operators start a word in
+/// operand position (`[[ !(a) ]]` is then "is the word `!(a)` non-empty");
+/// with it off, `!(` is negation of a group.
+pub(crate) fn conditional_tokens(body: &[u8], extglob: bool) -> Vec<CondToken> {
     let mut tokens = Vec::new();
     let mut index = 0usize;
+    let mut pattern_context = false;
     while index < body.len() {
         let byte = body[index];
         if byte.is_ascii_whitespace() {
@@ -233,6 +305,16 @@ pub(crate) fn conditional_tokens(body: &[u8]) -> Vec<CondToken> {
             continue;
         }
         let rest = &body[index..];
+        // A pattern operand may begin with an extglob operator, and so may an
+        // ordinary operand when the dialect is on; `!` is an operator
+        // character everywhere else.
+        if (pattern_context || extglob) && starts_extglob(rest) {
+            let length = word_end(body, index, true);
+            tokens.push(CondToken::Word(index..index + length));
+            index += length;
+            pattern_context = false;
+            continue;
+        }
         let two = |token: CondToken| (token, 2usize);
         let (token, length) = if rest.starts_with(b"&&") {
             two(CondToken::And)
@@ -257,15 +339,95 @@ pub(crate) fn conditional_tokens(body: &[u8]) -> Vec<CondToken> {
         } else if rest.starts_with(b">") {
             (CondToken::Gt, 1)
         } else {
-            let length = word_end(body, index);
+            let length = word_end(body, index, pattern_context);
             tokens.push(CondToken::Word(index..index + length));
             index += length;
+            pattern_context = false;
             continue;
         };
+        pattern_context = matches!(token, CondToken::Eq | CondToken::Ne);
         tokens.push(token);
         index += length;
     }
     tokens
+}
+
+/// Whether `rest` begins with one of the five extglob operators.
+fn starts_extglob(rest: &[u8]) -> bool {
+    matches!(rest, [b'?' | b'*' | b'+' | b'@' | b'!', b'(', ..])
+}
+
+/// One piece of a `[[ … == PAT ]]` operand: source text to expand, or extglob
+/// punctuation that must stay active.
+enum Segment<'a> {
+    /// Operator bytes (`@(`, `|`, `)`, …), passed through unquoted.
+    Raw(&'a [u8]),
+    /// A range of the operand to expand with the ordinary pipeline.
+    Text(std::ops::Range<usize>),
+}
+
+/// Split a pattern operand at its extglob punctuation.
+///
+/// Returns `None` when there is no well-formed extglob group, in which case
+/// the whole operand is an ordinary word. Quotes, escapes and substitutions
+/// are skipped whole, so a quoted `|` never splits and `"$(echo a|b)"` stays
+/// one stretch.
+fn pattern_segments(text: &[u8]) -> Option<Vec<Segment<'_>>> {
+    let mut segments = Vec::new();
+    let mut literal = 0usize;
+    let mut index = 0usize;
+    let mut depth = 0usize;
+    let mut found = false;
+    while index < text.len() {
+        let byte = text[index];
+        match byte {
+            b'\\' => {
+                index += 2;
+                continue;
+            }
+            b'\'' => {
+                index = skip_single(text, index).unwrap_or(text.len());
+                continue;
+            }
+            b'"' => {
+                index = skip_double(text, index).unwrap_or(text.len());
+                continue;
+            }
+            b'`' | b'$' => {
+                index = construct_end(text, index).unwrap_or(index + 1);
+                continue;
+            }
+            _ => {}
+        }
+        let operator = depth == 0
+            && matches!(byte, b'?' | b'*' | b'+' | b'@' | b'!')
+            && text.get(index + 1) == Some(&b'(');
+        let nested = depth > 0 && matches!(byte, b'(' | b')' | b'|');
+        if !operator && !nested {
+            index += 1;
+            continue;
+        }
+        found = true;
+        if literal < index {
+            segments.push(Segment::Text(literal..index));
+        }
+        let length = if operator { 2 } else { 1 };
+        segments.push(Segment::Raw(&text[index..index + length]));
+        if operator || byte == b'(' {
+            depth += 1;
+        } else if byte == b')' {
+            depth = depth.saturating_sub(1);
+        }
+        index += length;
+        literal = index;
+    }
+    if !found || depth != 0 {
+        return None;
+    }
+    if literal < text.len() {
+        segments.push(Segment::Text(literal..text.len()));
+    }
+    Some(segments)
 }
 
 /// One `[[ … ]]` token.
@@ -287,7 +449,10 @@ pub(crate) enum CondToken {
 
 /// The end of a conditional word: whitespace, parentheses and the comparison
 /// operators end it; quotes, substitutions and escapes are skipped whole.
-fn word_end(body: &[u8], start: usize) -> usize {
+///
+/// With `extglob`, a `X(…)` group is part of the word: `[[ x == a@(b|c) ]]`
+/// is one operand, not `a@` followed by a group.
+fn word_end(body: &[u8], start: usize, extglob: bool) -> usize {
     let mut index = start;
     while index < body.len() {
         match body[index] {
@@ -296,6 +461,12 @@ fn word_end(body: &[u8], start: usize) -> usize {
             b'"' => index = skip_double(body, index).unwrap_or(body.len()),
             b'`' => index = construct_end(body, index).unwrap_or(index + 1),
             b'$' => index = construct_end(body, index).unwrap_or(index + 1),
+            byte if extglob
+                && matches!(byte, b'?' | b'*' | b'+' | b'@' | b'!')
+                && body.get(index + 1) == Some(&b'(') =>
+            {
+                index = extglob_end(body, index + 1);
+            }
             byte if byte.is_ascii_whitespace() || matches!(byte, b'(' | b')' | b'<' | b'>') => {
                 break;
             }
@@ -303,6 +474,38 @@ fn word_end(body: &[u8], start: usize) -> usize {
         }
     }
     index.max(start + 1).min(body.len()) - start
+}
+
+/// The offset just past the `)` that closes the group opened at `open`.
+///
+/// Quotes and escapes are skipped so a `)` inside them does not close the
+/// group; an unterminated group runs to the end of the body, which the matcher
+/// then treats as literal text.
+fn extglob_end(body: &[u8], open: usize) -> usize {
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < body.len() {
+        match body[index] {
+            b'\\' => index += 2,
+            b'\'' => index = skip_single(body, index).unwrap_or(body.len()),
+            b'"' => index = skip_double(body, index).unwrap_or(body.len()),
+            b'`' => index = construct_end(body, index).unwrap_or(index + 1),
+            b'$' => index = construct_end(body, index).unwrap_or(index + 1),
+            b'(' => {
+                depth += 1;
+                index += 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    body.len()
 }
 
 /// Whether `word` denotes one of the two-operand test operators.

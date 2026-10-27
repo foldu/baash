@@ -19,6 +19,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bsh_lang::Field;
+use bsh_lang::Shell as _;
 use bsh_runtime::{ShellHost, Status};
 
 use super::words::{CondToken, binary_operator, conditional_tokens, unary_operator};
@@ -31,7 +32,11 @@ pub(crate) fn evaluate(
     body: Range<usize>,
 ) -> Status {
     let text = &chunk.source.bytes()[body.clone()];
-    let tokens = conditional_tokens(text);
+    // bash decides whether `!(…)` is an extglob word or a negation at parse
+    // time; the tokenizer runs here, so the current option is the closest
+    // thing to that.
+    let extglob = interp.pattern_flags().extglob;
+    let tokens = conditional_tokens(text, extglob);
     let mut parser = Parser {
         interp,
         text,
@@ -175,7 +180,14 @@ impl Parser<'_> {
                         String::from_utf8_lossy(&operator)
                     ));
                 };
-                let right = self.expand(&right)?;
+                // The right-hand side of `==`/`!=` is a pattern, so an
+                // extglob group in the source text belongs to it even though
+                // the body is parsed one word at a time.
+                let right = if matches!(operator.as_slice(), b"==" | b"=" | b"!=") {
+                    self.expand_pattern(&right)?
+                } else {
+                    self.expand(&right)?
+                };
                 return self.compare(&operator, &left, &right);
             }
         }
@@ -195,11 +207,26 @@ impl Parser<'_> {
         }
     }
 
+    /// Expand a right-hand operand of `==`/`!=`, keeping extglob punctuation
+    /// active.
+    fn expand_pattern(&mut self, range: &Range<usize>) -> Result<Field, String> {
+        let text = &self.text[range.clone()];
+        match self.interp.expand_pattern_fragment(text) {
+            Ok(field) => Ok(field),
+            Err(error) => {
+                self.interp.diagnose(&error.diagnostic());
+                Err(String::new())
+            }
+        }
+    }
+
     fn compare(&mut self, operator: &[u8], left: &Field, right: &Field) -> Result<bool, String> {
         match operator {
             b"==" | b"=" | b"!=" => {
-                let pattern = crate::glob::Pattern::new(&right.bytes, Some(&right.quoted));
-                let hit = crate::glob::matches(&pattern, &left.bytes);
+                // bash matches the right-hand side with extglob semantics even
+                // when `shopt -u extglob`; `nocasematch` still applies.
+                let flags = crate::pattern::conditional_flags(self.interp.pattern_flags());
+                let hit = crate::pattern::matches(right, &left.bytes, flags);
                 Ok(if operator == b"!=" { !hit } else { hit })
             }
             b"<" => Ok(left.bytes < right.bytes),

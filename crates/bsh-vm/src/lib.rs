@@ -40,6 +40,7 @@ use bsh_compile::Chunk;
 
 pub mod arith;
 pub mod glob;
+mod pattern;
 pub mod tree;
 
 pub use tree::{Interp, TrapKind, Unwind};

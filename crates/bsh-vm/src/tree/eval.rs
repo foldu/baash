@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use bsh_diag::Diagnostic;
+use bsh_lang::Shell as _;
 use bsh_runtime::{ShellHost, Status};
 use bsh_syntax::{CaseTerm, NodeId, NodeKind, PipeOp, Separator};
 
@@ -509,8 +510,10 @@ impl Interp {
                         Ok(field) => field,
                         Err(error) => return self.expansion_failed(error),
                     };
-                    let pattern = crate::glob::Pattern::new(&field.bytes, Some(&field.quoted));
-                    if crate::glob::matches(&pattern, &subject.bytes) {
+                    // The dialect is read per arm: a `shopt` inside an earlier
+                    // arm's body takes effect on the arms after it, as in bash.
+                    let flags = self.pattern_flags();
+                    if crate::pattern::matches(&field, &subject.bytes, flags) {
                         matched = true;
                         break;
                     }
