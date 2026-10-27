@@ -87,18 +87,37 @@ does not yet retry `ENOEXEC` as a script) plus `command -v`.
 
 ## Tranche 2 — expansion and pattern work
 
+At the start of this tranche the suite stood at 1013/2787 total. It is now
+**1681/2787 total, 1626 strict** (recorded in `crates/bsh-spec/baseline.txt`).
+
 - [x] Shared pattern engine (`bsh-pattern`): Thompson NFA, byte and UTF-8
       modes, extglob, brackets, POSIX classes, no exponential blowup.
 - [x] `${x#pat}`, `${x##pat}`, `${x%pat}`, `${x%%pat}` — 0/29 → 26/29.
 - [x] `${x/a/b}`, `${x//a/b}`, `${x/#a/b}`, `${x/%a/b}` — 1/28 → 25/28.
 - [x] `${x^pat}`, `${x^^pat}`, `${x,}`, `${x,,}`, including on `$@`/arrays.
 - [ ] `${x@Q}`, `${x@E}`, `${x@P}`, `${!prefix@}` (the rest of `var-op-bash`).
-- [ ] `shopt` plus the `pattern_flags()` override, so `extglob`/`nocasematch`
+- [x] `shopt` plus the `pattern_flags()` override, so `extglob`/`nocasematch`
       reach the matcher.
+- [x] `failglob` — fails the command, not the shell (bash's script behaviour);
+      `${x:?}` still ends a non-interactive shell.
+- [x] UTF-8 character units in `bsh-lang`: `${#x}` and `${x:o:l}` count
+      characters when the locale says so, through `Vars::utf8()` and
+      `bsh_pattern::char_len`. The VM side (detect the locale, answer `utf8()`)
+      and the matcher flags follow in the next wave.
 - [ ] Brace expansion `{a,b}` and `{1..3}` (92 regressions with extglob).
-- [ ] `extglob` `?(…)`, `*(…)`, `+(…)`, `@(…)`, `!(…)`.
+- [~] `extglob` `?(…)`, `*(…)`, `+(…)`, `@(…)`, `!(…)` — the matcher is done
+      (110 tests in `bsh-pattern`); the **lexer** cannot parse the syntax yet,
+      so `case x in @(a|b))` is a syntax error. That is `extglob-files` 0/23
+      and most of the remaining glob failures. In flight.
+      Design note: bash decides extglob at parse time, and ßhell parses a whole
+      script before running it, so the option cannot reach the parser without
+      incremental top-level parsing. The plan is to lex the syntax
+      unconditionally (superset grammar, §3.3) and let the matcher honour
+      `shopt` — which makes us *more* permissive when extglob is off
+      (`echo @(a)` prints instead of failing).
 - [ ] `[[ =~ ]]` with `BASH_REMATCH` (34).
-- [ ] `$RANDOM`, `$SECONDS`, `$PIPESTATUS`, `$FUNCNAME`, `$BASH_SOURCE`.
+- [x] `$LINENO` (from node spans) and `$PIPESTATUS`.
+- [ ] `$RANDOM`, `$SECONDS`, `$FUNCNAME`, `$BASH_SOURCE`, `BASH_LINENO`.
 
 ## Tranche 3 — process and job control
 
