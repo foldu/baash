@@ -53,6 +53,18 @@ impl ThreadGate {
     }
 }
 
+/// The process-wide gate used by [`fork_child`](crate::fork_child) and
+/// [`spawn_forked`](crate::spawn_forked).
+///
+/// Modes that own helper threads (the full-screen picker, the debugger) take a
+/// guard here; any `fork` then panics instead of producing a child that may
+/// deadlock on a lock held by a thread it does not have (DESIGN.md §4.3).
+/// `posix_spawn` does not consult it: it is safe in a threaded process.
+pub fn fork_gate() -> &'static ThreadGate {
+    static FORK_GATE: ThreadGate = ThreadGate::new();
+    &FORK_GATE
+}
+
 /// Decrements the count when dropped.
 #[derive(Debug)]
 pub struct ThreadGuard<'a> {
