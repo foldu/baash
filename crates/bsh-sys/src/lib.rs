@@ -107,6 +107,12 @@ pub const SIGINT: c_int = libc::SIGINT;
 /// `SIGQUIT`: ignored by the shell while it waits for a foreground job.
 pub const SIGQUIT: c_int = libc::SIGQUIT;
 
+/// `SIGTERM`, the default signal for `kill`.
+pub const SIGTERM: c_int = libc::SIGTERM;
+
+/// `ECHILD`: the pid is not a child, i.e. `wait` has nothing to report for it.
+pub const ECHILD: c_int = libc::ECHILD;
+
 /// Whether `fd` refers to a terminal.
 ///
 /// Interactive behaviour (colour, the line editor, job control) hangs off this

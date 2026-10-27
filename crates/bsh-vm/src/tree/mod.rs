@@ -107,6 +107,7 @@ mod builtins;
 mod command;
 mod cond;
 mod eval;
+mod jobs;
 mod read;
 mod redir;
 mod traps;
@@ -230,6 +231,13 @@ pub struct Interp {
     in_trap: bool,
     /// True once the shell has started finishing, so the EXIT trap runs once.
     exiting: bool,
+    /// Children started with `&`, and the status of the ones already reaped
+    /// (so `wait PID` can report a status after the fact).
+    background: traps::Background,
+    /// The pids of those children in start order, which is what `%1`, `%%` and
+    /// `%-` name. Real job control is out of scope; this is enough for
+    /// `wait %%` and `kill -TERM %%`.
+    jobs: Vec<i32>,
     /// The pending exit status while the `EXIT` trap runs, so a bare `exit`
     /// inside it keeps that status (bash's rule).
     exit_trap_status: Option<Status>,
@@ -278,6 +286,8 @@ impl Interp {
             run_depth: 0,
             in_trap: false,
             exiting: false,
+            background: traps::Background::new(),
+            jobs: Vec::new(),
             exit_trap_status: None,
         };
         // `$?`, `$$` and `$-` must answer before the first command runs.

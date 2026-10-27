@@ -22,6 +22,7 @@
 //! sourced script returns (and from a function only under `-o functrace`,
 //! which is bash's inheritance rule).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bsh_runtime::{Status, TrapAction, TrapKey};
@@ -149,6 +150,7 @@ impl Interp {
         self.in_trap = false;
         self.exiting = false;
         self.run_depth = 0;
+        self.background.clear();
         self.read_buffers.clear();
     }
 
@@ -370,4 +372,17 @@ impl Drop for Interp {
             self.finish(status);
         }
     }
+}
+
+/// A child process the shell started with `&`, and its status once reaped.
+///
+/// `None` means "still running" (or at least not reaped yet); the status is
+/// kept after the child is reaped so `wait PID` can still report it.
+pub(crate) type Background = BTreeMap<i32, Option<Status>>;
+
+/// The name a `wait`/`kill` diagnostic should print for itself.
+pub(crate) fn builtin_name(argv: &[Vec<u8>], fallback: &str) -> String {
+    argv.first()
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .unwrap_or_else(|| fallback.to_owned())
 }

@@ -1012,11 +1012,23 @@ impl Interp {
         None
     }
 
-    /// Reap finished background children without blocking. `SIGCHLD` is a
-    /// wakeup hint, not a per-child event (DESIGN.md §4.5), so this is a
-    /// drain-in-the-loop, not a handler.
-    fn reap_background(&mut self) {
-        while bsh_sys::wait_any_nohang().is_some() {}
+    /// Reap finished children without blocking. `SIGCHLD` is a wakeup hint,
+    /// not a per-child event (DESIGN.md §4.5), so this is a drain-in-the-loop,
+    /// not a handler. Background statuses are kept: `wait PID` may be asked
+    /// for a child that finished several commands ago.
+    pub(crate) fn reap_background(&mut self) {
+        while let Some((pid, outcome)) = bsh_sys::wait_any_nohang() {
+            if let Some(slot) = self.background.get_mut(&pid) {
+                *slot = Some(Status(outcome.exit_status()));
+            }
+        }
+    }
+
+    /// Register a child started with `&` so `wait` and `%N` can find it.
+    pub(crate) fn track_background(&mut self, pid: i32) {
+        self.background.insert(pid, None);
+        self.jobs.retain(|candidate| *candidate != pid);
+        self.jobs.push(pid);
     }
 }
 

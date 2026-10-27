@@ -151,6 +151,7 @@ impl Interp {
             if item.sep == Some(Separator::Amp) {
                 match self.fork_shell(chunk, item.node, Ctx::default()) {
                     Ok(child) => {
+                        self.track_background(child.pid());
                         self.state.vars.set_last_bg_pid(Some(child.pid()));
                         last = Status::SUCCESS;
                     }

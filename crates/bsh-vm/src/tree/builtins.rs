@@ -101,6 +101,14 @@ static VM_BUILTINS: &[VmBuiltin] = &[
         name: b"read",
         run: super::read::bi_read,
     },
+    VmBuiltin {
+        name: b"wait",
+        run: super::Interp::bi_wait,
+    },
+    VmBuiltin {
+        name: b"kill",
+        run: super::Interp::bi_kill,
+    },
 ];
 
 fn diagnose(interp: &mut Interp, message: impl Into<String>) {
