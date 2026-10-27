@@ -7,3 +7,8 @@ license.workspace = true
 description = "Diagnostic IR and renderers for ßhell"
 
 [dependencies]
+unicode-width.workspace = true
+miette = { workspace = true, optional = true }
+
+[features]
+fancy = ["dep:miette"]

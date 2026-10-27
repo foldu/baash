@@ -8,3 +8,4 @@ description = "Words, quoting and expansion"
 
 [dependencies]
 bsh-diag.workspace = true
+smallvec.workspace = true

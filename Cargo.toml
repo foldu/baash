@@ -22,6 +22,12 @@ bsh-repl = { path = "crates/bsh-repl" }
 bsh-tools = { path = "crates/bsh-tools" }
 
 libc = "0.2"
+bumpalo = "3"
+memchr = "2"
+smallvec = "1"
+unicode-width = "0.2"
+miette = "7"
+nucleo-matcher = "0.3.1"
 
 [profile.release]
 # Interactive shell: startup latency matters more than peak throughput.

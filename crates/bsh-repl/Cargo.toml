@@ -11,3 +11,4 @@ bsh-highlight.workspace = true
 bsh-complete.workspace = true
 bsh-diag.workspace = true
 bsh-sys.workspace = true
+unicode-width.workspace = true

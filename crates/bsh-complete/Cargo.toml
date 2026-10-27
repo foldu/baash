@@ -9,3 +9,4 @@ description = "Completion candidates and ranking"
 [dependencies]
 bsh-syntax.workspace = true
 bsh-diag.workspace = true
+nucleo-matcher.workspace = true

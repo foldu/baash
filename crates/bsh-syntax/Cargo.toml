@@ -8,3 +8,5 @@ description = "Tolerant lexer, spans and parse outcomes"
 
 [dependencies]
 bsh-diag.workspace = true
+bumpalo.workspace = true
+memchr.workspace = true

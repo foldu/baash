@@ -8,3 +8,4 @@ description = "Syntax highlighting over the real lexer"
 
 [dependencies]
 bsh-syntax.workspace = true
+unicode-width.workspace = true
