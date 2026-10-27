@@ -109,6 +109,7 @@ mod cond;
 mod eval;
 mod read;
 mod redir;
+mod traps;
 mod words;
 
 pub use eval::TrapKind;
@@ -220,6 +221,18 @@ pub struct Interp {
     /// file the surplus is rewound with `lseek` instead, so no second reader
     /// ever sees a stale buffer.
     read_buffers: std::collections::BTreeMap<std::os::fd::RawFd, Vec<u8>>,
+    /// The signal dispositions the trap table implies (see `traps.rs`).
+    signals: traps::SignalState,
+    /// `run_named` nesting. The EXIT trap runs when this returns to zero, so
+    /// `eval`, `source` and `$(…)` never trigger it early.
+    run_depth: usize,
+    /// True while a trap handler runs: a trap never re-enters itself.
+    in_trap: bool,
+    /// True once the shell has started finishing, so the EXIT trap runs once.
+    exiting: bool,
+    /// The pending exit status while the `EXIT` trap runs, so a bare `exit`
+    /// inside it keeps that status (bash's rule).
+    exit_trap_status: Option<Status>,
 }
 
 /// One `name=(…)` argument in a declaration command.
@@ -261,6 +274,11 @@ impl Interp {
             depth: 0,
             array_literals: Vec::new(),
             read_buffers: std::collections::BTreeMap::new(),
+            signals: traps::SignalState::default(),
+            run_depth: 0,
+            in_trap: false,
+            exiting: false,
+            exit_trap_status: None,
         };
         // `$?`, `$$` and `$-` must answer before the first command runs.
         interp.sync_specials();
@@ -301,7 +319,22 @@ impl Interp {
     /// This is what `-c`, a script file, a `$(…)` body, `eval` and `source`
     /// all funnel through, so there is exactly one place where "a chunk of
     /// shell text becomes commands" happens.
+    ///
+    /// The outermost call on a non-interactive shell is also where the EXIT
+    /// trap runs: it is inside the chunk's unwind, so `exit 42` in the handler
+    /// still decides the process's status. Nested calls (`eval`, `source`,
+    /// a command substitution) never reach that point.
     pub fn run_named(&mut self, name: &str, src: &[u8]) -> Status {
+        self.run_depth += 1;
+        let status = self.run_named_inner(name, src);
+        self.run_depth -= 1;
+        if self.run_depth == 0 && !self.interactive && !self.exiting {
+            return self.finish(status);
+        }
+        status
+    }
+
+    fn run_named_inner(&mut self, name: &str, src: &[u8]) -> Status {
         let source = Arc::new(SourceFile::new(name, src));
         let opts = self.parse_opts();
         let chunk = match parse_with(&source, &opts) {
@@ -443,8 +476,18 @@ impl Interp {
     }
 
     /// `errexit`, applied at the one place a whole and-or list finishes.
+    ///
+    /// The `ERR` trap fires here too, whether or not `errexit` is on: the
+    /// ignore-context rules are the same for both (DESIGN.md §4.7), which is
+    /// why they share this one call site.
     pub(crate) fn check_errexit(&mut self, status: Status, ctx: Ctx, negated: bool) -> Unwind {
-        if status.is_success() || ctx.ignore_errexit || negated || !self.state.opts.errexit {
+        if status.is_success() || ctx.ignore_errexit || negated {
+            return Unwind::Status(status);
+        }
+        if let Some(exit) = self.run_err_trap(status) {
+            return Unwind::Exit(exit);
+        }
+        if !self.state.opts.errexit {
             return Unwind::Status(status);
         }
         Unwind::Exit(status)
@@ -464,6 +507,7 @@ impl Interp {
         ctx: Ctx,
     ) -> std::io::Result<bsh_sys::Child> {
         bsh_sys::fork_child(|| {
+            self.enter_child();
             let unwind = self.eval_node(chunk, body, ctx);
             let status = match unwind {
                 Unwind::Status(status) | Unwind::Return(status) | Unwind::Exit(status) => status,
@@ -737,6 +781,20 @@ impl ShellHost for Interp {
                 Status(1)
             }
         })
+    }
+
+    fn trap_saved_status(&self) -> Option<Status> {
+        self.exit_trap_status
+    }
+
+    fn check_syntax(&mut self, src: &[u8]) -> bool {
+        // `trap` validates its action when it is registered, so the error is
+        // reported immediately rather than at exit.
+        let opts = self.parse_opts();
+        matches!(
+            bsh_syntax::parse_bytes(src, &opts),
+            bsh_syntax::ParseOutcome::Ok(_)
+        )
     }
 
     fn diagnose(&mut self, diagnostic: &Diagnostic) {

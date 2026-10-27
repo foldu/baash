@@ -26,6 +26,7 @@
 mod builtins;
 mod errors;
 mod opts;
+mod traps;
 mod vars;
 
 #[cfg(test)]
@@ -38,6 +39,9 @@ pub use builtins::{
 };
 pub use errors::{Action, Error, ShellError, codes, consequence, display as display_bytes};
 pub use opts::{ALL_FLAGS, Flag, NamedOption, OptionKind, Opts};
+pub use traps::{
+    SIGNALS, TrapAction, TrapKey, TrapTable, signal_number, signal_short_name, signal_table,
+};
 pub use vars::{
     ArrayShape, Attrs, CreateScope, FrameId, FrameKind, Positional, PrefixAssignments, Var,
     VarValue, Vars,
@@ -82,6 +86,10 @@ pub struct ShellState {
     pub opts: Opts,
     /// Variables, scopes and positional parameters.
     pub vars: Vars,
+    /// Registered traps, including the `EXIT`/`ERR`/`DEBUG`/`RETURN`
+    /// pseudo-signals. Signal *dispositions* are the VM's business: this table
+    /// only records what `trap` was asked to do.
+    pub traps: TrapTable,
     error: Option<ShellError>,
     exit_request: Option<Status>,
 }
@@ -92,6 +100,7 @@ impl ShellState {
         Self {
             opts,
             vars: Vars::default(),
+            traps: TrapTable::default(),
             error: None,
             exit_request: None,
         }
@@ -173,6 +182,28 @@ pub trait ShellHost {
     fn unset_array_element(&mut self, operand: &[u8]) -> Option<Status> {
         let _ = operand;
         None
+    }
+
+    /// The exit status the shell had when it entered its `EXIT` trap.
+    ///
+    /// bash's `exit` with no argument inside the EXIT trap reuses the status
+    /// the shell was already exiting with (`trap 'true; exit' EXIT; exit 3`
+    /// exits 3, not 0), which is why the handler cannot just look at `$?`.
+    /// `None` means "not running the EXIT trap".
+    fn trap_saved_status(&self) -> Option<Status> {
+        None
+    }
+
+    /// Whether `src` parses as shell code.
+    ///
+    /// `trap` validates its action string when it is registered, so
+    /// `trap 'echo <' EXIT` reports the error immediately rather than at exit
+    /// (and returns non-zero, which is what the suite expects). Parsing lives
+    /// in `bsh-syntax`, which this crate does not depend on, so the VM answers
+    /// through this seam. The default accepts everything.
+    fn check_syntax(&mut self, src: &[u8]) -> bool {
+        let _ = src;
+        true
     }
 
     /// Report a diagnostic.

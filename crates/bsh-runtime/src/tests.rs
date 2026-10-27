@@ -353,10 +353,10 @@ fn builtin_names_are_unique_and_implemented_set_is_explicit() {
     assert_eq!(
         implemented,
         [
-            ":", "exit", "export", "false", "readonly", "set", "shift", "true", "unset",
+            ":", "exit", "export", "false", "readonly", "set", "shift", "trap", "true", "unset",
         ]
     );
-    assert_eq!(stubs_in(Tier::Special), 15 - 7);
+    assert_eq!(stubs_in(Tier::Special), 15 - 8);
     assert_eq!(stubs_in(Tier::Intrinsic), 16);
 }
 

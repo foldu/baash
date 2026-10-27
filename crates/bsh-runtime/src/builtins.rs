@@ -175,7 +175,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     def("set", Tier::Special, Some(bi_set)),
     def("shift", Tier::Special, Some(bi_shift)),
     def("times", Tier::Special, None),
-    def("trap", Tier::Special, None),
+    def("trap", Tier::Special, Some(bi_trap)),
     def("unset", Tier::Special, Some(bi_unset)),
     // POSIX 2024 §1.7 intrinsic utilities (16).
     def("alias", Tier::Intrinsic, None),
@@ -506,7 +506,11 @@ fn bi_exit(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
     };
     match request {
         Request::Last => {
-            let status = host.state().vars.last_status();
+            // Inside the EXIT trap a bare `exit` reuses the status the shell
+            // was already exiting with, not the handler's last command.
+            let status = host
+                .trap_saved_status()
+                .unwrap_or_else(|| host.state().vars.last_status());
             host.state().request_exit(status);
             status
         }
@@ -789,6 +793,197 @@ fn bi_unset(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
         }
     }
     status
+}
+
+// ---------------------------------------------------------------------------
+// `trap`
+// ---------------------------------------------------------------------------
+
+/// A trap failure must not be fatal even though `trap` is a special built-in.
+///
+/// POSIX §2.8.1 would exit a non-interactive shell when a special built-in
+/// fails; every shell in the suite continues after a bad `trap` operand
+/// (`trap 'x' SIGINVALID; echo ok` prints `ok`), so the handler records a
+/// *utility* failure — the one class whose consequence is `Continue` — instead
+/// of letting the dispatch point classify it by tier. `set -e` still stops a
+/// script, which is how `trap -1 …` becomes fatal.
+fn trap_failed(host: &mut dyn ShellHost, status: Status) {
+    host.state().record_error(crate::ShellError::Utility {
+        status,
+        redirection: false,
+    });
+}
+
+fn trap_usage(host: &mut dyn ShellHost, argv: &[&[u8]], message: &str) -> Status {
+    let status = usage(host, argv, message);
+    trap_failed(host, status);
+    status
+}
+
+fn bi_trap(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
+    let mut print = false;
+    let mut list = false;
+    let mut index = 1;
+    while index < argv.len() {
+        let argument = argv[index];
+        if argument == b"--" {
+            index += 1;
+            break;
+        }
+        if argument.len() > 1 && argument[0] == b'-' {
+            for &flag in &argument[1..] {
+                match flag {
+                    b'p' | b'P' => print = true,
+                    b'l' | b'L' => list = true,
+                    _ => {
+                        return trap_usage(host, argv, "invalid option");
+                    }
+                }
+            }
+            index += 1;
+            continue;
+        }
+        break;
+    }
+
+    if list {
+        // `trap -l` lists the signal names; other operands are ignored, as in
+        // bash, which makes `trap -l 2` a listing rather than a reset.
+        let table = crate::signal_table();
+        return host.write_out(&table);
+    }
+
+    let operands = &argv[index..];
+
+    if print {
+        // `trap -p` (or `trap -p SIG…`) prints in re-input-safe form. A signal
+        // with no trap prints nothing; an invalid one is an error.
+        let mut only = Vec::new();
+        for spec in operands {
+            match crate::TrapKey::parse(spec) {
+                Some(key) => only.push(key),
+                None => {
+                    diagnose(
+                        host,
+                        codes::USAGE,
+                        format!(
+                            "{}: {}: invalid signal specification",
+                            program_name(argv, "trap"),
+                            display(spec)
+                        ),
+                    );
+                    trap_failed(host, Status(1));
+                    return Status(1);
+                }
+            }
+        }
+        return print_traps(host, &only);
+    }
+
+    if operands.is_empty() {
+        return print_traps(host, &[]);
+    }
+
+    // bash's rule, and the one place the `trap` surface is surprising: if the
+    // *first* operand is itself a signal specification, there is no action and
+    // every operand is a signal to reset. So `trap 0 2` resets EXIT and INT,
+    // and `trap 2 EXIT` does too; `trap - SIG` spells the same thing out, and
+    // `trap EXIT` (one operand) is the common shorthand.
+    if crate::TrapKey::parse(operands[0]).is_some() {
+        let mut status = Status::SUCCESS;
+        for spec in operands {
+            match crate::TrapKey::parse(spec) {
+                Some(key) => {
+                    host.state().traps.remove(key);
+                }
+                None => {
+                    diagnose(
+                        host,
+                        codes::USAGE,
+                        format!(
+                            "{}: {}: invalid signal specification",
+                            program_name(argv, "trap"),
+                            display(spec)
+                        ),
+                    );
+                    status = Status::FAILURE;
+                }
+            }
+        }
+        if !status.is_success() {
+            trap_failed(host, status);
+        }
+        return status;
+    }
+
+    let action = operands[0];
+    let signals = &operands[1..];
+    if signals.is_empty() {
+        return trap_usage(host, argv, "invalid signal specification");
+    }
+    let reset = action == b"-";
+    if !reset && !host.check_syntax(action) {
+        diagnose(
+            host,
+            codes::USAGE,
+            format!(
+                "{}: {}: syntax error in trap action",
+                program_name(argv, "trap"),
+                display(action)
+            ),
+        );
+        trap_failed(host, Status::FAILURE);
+        return Status::FAILURE;
+    }
+
+    let mut status = Status::SUCCESS;
+    for &spec in signals {
+        let Some(key) = crate::TrapKey::parse(spec) else {
+            diagnose(
+                host,
+                codes::USAGE,
+                format!(
+                    "{}: {}: invalid signal specification",
+                    program_name(argv, "trap"),
+                    display(spec)
+                ),
+            );
+            status = Status::FAILURE;
+            continue;
+        };
+        if reset {
+            host.state().traps.remove(key);
+        } else if action.is_empty() {
+            host.state().traps.set(key, crate::TrapAction::Ignore);
+        } else {
+            host.state()
+                .traps
+                .set(key, crate::TrapAction::Command(action.to_vec()));
+        }
+    }
+    if !status.is_success() {
+        trap_failed(host, status);
+    }
+    status
+}
+
+/// Print the traps in `only` (all of them when empty), re-input-safe.
+fn print_traps(host: &mut dyn ShellHost, only: &[crate::TrapKey]) -> Status {
+    let mut out = Vec::new();
+    {
+        let table = &host.state().traps;
+        for (key, action) in table.entries() {
+            if !only.is_empty() && !only.contains(key) {
+                continue;
+            }
+            out.extend_from_slice(b"trap -- ");
+            quote_into(&mut out, action.code());
+            out.push(b' ');
+            out.extend_from_slice(&key.as_spec());
+            out.push(b'\n');
+        }
+    }
+    host.write_out(&out)
 }
 
 // ---------------------------------------------------------------------------

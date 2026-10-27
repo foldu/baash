@@ -240,7 +240,14 @@ impl Interp {
                 other => return other,
             },
             _ => match self.run_pipeline(chunk, stages, links, ctx) {
-                Ok(statuses) => combine_pipeline(&statuses, pipefail),
+                Ok(statuses) => {
+                    // Traps run after the whole foreground pipeline has been
+                    // reaped, never between two of its stages.
+                    if let Some(exit) = self.after_foreground_wait() {
+                        return Unwind::Exit(exit);
+                    }
+                    combine_pipeline(&statuses, pipefail)
+                }
                 Err(message) => {
                     self.report(crate::codes::INTERNAL, 0..0, message);
                     Status::FAILURE
@@ -294,6 +301,7 @@ impl Interp {
                 .is_some_and(|link| *link == PipeOp::PipeStderr);
             let ends = ends.clone();
             let result = bsh_sys::fork_child(|| {
+                self.enter_child();
                 if let Some(fd) = stdin {
                     bsh_sys::dup2(fd, 0)?;
                 }
@@ -325,15 +333,20 @@ impl Interp {
         }
         drop(pipes);
 
+        // The stages are already forked, so ignoring `SIGINT`/`SIGQUIT` here
+        // protects only the shell while it reaps them.
+        let guard = self.ignore_int_quit();
         let mut statuses = Vec::with_capacity(children.len());
         for child in children {
             match bsh_sys::wait_pid(child.pid(), false) {
                 Ok(outcome) => statuses.push(Status(outcome.exit_status())),
                 Err(error) => {
+                    drop(guard);
                     return Err(format!("cannot wait for a pipeline stage: {error}"));
                 }
             }
         }
+        drop(guard);
         Ok(statuses)
     }
 
@@ -517,17 +530,30 @@ impl Interp {
 
     fn eval_subshell(&mut self, chunk: &Arc<ParsedChunk>, body: NodeId, ctx: Ctx) -> Unwind {
         match self.fork_shell(chunk, body, ctx) {
-            Ok(child) => match child.wait(false) {
-                Ok(outcome) => Unwind::Status(Status(outcome.exit_status())),
-                Err(error) => {
-                    self.report(
-                        crate::codes::INTERNAL,
-                        0..0,
-                        format!("cannot wait for a subshell: {error}"),
-                    );
-                    Unwind::Status(Status::FAILURE)
+            Ok(child) => {
+                let guard = self.ignore_int_quit();
+                let waited = child.wait(false);
+                drop(guard);
+                match waited {
+                    Ok(outcome) => {
+                        let status = Status(outcome.exit_status());
+                        self.set_status(status);
+                        self.sync_specials();
+                        if let Some(exit) = self.after_foreground_wait() {
+                            return Unwind::Exit(exit);
+                        }
+                        Unwind::Status(status)
+                    }
+                    Err(error) => {
+                        self.report(
+                            crate::codes::INTERNAL,
+                            0..0,
+                            format!("cannot wait for a subshell: {error}"),
+                        );
+                        Unwind::Status(Status::FAILURE)
+                    }
                 }
-            },
+            }
             Err(error) => {
                 self.report(
                     crate::codes::INTERNAL,
@@ -574,6 +600,7 @@ impl Interp {
         let read = pipe.read_fd();
         let write = pipe.write_fd();
         let child = bsh_sys::fork_child(|| {
+            self.enter_child();
             bsh_sys::dup2(write, 1)?;
             let _ = bsh_sys::close(write);
             let _ = bsh_sys::close(read);
@@ -583,6 +610,9 @@ impl Interp {
         .map_err(|error| format!("cannot start a command substitution: {error}"))?;
 
         drop(pipe.write);
+        // Reading the child's output is a foreground wait as far as signals
+        // are concerned: `SIGINT`/`SIGQUIT` must not kill the shell here.
+        let guard = self.ignore_int_quit();
         let mut bytes = Vec::new();
         {
             use std::io::Read;
@@ -592,6 +622,10 @@ impl Interp {
         }
         let outcome = bsh_sys::wait_pid(child.pid(), false)
             .map_err(|error| format!("cannot wait for a command substitution: {error}"))?;
+        drop(guard);
+        // A trap that arrived while the substitution ran runs at the next
+        // command boundary; the exit request (if any) is recorded in the state.
+        let _ = self.after_foreground_wait();
         while bytes.last() == Some(&b'\n') {
             bytes.pop();
         }

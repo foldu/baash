@@ -223,16 +223,23 @@ fn bi_source(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
         }
     };
     let display = String::from_utf8_lossy(&path).into_owned();
-    if argv.len() > 2 {
+    let status = if argv.len() > 2 {
         // `source file a b` gives the sourced file its own positional
         // parameters; a frame is the cheapest way to scope them.
         interp.state.vars.push_frame();
         interp.state.vars.set_positional(argv[2..].to_vec());
         let status = interp.run_named(&display, &bytes);
         let _ = interp.state.vars.pop_frame();
-        return status;
+        status
+    } else {
+        interp.run_named(&display, &bytes)
+    };
+    // `RETURN` runs when a script executed by `.`/`source` finishes; its status
+    // does not replace the script's (bash keeps `return 42` as the status).
+    if let Some(exit) = interp.run_return_trap() {
+        interp.state.request_exit(exit);
     }
-    interp.run_named(&display, &bytes)
+    status
 }
 
 /// `echo`, with bash's `-n`/`-e`/`-E` handling.

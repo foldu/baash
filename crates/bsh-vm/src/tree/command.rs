@@ -80,6 +80,16 @@ impl Interp {
         command: &SimpleCommand,
         ctx: Ctx,
     ) -> Unwind {
+        // A command boundary is a trap safe point (DESIGN.md §4.5): signals
+        // that arrived during the previous command run now, before this one
+        // starts, so a trap can never interrupt a built-in half-way.
+        self.sync_traps();
+        if let Some(exit) = self.run_pending_signal_traps() {
+            return Unwind::Exit(exit);
+        }
+        if let Some(exit) = self.state.take_exit_request() {
+            return Unwind::Exit(exit);
+        }
         self.reap_background();
         // Errors are per-command: an unconsumed class from an earlier command
         // must not be applied to this one.
@@ -166,6 +176,13 @@ impl Interp {
             }
         }
         let assignment_status = self.last_cmdsub.take().unwrap_or(Status::SUCCESS);
+
+        // `DEBUG` runs before the command, after its words have been expanded
+        // (bash sets `BASH_COMMAND` from the expanded text). A `DEBUG` handler
+        // that fails is fatal only under `errexit`.
+        if let Some(exit) = self.run_debug_trap() {
+            return Unwind::Exit(exit);
+        }
 
         // 3. No command word: the assignments persist, the redirections are
         //    scoped to this command (POSIX §2.9.1.4).
@@ -595,6 +612,9 @@ impl Interp {
 
         let _ = self.state.vars.finish_prefix_assignments(applied);
         self.restore_fds(saved);
+        // A `trap` built-in changes the table; make the dispositions agree
+        // before the next command can be interrupted.
+        self.sync_traps();
 
         if let Some(unwind) = self.pending.take() {
             return unwind;
@@ -667,14 +687,31 @@ impl Interp {
             }
         };
 
+        // The DEBUG/ERR/RETURN traps are not inherited by functions unless the
+        // matching `-o` option is on (bash's rule). Save the inherited ones,
+        // take them out for the call, and put them back afterwards.
+        let inherited = self.suspend_function_traps();
         self.state.vars.push_frame();
         self.state.vars.set_positional(argv[1..].to_vec());
         self.depth += 1;
         let result = self.eval_node(&function.chunk, function.body, ctx);
+        // `RETURN` runs with the function's frame still in scope.
+        if let Some(exit) = self.run_return_trap() {
+            self.depth -= 1;
+            let _ = self.state.vars.pop_frame();
+            self.restore_function_traps(inherited);
+            let _ = self.state.vars.finish_prefix_assignments(applied);
+            self.restore_fds(saved);
+            return Unwind::Exit(exit);
+        }
         self.depth -= 1;
         let frame = self.state.vars.pop_frame();
+        self.restore_function_traps(inherited);
         let _ = self.state.vars.finish_prefix_assignments(applied);
         self.restore_fds(saved);
+        // A `trap` built-in changes the table; make the dispositions agree
+        // before the next command can be interrupted.
+        self.sync_traps();
         if let Err(error) = frame {
             self.report(crate::codes::INTERNAL, 0..0, error.message());
         }
@@ -753,24 +790,39 @@ impl Interp {
         // the shell, and `exec` preserves `SIG_IGN` — a child that inherits the
         // ignore would never die on a closed pipe (DESIGN.md §4.3, §4.5).
         plan.sigmask = Some(bsh_sys::SignalSet::empty());
-        plan.reset_signals = bsh_sys::SignalSet::of(&[bsh_sys::SIGPIPE]);
+        plan.reset_signals = self.child_reset_signals();
 
         let result = bsh_sys::spawn(plan);
         drop(keep);
         let _ = self.state.vars.finish_prefix_assignments(applied);
 
         match result {
-            Ok(child) => match bsh_sys::wait_pid(child.pid(), false) {
-                Ok(outcome) => Unwind::Status(Status(outcome.exit_status())),
-                Err(error) => {
-                    self.report(
-                        crate::codes::INTERNAL,
-                        0..0,
-                        format!("{}: cannot wait: {error}", String::from_utf8_lossy(path)),
-                    );
-                    Unwind::Status(Status::FAILURE)
+            Ok(child) => {
+                // bash ignores `SIGINT`/`SIGQUIT` delivered to the shell while
+                // it waits for a foreground job; the job has its own copy.
+                let guard = self.ignore_int_quit();
+                let waited = bsh_sys::wait_pid(child.pid(), false);
+                drop(guard);
+                match waited {
+                    Ok(outcome) => {
+                        let status = Status(outcome.exit_status());
+                        self.set_status(status);
+                        self.sync_specials();
+                        if let Some(exit) = self.after_foreground_wait() {
+                            return Unwind::Exit(exit);
+                        }
+                        Unwind::Status(status)
+                    }
+                    Err(error) => {
+                        self.report(
+                            crate::codes::INTERNAL,
+                            0..0,
+                            format!("{}: cannot wait: {error}", String::from_utf8_lossy(path)),
+                        );
+                        Unwind::Status(Status::FAILURE)
+                    }
                 }
-            },
+            }
             Err(error) => {
                 let status = self.spawn_status(&error, path);
                 self.report(
