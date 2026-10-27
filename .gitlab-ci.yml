@@ -32,14 +32,14 @@ lint:
   <<: *nix_cache
   script:
     - nix develop --command cargo fmt --all -- --check
-    - nix develop --command cargo clippy --workspace --all-targets -- --deny warnings
+    - nix develop --command cargo clippy --workspace --all-targets --all-features -- --deny warnings
 
 test:
   stage: check
   tags: [nix]
   <<: *nix_cache
   script:
-    - nix develop --command cargo test --workspace
+    - nix develop --command cargo test --workspace --all-features
 
 package:
   stage: package

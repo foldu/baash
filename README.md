@@ -37,9 +37,14 @@ without an interpreter.
 
 ```sh
 nix develop          # cargo, rustc, clippy, rustfmt, rust-analyzer
-cargo test --workspace
-cargo run -p bsh -- --highlight < script.sh
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- --deny warnings
+cargo run -p bsh -- -c 'echo hi'
 ```
+
+Use `--all-features` for both. `bsh-diag`'s `miette` adapter is behind the
+`fancy` feature and is invisible to a default-feature build, so a count without
+the flag is not the project's test count.
 
 or without a dev shell:
 
