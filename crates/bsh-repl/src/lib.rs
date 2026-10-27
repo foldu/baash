@@ -1,13 +1,95 @@
-//! Line editor and terminal rendering.
+//! The interactive line editor.
 //!
-//! Not implemented beyond rendering: [`paint`] is the whole surface so far.
-//! The editor is deliberately independent of the interpreter, talking to it
-//! through traits, so it can be driven headlessly in tests (DESIGN.md §4.1).
+//! This crate is the editor half of the interactive shell: a byte-oriented line
+//! buffer, key decoding, syntax highlighting, `PS1`/`PS2` expansion, history,
+//! `PS2` continuation, and the completion menu. The interpreter is not here and
+//! is not depended on: completion arrives through
+//! [`bsh_complete::Completer`] and the parser's "is this line finished?"
+//! question through [`Syntax`], so the editor can be driven by a fake terminal
+//! in tests and by a real one in `bsh`.
+//!
+//! # Layers
+//!
+//! | layer | responsibility |
+//! |---|---|
+//! | `term` | the [`Terminal`] trait and its real-tty implementation |
+//! | `key` | bytes → [`Key`], including bracketed paste |
+//! | `line` | the [`Line`] buffer, cursor and kill ring |
+//! | `display` | bytes → display cells (`unicode-width`) |
+//! | `render` | one frame: prompt, line, ghost text, menu ([`Frame`]) |
+//! | `history` | history ring, navigation, `HISTFILE` append |
+//! | `prompt` | `PS1`/`PS2` backslash escapes ([`expand`]) |
+//! | `editor` | the [`Editor`] state machine and read loop |
+//!
+//! # Deferred
+//!
+//! Consciously left out of this wave, in rough order of how much a daily user
+//! would miss them:
+//!
+//! * **`Ctrl-R` reverse incremental search.** The history ring and navigation
+//!   are here; the search UI, prompt and match highlighting are not.
+//! * **Cycling the completion menu with Tab.** Tab accepts the selection (as
+//!   does Enter); Up/Down, `Ctrl-P`/`Ctrl-N` and Shift-Tab move it. Readline's
+//!   menu-complete, where repeated Tab advances *and* inserts, is a different
+//!   interaction and is not implemented.
+//! * **Vi mode and `set -o vi`.** No modal editing, no `bind`, no `inputrc`.
+//! * **Multi-column menus and the full-screen picker** (`DESIGN.md` §6.8). The
+//!   menu is a single column with a description, capped at a few rows.
+//! * **A `poll(2)`-based key timeout.** `bsh-sys` has no `poll` wrapper, so a
+//!   lone `Esc` is only decoded as `Esc` at end of input; on a real tty it is
+//!   indistinguishable from the start of `Alt-<key>`. Pressing `Esc` twice
+//!   cancels the menu (`Ctrl-C` and typing also do), and a timeout in the
+//!   `Terminal` implementation is the real fix; it does not touch the editor.
+//! * **Pty integration tests.** `bsh-sys` has none yet; every test here drives
+//!   a fake [`Terminal`]. The trait is the seam a pty harness will implement.
+//! * **`SIGWINCH` handling.** The size is read on every repaint, but a resize
+//!   mid-line forces a fresh frame rather than reflowing history above it.
+//! * **A prompt after output that did not end in a newline.** The editor
+//!   anchors each prompt at column 0 because it cannot see what the command
+//!   wrote; a partial output line is erased when the next prompt is painted.
+//!   Querying the cursor position (DSR) or tracking the output column fixes
+//!   it.
+//! * **Editing earlier lines of a multi-line command.** `PS2` continuation
+//!   makes the submitted lines scrollback; only the live segment is editable,
+//!   and Up/Down history navigation is suppressed while continuing.
+//! * **`Ctrl-D` at an empty `PS2` line reports a syntax error**, as bash does.
+//!   It abandons the whole logical command instead, because the [`Syntax`]
+//!   trait can say "more input" but not "incomplete, now complain".
+//! * **Mouse support**, selection, and copy/paste chords.
+//! * **Semantic highlighting** (unknown commands coloured differently) and
+//!   incremental highlighting; the whole buffer is re-lexed per keystroke.
+//! * **Ghost text without colour.** Suggestions are painted, and accepted with
+//!   `→`/`End` at the end of the line, only when ANSI dim is available.
+//! * **`HISTCONTROL`, `HISTSIZE`, timestamped history**, and persisting
+//!   multi-line entries (`HISTFILE` is line-oriented; those are skipped).
+//! * **`PS1` from shell variables.** Prompts are read from the process
+//!   environment, so `PS1=…` typed at the prompt does not take effect.
+//! * **Bracketed-paste text inserted as real newlines**; a pasted newline is
+//!   inserted verbatim but displayed as `^J`, like any other control byte.
+//! * **Differential repaint**; every keystroke paints the whole frame.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod completion;
+mod display;
+mod editor;
+mod history;
+mod key;
+mod line;
+mod prompt;
+mod render;
+mod term;
+
 pub use bsh_highlight::Theme;
+
+pub use editor::{Config, Editor, Flow, NeverNeedsMore, ReadResult, Syntax};
+pub use history::History;
+pub use key::{Decoder, Key};
+pub use line::Line;
+pub use prompt::{Prompt, PromptState, expand, is_root};
+pub use render::{Frame, MenuRow, MenuView, Renderer};
+pub use term::{RealTerminal, Size, Terminal};
 
 /// Paint `line` for display.
 ///

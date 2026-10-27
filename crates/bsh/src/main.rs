@@ -31,6 +31,7 @@ USAGE
 
 OPTIONS
     -c <COMMAND>    Run COMMAND.
+    -i              Interactive: read commands from a terminal with a prompt.
     -n              Parse SCRIPT (or stdin) without executing.
     --highlight     Syntax-highlight stdin to stdout and exit.
     -h, --help      Print this help.
@@ -68,7 +69,7 @@ enum Source {
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
-        Ok(mode) => dispatch(mode),
+        Ok((mode, interactive)) => dispatch(mode, interactive),
         Err(message) => {
             eprintln!("bsh: {message}");
             eprintln!("Try 'bsh --help' for more information.");
@@ -81,22 +82,24 @@ fn bytes(value: &OsString) -> Vec<u8> {
     value.as_os_str().as_bytes().to_vec()
 }
 
-fn parse_args(args: &[OsString]) -> Result<Mode, String> {
+fn parse_args(args: &[OsString]) -> Result<(Mode, bool), String> {
     let mut index = 0;
     let mut command: Option<Vec<u8>> = None;
     let mut parse_only = false;
     let mut highlight = false;
+    let mut interactive = false;
     let mut positional: Vec<Vec<u8>> = Vec::new();
 
     while index < args.len() {
         let argument = bytes(&args[index]);
         match argument.as_slice() {
-            b"-h" | b"--help" => return Ok(Mode::Help),
-            b"-V" | b"--version" => return Ok(Mode::Version),
+            b"-h" | b"--help" => return Ok((Mode::Help, false)),
+            b"-V" | b"--version" => return Ok((Mode::Version, false)),
             b"--highlight" => highlight = true,
             b"--lint" => {
-                return Ok(Mode::Lint(source_from(&positional, &mut None)?));
+                return Ok((Mode::Lint(source_from(&positional, &mut None)?), false));
             }
+            b"-i" | b"--interactive" => interactive = true,
             b"-n" => parse_only = true,
             b"-c" => {
                 index += 1;
@@ -125,14 +128,17 @@ fn parse_args(args: &[OsString]) -> Result<Mode, String> {
     }
 
     if highlight {
-        return Ok(Mode::Highlight);
+        return Ok((Mode::Highlight, false));
     }
     let source = source_from(&positional, &mut command)?;
-    Ok(if parse_only {
-        Mode::ParseOnly(source)
-    } else {
-        Mode::Execute(source)
-    })
+    Ok((
+        if parse_only {
+            Mode::ParseOnly(source)
+        } else {
+            Mode::Execute(source)
+        },
+        interactive,
+    ))
 }
 
 /// Turn the trailing operands (plus any `-c` command) into a [`Source`].
@@ -155,7 +161,7 @@ fn source_from(positional: &[Vec<u8>], command: &mut Option<Vec<u8>>) -> Result<
     }
 }
 
-fn dispatch(mode: Mode) -> ExitCode {
+fn dispatch(mode: Mode, interactive_flag: bool) -> ExitCode {
     match mode {
         Mode::Help => {
             print!("{USAGE}");
@@ -179,14 +185,20 @@ fn dispatch(mode: Mode) -> ExitCode {
             }
         }
         Mode::Execute(source) => {
-            // `bsh` with a terminal on stdin is interactive; anything else
-            // (a script, `-c`, a pipe) is not, which is what selects the
-            // POSIX §2.8.1 consequences and the compact diagnostic renderer.
-            // A real interactive REPL — prompt, editor, completion — is
-            // `bsh-repl`'s job and is not wired up here.
-            let interactive = matches!(source, Source::Stdin) && bsh_sys::is_tty(0);
+            // Interactive by default when the command text comes from a
+            // terminal; `-i` asks for interactive semantics even when it does
+            // not (a pipe, a script). Only a terminal can be driven by the
+            // line editor, so a pipe keeps the script path.
+            let stdin_tty = bsh_sys::is_tty(0);
+            let from_stdin = matches!(source, Source::Stdin);
+            let repl = from_stdin && stdin_tty;
+            let interactive = interactive_flag || repl;
             let mut shell = shell(interactive);
-            execute(&mut shell, source)
+            if repl {
+                run_repl(&mut shell)
+            } else {
+                execute(&mut shell, source)
+            }
         }
     }
 }
@@ -290,9 +302,99 @@ fn parse_only(name: &[u8], bytes: &[u8]) -> ExitCode {
     }
 }
 
+/// The parser's "is this command finished?" answer, as the editor needs it.
+struct ShellSyntax;
+
+impl bsh_repl::Syntax for ShellSyntax {
+    fn needs_more_input(&self, buffer: &[u8]) -> bool {
+        matches!(
+            bsh_syntax::parse_bytes(buffer, &ParseOpts::DEFAULT),
+            ParseOutcome::NeedMoreInput { .. }
+        )
+    }
+}
+
+/// The interactive shell: prompt, line editor, completion, history.
+///
+/// `$?` consequences, exit requests and diagnostics are the VM's; this loop
+/// only decides which bytes are one command. A failed command stays silent
+/// because the command itself already reported its error, `exit N` leaves with
+/// `N`, and `Ctrl-D` on an empty line leaves with 0.
+fn run_repl(shell: &mut Interp) -> ExitCode {
+    let syntax = ShellSyntax;
+    let cwd = shell
+        .state()
+        .vars
+        .scalar(b"PWD")
+        .map(<[u8]>::to_vec)
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|path| path.as_os_str().as_bytes().to_vec())
+        });
+    let root = cwd
+        .as_deref()
+        .map(|bytes| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let engine = bsh_complete::CompletionEngine::new().with_root(root);
+    let config = bsh_repl::Config {
+        // The editor paints on the controlling terminal, so colour is decided
+        // by the terminal rather than by stdout (which may be redirected).
+        color: bsh_repl::color_supported(0),
+        prompt: bsh_repl::Prompt::from_env(),
+        history: bsh_repl::History::from_env(),
+        ..bsh_repl::Config::default()
+    };
+    let mut terminal = bsh_repl::RealTerminal::new();
+    let mut editor = bsh_repl::Editor::with_config(&mut terminal, &engine, &syntax, config);
+    if let Some(cwd) = &cwd {
+        editor.set_cwd(cwd);
+    }
+
+    let status = loop {
+        match editor.read_line() {
+            Ok(bsh_repl::ReadResult::Line(bytes)) => {
+                if bytes.iter().all(u8::is_ascii_whitespace) {
+                    continue;
+                }
+                let before = shell.state().vars.scalar(b"PWD").map(<[u8]>::to_vec);
+                shell.run_named("<stdin>", &bytes);
+                // `cd` changes the shell's `PWD`; the completion engine and
+                // `PS1`'s `\w` must follow it (`docs/contracts.md`).
+                let after = shell.state().vars.scalar(b"PWD").map(<[u8]>::to_vec);
+                if after != before
+                    && let Some(pwd) = &after
+                {
+                    engine.set_root(std::ffi::OsStr::from_bytes(pwd));
+                    editor.set_cwd(pwd);
+                }
+                if let Some(requested) = shell.state().take_exit_request() {
+                    break requested;
+                }
+            }
+            Ok(bsh_repl::ReadResult::Interrupted) => {
+                // `Ctrl-C` abandons the line and leaves `$?` at 130, the way a
+                // shell reports an interrupted foreground command.
+                shell.state().vars.set_last_status(bsh_runtime::Status(130));
+            }
+            Ok(bsh_repl::ReadResult::Eof) => break bsh_runtime::Status::SUCCESS,
+            Err(error) => {
+                eprintln!("bsh: {error}");
+                let _ = editor.finish();
+                return ExitCode::from(1);
+            }
+        }
+    };
+    let _ = editor.finish();
+    ExitCode::from(status.exit_code() as u8)
+}
+
 /// Non-interactive stdin is one chunk; a terminal gets a line-at-a-time loop
-/// so a half-typed compound command is not executed early. The line editor is
-/// `bsh-repl`'s job and is not wired up here.
+/// so a half-typed compound command is not executed early.
+///
+/// The terminal path above ([`run_repl`]) uses `bsh-repl`'s editor; this is the
+/// fallback for a pipe or a redirected file, which must keep the script
+/// semantics of executing the whole input as one chunk.
 fn run_stdin(shell: &mut Interp) -> ExitCode {
     if !bsh_sys::is_tty(0) {
         let mut bytes = Vec::new();
@@ -366,4 +468,59 @@ fn highlight_stdin() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn dash_i_forces_interactive_semantics() {
+        let (mode, interactive) = parse_args(&args(&["-i"])).unwrap();
+        assert!(interactive);
+        assert!(matches!(mode, Mode::Execute(Source::Stdin)));
+
+        let (_, interactive) = parse_args(&args(&["--interactive", "-c", "x"])).unwrap();
+        assert!(interactive);
+    }
+
+    #[test]
+    fn a_command_is_not_interactive_by_default() {
+        let (mode, interactive) = parse_args(&args(&["-c", "echo hi"])).unwrap();
+        assert!(!interactive);
+        match mode {
+            Mode::Execute(Source::Command(text, argv)) => {
+                assert_eq!(text, b"echo hi");
+                assert!(argv.is_empty());
+            }
+            _ => panic!("expected -c to select a command"),
+        }
+    }
+
+    #[test]
+    fn a_script_file_carries_its_arguments() {
+        let (mode, _) = parse_args(&args(&["script.sh", "a", "b"])).unwrap();
+        match mode {
+            Mode::Execute(Source::File(path, argv)) => {
+                assert_eq!(path, b"script.sh");
+                assert_eq!(argv, vec![b"a".to_vec(), b"b".to_vec()]);
+            }
+            _ => panic!("expected a script file"),
+        }
+    }
+
+    #[test]
+    fn parse_only_wins_over_execution() {
+        let (mode, _) = parse_args(&args(&["-n", "-c", "x"])).unwrap();
+        assert!(matches!(mode, Mode::ParseOnly(Source::Command(..))));
+    }
+
+    #[test]
+    fn an_unknown_option_is_an_error() {
+        assert!(parse_args(&args(&["--nope"])).is_err());
+    }
 }
