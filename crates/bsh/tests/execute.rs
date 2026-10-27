@@ -798,3 +798,31 @@ fn a_failing_special_builtin_exits_a_non_interactive_shell() {
         "recovered\n"
     );
 }
+
+/// Run the binary with explicit arguments rather than a `-c` script.
+fn run_args(args: &[&str]) -> Output {
+    bsh().args(args).output().expect("spawn bsh")
+}
+
+#[test]
+fn shell_options_on_the_command_line_reach_the_shell() {
+    // `$SH -e -c …` is how the conformance suite invokes the shell, so these
+    // have to work before any spec case can pass.
+    let output = run_args(&["-e", "-c", "false; echo after"]);
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "");
+
+    let output = run_args(&["-e", "-c", "set +e; false; echo after"]);
+    assert_eq!(stdout(&output), "after\n");
+
+    let output = run_args(&["-o", "pipefail", "-c", "false | true"]);
+    assert_eq!(code(&output), 1);
+
+    // An unknown option is a usage error, not a silent no-op.
+    assert_eq!(code(&run_args(&["-Q", "-c", "echo hi"])), 2);
+    assert_eq!(code(&run_args(&["-o", "nope", "-c", "echo hi"])), 2);
+
+    // The flags show up in `$-`.
+    let output = run_args(&["-e", "-c", "case $- in *e*) echo yes;; *) echo no;; esac"]);
+    assert_eq!(stdout(&output), "yes\n");
+}

@@ -56,6 +56,52 @@ enum Mode {
     Lint(Source),
 }
 
+/// Shell options given on the command line: `-e`, `+u`, `-o pipefail`, `+o`.
+///
+/// The POSIX letters are applied through `Opts::set_by_short` and `-o` names
+/// through `Opts::set_by_name`, so the CLI needs no table of its own and an
+/// unknown option is reported by the same code that reports `set -o junk`.
+#[derive(Debug, Default)]
+struct ShellFlags {
+    set: Vec<FlagSpec>,
+    clear: Vec<FlagSpec>,
+}
+
+impl ShellFlags {
+    fn apply(&self, opts: &mut bsh_runtime::Opts) -> Result<(), String> {
+        for spec in &self.set {
+            spec.apply(opts, true)?;
+        }
+        for spec in &self.clear {
+            spec.apply(opts, false)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+enum FlagSpec {
+    /// A `set` letter, e.g. `-e`.
+    Short(u8),
+    /// An `-o` name, e.g. `-o pipefail`.
+    Named(Vec<u8>),
+}
+
+impl FlagSpec {
+    fn apply(&self, opts: &mut bsh_runtime::Opts, on: bool) -> Result<(), String> {
+        let result = match self {
+            FlagSpec::Short(letter) => opts.set_by_short(*letter, on),
+            FlagSpec::Named(name) => opts.set_by_name(name, on),
+        };
+        result.map_err(|_error| match self {
+            FlagSpec::Short(letter) => format!("unknown option `-{}`", char::from(*letter)),
+            FlagSpec::Named(name) => {
+                format!("unknown option name `{}`", String::from_utf8_lossy(name))
+            }
+        })
+    }
+}
+
 /// Where the shell text comes from.
 enum Source {
     /// `-c COMMAND`, with an optional `$0` and positional parameters.
@@ -69,7 +115,7 @@ enum Source {
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
-        Ok((mode, interactive)) => dispatch(mode, interactive),
+        Ok((mode, interactive, flags)) => dispatch(mode, interactive, flags),
         Err(message) => {
             eprintln!("bsh: {message}");
             eprintln!("Try 'bsh --help' for more information.");
@@ -82,22 +128,27 @@ fn bytes(value: &OsString) -> Vec<u8> {
     value.as_os_str().as_bytes().to_vec()
 }
 
-fn parse_args(args: &[OsString]) -> Result<(Mode, bool), String> {
+fn parse_args(args: &[OsString]) -> Result<(Mode, bool, ShellFlags), String> {
     let mut index = 0;
     let mut command: Option<Vec<u8>> = None;
     let mut parse_only = false;
     let mut highlight = false;
     let mut interactive = false;
+    let mut flags = ShellFlags::default();
     let mut positional: Vec<Vec<u8>> = Vec::new();
 
     while index < args.len() {
         let argument = bytes(&args[index]);
         match argument.as_slice() {
-            b"-h" | b"--help" => return Ok((Mode::Help, false)),
-            b"-V" | b"--version" => return Ok((Mode::Version, false)),
+            b"-h" | b"--help" => return Ok((Mode::Help, false, ShellFlags::default())),
+            b"-V" | b"--version" => return Ok((Mode::Version, false, ShellFlags::default())),
             b"--highlight" => highlight = true,
             b"--lint" => {
-                return Ok((Mode::Lint(source_from(&positional, &mut None)?), false));
+                return Ok((
+                    Mode::Lint(source_from(&positional, &mut None)?),
+                    false,
+                    ShellFlags::default(),
+                ));
             }
             b"-i" | b"--interactive" => interactive = true,
             b"-n" => parse_only = true,
@@ -108,6 +159,20 @@ fn parse_args(args: &[OsString]) -> Result<(Mode, bool), String> {
                 };
                 command = Some(bytes(text));
             }
+            b"-s" => {}
+            b"-o" | b"+o" => {
+                let on = argument[0] == b'-';
+                index += 1;
+                let Some(name) = args.get(index) else {
+                    return Err(format!("{}o requires an argument", char::from(argument[0])));
+                };
+                let name = bytes(name);
+                if on {
+                    flags.set.push(FlagSpec::Named(name));
+                } else {
+                    flags.clear.push(FlagSpec::Named(name));
+                }
+            }
             b"--" => {
                 index += 1;
                 while index < args.len() {
@@ -116,11 +181,18 @@ fn parse_args(args: &[OsString]) -> Result<(Mode, bool), String> {
                 }
                 break;
             }
-            other if other.first() == Some(&b'-') && other.len() > 1 => {
-                return Err(format!(
-                    "unknown option `{}`",
-                    String::from_utf8_lossy(other)
-                ));
+            other if other.len() > 1 && (other[0] == b'-' || other[0] == b'+') => {
+                // A bundle of `set` letters: `-eu`, `+x`. The letters this CLI
+                // handles itself were matched above, so anything here is a
+                // shell option and is validated by `Opts`.
+                let on = other[0] == b'-';
+                for letter in &other[1..] {
+                    if on {
+                        flags.set.push(FlagSpec::Short(*letter));
+                    } else {
+                        flags.clear.push(FlagSpec::Short(*letter));
+                    }
+                }
             }
             _ => positional.push(argument),
         }
@@ -128,7 +200,7 @@ fn parse_args(args: &[OsString]) -> Result<(Mode, bool), String> {
     }
 
     if highlight {
-        return Ok((Mode::Highlight, false));
+        return Ok((Mode::Highlight, false, flags));
     }
     let source = source_from(&positional, &mut command)?;
     Ok((
@@ -138,6 +210,7 @@ fn parse_args(args: &[OsString]) -> Result<(Mode, bool), String> {
             Mode::Execute(source)
         },
         interactive,
+        flags,
     ))
 }
 
@@ -161,7 +234,7 @@ fn source_from(positional: &[Vec<u8>], command: &mut Option<Vec<u8>>) -> Result<
     }
 }
 
-fn dispatch(mode: Mode, interactive_flag: bool) -> ExitCode {
+fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
     match mode {
         Mode::Help => {
             print!("{USAGE}");
@@ -178,7 +251,7 @@ fn dispatch(mode: Mode, interactive_flag: bool) -> ExitCode {
             ExitCode::from(UNIMPLEMENTED)
         }
         Mode::ParseOnly(source) => {
-            let mut shell = shell(false);
+            let mut shell = shell(false, &flags);
             match read_source(&mut shell, source) {
                 Ok((name, bytes)) => parse_only(&name, &bytes),
                 Err(code) => code,
@@ -193,7 +266,7 @@ fn dispatch(mode: Mode, interactive_flag: bool) -> ExitCode {
             let from_stdin = matches!(source, Source::Stdin);
             let repl = from_stdin && stdin_tty;
             let interactive = interactive_flag || repl;
-            let mut shell = shell(interactive);
+            let mut shell = shell(interactive, &flags);
             if repl {
                 run_repl(&mut shell)
             } else {
@@ -204,8 +277,13 @@ fn dispatch(mode: Mode, interactive_flag: bool) -> ExitCode {
 }
 
 /// A shell with the environment imported and `PWD` sane.
-fn shell(interactive: bool) -> Interp {
+fn shell(interactive: bool, flags: &ShellFlags) -> Interp {
     let mut shell = Interp::new(interactive);
+    if let Err(message) = flags.apply(&mut shell.state().opts) {
+        eprintln!("bsh: {message}");
+        eprintln!("Try 'bsh --help' for more information.");
+        std::process::exit(2);
+    }
     shell.import_environment();
     if shell.state().vars.scalar(b"PWD").is_none() {
         if let Ok(directory) = std::env::current_dir() {
