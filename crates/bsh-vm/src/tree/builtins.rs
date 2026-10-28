@@ -632,6 +632,26 @@ fn declare(interp: &mut Interp, argv: &[Vec<u8>], local_only: bool) -> Status {
                     continue;
                 }
             }
+            // `declare a[]=x`: bash reports `a[]: bad array subscript`, but it
+            // has already turned the name into an (empty) indexed array. The
+            // quoted spelling `a[""]=x` is a legal write to element zero.
+            if subscript.is_empty() {
+                let shape = if associative {
+                    bsh_runtime::ArrayShape::Associative
+                } else {
+                    bsh_runtime::ArrayShape::Indexed
+                };
+                let _ = interp.state.vars.declare_shape(variable, shape);
+                diagnose(
+                    interp,
+                    format!(
+                        "{name}: {}[]: bad array subscript",
+                        String::from_utf8_lossy(variable)
+                    ),
+                );
+                status = Status::FAILURE;
+                continue;
+            }
             if let Err(message) = interp.assign_element(variable, subscript, append, value) {
                 diagnose(interp, format!("{name}: {message}"));
                 status = Status::FAILURE;

@@ -1034,6 +1034,27 @@ impl ShellHost for Interp {
         })
     }
 
+    fn apply_array_literal_operand(
+        &mut self,
+        operand: &[u8],
+        shape: Option<bsh_runtime::ArrayShape>,
+        scope: bsh_runtime::CreateScope,
+    ) -> Option<Result<(), String>> {
+        let literal = self.take_array_literal(operand)?;
+        let variable = literal.name.clone();
+        if scope == bsh_runtime::CreateScope::Local
+            && let Err(error) = self.state.vars.declare_local(&variable)
+        {
+            return Some(Err(error.message()));
+        }
+        if let Some(shape) = shape
+            && let Err(error) = self.state.vars.declare_shape(&variable, shape)
+        {
+            return Some(Err(error.message()));
+        }
+        Some(self.assign_array_literal(&variable, &literal.elements, literal.append, shape))
+    }
+
     fn trap_saved_status(&self) -> Option<Status> {
         self.exit_trap_status
     }

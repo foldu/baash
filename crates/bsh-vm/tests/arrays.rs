@@ -307,3 +307,59 @@ fn subscripts_are_arithmetic_for_indexed_and_text_for_associative() {
     assert_eq!(text(&interp, b"assoc_keys"), "1+1 a b");
     assert_eq!(text(&interp, b"literal"), "literal");
 }
+#[test]
+fn declaration_builtins_apply_array_literals() {
+    // bash 5.3.20: `readonly -a ra=([3]=x y)` is the array [3]=x [4]=y, and
+    // `readonly -A rb=([k]=v)` keeps its key. The parser records these
+    // operands as array literals, which the builtins must consume instead of
+    // assigning the textual value "(…)".
+    let mut interp = shell();
+    run(
+        &mut interp,
+        "readonly -a ra=([3]=x y)
+         ra_at=\"${ra[@]}\"
+         ra_keys=\"${!ra[@]}\"
+         readonly -A rb=([k]=v)
+         rb_value=\"${rb[k]}\"
+         rb_keys=\"${!rb[@]}\"
+         export ea=(1 2)
+         ea_at=\"${ea[@]}\"
+         ea_keys=\"${!ea[@]}\"",
+    );
+    assert_eq!(text(&interp, b"ra_at"), "x y");
+    assert_eq!(text(&interp, b"ra_keys"), "3 4");
+    assert_eq!(text(&interp, b"rb_value"), "v");
+    assert_eq!(text(&interp, b"rb_keys"), "k");
+    assert_eq!(text(&interp, b"ea_at"), "1 2");
+    assert_eq!(text(&interp, b"ea_keys"), "0 1");
+    // The attribute is real: the same shell refuses a later element write.
+    let status = interp.run_named("<array-test>", b"ra[0]=changed\n");
+    assert!(!status.is_success());
+    assert_eq!(values(&interp, b"ra"), ["x", "y"]);
+}
+
+#[test]
+fn empty_literal_subscript_is_rejected_but_quoted_empty_is_zero() {
+    // bash 5.3.20: `a[]=x` is `a[]: bad array subscript` and leaves the array
+    // alone; `a[""]=x` writes element zero because the quoted empty word is
+    // arithmetic zero. `declare a[]=x` also leaves an empty indexed array.
+    let mut interp = shell();
+    run(
+        &mut interp,
+        "a=(1 2 3)
+         a[]=x
+         rejected=$?
+         a[\"\"]=zero
+         keys=\"${!a[@]}\"
+         first=\"${a[0]}\"
+         declare e[]=v
+         declared=$?
+         declared_len=${#e[@]}",
+    );
+    assert_eq!(text(&interp, b"rejected"), "1");
+    assert_eq!(text(&interp, b"first"), "zero");
+    assert_eq!(text(&interp, b"keys"), "0 1 2");
+    assert_eq!(text(&interp, b"declared"), "1");
+    assert_eq!(text(&interp, b"declared_len"), "0");
+    assert_eq!(values(&interp, b"a"), ["zero", "2", "3"]);
+}

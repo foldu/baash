@@ -234,6 +234,22 @@ impl Interp {
                 Err(error) => return self.expansion_failed(error),
             };
             if let Some(subscript) = &assignment.index {
+                // `a[]=x` has an *empty literal* subscript. Bash rejects it
+                // (`a[]: bad array subscript`) and leaves the array alone,
+                // while `a[""]=x` is element zero because the quoted empty
+                // word is arithmetic zero. The word's part list is what tells
+                // the two apart before expansion erases the difference.
+                if subscript.parts.is_empty() {
+                    self.report(
+                        crate::codes::ASSIGNMENT,
+                        assignment.span.clone(),
+                        format!("{}[]: bad array subscript", String::from_utf8_lossy(&name)),
+                    );
+                    if argv.is_empty() {
+                        return Unwind::Status(Status::FAILURE);
+                    }
+                    continue;
+                }
                 let subscript = match expand_assignment(subscript, self) {
                     Ok(text) => text,
                     Err(error) => return self.expansion_failed(error),

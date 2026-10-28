@@ -735,6 +735,23 @@ fn bi_export(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
 
     let mut status = Status::SUCCESS;
     for &operand in &argv[index..] {
+        // `export a=(1 2)`: the literal's elements are structured, and the
+        // textual operand would otherwise be the scalar `(1 2)`. Only the
+        // element assignment is special; the export attribute is added below.
+        if let Some(result) = host.apply_array_literal_operand(operand, None, CreateScope::Default)
+        {
+            if let Err(message) = result {
+                host.diagnose(&Diagnostic::error(codes::ARRAY_SHAPE, 0..0, message));
+                status = Status(1);
+                continue;
+            }
+            let name = split_assignment(operand).name;
+            if let Err(error) = host.state().vars.mark_exported(name) {
+                let _ = report_error(host, argv, &error);
+                status = Status(1);
+            }
+            continue;
+        }
         let assignment = split_assignment(operand);
         let name = assignment.name;
         if !Vars::is_name(name) {
@@ -815,6 +832,32 @@ fn bi_readonly(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
 
     let mut status = Status::SUCCESS;
     for &operand in &argv[index..] {
+        // `readonly -a a=(1 2)`: the literal's elements are structured, so the
+        // VM applies them and this handler adds the attribute. `scope` is
+        // `Default` on purpose: bash's `readonly` is not a declaration
+        // command — inside a function it updates an existing (dynamic) name or
+        // creates a global, unlike `declare`/`local`.
+        let shape = if associative {
+            Some(ArrayShape::Associative)
+        } else if indexed {
+            Some(ArrayShape::Indexed)
+        } else {
+            None
+        };
+        if let Some(result) = host.apply_array_literal_operand(operand, shape, CreateScope::Default)
+        {
+            if let Err(message) = result {
+                host.diagnose(&Diagnostic::error(codes::ARRAY_SHAPE, 0..0, message));
+                status = Status(1);
+                continue;
+            }
+            let name = split_assignment(operand).name;
+            if let Err(error) = host.state().vars.mark_readonly(name) {
+                let _ = report_error(host, argv, &error);
+                status = Status(1);
+            }
+            continue;
+        }
         let assignment = split_assignment(operand);
         let name = assignment.name;
         if !Vars::is_name(name) {

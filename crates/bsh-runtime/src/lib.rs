@@ -252,6 +252,29 @@ pub trait ShellHost {
         None
     }
 
+    /// Apply a structured array-literal operand (`name=(…)`) of a declaration
+    /// builtin, e.g. `readonly -a a=(1 2)`.
+    ///
+    /// The parser keeps array literals out of the ordinary word model (they
+    /// are not field-split, and `[i]=v` elements are structural), so their
+    /// elements live in a VM side channel. `declare`/`local` already consume
+    /// it; `readonly`/`export` reach the runtime as a plain operand whose
+    /// textual value would be `(1 2)`, which is why this seam exists.
+    ///
+    /// `shape` is the `-a`/`-A` request, and `scope` is where a new variable
+    /// is created. `None` means the operand is not an array literal for this
+    /// command. A failure has already been explained by the host; the runtime
+    /// only needs to report it.
+    fn apply_array_literal_operand(
+        &mut self,
+        operand: &[u8],
+        shape: Option<ArrayShape>,
+        scope: CreateScope,
+    ) -> Option<Result<(), String>> {
+        let _ = (operand, shape, scope);
+        None
+    }
+
     /// The exit status the shell had when it entered its `EXIT` trap.
     ///
     /// bash's `exit` with no argument inside the EXIT trap reuses the status
