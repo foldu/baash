@@ -331,11 +331,33 @@ impl Field {
     }
 
     /// Whether a glob metacharacter is active in this field.
+    ///
+    /// With `extglob` on, the group openers are metacharacters too: `@(a)` is
+    /// a pattern even though it contains no `*`, and failing to say so leaves
+    /// it unexpanded, which is a whole class of silently-wrong results rather
+    /// than an error.
     pub fn has_active_glob(&self) -> bool {
+        self.has_active_glob_with(false)
+    }
+
+    /// [`Field::has_active_glob`], with the shell's `extglob` setting.
+    pub fn has_active_glob_with(&self, extglob: bool) -> bool {
         self.bytes
             .iter()
             .zip(&self.quoted)
-            .any(|(&b, &q)| !q && matches!(b, b'*' | b'?' | b'['))
+            .enumerate()
+            .any(|(i, (&b, &q))| {
+                if q {
+                    return false;
+                }
+                match b {
+                    b'*' | b'?' | b'[' => true,
+                    b'@' | b'+' | b'!' => {
+                        extglob && self.bytes.get(i + 1) == Some(&b'(') && !self.quoted[i + 1]
+                    }
+                    _ => false,
+                }
+            })
     }
 }
 
@@ -1698,9 +1720,10 @@ impl Splitter {
 /// leaves the field as written (POSIX's default, and bash's without
 /// `nullglob`). Matches are marked fully quoted so nothing is globbed twice.
 pub fn expand_pathnames<S: Shell>(fields: Vec<Field>, shell: &mut S) -> Result<Vec<Field>, Error> {
+    let extglob = shell.pattern_flags().extglob;
     let mut out = Vec::with_capacity(fields.len());
     for field in fields {
-        if !field.has_active_glob() {
+        if !field.has_active_glob_with(extglob) {
             out.push(field);
             continue;
         }

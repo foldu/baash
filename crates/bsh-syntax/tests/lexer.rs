@@ -92,15 +92,23 @@ fn extglob_groups_are_part_of_the_word() {
         &b"?(a|b)"[..],
         &b"*(a|b)"[..],
         &b"+(a|b)"[..],
-        &b"!(a|b)"[..],
+        &b"echo !(a|b)"[..],
         &b"x@(a|b)y"[..],
         &b"*.@(cc|h)"[..],
         &b"@(a|b)@(c|d)"[..],
         &b"@(a|b)?(c|d)"[..],
     ] {
+        // `echo !(a|b)` proves the group forms in word position; the leading
+        // word is its own token, so compare the last one.
+        let tokens = texts(src);
+        let word = tokens.last().cloned().unwrap_or_default();
+        let expected: &[u8] = match src.starts_with(b"echo ") {
+            true => &src[5..],
+            false => src,
+        };
         assert_eq!(
-            texts(src),
-            vec![src.to_vec()],
+            word,
+            expected.to_vec(),
             "expected one word token for {:?}",
             String::from_utf8_lossy(src)
         );
@@ -134,9 +142,17 @@ fn extglob_groups_scan_nesting_quotes_and_substitutions() {
         &b"@(a|$((1 + 2)))"[..],
         &b"@(a|b)!(*.h)"[..],
     ] {
+        // `echo !(a|b)` proves the group forms in word position; the leading
+        // word is its own token, so compare the last one.
+        let tokens = texts(src);
+        let word = tokens.last().cloned().unwrap_or_default();
+        let expected: &[u8] = match src.starts_with(b"echo ") {
+            true => &src[5..],
+            false => src,
+        };
         assert_eq!(
-            texts(src),
-            vec![src.to_vec()],
+            word,
+            expected.to_vec(),
             "expected one word token for {:?}",
             String::from_utf8_lossy(src)
         );
@@ -152,7 +168,7 @@ fn unclosed_extglob_group_leaves_the_paren_as_a_word_byte() {
         &b"?(a"[..],
         &b"*(a"[..],
         &b"+(a"[..],
-        &b"!(a"[..],
+        &b"echo !(a"[..],
         &b"@("[..],
         &b"x@(a"[..],
         // Several operators inside one unclosed group: every `(` is a word
@@ -160,9 +176,15 @@ fn unclosed_extglob_group_leaves_the_paren_as_a_word_byte() {
         &b"@(a@(b"[..],
         &b"@(a@(b@(c"[..],
     ] {
+        let tokens = texts(src);
+        let word = tokens.last().cloned().unwrap_or_default();
+        let expected: &[u8] = match src.starts_with(b"echo ") {
+            true => &src[5..],
+            false => src,
+        };
         assert_eq!(
-            texts(src),
-            vec![src.to_vec()],
+            word,
+            expected.to_vec(),
             "expected one literal word for {:?}",
             String::from_utf8_lossy(src)
         );

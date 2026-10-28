@@ -950,6 +950,7 @@ pub(crate) fn scan_word(
     start: usize,
     depth: usize,
     nest: &mut Vec<OpenConstruct>,
+    statement_start: bool,
 ) -> WordScan {
     let mut i = start;
     // Once an extglob group runs to end of input, no later group in this word
@@ -1049,7 +1050,16 @@ pub(crate) fn scan_word(
             // `?(` `*(` `+(` `@(` `!(` open an extglob group. It is part of
             // this word through its matching `)`; a group that never closes is
             // not consumed, and the `(` is left as an ordinary word byte.
-            b if is_extglob_op(b) && src.get(i + 1) == Some(&b'(') => {
+            //
+            // `!(` at the *start of a statement* is the exception: there it is
+            // pipeline negation of a subshell (`if !(a && b)`), which is how
+            // bash reads it when extglob is off — and extglob is off by
+            // default. Only `!` is affected: `@(`, `?(`, `*(` and `+(` cannot
+            // begin a command, so they are always groups.
+            b if is_extglob_op(b)
+                && src.get(i + 1) == Some(&b'(')
+                && !(b == b'!' && statement_start && i == start) =>
+            {
                 i = if extglob_broken {
                     i + 2
                 } else {
@@ -1210,6 +1220,39 @@ struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
+    /// Whether the next word starts a statement, so a leading `!(` is pipeline
+    /// negation rather than an extglob group.
+    ///
+    /// `cmd_pos` cannot answer this: `in` also opens a *word* list
+    /// (`for x in !(a)`), while `if`/`while`/`;`/`&&` open a command. The last
+    /// token therefore decides, and the list is deliberately explicit rather
+    /// than "any keyword".
+    fn at_statement_start(&self) -> bool {
+        // Whitespace is a token here, so look back past it: the decision is
+        // about the last *significant* token.
+        let Some(last) = self
+            .tokens
+            .iter()
+            .rev()
+            .find(|token| token.kind != TokenKind::Whitespace)
+        else {
+            return true;
+        };
+        let text = last.text(self.src);
+        match last.kind {
+            TokenKind::Newline => true,
+            TokenKind::Operator => matches!(
+                text,
+                b";" | b"&" | b"&&" | b"||" | b"|" | b"(" | b"{" | b";;" | b";&" | b";;&" | b"|&"
+            ),
+            TokenKind::Keyword => matches!(
+                text,
+                b"if" | b"then" | b"elif" | b"else" | b"do" | b"while" | b"until" | b"time" | b"!"
+            ),
+            _ => false,
+        }
+    }
+
     fn new(src: &'a [u8], i: usize, depth: usize, stop: Option<StopMode>) -> Self {
         Self {
             src,
@@ -1533,7 +1576,7 @@ impl<'a> Lexer<'a> {
         let mut target: Option<Span> = None;
         if let Some(&b) = self.src.get(op_end) {
             if !is_meta(b) {
-                let scan = scan_word(self.src, op_end, self.depth, &mut Vec::new());
+                let scan = scan_word(self.src, op_end, self.depth, &mut Vec::new(), false);
                 if scan.unterminated.is_none() {
                     end = scan.end;
                     target = Some(op_end..end);
@@ -1584,7 +1627,8 @@ impl<'a> Lexer<'a> {
 
     fn word(&mut self) {
         let start = self.i;
-        let scan = scan_word(self.src, start, self.depth, &mut self.nest);
+        let statement_start = self.at_statement_start();
+        let scan = scan_word(self.src, start, self.depth, &mut self.nest, statement_start);
         self.i = scan.end;
         let text = &self.src[start..scan.end];
         if scan.unterminated.is_none() && text == b"\\\n" {
