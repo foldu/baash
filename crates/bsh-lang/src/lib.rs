@@ -56,9 +56,12 @@
 //! # Deliberate gaps
 //!
 //! Operators that need pattern matching or re-parse their argument as code —
-//! `${x#pat}`, `${x%pat}`, `${x/pat/rep}`, `${!x}` on a non-array, `${x@Q}`,
-//! `${x^^pat}` — return [`ErrorKind::Unsupported`] instead of doing something
-//! subtly wrong. `${@^^}` is likewise unsupported rather than approximated.
+//! `${x#pat}`, `${x%pat}`, `${x/pat/rep}`, `${!x}` on a non-array, `${x@Q}`
+//! and the other transformations except `@P`, `${x^^pat}` — return
+//! [`ErrorKind::Unsupported`] instead of doing something subtly wrong.
+//! `${@^^}` is likewise unsupported rather than approximated. `${x@P}` is
+//! implemented by [`prompt`], shared with the line editor so a prompt cannot
+//! render differently depending on who asked.
 //! Byte-oriented `LC_ALL=C` semantics are used for `${#x}` and `${x:o:l}`.
 //!
 //! Arrays are part of the model: [`ParamName::Element`] is `${a[i]}` and
@@ -78,6 +81,7 @@ mod brace;
 mod expand;
 mod host;
 mod ifs;
+pub mod prompt;
 mod quote;
 mod vars;
 mod word;
