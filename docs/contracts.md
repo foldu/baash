@@ -131,7 +131,8 @@ incidental.
 
 **`ShellHost` is the VM's obligation.** It now *requires* `state()`,
 `run_source()`, `write_out()` and `write_err()`; `is_interactive()` and
-`diagnose()` have defaults. `state()` hands out `ShellState { opts, vars }`.
+`diagnose()` have defaults. `state()` hands out `ShellState`, whose main pieces are `opts`, `vars`
+and `history`.
 
 **The per-command sequence is fixed, and the order matters:**
 
@@ -181,6 +182,19 @@ quoting rules itself.
 **Construct `Opts` from the presets** (`Opts::POSIX`, `Opts::BASH`, `Default`).
 It carries ~70 flags now; an exhaustive struct literal outside this crate will
 break on the next flag.
+
+**History is one ring, owned here.** `ShellState::history` is a
+`crate::History`; `shell.sync_history()` re-reads `HISTFILE`, `HISTSIZE`,
+`HISTFILESIZE`, `HISTCONTROL`, `HISTIGNORE` and the `histappend` shopt from the
+variables and options, and truncates the file when `HISTFILESIZE` changes. The
+interactive loop swaps the ring in and out of the editor around each command
+(`bsh-repl` depends on this crate for the *type*), so the built-ins and Up/Down
+navigate the same entries. Numbers are stored per entry: trimming leaves them
+alone (`501…` after a 500-entry window) and `history -d` renumbers the tail.
+The file operations are `read_file` (`-r`), `read_new` (`-n`), `append_file`
+(`-a`), `write_file` (`-w`), `truncate_file` (`HISTFILESIZE`) and `save` (exit;
+`histappend` selects append or rewrite, then truncation). Measured bash quirk
+honoured: `-w` does not apply `HISTFILESIZE`; the exit save does.
 
 **Builtin tiers are exact and load-bearing** (DESIGN §2): 15 special, 16
 intrinsic, 7 regular, 18 bash extensions. `printf`, `test`, `[`, `echo`, `pwd`,
@@ -668,8 +682,12 @@ dependency, which keeps "only `bsh-sys` touches the platform" true.
 
 **The editor takes bytes and a `Terminal`; it does not know about the shell.**
 `bsh-repl` depends on `bsh-lang` for the one prompt expander
-(`bsh_lang::prompt`) and on no interpreter or parser crate — not even
-`bsh-syntax`. Two traits carry everything else it needs from above:
+(`bsh_lang::prompt`) and on `bsh-runtime` for exactly one *type*: the history
+ring, re-exported as `bsh_repl::History`, so the editor's Up/Down and the
+`history`/`fc` built-ins cannot drift apart. It still does not depend on an
+interpreter or parser crate — not even `bsh-syntax` — and it constructs its own
+`History::new()` in tests. Two traits carry everything else it needs from
+above:
 
 ```rust
 pub trait Terminal {                       // the pty wave implements these five
@@ -708,15 +726,18 @@ returns `bsh_lang::prompt::ExpandedPrompt`; `Frame::prompt` carries the
 non-printing ranges so `paint_prompt` writes hidden stretches to the terminal
 without advancing the cursor column. `PS1`/`PS2` still come from the environment
 only, so `PS1=…` typed at the prompt does not take effect until the runtime
-exposes shell variables to it. The editor also owns history (`$HISTFILE`
-appended, never rewritten) and the `cd`-driven `set_cwd` call, which the binary
-makes after each chunk.
+exposes shell variables to it. The editor *borrows* history through `Config`:
+the binary takes the ring out of `ShellState`, hands it to the editor, swaps it
+back for the duration of each command, and the editor's `finish` saves it on
+exit. The `cd`-driven `set_cwd` call is the binary's, after each chunk.
 
 Deferred, with the list maintained at the top of `crates/bsh-repl/src/lib.rs`:
 Ctrl-R reverse search, vi mode, multi-column menus and the full-screen picker,
 a `poll(2)` key timeout (a lone Esc is only distinguishable at end of input),
-`SIGWINCH` reflow, mouse, incremental/semantic highlighting, `HISTCONTROL`, and
-automated pty tests.
+`SIGWINCH` reflow, mouse, incremental/semantic highlighting, and history
+expansion. The ring's `HISTCONTROL`/`HISTSIZE` policies are wired in
+`bsh-runtime`; the pty tests are `crates/bsh/tests/interactive_jobs.rs` and
+`interactive_history.rs`.
 
 ---
 

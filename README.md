@@ -7,13 +7,13 @@ lives in [DESIGN.md](DESIGN.md); this file is the operator's manual.
 and `bsh` with no arguments gives you an interactive editor with syntax
 highlighting, TAB completion and history.
 
-**1980 of 2787 comparable cases pass** in the vendored Oils suite (71.0%; 1184
-cases skipped as out of scope), of which **1925 (69.1%) also pass strictly** —
+**1985 of 2787 comparable cases pass** in the vendored Oils suite (71.2%; 1184
+cases skipped as out of scope), of which **1930 (69.3%) also pass strictly** —
 that is, matching only a case's primary expectation rather than any
 `## OK <shell>` alternative. Both numbers are recorded in
 `crates/bsh-spec/baseline.txt` and CI fails if either drops.
 
-For scale, bash passes 2574/2787 (92.4%) on the same run, so 640 cases are
+For scale, bash passes 2574/2787 (92.4%) on the same run, so 635 cases are
 things bash does and we do not yet — 62% of that gap is closed. Conformance is
 measured but no longer the priority: interactive use comes first, and
 [`docs/state.md`](docs/state.md) is the resume document (what exists, what is
@@ -31,15 +31,15 @@ substitution, arithmetic, `[[ ]]` including `=~`, globbing with
 `extglob`/`failglob`, indexed and associative arrays, namerefs, `declare`/
 `typeset`/`readonly`/`export` with bash's own `-p` layout, the pattern
 operators (`${x#pat}`, `${x%pat}`, `${x//a/b}`, `${x@Q}`), traps, `set -e` and
-`set -u`, `break`/`continue`/`return`/`exit`, `exec`, and the built-ins listed
-in `docs/contracts.md`.
+`set -u`, `break`/`continue`/`return`/`exit`, `exec`, job control, history
+(`history`, `fc`, the `HIST*` knobs; persisted to `~/.bsh_history` by default),
+and the built-ins listed in `docs/contracts.md`.
 
-Not implemented yet: job control (`jobs`, `fg`, `bg`, `disown` — there are no
-per-job process groups), `history`/`fc`, the directory stack
-(`pushd`/`popd`/`dirs`), `umask`, `let`, `ulimit`, `times`, `enable`,
-`$RANDOM`/`$SECONDS`/`$FUNCNAME`, xtrace (`set -x`), `~user`, and process
-substitution (`<(...)`, rejected as `BSH-E0301`). Missing built-ins answer
-status 2 with `BSH-E0508`; missing special variables expand to nothing.
+Not implemented yet: the directory stack (`pushd`/`popd`/`dirs`), `umask`,
+`let`, `ulimit`, `times`, `enable`, `Ctrl-R` history search, history
+expansion, `$RANDOM`/`$SECONDS`/`$FUNCNAME`, xtrace (`set -x`), `~user`, and
+process substitution (`<(...)`, rejected as `BSH-E0301`). Missing built-ins
+answer status 2 with `BSH-E0508`; missing special variables expand to nothing.
 `printf`, `pwd`, `test` and `[` are served from `PATH` by design.
 [`docs/state.md`](docs/state.md) has the full inventory; the interactive
 editor's deferred list (Ctrl-R, vi mode, undo, `SIGWINCH` reflow) is at the top
@@ -71,8 +71,14 @@ Cross-crate contracts (fork gate, spawn plans, renderers) are in
 
 Dependency direction follows DESIGN.md §4.1: `bsh-sys` is the only crate
 permitted `unsafe`, and everything else carries `#![forbid(unsafe_code)]`.
-`bsh-repl` does not depend on `bsh-runtime`, so the editor can be tested
-without an interpreter.
+`bsh-repl` depends on `bsh-runtime` for exactly one type — the history ring —
+so the editor and the `history`/`fc` built-ins share one ring; it still builds
+its own in tests and never touches an interpreter.
+
+An interactive shell sources `~/.bshrc` when that file exists, otherwise
+`~/.bashrc` (`--rcfile` and `--norc` still win). History goes to
+`~/.bsh_history`, deliberately not bash's `~/.bash_history`, so two shells do
+not rewrite each other's history.
 
 ## Building
 

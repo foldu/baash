@@ -22,7 +22,7 @@ cargo build -p bsh -p bsh-spec
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- --deny warnings
 cargo test --workspace --all-features
-cargo test --workspace --all-features -- --list | grep -c ': test$'   # 1012
+cargo test --workspace --all-features -- --list | grep -c ': test$'   # 1068
 
 # conformance
 target/debug/bsh-spec --shell target/debug/bsh --ratchet   # must be >= baseline
@@ -47,18 +47,18 @@ a stale brief has already cost two wrong scopes (arrays: 54 vs real; namerefs:
 
 | measure | value |
 |---|---|
-| comparable cases | **1981 / 2787 = 71.1 %** |
-| strict (primary expectation only) | 1926 / 2787 = 69.1 % |
-| failing | 806 |
+| comparable cases | **1985 / 2787 = 71.2 %** |
+| strict (primary expectation only) | 1930 / 2787 = 69.3 % |
+| failing | 802 |
 | timeouts | 0 |
-| of the whole suite (3971 cases) | 49.9 % |
-| as a fraction of bash's score | 1981 / 2574 = 77.0 % |
-| share of the bash gap closed since 1013 | 968 / 1561 = 62.0 % |
-| our test count | 1032 |
+| of the whole suite (3971 cases) | 50.0 % |
+| as a fraction of bash's score | 1985 / 2574 = 77.1 % |
+| share of the bash gap closed since 1013 | 972 / 1561 = 62.3 % |
+| our test count | 1068 |
 
 Measured with `bash 5.3.20` as the comparison shell, harness forced to
 `LC_ALL=C` (bash scores *worse* under `C.UTF-8`: 2574 → 2435, so the C locale
-is the fair denominator). We pass 46 cases bash fails; bash passes 640 we fail.
+is the fair denominator). We pass 46 cases bash fails; bash passes 635 we fail.
 
 **1184 skipped** cases: 745 from the ysh-only suite files, 417 marked
 `our_shell: ysh`, 22 needing a `python2` helper we do not provide. 100 % is not
@@ -66,27 +66,27 @@ a meaningful target: bash itself scores 92.4 %, and 55 of our passes come from
 `## OK <shell>` alternatives rather than the primary expectation — which is
 exactly the 71.1 % vs 69.1 % split, and why both numbers are ratcheted.
 
-Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 1981`,
-`strict = 1926`). `--ratchet` exits 1 below either, 2 if it cannot measure.
+Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 1985`,
+`strict = 1930`). `--ratchet` exits 1 below either, 2 if it cannot measure.
 
 ## 3. Layers
 
-59 423 lines of `src` across 14 crates.
+60 833 lines of `src` across 14 crates.
 
 | crate | lines | responsibility |
 |---|---|---|
 | `bsh-sys` | 3547 | the only `unsafe`. fork/exec (`posix_spawn` by default), descriptors, pipes/pty, termios, signals, `wait_any`, process groups and `tcsetpgrp`, libc regex, global `fork_gate()` |
 | `bsh-syntax` | 6607 | lexer + recursive-descent parser producing `Word`/`Command`; the superset grammar |
 | `bsh-lang` | 9574 | shell *text* semantics: word expansion, patterns (`bsh-pattern`), parameter operators, prompt escapes, arithmetic; no I/O |
-| `bsh-runtime` | 10030 | shell *state*: variables/arrays/namerefs, options, builtin registry and state-only bodies, traps bookkeeping, completion registry, `declare -p` rendering |
-| `bsh-vm` | 13072 | the evaluator (tree-walking) and everything that needs both state and syscalls: command execution, redirection, jobs, traps |
+| `bsh-runtime` | 11675 | shell *state*: variables/arrays/namerefs, options, builtin registry and state-only bodies, the history ring and `HIST*` policies, traps bookkeeping, completion registry, `declare -p` rendering |
+| `bsh-vm` | 13121 | the evaluator (tree-walking) and everything that needs both state and syscalls: command execution, redirection, jobs, traps |
 | `bsh-pattern` | 3947 | Thompson-NFA glob: `O(n·m)`, never exponential; `extglob`/`nocasematch`/`utf8` flags |
 | `bsh-diag` | 1946 | diagnostic model and miette rendering; error-code space |
 | `bsh-complete` | 3137 | completion engine: providers, contexts, nucleo ranking, menu layout |
-| `bsh-repl` | 3092 | line editor, key decoding, history, prompt adapter, renderer, terminal abstraction |
+| `bsh-repl` | 2762 | line editor, key decoding, history navigation, prompt adapter, renderer, terminal abstraction |
 | `bsh-highlight` | 386 | syntax highlighting (token → style), shared with the editor |
 | `bsh-spec` | 3242 | the Oils-suite runner, comparator, ratchet |
-| `bsh` | 707 | the binary: argument parsing, startup files, REPL loop |
+| `bsh` | 753 | the binary: argument parsing, startup files, REPL loop, history ownership swap |
 | `bsh-compile` | 120 | bytecode types only (`Chunk`, `Op`, `Vm{chunk,pc}`) — wave 5, unwired |
 | `bsh-tools` | 16 | dev helpers |
 
@@ -109,7 +109,13 @@ delegates everything else: line editing to `bsh-repl`, execution to the
 * entering commands, running programs, `$((…))`, `exit`;
 * syntax highlighting (raw mode, `bsh-highlight`, colour decided by fd 0);
 * completion on `Tab` with a navigable menu (Up/Down/BackTab/Ctrl-P);
-* history: loaded from `$HISTFILE`, appended on save, `Up`/`Down` navigation;
+* **history as a shell feature**: one ring owned by `bsh-runtime` and shared by
+  the editor and the `history`/`fc` built-ins; `history [n]`, `-c`, `-d`,
+  `-a`, `-n`, `-r`, `-w`, `-p`, `-s`; `fc -l` (`-n`/`-r`/ranges) and `fc -s`;
+  `HISTFILE`, `HISTSIZE`, `HISTFILESIZE`, `HISTCONTROL` (`ignorespace`,
+  `ignoredups`, `ignoreboth`, `erasedups`), `HISTIGNORE` (including `&`), and
+  the `histappend` shopt; default `~/.bsh_history`; the file is loaded at
+  startup and saved on exit; `Up`/`Down` navigation and ghost text;
 * `Ctrl-C` on a line → discards it, `$?` = 130; `Ctrl-D` on an empty line →
   exit 0;
 * **job control**: every foreground command (and pipeline) gets its own
@@ -121,15 +127,13 @@ delegates everything else: line editing to `bsh-repl`, execution to the
   instead of hanging. Verified by `crates/bsh/tests/interactive_jobs.rs`, which
   runs `bsh -i` on a real pty;
 * `$!`, `wait`, `kill` for children *this* shell started;
-* `--rcfile FILE` / `--norc`; default startup file is `~/.bashrc`
-  (bash-compatible by choice — **flagged as a question**, see §9).
+* `--rcfile FILE` / `--norc`; the default startup file is `~/.bshrc` when it
+  exists, otherwise `~/.bashrc` (see §9).
 
 **Missing, in order of how badly it hurts an interactive user:**
 
-1. **History as a shell feature.** No `history` builtin, no `fc`, no
-   `Ctrl-R` search, no `HISTSIZE`/`HISTFILESIZE`/`histappend`/`HISTCONTROL`,
-   and **no default history file**: `History::from_env` persists only when
-   `$HISTFILE` is set, so out of the box nothing survives a session.
+1. **`Ctrl-R` reverse incremental search.** The ring, navigation and the
+   policies are in place; the search UI is the next editor wave.
 2. **Directory stack.** `pushd`, `popd`, `dirs` missing.
 3. **Small but common builtins.** `umask`, `let`, `times`, `ulimit`, `enable`.
    `printf`, `pwd`, `test`, `[` are served from `PATH` — exec-able by design,
@@ -143,6 +147,16 @@ delegates everything else: line editing to `bsh-repl`, execution to the
    no `Ctrl-L`. Bracketed paste appears in the key decoder (`Paste` in
    `key.rs`) but is unverified.
 6. **No `PROMPT_COMMAND`.**
+
+**Known history limitations** (measured or deliberately deferred): `fc` with
+neither `-l` nor `-s` reports "editing history is not implemented yet" instead
+of opening `$FCEDIT`/`$EDITOR`; history expansion (`!`, `!!`, `!$`) does not
+exist, so `history -p` prints its arguments unchanged (which is what bash
+prints when there is nothing to expand); a multi-line command is kept in memory
+but skipped when the line-oriented file is written (bash's `cmdhist` joins it
+with `;`); `HISTTIMEFORMAT` is not implemented; the conformance suite's
+interactive history cases mostly still fail on the bash-only `^D` marker, not
+on history behaviour.
 
 **Known job-control limitations** (measured, not defects to rediscover): a
 foreground stop inside a function or brace group resumes the *child*, not the
@@ -168,14 +182,17 @@ foreground pgroup, `become_session_leader`), `crates/bsh/tests/interactive_jobs.
 
 ## 5. Builtin inventory
 
-55 names registered in `bsh-runtime`; 41 have a body (runtime handler or VM
-body); 14 do not, of which 4 are intentionally exec-able.
+56 names registered in `bsh-runtime`; 22 have a registry body, and several
+more are the executor's. Eight are missing outright: `times`, `ulimit`,
+`umask`, `dirs`, `enable`, `let`, `popd`, `pushd`. Four more (`[`, `printf`,
+`pwd`, `test`) are intentionally exec-able.
 
 * special (15): all but `times` are implemented.
-* intrinsic (16): missing `fc`, `ulimit`, `umask`.
-* regular (6): `false`, `true`, `echo` implemented; `[`, `printf`, `pwd`,
-  `test` fall through to `PATH` by design.
-* extension (18): missing `dirs`, `enable`, `history`, `let`, `popd`, `pushd`.
+* intrinsic (16): only `ulimit` and `umask` are missing; `fc` landed here.
+* regular (7): `false` and `true` in-process; `echo` is the VM's body; `[`,
+  `printf`, `pwd`, `test` fall through to `PATH` by design.
+* extension (18): missing `dirs`, `enable`, `let`, `popd`, `pushd`; `history`
+  landed here.
 
 Note the ownership rule that keeps this honest: the VM's table is consulted
 only when the registry entry has no body, so filling in a runtime body silently
@@ -248,9 +265,11 @@ measured finish line.
    default for a terminal shell, and a pty integration test. Remaining edge
    cases are listed under §4's known limitations (`$!` for pipelines, stops
    inside compound commands, `SIGHUP` on exit).
-2. **History.** `history` and `fc` builtins, default `~/.bsh_history`,
-   `HISTSIZE`/`HISTFILESIZE`/`histappend`/`HISTCONTROL`, `Ctrl-R` incremental
-   search in the editor.
+2. ~~**History.**~~ Landed: one ring in `bsh-runtime`, `history`/`fc`,
+   `HISTFILE`/`HISTSIZE`/`HISTFILESIZE`/`HISTCONTROL`/`HISTIGNORE`,
+   `histappend`, default `~/.bsh_history`, save/load across sessions, and the
+   `.bshrc`/`.bashrc` startup-file rule. `Ctrl-R` incremental search moved to
+   item 5 (editor depth), which is the next wave.
 3. **Prompt parity.** `promptvars` second expansion, `PROMPT_COMMAND`, bash's
    default `PS1`, `\!`/`\#` history numbers.
 4. **Common builtins.** `pushd`/`popd`/`dirs`, `umask`, `let`, `times`,
@@ -266,10 +285,20 @@ measured finish line.
 
 ## 9. Open questions
 
-* **Startup file.** We source `~/.bashrc` (bash-compatible). For a shell with
-  partial bash support that is a footgun as much as a feature: a bashrc with
-  `bind`, `complete -D`, `PROMPT_COMMAND` will half-apply. Decide between
-  `~/.bshrc` with `.bashrc` fallback, or keep bash parity and document it.
+* **Startup file — decided.** `~/.bshrc` is sourced when it exists, otherwise
+  `~/.bashrc`; `--rcfile` and `--norc` still win. A bashrc full of
+  `bind`/`complete -D`/`PROMPT_COMMAND` half-applies, so a user who wants a
+  bsh-specific file gets one without renaming the bash file.
+* **Default history file — deliberate deviation.** `HISTFILE` defaults to
+  `~/.bsh_history`, not bash's `~/.bash_history`. Sharing bash's file means two
+  shells rewriting each other's history (and bash's `histappend` default is
+  off), so the history would be lost or interleaved. The default is applied
+  only to an interactive shell, after the startup file, and only when neither
+  the environment nor the startup file set `HISTFILE`; an explicitly empty
+  `HISTFILE` disables persistence. `/bin/sh` compatibility is unaffected
+  because non-interactive shells neither load nor save.
+* **History expansion is still absent**, and `fc`'s editor form is deferred.
+  Both are recorded under the known history limitations in §4.
 * **`set -o vi`** exists in the option table but has no editor behind it.
 * **Bytecode VM.** Types exist; `DESIGN.md` §5 disagrees with the code on
   `Vec<u32>` vs `Vec<Op>` and on static vs push/pop handler tables. The
