@@ -192,6 +192,9 @@ impl Provider for BuiltinProvider {
     }
 
     fn candidates(&self, _ctx: &Ctx) -> Vec<Candidate> {
+        // Literal, not source: a builtin name is a command word like any other,
+        // and a literal can be inserted inside an open quote. The only name
+        // that gains an escape is `[` (as `\[`, which still runs `[`).
         sources::BUILTINS
             .iter()
             .map(|name| Candidate::new(*name, CandKind::Builtin).with_desc("builtin"))

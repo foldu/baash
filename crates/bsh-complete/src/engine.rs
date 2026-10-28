@@ -498,11 +498,15 @@ fn builtin_spec(command: &[u8]) -> Option<Spec> {
 }
 
 /// Reserved words as candidates, for command position and `-A keyword`.
+///
+/// Source candidates, not literals: `[[`, `{` and `!` are syntax. Inserting
+/// them through `bsh_lang::quote` would escape the bracket or brace and turn
+/// the keyword into an ordinary word.
 fn keyword_candidates() -> Vec<Candidate> {
     sources::COMMAND_KEYWORDS
         .iter()
         .map(|keyword| {
-            Candidate::new(*keyword, CandKind::Keyword)
+            Candidate::source(*keyword, CandKind::Keyword)
                 .with_desc("keyword")
                 .appending_space()
         })

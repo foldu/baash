@@ -482,6 +482,20 @@ fn a_keyword_is_offered_in_command_position() {
 }
 
 #[test]
+fn a_keyword_with_shell_syntax_is_inserted_verbatim() {
+    let engine = CompletionEngine::new().with_path_var(Vec::new());
+    // `[[` must not be escaped into `\[\[`: that would be an ordinary word,
+    // not the conditional's keyword.
+    let menu = engine.complete(b"[[", 2);
+    let index = menu
+        .candidates
+        .iter()
+        .position(|candidate| candidate.insert == b"[[")
+        .expect("the keyword");
+    assert_eq!(menu.insertion(index).as_deref(), Some(&b"[[ "[..]));
+}
+
+#[test]
 fn dollar_completes_variable_names() {
     let engine = CompletionEngine::new()
         .with_vars(vars(&[b"HOME", b"HOSTNAME", b"PATH"]))

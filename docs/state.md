@@ -71,7 +71,7 @@ Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 1986`,
 
 ## 3. Layers
 
-62 826 lines of `src` across 14 crates.
+62 833 lines of `src` across 14 crates.
 
 | crate | lines | responsibility |
 |---|---|---|
@@ -82,7 +82,7 @@ Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 1986`,
 | `bsh-vm` | 13242 | the evaluator (tree-walking) and everything that needs both state and syscalls: command execution, redirection, jobs, traps |
 | `bsh-pattern` | 3947 | Thompson-NFA glob: `O(n·m)`, never exponential; `extglob`/`nocasematch`/`utf8` flags |
 | `bsh-diag` | 1946 | diagnostic model and miette rendering; error-code space |
-| `bsh-complete` | 3836 | completion engine: providers, contexts, nucleo ranking, menu layout |
+| `bsh-complete` | 3843 | completion engine: providers, contexts, nucleo ranking, menu layout |
 | `bsh-repl` | 3041 | line editor, key decoding, history navigation, prompt adapter, renderer, terminal abstraction |
 | `bsh-highlight` | 386 | syntax highlighting (token → style), shared with the editor |
 | `bsh-spec` | 3242 | the Oils-suite runner, comparator, ratchet |
