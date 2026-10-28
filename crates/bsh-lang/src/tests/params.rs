@@ -422,34 +422,33 @@ fn prompt_transform_of_unset_is_empty_but_nounset_errors() {
 }
 
 /// The front end reports every `@` form as `UnsupportedOp::Transform`; the
-/// runtime resolves the letter from the span. Both halves are exercised here:
-/// with the letter the expansion works, without it the honest error remains.
+/// The parser emits `ParamOp::Transform` for a letter it knows, so expansion
+/// needs no help from the runtime; an unknown letter stays an error rather than
+/// being guessed at from the source.
 #[test]
-fn prompt_transform_resolves_the_letter_through_the_shell() {
-    let word = Word::new(vec![Part::Param(ParamExp::new(
+fn prompt_transform_comes_from_the_parser() {
+    let prompt = Word::new(vec![Part::Param(ParamExp::new(
+        ParamName::var(b"x"),
+        ParamOp::Transform(Transform::Prompt),
+        0..7,
+    ))]);
+    let mut shell = TestShell::new().var(b"x", b"abc");
+    assert_eq!(
+        expand_word(&prompt, &mut shell).unwrap(),
+        vec![b"abc".to_vec()]
+    );
+
+    let unknown = Word::new(vec![Part::Param(ParamExp::new(
         ParamName::var(b"x"),
         ParamOp::Unsupported(UnsupportedOp::Transform),
         0..7,
     ))]);
-
-    let mut shell = TestShell::new().var(b"x", b"abc");
     assert!(
-        expand_word(&word, &mut shell).is_err(),
-        "no letter, no guess"
-    );
-
-    shell.transform_letter = Some(b'P');
-    assert_eq!(
-        expand_word(&word, &mut shell).unwrap(),
-        vec![b"abc".to_vec()]
-    );
-
-    shell.transform_letter = Some(b'Q');
-    assert!(
-        expand_word(&word, &mut shell).is_err(),
-        "Q is not implemented"
+        expand_word(&unknown, &mut shell).is_err(),
+        "an unknown transform letter is not guessed"
     );
     assert_eq!(Transform::from_letter(b'P'), Some(Transform::Prompt));
+    assert_eq!(Transform::from_letter(b'Q'), None);
 }
 
 #[test]

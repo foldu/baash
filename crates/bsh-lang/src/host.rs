@@ -21,11 +21,9 @@
 //! * [`Shell::process_substitution`] returns the `/dev/fd/N` path.
 //! * [`Shell::home_dir`] resolves `~user`; `~` itself uses `$HOME` first.
 
-use crate::Span;
 use crate::expand::{Error, Field};
 use crate::prompt::PromptContext;
 use crate::vars::{SetError, Vars};
-use crate::word::Transform;
 use crate::word::UnsupportedOp;
 use crate::word::{Arithmetic, CommandSub, ProcessSub};
 
@@ -119,25 +117,6 @@ pub trait Shell: Vars {
     fn brace_expansion(&self) -> bool {
         true
     }
-
-    /// The letter of a `${x@…}` transformation the front end reported
-    /// generically as [`UnsupportedOp::Transform`].
-    ///
-    /// The parser classifies every `@` form the same way because the letter
-    /// lives in source text that the word model does not copy. Only the
-    /// runtime still holds that source, so it resolves `span` (the whole
-    /// `${…}`) to a [`Transform`]. Returning `None` keeps the honest
-    /// "unsupported" error, which is the default: a [`Vars`] implementation
-    /// with no source text cannot know the letter.
-    ///
-    /// `bsh-vm` implements this by taking `src[span]` and reading the byte
-    /// after the last `@` (`${a[@]@P}` has two). `Transform::from_letter`
-    /// filters the letters this crate implements.
-    fn transform_operator(&self, span: &Span) -> Option<Transform> {
-        let _ = span;
-        None
-    }
-
     /// The facts `${x@P}` reads.
     ///
     /// The default is the process environment, which is enough for the parts

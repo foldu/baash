@@ -28,6 +28,7 @@ use crate::lexer::{
 };
 use crate::{Token, TokenKind};
 use bsh_diag::{Diagnostic, Label, SourceFile, Span};
+use bsh_lang::Transform;
 use bsh_lang::{
     Arithmetic, CaseHow, CommandSub, Lit, LitKind, ParamExp, ParamName, ParamOp, Part, ProcSubDir,
     ProcessSub, ReplaceMode, TildeSpec, UnsupportedOp, Word,
@@ -2632,7 +2633,13 @@ impl<'a> Parser<'a, '_> {
         } else if rest.starts_with(b"/") {
             self.parse_replace_op(op_start, inner.end)
         } else if rest.starts_with(b"@") {
-            ParamOp::Unsupported(UnsupportedOp::Transform)
+            // `${x@P}` and friends. A letter this crate does not know stays
+            // unsupported rather than being guessed at: the error names the
+            // operator, and no letter is silently ignored.
+            match rest.get(1).copied().and_then(Transform::from_letter) {
+                Some(transform) => ParamOp::Transform(transform),
+                None => ParamOp::Unsupported(UnsupportedOp::Transform),
+            }
         } else if rest.starts_with(b"^^") || rest.starts_with(b",,") {
             let how = if rest.starts_with(b"^^") {
                 CaseHow::Upper

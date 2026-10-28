@@ -830,15 +830,12 @@ fn expand_param<S: Shell>(
     }
     match &exp.op {
         ParamOp::Transform(transform) => expand_transform(*transform, &exp.name, quoted, ctx, out),
+        // A letter the parser did not recognise (`${x@Q}`, `${x@a}`). It is
+        // not guessed at: the parser saw the letter and declined it, and a
+        // runtime re-reading the source to recover it was only ever a way
+        // around a parser that dropped the letter.
         ParamOp::Unsupported(UnsupportedOp::Transform) => {
-            // The parser classifies every `${x@…}` the same way, because the
-            // letter is source text it does not copy into the word. The
-            // runtime still has the source, so it resolves the letter from
-            // the span; without it the honest answer is "unsupported".
-            match ctx.shell.transform_operator(&span) {
-                Some(transform) => expand_transform(transform, &exp.name, quoted, ctx, out),
-                None => Err(Error::unsupported(UnsupportedOp::Transform, span)),
-            }
+            Err(Error::unsupported(UnsupportedOp::Transform, span))
         }
         ParamOp::Unsupported(op) => Err(Error::unsupported(*op, span)),
         ParamOp::Length => {

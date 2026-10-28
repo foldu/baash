@@ -745,6 +745,34 @@ impl bsh_lang::Shell for Interp {
         self.state.opts.braceexpand
     }
 
+    /// The facts `${x@P}` and the `PS1` renderer read.
+    ///
+    /// The default resolves user, host, cwd and time from the environment; a
+    /// shell adds what only it knows — the *logical* `PWD` (which can differ
+    /// from `std::env::current_dir()` after `cd` through a symlink), the
+    /// command counter behind `\#`, and the job count behind `\j`.
+    fn prompt_context(&self) -> bsh_lang::prompt::PromptContext {
+        let mut context = bsh_lang::prompt::PromptContext::from_env();
+        let vars = &self.state.vars;
+        if let Some(value) = vars.scalar(b"PWD") {
+            context.cwd = value.to_vec();
+        }
+        if let Some(value) = vars.scalar(b"OLDPWD") {
+            context.previous_cwd = value.to_vec();
+        }
+        if let Some(value) = vars.scalar(b"HOME") {
+            context.home = value.to_vec();
+        }
+        if let Some(value) = vars.scalar(b"USER") {
+            context.user = value.to_vec();
+        }
+        if let Some(value) = vars.scalar(b"HOSTNAME") {
+            context.host = value.to_vec();
+        }
+        context.job_count = self.jobs.len() as u32;
+        context
+    }
+
     fn pattern_flags(&self) -> bsh_pattern::Flags {
         // `utf8` stays at its default (byte units): expansion forces the C
         // locale, the same policy `${#x}` uses. What comes from `shopt` is

@@ -64,10 +64,6 @@ pub struct TestShell {
     /// The facts `${x@P}` reads. Defaults are deterministic (empty user and
     /// host, a zero clock), so a prompt test never depends on the machine.
     pub prompt: PromptContext,
-    /// When set, [`crate::Shell::transform_operator`] answers with this letter
-    /// for any span, which exercises the parser-does-not-carry-the-letter
-    /// path.
-    pub transform_letter: Option<u8>,
 }
 
 impl TestShell {
@@ -222,10 +218,6 @@ impl Vars for TestShell {
 impl Shell for TestShell {
     fn brace_expansion(&self) -> bool {
         !self.brace_expansion_off
-    }
-
-    fn transform_operator(&self, _span: &crate::Span) -> Option<Transform> {
-        self.transform_letter.and_then(Transform::from_letter)
     }
 
     fn prompt_context(&self) -> PromptContext {
