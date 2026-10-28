@@ -7,13 +7,13 @@ lives in [DESIGN.md](DESIGN.md); this file is the operator's manual.
 and `bsh` with no arguments gives you an interactive editor with syntax
 highlighting, TAB completion and history.
 
-**1985 of 2787 comparable cases pass** in the vendored Oils suite (71.2%; 1184
-cases skipped as out of scope), of which **1930 (69.3%) also pass strictly** —
+**1986 of 2787 comparable cases pass** in the vendored Oils suite (71.3%; 1184
+cases skipped as out of scope), of which **1931 (69.3%) also pass strictly** —
 that is, matching only a case's primary expectation rather than any
 `## OK <shell>` alternative. Both numbers are recorded in
 `crates/bsh-spec/baseline.txt` and CI fails if either drops.
 
-For scale, bash passes 2574/2787 (92.4%) on the same run, so 635 cases are
+For scale, bash passes 2574/2787 (92.4%) on the same run, so 588 cases are
 things bash does and we do not yet — 62% of that gap is closed. Conformance is
 measured but no longer the priority: interactive use comes first, and
 [`docs/state.md`](docs/state.md) is the resume document (what exists, what is
@@ -35,15 +35,23 @@ operators (`${x#pat}`, `${x%pat}`, `${x//a/b}`, `${x@Q}`), traps, `set -e` and
 (`history`, `fc`, the `HIST*` knobs; persisted to `~/.bsh_history` by default),
 and the built-ins listed in `docs/contracts.md`.
 
+The interactive prompt is built from the shell's own variables before every
+line: `PS1`/`PS2` from an rc file, the environment or a command all take
+effect at the next prompt, the escapes read the shell's logical `PWD`, job
+table and history ring, `shopt promptvars` runs a second expansion (so
+`PS1='$(date +%H:%M) $ '` works), and `PROMPT_COMMAND` (string or array) runs
+before each prompt with its output above it. `Ctrl-R` is
+readline-compatible reverse incremental search.
+
 Not implemented yet: the directory stack (`pushd`/`popd`/`dirs`), `umask`,
-`let`, `ulimit`, `times`, `enable`, `Ctrl-R` history search, history
+`let`, `ulimit`, `times`, `enable`, history
 expansion, `$RANDOM`/`$SECONDS`/`$FUNCNAME`, xtrace (`set -x`), `~user`, and
 process substitution (`<(...)`, rejected as `BSH-E0301`). Missing built-ins
 answer status 2 with `BSH-E0508`; missing special variables expand to nothing.
 `printf`, `pwd`, `test` and `[` are served from `PATH` by design.
 [`docs/state.md`](docs/state.md) has the full inventory; the interactive
-editor's deferred list (Ctrl-R, vi mode, undo, `SIGWINCH` reflow) is at the top
-of `crates/bsh-repl/src/lib.rs`.
+editor's deferred list (vi mode, undo, search highlighting, `SIGWINCH` reflow)
+is at the top of `crates/bsh-repl/src/lib.rs`.
 
 The bytecode backend is not written yet either: `bsh-vm` runs a tree-walking
 evaluator, which is kept afterwards as the reference backend for the compiler.

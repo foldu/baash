@@ -183,6 +183,15 @@ quoting rules itself.
 It carries ~70 flags now; an exhaustive struct literal outside this crate will
 break on the next flag.
 
+**`ShellState::command_number` is `\#`, and the REPL advances it.**
+`begin_command()` increments it when the interactive loop hands a line to the
+interpreter; the prompt for the line about to be typed and `${x@P}` inside a
+running line both report `command_number + 1`, which is bash's
+`current_command_number` rule measured on 5.3.20 (prompt `\#=2` for a line
+whose `${PS1@P}` says `3`). The evaluator does not touch it: it sees whole
+chunks and cannot tell a REPL line from a script, so a non-interactive run
+never advances the counter.
+
 **History is one ring, owned here.** `ShellState::history` is a
 `crate::History`; `shell.sync_history()` re-reads `HISTFILE`, `HISTSIZE`,
 `HISTFILESIZE`, `HISTCONTROL`, `HISTIGNORE` and the `histappend` shopt from the
@@ -337,14 +346,35 @@ and the string a script gets cannot drift.
   nest. The renderer consumes `non_printing()`; a caller that only needs bytes
   uses `into_bytes()`.
 
-`expand_with_variables(template, context, shell)` is `${x@P}`: it decodes the
-escapes and then expands the result as if it were double-quoted, which is the
-`promptvars` pass. It expands `$name`, `${name}`, `${#name}`, `$@`, `$*` and
-the specials, applies double-quote backslash removal, and copies every other
-form (`${x:-word}`, `${a[0]}`, `$(…)`, backticks) through **literally**: the
-full word pipeline needs a parser, which is the front end's job. The line
-editor has no interpreter, so it uses the one-pass form (bash's `promptvars`
-off) and does not expand `$name` in `PS1` yet.
+`expand_with_variables(template, context, shell) -> ExpandedPrompt` is the
+two-pass form: it decodes the escapes, then — when `context.prompt_vars` is set
+(`shopt promptvars`, bash's default) — expands the result as if it were
+double-quoted. `${x@P}` and the interactive `PS1`/`PS2` both go through it, so
+they cannot drift. The second pass expands `$name`, `${name}`, `${#name}`,
+`$@`, `$*`, the specials, `$((…))`, `$(…)` and backticks through the `Shell`
+callbacks, and applies double-quote backslash removal. Measured against bash
+5.3.20: a failing command substitution contributes nothing (its error goes to
+stderr, the status is untouched) and a failing arithmetic expansion keeps its
+text. Forms with an operator this scanner does not implement (`${x:-word}`,
+`${a[0]}`) are copied through **literally** rather than guessed at; a full
+implementation needs the word parser, which is the front end's job.
+
+`prompt_vars` off is exactly `expand()`: no second pass, no double-quote
+escaping of inserted values, and `$PWD` in `PS1` prints as `$PWD`. `\!` and
+`\#` expand in both modes, because they are first-pass escapes. The second
+pass runs **per non-printing stretch**, so `non_printing()` indexes the final
+bytes: `PS1='\[\e[1;32m\]\u@\h\[\e[0m\] \w\$ '` keeps two ranges
+(0..7 and 14..18 after `ada`/`lab`), which is what lets the editor put the
+cursor after a coloured prompt that also contains a variable. `ExpandedPrompt`
+is `Clone + PartialEq + Eq` and has `bytes()`, `into_bytes()`,
+`from_bytes(plain)`, `non_printing()` and `is_non_printing(offset)`.
+
+The editor does **not** expand anything itself: the shell renders both prompts
+before each line (it is the only party with the variable table and an
+interpreter for `$(…)`). `PromptContext::default()` reports the crate version
+for `\v` (`major.minor`) and `\V` (full), and `shell` as `bsh`; root, user,
+host, home and cwd come from the process when the caller does not override
+them.
 
 **The transform letter is a `Shell` seam.** The parser classifies every
 `${x@…}` as `ParamOp::Unsupported(UnsupportedOp::Transform)`; it does not copy
@@ -367,9 +397,13 @@ The default returns `None`, so a `Vars` source with no source text keeps the
 honest unsupported error. `Shell::prompt_context() -> PromptContext` has a
 default built from the process environment (user from `/etc/passwd` by
 effective uid, host from `/proc`, cwd from `current_dir`, local time from
-TZif). `bsh-vm` should override it to supply what only it knows: the logical
-`$PWD`/`$OLDPWD`/`$HOME`/`$USER`/`$HOSTNAME`, the command number (`\#`), the
-history number (`\!`), the job count (`\j`) and the terminal width.
+TZif). `bsh-vm` overrides it with what only it knows: the logical
+`$PWD`/`$OLDPWD`/`$HOME`/`$USER`/`$HOSTNAME`, the job count (`\j`),
+`prompt_vars` from `shopt`, last-failed, root, `\l` (the tty basename from
+`/proc/self/fd/0`, `tty` when stdin is not a terminal) and the two numbers
+below. An interactive shell also starts with bash's `PS1='\s-\v\$ '` and
+`PS2='> '` as *variables* (unexported), which is what `${PS1}` and `${PS1@P}`
+read; `unset PS1` renders an empty prompt, like bash.
 
 **Brace expansion is stage 0, and it is the only switchable stage.**
 `expand_braces(&Word) -> Vec<Word>` runs before tilde expansion in
@@ -721,23 +755,39 @@ Ctrl-P/Ctrl-N navigate; Esc cancels. One candidate is inserted through
 `Menu::apply` without opening a menu. Ghost text comes from history and is
 accepted with Right or End.
 
-**The editor owns the prompt bytes, but not the escapes.** `Prompt::primary_text`
-returns `bsh_lang::prompt::ExpandedPrompt`; `Frame::prompt` carries the
-non-printing ranges so `paint_prompt` writes hidden stretches to the terminal
-without advancing the cursor column. `PS1`/`PS2` still come from the environment
-only, so `PS1=…` typed at the prompt does not take effect until the runtime
-exposes shell variables to it. The editor *borrows* history through `Config`:
-the binary takes the ring out of `ShellState`, hands it to the editor, swaps it
-back for the duration of each command, and the editor's `finish` saves it on
-exit. The `cd`-driven `set_cwd` call is the binary's, after each chunk.
+**The editor paints a rendered prompt; it does not expand one.**
+`bsh_repl::Prompt` holds two `bsh_lang::prompt::ExpandedPrompt`s (built by the
+shell with `Prompt::from_expanded`, or by `Prompt::new`/`from_template` for a
+caller with no interpreter), and `Frame::prompt` carries their non-printing
+ranges so `paint_prompt` writes hidden stretches without advancing the column.
+`Editor::set_prompt(Prompt)` is called by the binary before *each* line, which
+is what makes a `PS1` from an rc file, from the environment or from the command
+just run take effect at the next prompt. There is no `set_cwd`: `PS1`'s `\w`
+follows `$PWD` because the shell re-renders, not because the editor patches a
+field. The editor *borrows* history through `Config`: the binary takes the ring
+out of `ShellState`, hands it to the editor, swaps it back for the duration of
+each command (and around `PROMPT_COMMAND`), and the editor's `finish` saves it
+on exit.
+
+**`Ctrl-R` is a prompt swap, not a screen mode.** `Search` remembers the
+original line and cursor, the query, the matched history index and whether the
+last search failed; while it is active `draw` uses
+`(reverse-i-search)`query': ` (or `(failed reverse-i-search)…`) as the prompt
+and the line is the match, so wrapping, painting and cursor arithmetic are the
+existing code. `Enter` submits the match, `Left`/`Right` accept it with the
+cursor on the first byte of the match and then act normally, `Esc`/`Ctrl-G`
+restore the original line and cursor, `Backspace` edits the query, `Ctrl-R`
+walks older, `Ctrl-C` returns `ReadResult::Interrupted`, and any other key
+accepts the match and is reprocessed. Matching is a substring search from the
+newest entry downwards; an empty ring is a failed search, never a panic.
 
 Deferred, with the list maintained at the top of `crates/bsh-repl/src/lib.rs`:
-Ctrl-R reverse search, vi mode, multi-column menus and the full-screen picker,
-a `poll(2)` key timeout (a lone Esc is only distinguishable at end of input),
-`SIGWINCH` reflow, mouse, incremental/semantic highlighting, and history
-expansion. The ring's `HISTCONTROL`/`HISTSIZE` policies are wired in
-`bsh-runtime`; the pty tests are `crates/bsh/tests/interactive_jobs.rs` and
-`interactive_history.rs`.
+search-match highlighting and `Ctrl-S`, vi mode, multi-column menus and the
+full-screen picker, a `poll(2)` key timeout (a lone Esc is only distinguishable
+at end of input), `SIGWINCH` reflow, mouse, incremental/semantic highlighting,
+and history expansion. The ring's `HISTCONTROL`/`HISTSIZE` policies are wired
+in `bsh-runtime`; the pty tests are `crates/bsh/tests/interactive_jobs.rs`,
+`interactive_history.rs` and `interactive_prompt.rs`.
 
 ---
 
@@ -931,6 +981,20 @@ primary expectations are byte-calibrated: measured, bash falls from 2574 to
 2435 under `C.UTF-8`, while counting characters gains us 15. UTF-8 is therefore
 a diagnostic mode, not the baseline.
 
+### The binary's REPL loop (`crates/bsh/src/main.rs`)
+
+Before each `editor.read_line()` the loop, in order: restores the terminal and
+emits job notices; swaps the history ring into `ShellState`; runs
+`PROMPT_COMMAND` (a scalar command or an indexed array, each element run in
+turn) with its stdout captured through a seekable temporary file and re-emitted
+above the prompt, appending a newline when the output did not end in one;
+restores `$?`; syncs the `HIST*` knobs; renders `PS1` and `PS2` with
+`Interp::render_prompt`; swaps the ring back; and hands the pair to
+`editor.set_prompt`. A `PROMPT_COMMAND` that calls `exit` leaves the shell. The
+capture is why `PROMPT_COMMAND='echo -n x'` cannot corrupt the editor's column
+model; a write straight to `/dev/tty` bypasses it. With `set -e` and a failing
+`PROMPT_COMMAND`, bash exits and this shell does not (`docs/state.md` §4).
+
 ### bsh-vm additions
 
 `Interp::each_candidate` is the single resolution walk (alias → keyword →
@@ -939,6 +1003,15 @@ gone. The `PATH`/hash table lives on `Interp`. `hash` and `mapfile`/`readarray`
 are executor bodies with registry stubs, like `read` and `cd`, because their
 state is the hash table and the descriptor table. `read::read_record` is the
 record reader `mapfile` shares with `read`.
+
+`Interp::repl_prompt_context()` and `Interp::render_prompt(template)` are the
+prompt seam the binary uses before every line. The context is
+`Shell::prompt_context()` with `\!` set to the ring's *next* number (the line
+has not been recorded yet) and `\l`/width read from the terminal on stdin;
+`render_prompt` runs the shared expander with the shell as its second-pass host
+and puts `$?` back afterwards (a prompt `$(false)` must not change the status
+the next command sees). `Interp::restore_status(status)` is the same
+save/restore for `PROMPT_COMMAND`, which runs between commands.
 
 `Interp::pattern_flags()` answers from `shopt`: `extglob` and `nocasematch` are
 the pattern dialect, while `utf8` stays off (byte units, C locale — the policy
