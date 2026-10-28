@@ -79,6 +79,7 @@
 
 mod brace;
 mod expand;
+pub mod histexpand;
 mod host;
 mod ifs;
 pub mod prompt;
