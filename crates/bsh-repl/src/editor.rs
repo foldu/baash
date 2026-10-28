@@ -25,8 +25,9 @@ use std::io;
 use bsh_complete::Completer;
 use bsh_highlight::Theme;
 
+use bsh_runtime::History;
+
 use crate::completion::MenuState;
-use crate::history::History;
 use crate::key::{Decoder, Key};
 use crate::line::Line;
 use crate::prompt::Prompt;
@@ -513,8 +514,7 @@ impl<'a> Editor<'a> {
             return Ok(());
         }
         self.dirty = false;
-        self.prompt.state.history_number =
-            u32::try_from(self.history.len() + 1).unwrap_or(u32::MAX);
+        self.prompt.state.history_number = self.history.next_number();
         let prompt = if self.secondary {
             self.prompt.secondary_text()
         } else {

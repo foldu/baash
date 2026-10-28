@@ -5,7 +5,9 @@ mod common;
 use std::io::Write;
 
 use bsh_complete::Candidate;
-use bsh_repl::{Config, Editor, Flow, History, Key, Prompt, ReadResult, Size, Theme};
+use bsh_repl::{
+    Config, Editor, Flow, History, HistoryControl, Key, Prompt, ReadResult, Size, Theme,
+};
 
 use common::{
     FakeTerminal, Session, StubCompleter, StubSyntax, apply_keys, chars, clear_output, has_sgr,
@@ -440,12 +442,32 @@ fn history_navigation_restores_the_draft() {
 }
 
 #[test]
-fn consecutive_duplicates_are_not_recorded() {
+fn duplicates_follow_histcontrol() {
+    // bash keeps duplicates unless HISTCONTROL says otherwise; the old ring
+    // dropped them unconditionally.
     let driven = session(
         FakeTerminal::new(b"ls\rls\r"),
         &StubCompleter::empty(),
         &bsh_repl::NeverNeedsMore,
         plain_config(),
+        3,
+    );
+    assert_eq!(
+        driven.history,
+        vec![b"ls".to_vec(), b"ls".to_vec()],
+        "no HISTCONTROL means duplicates are kept"
+    );
+
+    let mut history = History::new();
+    history.set_control(HistoryControl::parse(b"ignoredups"));
+    let driven = session(
+        FakeTerminal::new(b"ls\rls\r"),
+        &StubCompleter::empty(),
+        &bsh_repl::NeverNeedsMore,
+        Config {
+            history,
+            ..plain_config()
+        },
         3,
     );
     assert_eq!(driven.history, vec![b"ls".to_vec()]);

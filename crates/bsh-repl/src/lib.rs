@@ -2,11 +2,14 @@
 //!
 //! This crate is the editor half of the interactive shell: a byte-oriented line
 //! buffer, key decoding, syntax highlighting, `PS1`/`PS2` expansion, history,
-//! `PS2` continuation, and the completion menu. The interpreter is not here and
-//! is not depended on: completion arrives through
+//! `PS2` continuation, and the completion menu. The *interpreter* is not here
+//! and is not depended on: completion arrives through
 //! [`bsh_complete::Completer`] and the parser's "is this line finished?"
 //! question through [`Syntax`], so the editor can be driven by a fake terminal
-//! in tests and by a real one in `bsh`.
+//! in tests and by a real one in `bsh`. The one exception is the history
+//! *type*: the ring lives in `bsh-runtime` so the editor and the
+//! `history`/`fc` built-ins cannot drift apart, and the editor still builds
+//! its own [`History`] in tests.
 //!
 //! # Layers
 //!
@@ -17,9 +20,11 @@
 //! | `line` | the [`Line`] buffer, cursor and kill ring |
 //! | `display` | bytes → display cells (`unicode-width`) |
 //! | `render` | one frame: prompt, line, ghost text, menu ([`Frame`]) |
-//! | `history` | history ring, navigation, `HISTFILE` append |
 //! | `prompt` | `PS1`/`PS2` backslash escapes ([`expand`]) |
 //! | `editor` | the [`Editor`] state machine and read loop |
+//!
+//! The history ring itself (`bsh_runtime::History`) is re-exported as
+//! [`History`]: entries, navigation, the `HIST*` policies and persistence.
 //!
 //! # Deferred
 //!
@@ -60,8 +65,9 @@
 //!   incremental highlighting; the whole buffer is re-lexed per keystroke.
 //! * **Ghost text without colour.** Suggestions are painted, and accepted with
 //!   `→`/`End` at the end of the line, only when ANSI dim is available.
-//! * **`HISTCONTROL`, `HISTSIZE`, timestamped history**, and persisting
-//!   multi-line entries (`HISTFILE` is line-oriented; those are skipped).
+//! * **Timestamped history** and persisting multi-line entries (`HISTFILE`
+//!   is line-oriented; those are skipped). `HISTCONTROL`, `HISTSIZE` and
+//!   `HISTFILESIZE` live in the runtime ring and are wired.
 //! * **`PS1` from shell variables.** Prompts are read from the process
 //!   environment, so `PS1=…` typed at the prompt does not take effect.
 //! * **Bracketed-paste text inserted as real newlines**; a pasted newline is
@@ -74,7 +80,6 @@
 mod completion;
 mod display;
 mod editor;
-mod history;
 mod key;
 mod line;
 mod prompt;
@@ -83,8 +88,8 @@ mod term;
 
 pub use bsh_highlight::Theme;
 
+pub use bsh_runtime::{History, HistoryControl};
 pub use editor::{Config, Editor, Flow, NeverNeedsMore, ReadResult, Syntax};
-pub use history::History;
 pub use key::{Decoder, Key};
 pub use line::Line;
 pub use prompt::{Prompt, PromptState, expand, is_root};

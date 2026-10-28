@@ -205,7 +205,7 @@ pub fn session(
                 break;
             }
         }
-        history = editor.history().entries().to_vec();
+        history = editor.history().commands().map(<[u8]>::to_vec).collect();
     }
     Session {
         results,
