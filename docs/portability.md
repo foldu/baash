@@ -202,6 +202,12 @@ uutils binary. If it is ~5 ms saved and +1 MB, expand; if clap costs 8 MB and
    jobs, paths), then a `windows` profile that rejects the rest.
 4. **uutils:** the two-utility spike, then expand by measurement.
 
+The live prompt ([`prompt-watch.md`](prompt-watch.md)) is the first feature that
+looks like it needs a helper thread and deliberately does not: it polls two file
+descriptors instead. It is the test case for "is this profile actually good
+enough to live without `fork`", because it wants to run while the user is idle
+and would otherwise hold the fork gate open.
+
 ## 9. Open questions
 
 * Should `subinterpreter` mode be able to fall back to `fork` for the constructs
