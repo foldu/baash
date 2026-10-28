@@ -39,6 +39,45 @@
 //! `<(` is process substitution, `<<<` is a here-string. Profiles do not
 //! change the token stream; they only gate acceptance afterwards, in the
 //! parser.
+//!
+//! # Extglob groups
+//!
+//! The five extglob operators — `?(` `*(` `+(` `@(` `!(` — are lexed into one
+//! word **unconditionally**, whether or not `shopt -s extglob` was in effect
+//! for the containing script. The bytes stay in the word exactly as written
+//! and with their original quoting, because the pattern matcher (`bsh-pattern`)
+//! consumes active pattern text: `@("a b"|c)` reaches it as the group
+//! `@(` `"a b"` `|c)`, whose quoted stretch stays literal.
+//!
+//! This is the superset-grammar rule of `DESIGN.md` §3.1/§3.3 applied to a
+//! construct bash resolves at parse time. Bash cannot defer the decision: it
+//! chooses between `@(` and `@` `(` while tokenising, so with `shopt -u
+//! extglob` a closed group is a syntax error. ßhell parses the whole script in
+//! one pass, so the option is not available to the lexer — a later
+//! `shopt -s extglob` could not retroactively re-lex an earlier command. The
+//! lexer therefore takes the superset reading and lets the *matcher* decide
+//! semantics from `shopt` at run time, which is where `case`, `${…}` and
+//! pathname expansion already get their dialect (see `docs/contracts.md`,
+//! `bsh-pattern`'s wiring rules).
+//!
+//! The visible deviation: with extglob off, `echo @(a)` prints `@(a)` where
+//! bash reports a syntax error. We are more permissive on purpose — a stray
+//! `@(` is a literal rather than a parse failure — and `[[ x == pat ]]`
+//! already forces extglob semantics on, so it is unaffected.
+//!
+//! The same reading settles the `!(` / `! (` ambiguity from `DESIGN.md` §3.3
+//! by spelling, not by the option: `!(` with no space is always an extglob
+//! group, so pipeline negation of a subshell must be written `! (…)` with a
+//! space. Bash *without* `shopt -s extglob` accepts the unspaced `!(…)` as
+//! negation; we do not, because an unspaced `!(` is the operator that the
+//! matcher and every extglob pattern need. This is a second, deliberate
+//! deviation of the superset parse, not a bug in the scan.
+//!
+//! A group that never closes is **not** an error: the attempted `(` is simply
+//! left as an ordinary word byte and the normal scan continues (`@(a` is the
+//! one word `@(a`). That is the same tolerant reading the matcher takes of a
+//! malformed pattern, and it keeps the lexer from inventing a diagnostic for
+//! an unterminated group.
 
 use bsh_diag::Span;
 use memchr::memchr;
@@ -845,11 +884,67 @@ fn scan_backtick_body(src: &[u8], from: usize, depth: usize, nest: &mut Vec<Open
     nest.extend(inner.nest);
 }
 
+/// Whether `b` is one of the five extglob operators (`?(`, `*(`, `+(`, `@(`,
+/// `!(`).
+fn is_extglob_op(b: u8) -> bool {
+    matches!(b, b'?' | b'*' | b'+' | b'@' | b'!')
+}
+
+/// Scan the extglob group whose opening `(` is at `open`, returning the offset
+/// just past the matching `)`.
+///
+/// The scan is structural only: `|` alternatives and the operator bytes are
+/// ordinary bytes here, because the matcher parses them later. What it does
+/// track is everything that can hide a `)`: quotes, backslash escapes,
+/// `$(…)`/`$((…))`/`${…}`/backticks, and nested `(` … `)` groups. A `)`
+/// inside any of those does not close the group, and a construct that runs to
+/// end of input leaves the whole group unclosed.
+///
+/// `None` means no balanced group was found; the caller then treats the `(`
+/// as an ordinary word byte. That is deliberately not an error: a malformed
+/// group is literal pattern text (`bsh-pattern` degrades it the same way), and
+/// the lexer never invents a diagnostic of its own.
+fn scan_extglob(src: &[u8], open: usize, depth: usize) -> Option<usize> {
+    let mut i = open + 1;
+    let mut parens = 0usize;
+    while i < src.len() {
+        match src[i] {
+            b'\\' => i += 2,
+            b'\'' => i = skip_squote(src, i + 1)?,
+            b'"' => {
+                let mut inner = Vec::new();
+                i = skip_dquote(src, i + 1, depth, &mut inner)?;
+            }
+            b'`' => i = skip_backtick(src, i + 1)?,
+            // A `$` construct may contain its own parentheses and quotes; skip
+            // the whole thing so its `)` cannot be mistaken for the group's.
+            b'$' => {
+                let mut inner = Vec::new();
+                i = scan_dollar(src, i, depth, false, &mut inner)?;
+            }
+            b'(' => {
+                parens += 1;
+                i += 1;
+            }
+            b')' if parens == 0 => return Some(i + 1),
+            b')' => {
+                parens -= 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// Scan a word, returning where it ends and whether something is left open.
 ///
 /// The word stops at an unquoted metacharacter. `<(` and `>(` are process
 /// substitution only at the very start of the word, which is where a shell
-/// would recognise them.
+/// would recognise them. An extglob operator immediately followed by `(`
+/// consumes the balanced group as part of the word (see the module docs); if
+/// the group does not close, the `(` is just a word byte and nothing special
+/// is reported.
 pub(crate) fn scan_word(
     src: &[u8],
     start: usize,
@@ -857,6 +952,11 @@ pub(crate) fn scan_word(
     nest: &mut Vec<OpenConstruct>,
 ) -> WordScan {
     let mut i = start;
+    // Once an extglob group runs to end of input, no later group in this word
+    // can close either: the rest is inside the unclosed one. Stop rescanning
+    // the suffix for each further operator (`@(@(@(…` would otherwise be
+    // quadratic), the same shortcut `bsh-pattern`'s parser takes.
+    let mut extglob_broken = false;
     while i < src.len() {
         let b = src[i];
         if is_meta(b) {
@@ -946,6 +1046,22 @@ pub(crate) fn scan_word(
                     };
                 }
             },
+            // `?(` `*(` `+(` `@(` `!(` open an extglob group. It is part of
+            // this word through its matching `)`; a group that never closes is
+            // not consumed, and the `(` is left as an ordinary word byte.
+            b if is_extglob_op(b) && src.get(i + 1) == Some(&b'(') => {
+                i = if extglob_broken {
+                    i + 2
+                } else {
+                    match scan_extglob(src, i + 1, depth) {
+                        Some(end) => end,
+                        None => {
+                            extglob_broken = true;
+                            i + 2
+                        }
+                    }
+                };
+            }
             _ => i += 1,
         }
     }

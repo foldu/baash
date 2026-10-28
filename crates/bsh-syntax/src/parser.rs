@@ -171,9 +171,11 @@ pub struct ParseOpts {
     /// acceptance only; the grammar is always the bash superset
     /// (`DESIGN.md` §3.1).
     pub posix_mode: bool,
-    /// Reserved for extglob-aware word parsing. Extglob never changes the
-    /// grammar, only pattern matching (`DESIGN.md` §3.3), so the lexer ignores
-    /// it today.
+    /// Present for callers that map the shell's `shopt -s extglob` onto the
+    /// front end, but it does **not** affect lexing or parsing: the lexer
+    /// always takes the extglob reading of `?(` `*(` `+(` `@(` `!(` (the
+    /// superset-grammar rule of `DESIGN.md` §3.3), and only pattern matching
+    /// consults the option at run time. See [`crate::lexer`].
     pub extglob: bool,
     /// Maximum nesting depth of compound commands and substitutions. Exceeding
     /// it produces [`codes::DEPTH`] instead of overflowing the stack.

@@ -83,6 +83,163 @@ fn substitutions_are_single_tokens_with_nesting() {
 }
 
 #[test]
+fn extglob_groups_are_part_of_the_word() {
+    // All five operators, alone and embedded, stay one word with the bytes
+    // exactly as written: the matcher needs active pattern text, not a
+    // dequoted literal.
+    for src in [
+        &b"@(a|b)"[..],
+        &b"?(a|b)"[..],
+        &b"*(a|b)"[..],
+        &b"+(a|b)"[..],
+        &b"!(a|b)"[..],
+        &b"x@(a|b)y"[..],
+        &b"*.@(cc|h)"[..],
+        &b"@(a|b)@(c|d)"[..],
+        &b"@(a|b)?(c|d)"[..],
+    ] {
+        assert_eq!(
+            texts(src),
+            vec![src.to_vec()],
+            "expected one word token for {:?}",
+            String::from_utf8_lossy(src)
+        );
+    }
+    // An extglob operator inside a word, not only at its start.
+    assert_eq!(
+        texts(b"g=--@(help|verbose)"),
+        vec![b"g=--@(help|verbose)".to_vec()]
+    );
+    // A fused redirect target keeps the group with its operator.
+    assert_eq!(texts(b">@(out|err).txt"), vec![b">@(out|err).txt".to_vec()]);
+}
+
+#[test]
+fn extglob_groups_scan_nesting_quotes_and_substitutions() {
+    // The `)` must match: nested groups, quoted stretches, escapes and
+    // substitutions all hide their own parentheses and pipes.
+    for src in [
+        &b"@(a|@(b|c))"[..],
+        &b"@(a|b)@(c|@(d|e))"[..],
+        &b"@(\"a b\"|c)"[..],
+        &b"@('a b'|c)"[..],
+        &b"@(a\\|b|c)"[..],
+        &b"@(a\\))b"[..],
+        &b"@($(echo a)|b)"[..],
+        &b"@($(echo ')')|b)"[..],
+        &b"@($(case x in x) echo y;; esac)|b)"[..],
+        &b"@(${x:-a}b|${y:-)}c)"[..],
+        &b"@(a|`echo b`)"[..],
+        &b"@(a|$'b c')"[..],
+        &b"@(a|$((1 + 2)))"[..],
+        &b"@(a|b)!(*.h)"[..],
+    ] {
+        assert_eq!(
+            texts(src),
+            vec![src.to_vec()],
+            "expected one word token for {:?}",
+            String::from_utf8_lossy(src)
+        );
+    }
+}
+
+#[test]
+fn unclosed_extglob_group_leaves_the_paren_as_a_word_byte() {
+    // No balanced `)`: the `(` is an ordinary word byte rather than a new
+    // diagnostic. A later metacharacter still ends the word normally.
+    for src in [
+        &b"@(a"[..],
+        &b"?(a"[..],
+        &b"*(a"[..],
+        &b"+(a"[..],
+        &b"!(a"[..],
+        &b"@("[..],
+        &b"x@(a"[..],
+        // Several operators inside one unclosed group: every `(` is a word
+        // byte, and the scan does not restart for each operator.
+        &b"@(a@(b"[..],
+        &b"@(a@(b@(c"[..],
+    ] {
+        assert_eq!(
+            texts(src),
+            vec![src.to_vec()],
+            "expected one literal word for {:?}",
+            String::from_utf8_lossy(src)
+        );
+    }
+    // A quote that hides a `)` cannot make the group close.
+    assert_eq!(texts(b"@(a')'"), vec![b"@(a')'".to_vec()]);
+    // Normal word rules still end the word: a space or a `|` is not swallowed
+    // just because an unclosed group preceded it.
+    assert_eq!(
+        texts(b"@(a b"),
+        vec![b"@(a".to_vec(), b" ".to_vec(), b"b".to_vec()]
+    );
+    assert_eq!(
+        significant(b"@(a|b"),
+        vec![
+            (TokenKind::Word, b"@(a".to_vec()),
+            (TokenKind::Operator, b"|".to_vec()),
+            (TokenKind::Word, b"b".to_vec()),
+        ]
+    );
+    // A balanced group may contain spaces and semicolons: it is still one
+    // word. Without the closing `)`, normal scanning resumes at them.
+    assert_eq!(texts(b"@(a; echo b)"), vec![b"@(a; echo b)".to_vec()]);
+    assert_eq!(
+        kinds(b"@(a; echo b"),
+        vec![
+            TokenKind::Word,
+            TokenKind::Operator,
+            TokenKind::Whitespace,
+            TokenKind::Word,
+            TokenKind::Whitespace,
+            TokenKind::Word,
+        ]
+    );
+}
+
+#[test]
+fn extglob_group_does_not_steal_the_case_separator() {
+    // The group's `|` is inside the word; the pattern still ends at the `)`
+    // after it.
+    assert_eq!(
+        significant(b"case x in @(a|b))"),
+        vec![
+            (TokenKind::Keyword, b"case".to_vec()),
+            (TokenKind::Word, b"x".to_vec()),
+            (TokenKind::Word, b"in".to_vec()),
+            (TokenKind::Word, b"@(a|b)".to_vec()),
+            (TokenKind::Operator, b")".to_vec()),
+        ]
+    );
+    // A real alternative separator after the group is still an operator.
+    assert_eq!(
+        significant(b"case x in @(a|b)|c)"),
+        vec![
+            (TokenKind::Keyword, b"case".to_vec()),
+            (TokenKind::Word, b"x".to_vec()),
+            (TokenKind::Word, b"in".to_vec()),
+            (TokenKind::Word, b"@(a|b)".to_vec()),
+            (TokenKind::Operator, b"|".to_vec()),
+            (TokenKind::Word, b"c".to_vec()),
+            (TokenKind::Operator, b")".to_vec()),
+        ]
+    );
+    // `!(…)` is an extglob group, so it is one pattern word too.
+    assert_eq!(
+        significant(b"case x in !(a|b))"),
+        vec![
+            (TokenKind::Keyword, b"case".to_vec()),
+            (TokenKind::Word, b"x".to_vec()),
+            (TokenKind::Word, b"in".to_vec()),
+            (TokenKind::Word, b"!(a|b)".to_vec()),
+            (TokenKind::Operator, b")".to_vec()),
+        ]
+    );
+}
+
+#[test]
 fn arithmetic_command_is_one_token() {
     assert_eq!(
         significant(b"(( x = 1 + 2 ))"),
@@ -353,6 +510,11 @@ const CORPUS: &[&[u8]] = &[
     b"(( x = 1 + 2 ))\n",
     b"[[ -f x && ( -d y ) ]]\n",
     b"x=1 y+=(a b) z[2]=v\n",
+    b"echo @(a|b) ?(c) *(d|e) +(f) !(g)\n",
+    b"case $x in @(a|b)|c) echo y;; !(d)) echo z;; esac\n",
+    b"g=--@(help|verbose) cmd >@(out|err).txt A=(x @(a|b).py)\n",
+    b"echo @(\"a b\"|$(echo c)|${d:-e}) @(a|@(b|c))\n",
+    b"echo @(unterminated",
     b"echo \"unterminated",
     b"echo 'unterminated",
     b"echo $(unterminated",
