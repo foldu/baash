@@ -679,6 +679,18 @@ impl ExpandedPrompt {
         self.bytes
     }
 
+    /// A prompt with no non-printing stretches.
+    ///
+    /// For a caller that has plain text to paint — the editor's
+    /// `(reverse-i-search)` prompt, for instance — and needs the same type the
+    /// renderer takes.
+    pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Self {
+        Self {
+            bytes: bytes.into(),
+            non_printing: Vec::new(),
+        }
+    }
+
     /// Byte ranges of [`ExpandedPrompt::bytes`] that came from between `\[`
     /// and `\]` and must not count toward the display width.
     ///

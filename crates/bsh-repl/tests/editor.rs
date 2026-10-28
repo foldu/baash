@@ -10,8 +10,8 @@ use bsh_repl::{
 };
 
 use common::{
-    FakeTerminal, Session, StubCompleter, StubSyntax, apply_keys, chars, clear_output, has_sgr,
-    last_frame, output_text, plain_config, run, session,
+    FakeTerminal, Session, StubCompleter, StubSyntax, apply_keys, chars, clear_output,
+    config_with_history, drive, has_sgr, last_frame, output_text, plain_config, run, session,
 };
 
 #[test]
@@ -711,4 +711,190 @@ fn a_session_leaves_raw_mode_balanced_after_every_line() {
     assert!(driven.term.raw_balanced());
     assert_eq!(driven.results.len(), 3);
     assert!(matches!(driven.results[2], ReadResult::Eof));
+}
+
+// ---------------------------------------------------------------------------
+// Ctrl-R reverse incremental search
+// ---------------------------------------------------------------------------
+
+/// The keys a search uses, spelled out so the tests read like the interaction.
+const CTRL_R: Key = Key::Ctrl(0x12);
+const CTRL_G: Key = Key::Ctrl(0x07);
+const CTRL_C: Key = Key::Ctrl(0x03);
+
+/// `Ctrl-R` followed by `text`.
+fn search(text: &str) -> Vec<Key> {
+    let mut keys = vec![CTRL_R];
+    keys.extend(chars(text));
+    keys
+}
+
+#[test]
+fn ctrl_r_shows_the_newest_entry_and_typing_narrows() {
+    let entries = ["echo hello world", "echo hi there"];
+    let (buffer, _, _) = drive(&entries, &[CTRL_R]);
+    assert_eq!(buffer, b"echo hi there", "the newest entry is shown");
+
+    let (buffer, cursor, output) = drive(&entries, &search("hello"));
+    assert_eq!(buffer, b"echo hello world", "typing narrows the match");
+    assert_eq!(cursor, 5, "the cursor is at the start of the match");
+    assert!(
+        output.contains("(reverse-i-search)`hello': echo hello world"),
+        "the search prompt names the query and the match: {output:?}"
+    );
+}
+
+#[test]
+fn ctrl_r_again_walks_to_the_next_older_match() {
+    let entries = ["a one", "a two", "m three"];
+    let (buffer, _, _) = drive(&entries, &search("a"));
+    assert_eq!(buffer, b"a two");
+    let (buffer, _, _) = drive(&entries, &[CTRL_R, Key::Char('a'), CTRL_R]);
+    assert_eq!(buffer, b"a one", "a second Ctrl-R finds the older match");
+}
+
+#[test]
+fn a_query_with_no_older_match_reports_failure_and_keeps_the_last_match() {
+    let entries = ["first alpha", "second alpha"];
+    let (buffer, _, output) = drive(&entries, &[CTRL_R, Key::Char('a'), CTRL_R, CTRL_R]);
+    assert_eq!(buffer, b"first alpha", "the last match stays on the line");
+    assert!(
+        output.contains("(failed reverse-i-search)`a': first alpha"),
+        "the prompt says the search failed: {output:?}"
+    );
+}
+
+#[test]
+fn enter_accepts_the_match_and_executes_it() {
+    let (result, _) = run(
+        FakeTerminal::new(b"\x12hi\r"),
+        &StubCompleter::empty(),
+        &bsh_repl::NeverNeedsMore,
+        config_with_history(&["echo hello", "echo hi there"]),
+    );
+    assert_eq!(result, ReadResult::Line(b"echo hi there\n".to_vec()));
+}
+
+#[test]
+fn escape_restores_the_line_the_search_started_from() {
+    let mut keys = chars("draft");
+    keys.extend(search("hi"));
+    keys.push(Key::Esc);
+    let (buffer, cursor, _) = drive(&["echo hi there"], &keys);
+    assert_eq!(buffer, b"draft", "the original line comes back");
+    assert_eq!(cursor, 5);
+    assert!(
+        !drive(&["echo hi there"], &keys)
+            .2
+            .contains("reverse-i-search`hi': echo hi there\r")
+    );
+}
+
+#[test]
+fn ctrl_g_also_aborts_the_search() {
+    let mut keys = chars("draft");
+    keys.extend(search("hi"));
+    keys.push(CTRL_G);
+    let (buffer, cursor, _) = drive(&["echo hi there"], &keys);
+    assert_eq!((buffer.as_slice(), cursor), (b"draft".as_slice(), 5));
+}
+
+#[test]
+fn ctrl_c_abandons_the_whole_line() {
+    let (result, term) = run(
+        FakeTerminal::new(b"\x12hi\x03"),
+        &StubCompleter::empty(),
+        &bsh_repl::NeverNeedsMore,
+        config_with_history(&["echo hi there"]),
+    );
+    assert_eq!(result, ReadResult::Interrupted);
+    assert!(term.text().contains("^C"));
+}
+
+#[test]
+fn a_query_that_matches_nothing_says_so_and_does_not_change_the_line() {
+    let mut keys = search("zzz");
+    keys.push(Key::Esc);
+    let (buffer, cursor, output) = drive(&["echo hi there"], &keys);
+    assert_eq!(
+        (buffer.as_slice(), cursor),
+        (b"".as_slice(), 0),
+        "line unchanged"
+    );
+    assert!(
+        output.contains("(failed reverse-i-search)`zzz': echo hi there"),
+        "the failing spelling is used: {output:?}"
+    );
+}
+
+#[test]
+fn empty_history_does_not_panic_and_leaves_the_line_alone() {
+    // Ctrl-R, Ctrl-G with nothing to search.
+    let mut keys = chars("keep");
+    keys.push(CTRL_R);
+    keys.push(CTRL_G);
+    let (buffer, cursor, output) = drive(&[], &keys);
+    assert_eq!((buffer.as_slice(), cursor), (b"keep".as_slice(), 4));
+    assert!(
+        output.contains("(failed reverse-i-search)`': keep"),
+        "{output:?}"
+    );
+
+    // ... and Enter on an empty ring runs what was typed.
+    let (result, _) = run(
+        FakeTerminal::new(b"\x12\r"),
+        &StubCompleter::empty(),
+        &bsh_repl::NeverNeedsMore,
+        config_with_history(&[]),
+    );
+    assert_eq!(result, ReadResult::Line(b"\n".to_vec()));
+}
+
+#[test]
+fn backspace_edits_the_query_and_searches_again() {
+    let entries = ["echo hi there"];
+    let mut keys = search("hiz");
+    keys.push(Key::Backspace);
+    let (buffer, _, output) = drive(&entries, &keys);
+    assert_eq!(buffer, b"echo hi there");
+    assert!(
+        output.contains("(reverse-i-search)`hi': echo hi there"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn left_and_right_accept_the_match_and_put_the_cursor_on_it() {
+    // `wor` matches at index 11 of "echo hello world"; `->` puts the cursor at
+    // 12, so the typed byte lands between `w` and `o`.
+    let mut keys = search("wor");
+    keys.push(Key::Right);
+    keys.push(Key::Char('X'));
+    keys.push(Key::Enter);
+    let (result, _) = run(
+        FakeTerminal::new(b"\x12wor\x1b[CX\r"),
+        &StubCompleter::empty(),
+        &bsh_repl::NeverNeedsMore,
+        config_with_history(&["echo hello world"]),
+    );
+    assert_eq!(result, ReadResult::Line(b"echo hello wXorld\n".to_vec()));
+
+    let (result, _) = run(
+        FakeTerminal::new(b"\x12wor\x1b[DY\r"),
+        &StubCompleter::empty(),
+        &bsh_repl::NeverNeedsMore,
+        config_with_history(&["echo hello world"]),
+    );
+    assert_eq!(result, ReadResult::Line(b"echo helloY world\n".to_vec()));
+
+    // Right and then Left, which is where bash's own cursor ends up after a
+    // search: on the match, ready to type in front of it.
+    let (result, _) = run(
+        FakeTerminal::new(b"\x12wor\x1b[C\x1b[DY\r"),
+        &StubCompleter::empty(),
+        &bsh_repl::NeverNeedsMore,
+        config_with_history(&["echo hello world"]),
+    );
+    assert_eq!(result, ReadResult::Line(b"echo hello Yworld\n".to_vec()));
+    let _ = keys;
 }

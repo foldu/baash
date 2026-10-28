@@ -13,7 +13,9 @@ use std::io;
 use std::rc::Rc;
 
 use bsh_complete::{Candidate, Completer, CompletionEngine, Menu};
-use bsh_repl::{Config, Editor, NeverNeedsMore, Prompt, ReadResult, Size, Syntax, Terminal};
+use bsh_repl::{
+    Config, Editor, History, NeverNeedsMore, Prompt, ReadResult, Size, Syntax, Terminal,
+};
 
 /// A terminal whose input is a fixed script and whose output is recorded.
 pub struct FakeTerminal {
@@ -151,6 +153,41 @@ impl Syntax for StubSyntax {
     fn needs_more_input(&self, buffer: &[u8]) -> bool {
         (self.0)(buffer)
     }
+}
+
+/// A history ring seeded with `entries`, oldest first.
+pub fn seeded_history(entries: &[&str]) -> History {
+    let mut history = History::new();
+    for entry in entries {
+        history.push(entry.as_bytes());
+    }
+    history
+}
+
+/// [`plain_config`] with a seeded history ring.
+pub fn config_with_history(entries: &[&str]) -> Config {
+    Config {
+        history: seeded_history(entries),
+        ..plain_config()
+    }
+}
+
+/// Drive `keys` through the editor with a seeded ring; returns the buffer, the
+/// cursor and everything painted.
+pub fn drive(entries: &[&str], keys: &[bsh_repl::Key]) -> (Vec<u8>, usize, String) {
+    let mut term = FakeTerminal::sized(b"", 80, 24);
+    let handle = term.output_handle();
+    let completer = StubCompleter::empty();
+    let config = config_with_history(entries);
+    let mut editor = Editor::with_config(&mut term, &completer, &NeverNeedsMore, config);
+    for key in keys {
+        editor.step(key.clone()).expect("step");
+    }
+    (
+        editor.line().buffer().to_vec(),
+        editor.line().cursor(),
+        output_text(&handle),
+    )
 }
 
 /// A configuration with colour and ghost text off, and the default prompt.

@@ -14,6 +14,15 @@
 //! them, but they are scrollback now — the editor paints only the live segment
 //! (see [`crate::Line::start`]).
 //!
+//! # Reverse incremental search
+//!
+//! `Ctrl-R` (`Ctrl-R` again for older matches) searches the ring the editor
+//! already holds, with readline's interaction: the search *is* the prompt, the
+//! line being painted is the match, and `Enter` runs it. Nothing here is a new
+//! screen mode — [`Search`] only swaps the prompt and the buffer, so the
+//! renderer, the wrapping and the cursor arithmetic are the ones already used
+//! for typing.
+//!
 //! # Raw mode
 //!
 //! Raw mode is entered for the duration of `read_line` only. A command started
@@ -30,7 +39,7 @@ use bsh_runtime::History;
 use crate::completion::MenuState;
 use crate::key::{Decoder, Key};
 use crate::line::Line;
-use crate::prompt::Prompt;
+use crate::prompt::{ExpandedPrompt, Prompt};
 use crate::render::{Frame, MenuView, Renderer};
 use crate::term::Terminal;
 
@@ -112,6 +121,42 @@ impl Default for Config {
     }
 }
 
+/// `Ctrl-R` reverse incremental search.
+///
+/// The query is what has been typed since the search began; the line itself
+/// holds the current match, so the renderer paints the match with the normal
+/// line code. `original` is what `Esc`/`Ctrl-G` put back.
+#[derive(Clone, Debug)]
+struct Search {
+    /// Bytes typed into the search.
+    query: Vec<u8>,
+    /// The line as it was when `Ctrl-R` was pressed.
+    original: Vec<u8>,
+    /// The cursor as it was when `Ctrl-R` was pressed.
+    original_cursor: usize,
+    /// Index into the history entries of the match being shown.
+    matched: Option<usize>,
+    /// Whether the last search failed. The line keeps the last match, as
+    /// readline does, while the prompt says the search failed.
+    failed: bool,
+}
+
+impl Search {
+    /// The prompt readline draws in place of `PS1`.
+    fn prompt(&self) -> ExpandedPrompt {
+        let prefix: &[u8] = if self.failed {
+            b"(failed reverse-i-search)`"
+        } else {
+            b"(reverse-i-search)`"
+        };
+        let mut bytes = Vec::with_capacity(prefix.len() + self.query.len() + 3);
+        bytes.extend_from_slice(prefix);
+        bytes.extend_from_slice(&self.query);
+        bytes.extend_from_slice(b"': ");
+        ExpandedPrompt::from_bytes(bytes)
+    }
+}
+
 /// The interactive line editor.
 pub struct Editor<'a> {
     term: &'a mut dyn Terminal,
@@ -127,6 +172,8 @@ pub struct Editor<'a> {
     renderer: Renderer,
     decoder: Decoder,
     menu: Option<MenuState>,
+    /// The reverse search in progress, if any.
+    search: Option<Search>,
     secondary: bool,
     dirty: bool,
 }
@@ -162,6 +209,7 @@ impl<'a> Editor<'a> {
             renderer: Renderer::new(),
             decoder: Decoder::new(),
             menu: None,
+            search: None,
             secondary: false,
             dirty: true,
         }
@@ -231,6 +279,7 @@ impl<'a> Editor<'a> {
     fn begin(&mut self) {
         self.line.reset();
         self.menu = None;
+        self.search = None;
         self.history.reset_navigation();
         self.secondary = false;
         self.renderer.reset();
@@ -301,6 +350,9 @@ impl<'a> Editor<'a> {
     }
 
     fn handle(&mut self, key: Key) -> io::Result<Flow> {
+        if self.search.is_some() {
+            return self.handle_search(key);
+        }
         if self.menu.is_some() {
             return self.handle_menu(key);
         }
@@ -339,6 +391,7 @@ impl<'a> Editor<'a> {
                     self.accept_suggestion();
                 }
             }
+            Key::Ctrl(0x12) => self.begin_search(),
             Key::Up | Key::Ctrl(0x10) => self.history_previous(),
             Key::Down | Key::Ctrl(0x0e) => self.history_next(),
             Key::Ctrl(0x01) => {
@@ -483,6 +536,216 @@ impl<'a> Editor<'a> {
         }
     }
 
+    /// `Ctrl-R`: start a reverse search over the ring.
+    ///
+    /// The current line and cursor are remembered for `Esc`/`Ctrl-G`, and the
+    /// newest entry is shown at once (readline does the same, so a second
+    /// `Ctrl-R` walks back one entry at a time). A continuation line never
+    /// enters the search: earlier lines are already scrollback.
+    fn begin_search(&mut self) {
+        if self.line.in_continuation() {
+            return;
+        }
+        let mut search = Search {
+            query: Vec::new(),
+            original: self.line.buffer().to_vec(),
+            original_cursor: self.line.cursor(),
+            matched: None,
+            failed: true,
+        };
+        if self.history.is_empty() {
+            self.search = Some(search);
+            self.dirty = true;
+            return;
+        }
+        let newest = self.history.len() - 1;
+        search.matched = Some(newest);
+        search.failed = false;
+        self.search = Some(search);
+        self.show_match(newest);
+    }
+
+    /// One key while the search prompt is up.
+    ///
+    /// The keys readline gives a meaning are handled here; every other key
+    /// accepts the match (the line already holds it) and is then processed
+    /// normally — which is how `Left`/`Right` put the cursor on the match for
+    /// editing.
+    fn handle_search(&mut self, key: Key) -> io::Result<Flow> {
+        match key {
+            Key::Ctrl(0x12) => {
+                self.search_older();
+                Ok(Flow::Continue)
+            }
+            Key::Ctrl(0x07) | Key::Esc => {
+                self.abort_search();
+                Ok(Flow::Continue)
+            }
+            Key::Ctrl(0x03) => {
+                // The whole line is abandoned; there is nothing to restore.
+                self.search = None;
+                Ok(Flow::Interrupt)
+            }
+            Key::Enter => {
+                self.search = None;
+                Ok(Flow::Submit)
+            }
+            Key::Backspace => {
+                if let Some(search) = self.search.as_mut()
+                    && search.query.pop().is_some()
+                {
+                    self.research();
+                }
+                Ok(Flow::Continue)
+            }
+            Key::Char(character) => {
+                self.search_insert(character.to_string().as_bytes());
+                Ok(Flow::Continue)
+            }
+            Key::Byte(byte) => {
+                self.search_insert(&[byte]);
+                Ok(Flow::Continue)
+            }
+            other => {
+                // Accept and let the key act on the accepted line.
+                self.search = None;
+                self.dirty = true;
+                self.handle(other)
+            }
+        }
+    }
+
+    /// Add bytes to the query and search again from where we are.
+    fn search_insert(&mut self, bytes: &[u8]) {
+        if let Some(search) = self.search.as_mut() {
+            search.query.extend_from_slice(bytes);
+        }
+        self.research();
+    }
+
+    /// Re-run the search after a query edit.
+    ///
+    /// A failed search restarts from the newest entry (otherwise backspacing
+    /// out of a dead end would keep looking where it failed); a live match is
+    /// kept when it still contains the new query and the search walks older
+    /// from there, which is readline's narrowing.
+    fn research(&mut self) {
+        let Some(search) = self.search.as_ref() else {
+            return;
+        };
+        let query = search.query.clone();
+        let from = if search.failed {
+            self.history.len().saturating_sub(1)
+        } else {
+            match search.matched {
+                Some(index) => index,
+                None => self.history.len().saturating_sub(1),
+            }
+        };
+        if self.history.is_empty() {
+            if let Some(search) = self.search.as_mut() {
+                search.failed = true;
+                search.matched = None;
+            }
+            self.dirty = true;
+            return;
+        }
+        match self.find_match(&query, from) {
+            Some(index) => {
+                if let Some(search) = self.search.as_mut() {
+                    search.failed = false;
+                    search.matched = Some(index);
+                }
+                self.show_match(index);
+            }
+            None => {
+                if let Some(search) = self.search.as_mut() {
+                    search.failed = true;
+                    search.matched = None;
+                }
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// `Ctrl-R` again: the next older match.
+    fn search_older(&mut self) {
+        let Some(search) = self.search.as_ref() else {
+            return;
+        };
+        let query = search.query.clone();
+        let from = match search.matched {
+            Some(0) | None => {
+                if let Some(search) = self.search.as_mut() {
+                    search.failed = true;
+                }
+                self.dirty = true;
+                return;
+            }
+            Some(index) => index - 1,
+        };
+        match self.find_match(&query, from) {
+            Some(index) => {
+                if let Some(search) = self.search.as_mut() {
+                    search.failed = false;
+                    search.matched = Some(index);
+                }
+                self.show_match(index);
+            }
+            None => {
+                if let Some(search) = self.search.as_mut() {
+                    search.failed = true;
+                    search.matched = None;
+                }
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// The newest entry at or below `from` that contains `query`.
+    fn find_match(&self, query: &[u8], from: usize) -> Option<usize> {
+        let entries = self.history.entries();
+        let mut index = from.min(entries.len().checked_sub(1)?);
+        loop {
+            if contains(entries[index].text(), query) {
+                return Some(index);
+            }
+            index = index.checked_sub(1)?;
+        }
+    }
+
+    /// Put entry `index` on the line and the cursor at the start of the match.
+    ///
+    /// Leaving the cursor on the match (rather than at the end of the line)
+    /// is what makes readline's "a movement key accepts the match and puts the
+    /// cursor there for editing" work.
+    fn show_match(&mut self, index: usize) {
+        let query = self
+            .search
+            .as_ref()
+            .map(|search| search.query.clone())
+            .unwrap_or_default();
+        let Some(entry) = self.history.entries().get(index) else {
+            return;
+        };
+        let text = entry.text().to_vec();
+        let at = contains_at(&text, &query).unwrap_or(0);
+        self.line.set_text(&text);
+        self.line.set_cursor(at);
+        self.dirty = true;
+    }
+
+    /// `Esc`/`Ctrl-G`: restore the line the search started from.
+    fn abort_search(&mut self) {
+        let Some(search) = self.search.take() else {
+            return;
+        };
+        self.line.set_text(&search.original);
+        self.line
+            .set_cursor(search.original_cursor.min(search.original.len()));
+        self.dirty = true;
+    }
+
     fn accept_suggestion(&mut self) {
         // `suggestion` already checks that the ghost text is visible (colour,
         // auto-suggest, cursor at the end); accepting invisible text would be
@@ -513,7 +776,10 @@ impl<'a> Editor<'a> {
             return Ok(());
         }
         self.dirty = false;
-        let prompt = if self.secondary {
+        let search_prompt = self.search.as_ref().map(Search::prompt);
+        let prompt = if let Some(prompt) = &search_prompt {
+            prompt
+        } else if self.secondary {
             self.prompt.secondary_text()
         } else {
             self.prompt.primary_text()
@@ -524,7 +790,7 @@ impl<'a> Editor<'a> {
             .as_mut()
             .map(|menu| menu.rows(self.max_menu_rows, columns));
         let menu = rows.as_deref().map(|rows| MenuView { rows });
-        let ghost = if self.menu.is_some() {
+        let ghost = if self.menu.is_some() || self.search.is_some() {
             None
         } else {
             self.suggestion()
@@ -539,6 +805,19 @@ impl<'a> Editor<'a> {
         self.renderer
             .draw(self.term, &frame, &self.theme, self.color)
     }
+}
+
+/// The offset of `query` in `text`, or `None`. An empty query matches at 0.
+fn contains_at(text: &[u8], query: &[u8]) -> Option<usize> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    text.windows(query.len()).position(|window| window == query)
+}
+
+/// Whether `query` occurs in `text`; an empty query occurs everywhere.
+fn contains(text: &[u8], query: &[u8]) -> bool {
+    contains_at(text, query).is_some()
 }
 
 /// Whether `key` extends a kill sequence rather than ending one.

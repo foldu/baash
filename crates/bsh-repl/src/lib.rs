@@ -20,7 +20,7 @@
 //! | `line` | the [`Line`] buffer, cursor and kill ring |
 //! | `display` | bytes → display cells (`unicode-width`) |
 //! | `render` | one frame: prompt, line, ghost text, menu ([`Frame`]) |
-//! | `prompt` | `PS1`/`PS2` backslash escapes ([`expand`]) |
+//! | `prompt` | the rendered `PS1`/`PS2` the shell hands in ([`expand`]) |
 //! | `editor` | the [`Editor`] state machine and read loop |
 //!
 //! The history ring itself (`bsh_runtime::History`) is re-exported as
@@ -31,8 +31,11 @@
 //! Consciously left out of this wave, in rough order of how much a daily user
 //! would miss them:
 //!
-//! * **`Ctrl-R` reverse incremental search.** The history ring and navigation
-//!   are here; the search UI, prompt and match highlighting are not.
+//! * **Match highlighting in the search.** `Ctrl-R` shows the match with the
+//!   cursor on its first byte (readline reverses the matched range as well);
+//!   the renderer has no selection concept yet.
+//! * **`Ctrl-S` forward search.** `Ctrl-R` only walks backwards, which is also
+//!   what a terminal without `stty -ixon` can deliver.
 //! * **Cycling the completion menu with Tab.** Tab accepts the selection (as
 //!   does Enter); Up/Down, `Ctrl-P`/`Ctrl-N` and Shift-Tab move it. Readline's
 //!   menu-complete, where repeated Tab advances *and* inserts, is a different
