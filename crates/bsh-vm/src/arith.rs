@@ -36,8 +36,13 @@
 //! middle arm is a full expression (comma included) while the third is a
 //! conditional-expression, matching bash.
 //!
-//! Deferred: `base#digits` literals, and recursive evaluation of a variable
-//! whose value is itself an expression.
+//! Literals are C-style (`0x1f` hexadecimal, `010` octal, else decimal) plus
+//! bash's `base#digits` form for bases 2 through 64: digits above nine are
+//! `a`–`z` (10–35), `A`–`Z` (36–61 when the base is above 36, case-folded
+//! below it), `@` (62) and `_` (63). `10#011` is eleven, not nine.
+//!
+//! Deferred: recursive evaluation of a variable whose value is itself an
+//! expression.
 
 use std::collections::HashMap;
 
@@ -128,30 +133,107 @@ pub fn parse_int(bytes: &[u8]) -> Option<i64> {
         Some((&b'+', rest)) => (false, rest),
         _ => (false, text),
     };
-    let (radix, digits) = if let Some(hex) = digits
-        .strip_prefix(b"0x")
-        .or_else(|| digits.strip_prefix(b"0X"))
-    {
-        (16, hex)
-    } else if digits.len() > 1 && digits[0] == b'0' {
-        (8, &digits[1..])
-    } else {
-        (10, digits)
-    };
-    if digits.is_empty() {
-        return None;
-    }
-    let mut value: i64 = 0;
-    for &byte in digits {
-        let digit = (byte as char).to_digit(radix)?;
-        value = value.wrapping_mul(i64::from(radix));
-        value = value.wrapping_add(i64::from(digit));
-    }
+    let value = parse_literal(digits).ok()?;
     Some(if negative {
         value.wrapping_neg()
     } else {
         value
     })
+}
+
+/// Parse an unsigned integer literal: decimal, `0x` hexadecimal, leading-zero
+/// octal, or `base#digits`.
+fn parse_literal(token: &[u8]) -> Result<i64, String> {
+    if token.is_empty() {
+        return Err("invalid number".to_owned());
+    }
+    if let Some(hash) = token.iter().position(|&byte| byte == b'#') {
+        let base_text = &token[..hash];
+        let digits = &token[hash + 1..];
+        // bash rejects a zero or leading-zero base as a malformed number, not
+        // as an out-of-range base.
+        if base_text == b"0" || (base_text.len() > 1 && base_text[0] == b'0') {
+            return Err("invalid number".to_owned());
+        }
+        if base_text.is_empty() || !base_text.iter().all(u8::is_ascii_digit) {
+            return Err("invalid arithmetic base".to_owned());
+        }
+        let mut base: u32 = 0;
+        for &byte in base_text {
+            base = base
+                .saturating_mul(10)
+                .saturating_add(u32::from(byte - b'0'));
+        }
+        if !(2..=64).contains(&base) {
+            return Err("invalid arithmetic base".to_owned());
+        }
+        if digits.is_empty() {
+            return Err("invalid integer constant".to_owned());
+        }
+        let mut value: i64 = 0;
+        for &byte in digits {
+            let Some(digit) = digit_value(byte, base) else {
+                return Err("value too great for base".to_owned());
+            };
+            value = value
+                .wrapping_mul(i64::from(base))
+                .wrapping_add(i64::from(digit));
+        }
+        return Ok(value);
+    }
+    if token.len() >= 2 && token[0] == b'0' && matches!(token[1], b'x' | b'X') {
+        // `0x` with no digits is zero in bash.
+        let mut value: i64 = 0;
+        for &byte in &token[2..] {
+            let Some(digit) = hex_value(byte) else {
+                return Err("value too great for base".to_owned());
+            };
+            value = value.wrapping_mul(16).wrapping_add(i64::from(digit));
+        }
+        return Ok(value);
+    }
+    if token.len() > 1 && token[0] == b'0' {
+        let mut value: i64 = 0;
+        for &byte in &token[1..] {
+            if !(b'0'..=b'7').contains(&byte) {
+                return Err("value too great for base".to_owned());
+            }
+            value = value.wrapping_mul(8).wrapping_add(i64::from(byte - b'0'));
+        }
+        return Ok(value);
+    }
+    let mut value: i64 = 0;
+    for &byte in token {
+        if !byte.is_ascii_digit() {
+            return Err("value too great for base".to_owned());
+        }
+        value = value.wrapping_mul(10).wrapping_add(i64::from(byte - b'0'));
+    }
+    Ok(value)
+}
+
+fn hex_value(byte: u8) -> Option<u32> {
+    (byte as char).to_digit(16)
+}
+
+/// The value of one `base#digits` digit. Above base 36 the two cases are
+/// distinct (`64#A` is 36, not 10), matching bash.
+fn digit_value(byte: u8, base: u32) -> Option<u32> {
+    let value = match byte {
+        b'0'..=b'9' => u32::from(byte - b'0'),
+        b'a'..=b'z' => u32::from(byte - b'a') + 10,
+        b'A'..=b'Z' => {
+            if base <= 36 {
+                u32::from(byte - b'A') + 10
+            } else {
+                u32::from(byte - b'A') + 36
+            }
+        }
+        b'@' => 62,
+        b'_' => 63,
+        _ => return None,
+    };
+    (value < base).then_some(value)
 }
 
 /// Assignment spellings, longest first. `=` is listed after the shifts so a
@@ -511,16 +593,7 @@ impl<'a, V: IntVars> Parser<'a, V> {
             .first()
             .is_some_and(|b| b.is_ascii_digit())
         {
-            let start = self.pos;
-            while self
-                .src
-                .get(self.pos)
-                .is_some_and(|b| b.is_ascii_alphanumeric())
-            {
-                self.pos += 1;
-            }
-            return parse_int(&self.src[start..self.pos])
-                .ok_or_else(|| "invalid number".to_owned());
+            return self.number();
         }
         // bash accepts `$name` and `${name}` inside arithmetic, and `$1`-
         // style positional references are ordinary names there.
@@ -550,6 +623,47 @@ impl<'a, V: IntVars> Parser<'a, V> {
         let subscript = self.take_subscript()?;
         let current = self.read_lvalue(&name, subscript);
         self.take_postfix(current, &name, subscript)
+    }
+
+    /// A numeric literal, including bash's `base#digits` form.
+    fn number(&mut self) -> Result<i64, String> {
+        let start = self.pos;
+        while self.src.get(self.pos).is_some_and(u8::is_ascii_digit) {
+            self.pos += 1;
+        }
+        if self.src.get(self.pos) == Some(&b'#') {
+            self.pos += 1;
+            while self.src.get(self.pos).is_some_and(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(*byte, b'@' | b'_' | b'#')
+            }) {
+                self.pos += 1;
+            }
+        } else if &self.src[start..self.pos] == b"0"
+            && self
+                .src
+                .get(self.pos)
+                .is_some_and(|byte| matches!(byte, b'x' | b'X'))
+        {
+            self.pos += 1;
+            while self
+                .src
+                .get(self.pos)
+                .is_some_and(u8::is_ascii_alphanumeric)
+            {
+                self.pos += 1;
+            }
+        } else {
+            // Keep a malformed suffix (`42x`, `09`) in one token so the
+            // diagnostic names the whole constant.
+            while self
+                .src
+                .get(self.pos)
+                .is_some_and(u8::is_ascii_alphanumeric)
+            {
+                self.pos += 1;
+            }
+        }
+        parse_literal(&self.src[start..self.pos])
     }
 
     fn peek_name(&self) -> Option<&'a [u8]> {
@@ -700,13 +814,6 @@ mod tests {
     }
 
     #[test]
-    fn literals_are_c_style() {
-        assert_eq!(value("0x10"), 16);
-        assert_eq!(value("010"), 8);
-        assert_eq!(value("+4"), 4);
-    }
-
-    #[test]
     fn unset_names_are_zero_and_assignments_persist() {
         let mut vars = MapVars::default();
         assert_eq!(eval(b"n + 1", &mut vars), Ok(1));
@@ -744,10 +851,69 @@ mod tests {
     }
 
     #[test]
+    fn literals_are_c_style() {
+        assert_eq!(value("0x10"), 16);
+        assert_eq!(value("0XAA"), 170);
+        assert_eq!(value("010"), 8);
+        assert_eq!(value("10#011"), 11);
+        assert_eq!(value("+4"), 4);
+    }
+
+    #[test]
+    fn base_literals_follow_bash() {
+        assert_eq!(value("10#11"), 11);
+        assert_eq!(value("2#101"), 5);
+        assert_eq!(value("2#0110"), 6);
+        assert_eq!(value("16#1b"), 27);
+        assert_eq!(value("10#0123"), 123);
+        assert_eq!(value("24#ag7"), 6151);
+        assert_eq!(value("36#a"), 10);
+        assert_eq!(value("36#z"), 35);
+        assert_eq!(value("36#Z"), 35, "case-folded at or below base 36");
+        assert_eq!(value("64#a"), 10);
+        assert_eq!(value("64#z"), 35);
+        assert_eq!(value("64#A"), 36, "distinct above base 36");
+        assert_eq!(value("64#Z"), 61);
+        assert_eq!(value("64#@"), 62);
+        assert_eq!(value("64#_"), 63);
+        assert_eq!(value("64#10"), 64);
+        assert_eq!(value("-2#1"), -1);
+    }
+
+    #[test]
+    fn malformed_base_literals_are_errors() {
+        for src in [
+            "2#102",   // digit out of range
+            "8#9",     // digit out of range
+            "2#1_",    // `_` is 63, out of range for base 2
+            "37#Z",    // Z is 61, above base 37
+            "1#0",     // base too small
+            "65#0",    // base too large
+            "0#0",     // zero base
+            "02#0110", // leading-zero base
+            "2#",      // no digits
+            "2##1",    // malformed
+            "09",      // bad octal digit
+            "0x1X",    // bad hex digit
+            "42x",     // trailing junk
+        ] {
+            assert!(
+                eval(src.as_bytes(), &mut MapVars::default()).is_err(),
+                "{src} should fail"
+            );
+        }
+        assert!(fails("2#102").contains("value too great for base"));
+        assert!(fails("1#0").contains("invalid arithmetic base"));
+        assert!(fails("2#").contains("invalid integer constant"));
+    }
+
+    #[test]
     fn parse_int_accepts_signed_and_unsigned_forms() {
         assert_eq!(parse_int(b"42"), Some(42));
         assert_eq!(parse_int(b" -7 "), Some(-7));
         assert_eq!(parse_int(b"0xff"), Some(255));
+        assert_eq!(parse_int(b"2#101"), Some(5));
+        assert_eq!(parse_int(b"2#102"), None);
         assert_eq!(parse_int(b"nope"), None);
         assert_eq!(parse_int(b""), None);
     }
