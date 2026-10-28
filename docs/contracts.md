@@ -657,6 +657,30 @@ meaning); malformed extglob groups degrade to literal text; nesting is capped at
 - `OPTIND` is initialised to 1 by the VM at startup; assigning to it is
   getopts' reset signal, which is why `Vars::optind_writes` exists.
 
+### Lexing and parse-time options
+
+`lex_full` uses the default profile (`extglob` off); `lex_full_with(src,
+extglob)` takes the parse-affecting option, and `parse_with` passes
+`ParseOpts::extglob` through. This matters for exactly one decision: a
+word-initial `!(…)` at the start of a statement is pipeline negation when the
+option was off, and an extglob group when it was on. bash settles this at parse
+time, so a chunk parsed with the option on must not invent the negation
+reading. Every other extglob operator (`?(`, `*(`, `+(`, `@(`) is always a
+group, because none of them can begin a command.
+
+The lexer is a **superset** of bash's: with the option off, `echo @(a)` is the
+word `@(a)` where bash reports a syntax error. A group that never closes is not
+an error either — the `(` stays an ordinary word byte, which is how
+`bsh-pattern` degrades the same text.
+
+### bsh-spec
+
+`--locale NAME` sets `LC_ALL` for the shell under test **and** every reference,
+so the comparison is like-for-like. `C` is the default because the suite's
+primary expectations are byte-calibrated: measured, bash falls from 2574 to
+2435 under `C.UTF-8`, while counting characters gains us 15. UTF-8 is therefore
+a diagnostic mode, not the baseline.
+
 ### bsh-vm additions
 
 `Interp::each_candidate` is the single resolution walk (alias → keyword →
