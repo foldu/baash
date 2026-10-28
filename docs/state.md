@@ -54,7 +54,7 @@ a stale brief has already cost two wrong scopes (arrays: 54 vs real; namerefs:
 | of the whole suite (3971 cases) | 50.0 % |
 | as a fraction of bash's score | 1986 / 2574 = 77.2 % |
 | share of the bash gap closed since 1013 | 973 / 1561 = 62.3 % |
-| our test count | 1096 |
+| our test count | 1135 |
 
 Measured with `bash 5.3.20` as the comparison shell, harness forced to
 `LC_ALL=C` (bash scores *worse* under `C.UTF-8`: 2574 → 2435, so the C locale
@@ -71,7 +71,7 @@ Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 1986`,
 
 ## 3. Layers
 
-61 731 lines of `src` across 14 crates.
+62 826 lines of `src` across 14 crates.
 
 | crate | lines | responsibility |
 |---|---|---|
@@ -79,14 +79,14 @@ Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 1986`,
 | `bsh-syntax` | 6607 | lexer + recursive-descent parser producing `Word`/`Command`; the superset grammar |
 | `bsh-lang` | 9862 | shell *text* semantics: word expansion, patterns (`bsh-pattern`), parameter operators, prompt escapes, arithmetic; no I/O |
 | `bsh-runtime` | 11736 | shell *state*: variables/arrays/namerefs, options, builtin registry and state-only bodies, the history ring and `HIST*` policies, traps bookkeeping, completion registry, `declare -p` rendering |
-| `bsh-vm` | 13224 | the evaluator (tree-walking) and everything that needs both state and syscalls: command execution, redirection, jobs, traps |
+| `bsh-vm` | 13242 | the evaluator (tree-walking) and everything that needs both state and syscalls: command execution, redirection, jobs, traps |
 | `bsh-pattern` | 3947 | Thompson-NFA glob: `O(n·m)`, never exponential; `extglob`/`nocasematch`/`utf8` flags |
 | `bsh-diag` | 1946 | diagnostic model and miette rendering; error-code space |
-| `bsh-complete` | 3137 | completion engine: providers, contexts, nucleo ranking, menu layout |
+| `bsh-complete` | 3836 | completion engine: providers, contexts, nucleo ranking, menu layout |
 | `bsh-repl` | 3041 | line editor, key decoding, history navigation, prompt adapter, renderer, terminal abstraction |
 | `bsh-highlight` | 386 | syntax highlighting (token → style), shared with the editor |
 | `bsh-spec` | 3242 | the Oils-suite runner, comparator, ratchet |
-| `bsh` | 920 | the binary: argument parsing, startup files, REPL loop, history ownership swap |
+| `bsh` | 1298 | the binary: argument parsing, startup files, REPL loop, history ownership swap |
 | `bsh-compile` | 120 | bytecode types only (`Chunk`, `Op`, `Vm{chunk,pc}`) — wave 5, unwired |
 | `bsh-tools` | 16 | dev helpers |
 
@@ -124,7 +124,22 @@ delegates everything else: line editing to `bsh-repl`, execution to the
   command runs correctly after `done`;
 * entering commands, running programs, `$((…))`, `exit`;
 * syntax highlighting (raw mode, `bsh-highlight`, colour decided by fd 0);
-* completion on `Tab` with a navigable menu (Up/Down/BackTab/Ctrl-P);
+* **completion on `Tab`**, now bash-shaped rather than only `PATH`/paths:
+  * command position is the deduplicated union of aliases, functions,
+    builtins, keywords, `PATH` executables and variables, so `ec<TAB>` has
+    `exec` and `fo<TAB>` has `for` (once per name, in bash's order);
+  * variables: `$HO<TAB>` → `$HOME`, `${HO<TAB>` → `${HOME}` (bash closes the
+    expansion), `$` alone lists names; `$?`, `$#`, `$@`, `$*`, `$$`, `$!`,
+    `$-` and `$0`–`$9` are offered even though they are parameters rather than
+    variables;
+  * paths and directories, with insertion quoting from `bsh_lang::quote` that
+    round-trips a space, `$`, a quote, a newline and non-UTF-8 (a file
+    `a b$c` inserts as `a\ b\$c`); a directory ends in `/` and adds no space;
+  * **programmable completion** from `complete`: `-W` word lists, the `-A`
+    actions the engine can answer, `-P`/`-S`, and
+    `-o nospace|default|bashdefault|dirnames|plusdirs`; `cd`-like commands
+    complete directories;
+  * history words, and a navigable menu (Up/Down/BackTab/Ctrl-P);
 * **history as a shell feature**: one ring owned by `bsh-runtime` and shared by
   the editor and the `history`/`fc` built-ins; `history [n]`, `-c`, `-d`,
   `-a`, `-n`, `-r`, `-w`, `-p`, `-s`; `fc -l` (`-n`/`-r`/ranges) and `fc -s`;
@@ -199,6 +214,40 @@ source text, so bash's normalisation of `>/dev/null` to `> /dev/null` and of
 runs of spaces is not reproduced; `disown -h` marks the job but the shell still
 does not send `SIGHUP` on exit.
 
+**Known completion limitations** (measured against bash 5.3.20; not defects to
+rediscover):
+
+* **`complete -F` is not run.** A completion function is shell code. The
+  completer is a `&dyn Completer` the editor borrows once for the whole loop and
+  `Interp` is owned by `run_repl`; the provider traits are `Send + Sync` while
+  `Interp` is not `Sync` (`Cell` fields), so a provider cannot hold the
+  interpreter.
+  Making it work needs a per-line completer that holds the shell mutably, a
+  `COMP_*`/`COMPREPLY` save-restore around `ShellState`, and a way to keep a
+  function's own stdout out of the editor's unflushed raw-mode frame (bash
+  redraws above the prompt). `-C` and `-G` have the same blocker: they run
+  shell code or expand a glob. A rule whose only source is one of them is
+  reported as absent, so the command keeps its default completion.
+  `compopt` is therefore only observable inside `compgen`, not at Tab.
+* `-W` word lists are split on `IFS` but **not expanded**: expansion is shell
+  code, and doing it at prompt-refresh time would run `$(…)` on every prompt.
+  A `-W '$list'` therefore offers the literal `$list`.
+* `-A setopt`, `shopt`, `user`, `group`, `hostname`, `job`, `service`,
+  `binding`, `enabled`, `disabled`, `running` and `stopped` offer nothing at
+  Tab: the engine has no shell state for them (`compgen -A` still answers them
+  from the runtime).
+* `complete -G`/`-X` are not applied at Tab, and no rule is applied to a
+  redirection target or an assignment value (those are filenames/words).
+* Array subscripts (`${arr[`) are not completed. bash 5.3.20 rings the bell
+  there too, so this matches the reference rather than missing a feature.
+* The fuzzy tier means a menu can be wider than bash's: `$HO<TAB>` lists
+  `$HOME` first and then fuzzy matches such as `$DSH_HOME`. That is the
+  recorded `DESIGN.md` §6.5 ranking decision, not a prefix-matching bug.
+* `case` tags are still only the catch-all `*)`: nothing tracks the arms of the
+  enclosing `case`, so `CaseTagProvider` stays at its default.
+* `compgen -A signal` prints the runtime's short names (`HUP`) while the Tab
+  menu uses bash's spelling (`SIGHUP`); the runtime spelling is the outlier.
+
 **Known-untested:** terminal resize (there is a `TIOCGWINSZ` read; no `SIGWINCH`
 handling seen); whether the line editor is restored correctly when a child
 leaves the tty in raw/cbreak mode; and an interactive shell started in the
@@ -212,8 +261,11 @@ foreground pgroup, `become_session_leader`), `crates/bsh/tests/interactive_jobs.
 (interactive job control end to end), `crates/bsh/tests/interactive_history.rs`
 (history persistence), `crates/bsh/tests/interactive_prompt.rs` (the rendered
 prompt, `PROMPT_COMMAND`, prompt escapes, `PS1` from an rc file and from a
-command, `Ctrl-R` end to end) and `crates/bsh-repl/tests/editor.rs` (scripted
-keystrokes against a fake terminal, including the search states).
+command, `Ctrl-R` end to end), `crates/bsh/tests/interactive_complete.rs`
+(variable, keyword, function, `complete -W`, directory, `-o default`, history
+and quoted-filename completion at a real prompt) and
+`crates/bsh-repl/tests/editor.rs` (scripted keystrokes against a fake terminal,
+including the search states).
 
 ## 5. Builtin inventory
 
@@ -313,15 +365,24 @@ measured finish line.
    the real directory, which is what makes `\w` truthful. Remaining gaps are
    listed under §4's known prompt limitations (`\s`, `set -e` with a failing
    `PROMPT_COMMAND`, `${x@P}`'s history number without a recorded line).
-4. **Common builtins.** `pushd`/`popd`/`dirs`, `umask`, `let`, `times`,
+4. ~~**Completion.**~~ Landed: the engine is refreshed from shell state before
+   every prompt, command position is the deduplicated union (keywords included),
+   `$VAR`/`${VAR}` and quoted filenames work, and `complete -W`/`-A`/`-P`/`-S`/
+   `-o` drive Tab from the runtime's registry. `complete -F` remains deferred
+   for the reasons under §4's known completion limitations. **This moved ahead
+   of the small built-ins deliberately:** autocomplete was the owner's stated
+   product goal — the shell is judged at the prompt — whereas `ulimit` and
+   `times` are not typed interactively, so they can wait without costing a
+   user anything.
+5. **Common builtins.** `pushd`/`popd`/`dirs`, `umask`, `let`, `times`,
    `ulimit`, `enable`, and `printf`/`pwd` bodies so `printf -v` and `pwd -P`
    exist.
-5. **Editor depth.** `vi` mode, undo, `Ctrl-L`, word motions, bracketed paste
+6. **Editor depth.** `vi` mode, undo, `Ctrl-L`, word motions, bracketed paste
    (verify first), search-match highlighting and `Ctrl-S`.
-6. **Completion depth.** `$VAR`/`${…}` completion, command names from `PATH`,
-   quoting of inserted filenames, and wiring the `complete -F` registry to the
-   engine so programmable completion is real.
-7. **Back to conformance**, resuming with the clusters in §6 — interactive
+7. **Completion depth (next).** `complete -F`/`-C`/`-G` (needs the per-line
+   completer and `COMP_*` lifecycle described in §4), the remaining `-A`
+   actions that need shell state, and `case` tags.
+8. **Back to conformance**, resuming with the clusters in §6 — interactive
    semantics first (`sh-options`, `errexit-osh`), then builtins, then patterns.
 
 ## 9. Open questions
@@ -386,6 +447,32 @@ measured finish line.
   not name it (bash does the same silently); a valid logical path through a
   symlink is kept. Without this, `\w`, `$PWD` and `cd ..` could all be wrong
   in an environment built by `su` or a wrapper.
+* **Completion is refreshed as snapshots, not rebuilt per line — decided.**
+  The editor borrows the engine once, so every source the completer can read is
+  behind a `set_…(&self)` seam and `refresh_prompt` replaces it: `PATH`, `PWD`,
+  `HOME`, variable/function/alias names, the history ring and a clone of the
+  `complete` registry. `PROMPT_COMMAND` has already run and the ring is in the
+  shell at that point, so a rule defined on the previous line is live on the
+  next Tab. A per-line engine would have been simpler but would also rebuild the
+  `PATH` index and the `nucleo` matcher on every keystroke's worth of typing.
+* **`complete -F` is deferred deliberately.** The blockers are structural, not
+  effort: the completer has no mutable interpreter (the provider traits are
+  `Send + Sync`, `Interp` is not `Sync`), a function's output would land in the
+  editor's unflushed raw-mode frame, and `COMP_*`/`COMPREPLY`/`compopt` need a
+  begin/end lifecycle around `ShellState`. A `-F`-only rule falls back to the
+  default completion instead of swallowing Tab, so sourcing bash-completion's
+  `.bashrc` cannot make completion worse than it was before this wave.
+* **`-W` word lists are split, not expanded.** Expansion is shell code; doing it
+  in `refresh_prompt` would run a `$(…)` in a word list on every prompt, and
+  the completer cannot run it at Tab. Literal lists (the common case) are exact.
+* **The fuzzy matcher is nucleo's greedy path.** The optimal path in
+  `nucleo-matcher` 0.3.1 panics on ordinary ASCII subsequences (`HOSTNAME` ←
+  `HOM`, which variable completion now produces); greedy is `O(n)` and the tier
+  rules still decide the product behaviour.
+* **`cd`-style directory completion is a `complete` rule, not a special case.**
+  `cd`/`pushd`/`popd`/`rmdir`/`mkdir` get `-A directory -o default`, so
+  `cd $HO<TAB>` falls back to the variable provider and no provider carries a
+  per-command conditional.
 * **History expansion is still absent**, and `fc`'s editor form is deferred.
   Both are recorded under the known history limitations in §4.
 * **`set -o vi`** exists in the option table but has no editor behind it.

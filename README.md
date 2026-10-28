@@ -5,7 +5,7 @@ lives in [DESIGN.md](DESIGN.md); this file is the operator's manual.
 
 **Status: it runs, and conformance is now measured.** `bsh` executes scripts,
 and `bsh` with no arguments gives you an interactive editor with syntax
-highlighting, TAB completion and history.
+highlighting, bash-style TAB completion and history.
 
 **1986 of 2787 comparable cases pass** in the vendored Oils suite (71.3%; 1184
 cases skipped as out of scope), of which **1931 (69.3%) also pass strictly** —
@@ -43,10 +43,24 @@ table and history ring, `shopt promptvars` runs a second expansion (so
 before each prompt with its output above it. `Ctrl-R` is
 readline-compatible reverse incremental search.
 
+TAB completion is refreshed from the shell before every prompt and follows
+bash: command position is the deduplicated union of aliases, functions,
+builtins, keywords and `PATH` (`fo<TAB>` sees `for`, `ec<TAB>` sees `exec`);
+`$HO<TAB>` completes `$HOME` and `${HO<TAB>` completes `${HOME}`; files and
+directories are inserted with the quoting that gives the name back (a space, a
+`$`, a quote, a newline, non-UTF-8), and a directory ends in `/` without a
+trailing space. Programmable completion from `complete` is honoured for `-W`
+word lists, the `-A` actions the engine can answer, `-P`/`-S` and
+`-o nospace|default|bashdefault|dirnames|plusdirs`; `cd` completes directories.
+`complete -F` is deliberately not run yet: a completion function is shell code,
+and the completer has no mutable interpreter while the editor owns the
+terminal. The exact blockers are in [`docs/state.md`](docs/state.md) §4.
+
 Not implemented yet: the directory stack (`pushd`/`popd`/`dirs`), `umask`,
 `let`, `ulimit`, `times`, `enable`, history
-expansion, `$RANDOM`/`$SECONDS`/`$FUNCNAME`, xtrace (`set -x`), `~user`, and
-process substitution (`<(...)`, rejected as `BSH-E0301`). Missing built-ins
+expansion, `$RANDOM`/`$SECONDS`/`$FUNCNAME`, xtrace (`set -x`), `~user`,
+process substitution (`<(...)`, rejected as `BSH-E0301`), and `complete -F`/
+`-C`/`-G` at the prompt. Missing built-ins
 answer status 2 with `BSH-E0508`; missing special variables expand to nothing.
 `printf`, `pwd`, `test` and `[` are served from `PATH` by design.
 [`docs/state.md`](docs/state.md) has the full inventory; the interactive

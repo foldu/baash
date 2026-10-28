@@ -575,7 +575,66 @@ deliberate: completion runs while the editor holds the terminal, and it must not
 observe a half-mutated shell.
 
 **After `cd`, call `set_root`.** `invalidate_commands` is only needed for the
-pathological case; the `PATH` index already notices changes.
+pathological case; the `PATH` index already notices changes. The binary does
+both the after-command `set_root` and a full refresh before every prompt, so a
+`PWD` set by an rc file or by `PROMPT_COMMAND` is also honoured.
+
+**The engine outlives the prompt; its sources do not.** The editor borrows
+`&dyn Completer` once for the whole interactive loop, so every mutable source
+has a `set_…(&self)` seam — `set_vars`, `set_shell_names`, `set_history`,
+`set_case_tags`, `set_specs`, `set_path_var`, `set_home` — and the shell
+replaces the snapshots in `refresh_prompt`. `set_path_var` is a no-op when the
+value is unchanged, so a per-prompt refresh does not throw away the `PATH`
+index. The consuming `with_…` builders are for tests and one-shot engines.
+
+**Command position is a deduplicated union.** `PROVIDERS` answers
+`Expect::Command` with aliases, functions, builtins, keywords, `PATH`
+executables, variables and history; `Candidate::dedupe` keeps one entry per
+insertion text, at the position of the first provider (bash's order: aliases,
+functions, builtins, keywords, `PATH`). Keywords also answer a wrapper's
+argument (`sudo wh<TAB>`), which is a command slot. `$HO` is a variable slot: a
+candidate that starts with `$` is `Insertion::Source`. Inside `${…}` a bare
+name is offered as `NAME}`, because bash closes the expansion (`${PA<TAB>` →
+`${PATH}`) and a name without the brace would not re-parse.
+
+**Programmable completion is data.** `Spec` is what the engine needs from a
+`complete` rule (`-W` words, `-A` names, `-P`/`-S`, `-o` options, the raw `-F`
+name) and `SpecSource::spec(command)` is the lookup. `bsh-runtime` owns the
+registry and this crate must not depend on it, so `crates/bsh/src/complete.rs`
+translates a cloned `CompletionTable` into `Spec`s. Rules are consulted only
+for an argument slot: not the command word, not a redirection target, not an
+assignment value.
+
+`Action` maps the `-A` names this crate can generate onto its own providers:
+`alias`, `arrayvar`/`export`/`variable` (bare names, no `$`),
+`builtin`/`helptopic`, `command`, `directory`, `file`, `function`, `keyword`,
+`signal`. The rest (`setopt`, `shopt`, `user`, `group`, `hostname`, `job`,
+`service`, `binding`, `disabled`, `enabled`, `running`, `stopped`) need shell
+state this crate does not have and offer nothing; `complete` still accepts
+them. `-P`/`-S` decorate *after* matching (`compgen -P pre -W 'one' -- o` is
+`preone`, `-- pre` is nothing). `-o nospace|default|bashdefault|dirnames|plusdirs`
+are applied; `filenames` is accepted and has no effect (`-W` words and `-A`
+results are already inserted as literals), and `noquote`/`fullquote` are
+accepted and ignored.
+
+`-W` word lists are split on the shell's `IFS` by the bridge and **not
+expanded**: expansion is shell code (`$(…)` would run on every prompt refresh),
+which is the same blocker as `-F`. `-F`, `-C` and `-G` are not run from the
+completer at all; a rule whose only source is one of them is reported as
+absent, so the command keeps the default completion instead of losing it.
+`compopt` therefore changes nothing at the prompt yet (it only becomes
+observable together with `-F`).
+
+`cd`, `pushd`, `popd`, `rmdir` and `mkdir` get a built-in rule expressed as
+data: `-A directory` with `-o default`, so `cd /tm<TAB>` offers `/tmp/` and
+`cd $HO<TAB>` still falls back to the variable provider.
+
+**Ranking uses nucleo's greedy matcher.** `nucleo-matcher` 0.3.1's optimal
+matcher panics (`should have been caught by prefilter`) on ordinary ASCII
+subsequences such as `HOSTNAME` ← `HOM`, and a menu candidate must never take
+the shell down; greedy matching is `O(n)` as well. Tiers and frecency — not the
+fuzzy score — are the product promise, so this is a robustness choice, not a
+behaviour change.
 
 **`Candidate::display` is not sanitised.** A hostile filename can carry
 newlines or control bytes into the menu. The editor must flatten it when
@@ -590,9 +649,12 @@ operator table. `Ctx::expect` is the last entry of `Ctx::expects` (the
 innermost slot); the earlier entries are the construct's own keyword
 candidates.
 
-Known copy: the builtin-name list is duplicated from `bsh-runtime` because the
-dependency runs the other way. Replace it with a runtime-supplied list once the
-runtime exposes one.
+Known copies: the builtin-name and keyword lists are duplicated from
+`bsh-runtime` because the dependency runs the other way, and `SIGNALS` is
+spelled the way bash's `compgen -A signal` prints it (`SIGHUP`, `EXIT`, …).
+`compgen -A signal` in this shell still prints the runtime's short names
+(`HUP`); that existing inconsistency is a `bsh-runtime` fix, recorded here so
+the completion menu is not "fixed" to match the wrong spelling.
 
 ---
 
@@ -902,6 +964,14 @@ holds the `CompletionTable` (definition-ordered, like `AliasTable`), and
 valid inside a completion and an error outside it. `bsh-runtime` gained the
 workspace leaf `bsh-pattern` for `-G`/`-X` matching.
 
+At the prompt, the same registry also drives Tab: `crates/bsh/src/complete.rs`
+clones `ShellState::completions` into the engine before each prompt (see
+`bsh-complete`). The clone is the seam, so `complete -W` takes effect on the
+line typed after the one that defined it — the rule must be in the prompt
+snapshot, and the snapshot is taken before `read_line`. `-F`/`-C`/`-G` rules
+fall back to the default completion because the completer cannot run shell code
+(`docs/state.md` §4).
+
 Sources that would be lies are stubs returning nothing rather than plausible
 lists: `binding` (no line editor), `service`, `stopped` jobs, `disabled`
 built-ins (`enable -n` absent).
@@ -989,8 +1059,10 @@ emits job notices; swaps the history ring into `ShellState`; runs
 turn) with its stdout captured through a seekable temporary file and re-emitted
 above the prompt, appending a newline when the output did not end in one;
 restores `$?`; syncs the `HIST*` knobs; renders `PS1` and `PS2` with
-`Interp::render_prompt`; swaps the ring back; and hands the pair to
-`editor.set_prompt`. A `PROMPT_COMMAND` that calls `exit` leaves the shell. The
+`Interp::render_prompt`; refreshes the completion engine from the shell
+(`complete::refresh`: `PATH`, `PWD`, `HOME`, variable/function/alias names, the
+history ring and the `complete` registry); swaps the ring back; and hands the
+pair to `editor.set_prompt`. A `PROMPT_COMMAND` that calls `exit` leaves the shell. The
 capture is why `PROMPT_COMMAND='echo -n x'` cannot corrupt the editor's column
 model; a write straight to `/dev/tty` bypasses it. With `set -e` and a failing
 `PROMPT_COMMAND`, bash exits and this shell does not (`docs/state.md` §4).
@@ -1003,6 +1075,10 @@ gone. The `PATH`/hash table lives on `Interp`. `hash` and `mapfile`/`readarray`
 are executor bodies with registry stubs, like `read` and `cd`, because their
 state is the hash table and the descriptor table. `read::read_record` is the
 record reader `mapfile` shares with `read`.
+
+`Interp::function_names()` lists the function table for the completion bridge
+(the other completion-relevant state is already reachable through
+`ShellHost::state`). It returns names only, sorted and deduplicated.
 
 `Interp::repl_prompt_context()` and `Interp::render_prompt(template)` are the
 prompt seam the binary uses before every line. The context is
