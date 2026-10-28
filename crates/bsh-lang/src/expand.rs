@@ -884,25 +884,38 @@ fn expand_param<S: Shell>(
             Ok(())
         }
         ParamOp::ArraySlice { offset, length } => {
+            if let ParamName::Elements { name, star } = &exp.name {
+                let indices = ctx
+                    .shell
+                    .array(name)
+                    .map(|array| array.indices())
+                    .unwrap_or_default();
+                let values = array_values(ctx, name);
+                let bounds = slice_bounds(offset, length.as_ref(), ctx)?;
+                let values = slice_by_subscript(&indices, &values, bounds, span)?;
+                emit_values(ctx, &values, *star, quoted, out);
+                return Ok(());
+            }
+            let bounds = slice_bounds(offset, length.as_ref(), ctx)?;
+            if matches!(&exp.name, ParamName::At | ParamName::Star) {
+                let values = slice_positional(ctx, bounds, span)?;
+                let star = matches!(&exp.name, ParamName::Star);
+                emit_values(ctx, &values, star, quoted, out);
+                return Ok(());
+            }
             let (source, star) = match &exp.name {
                 ParamName::Elements { name, star } => (array_values(ctx, name), *star),
-                ParamName::At | ParamName::Star => (
-                    ctx.shell.positional().to_vec(),
-                    matches!(&exp.name, ParamName::Star),
-                ),
                 _ => return Err(Error::unsupported(UnsupportedOp::SubstringOfList, span)),
             };
-            let bounds = slice_bounds(offset, length.as_ref(), ctx)?;
             let values = slice_list(&source, bounds, span)?;
             emit_values(ctx, &values, star, quoted, out);
             Ok(())
         }
         ParamOp::Substring { offset, length } => {
             if matches!(&exp.name, ParamName::At | ParamName::Star) {
-                // bash slices the parameter *list* here; slicing a joined
-                // string would be quietly wrong.
-                let values: Vec<Vec<u8>> = ctx.shell.positional().to_vec();
-                let values = slice_list(&values, (*offset, *length), span)?;
+                // bash slices the parameter *list* here, with a one-based
+                // offset; slicing a joined string would be quietly wrong.
+                let values = slice_positional(ctx, (*offset, *length), span)?;
                 let star = matches!(&exp.name, ParamName::Star);
                 emit_values(ctx, &values, star, quoted, out);
                 return Ok(());
@@ -914,8 +927,13 @@ fn expand_param<S: Shell>(
                 return Ok(());
             }
             if let ParamName::Elements { name, star } = &exp.name {
+                let indices = ctx
+                    .shell
+                    .array(name)
+                    .map(|array| array.indices())
+                    .unwrap_or_default();
                 let values = array_values(ctx, name);
-                let values = slice_list(&values, (*offset, *length), span)?;
+                let values = slice_by_subscript(&indices, &values, (*offset, *length), span)?;
                 emit_values(ctx, &values, *star, quoted, out);
                 return Ok(());
             }
@@ -1103,6 +1121,88 @@ fn slice_bounds<S: Shell>(
 /// A negative offset counts from the end; an offset before the start or past
 /// the end yields nothing; a negative length is an error bash reports as
 /// `substring expression < 0`.
+/// Slice a named array the way bash does: the offset is a **subscript
+/// boundary**, not an element ordinal.
+///
+/// Measured: `a=(zero one two); unset 'a[1]'; ${a[@]:1:2}` is `two` — element
+/// index 1 is gone, so the slice starts at the next index at or above it, and
+/// the length then counts *elements*. A negative offset counts back from one
+/// past the largest index (`b[5]=end; ${b[@]: -1}` is `end`), not from the
+/// element count.
+/// Slice the positional parameters the way bash does.
+///
+/// The offset is **one-based**: `${@:1}` is `$1`, not `$2`. Offset 0 starts at
+/// `$0`, which is why `${@:0:2}` prints the shell name and the first argument.
+/// A negative offset still counts back from the last parameter.
+fn slice_positional<S: Shell>(
+    ctx: &mut Ctx<'_, S>,
+    (offset, length): (i64, Option<i64>),
+    span: Span,
+) -> Result<Vec<Vec<u8>>, Error> {
+    let positionals = ctx.shell.positional().to_vec();
+    if offset >= 0 {
+        let mut values: Vec<Vec<u8>> = Vec::new();
+        if offset == 0 {
+            if let Some(name) = ctx.shell.get(b"0") {
+                values.push(name.to_vec());
+            }
+        }
+        let skip = if offset == 0 {
+            0
+        } else {
+            (offset - 1) as usize
+        };
+        values.extend(positionals.into_iter().skip(skip));
+        return slice_list(&values, (0, length), span);
+    }
+    slice_list(&positionals, (offset, length), span)
+}
+
+fn slice_by_subscript(
+    indices: &[Vec<u8>],
+    values: &[Vec<u8>],
+    (offset, length): (i64, Option<i64>),
+    span: Span,
+) -> Result<Vec<Vec<u8>>, Error> {
+    // Associative keys are not ordinals; bash slices them by position, which
+    // is what the dense path already does.
+    let parsed: Option<Vec<i64>> = indices
+        .iter()
+        .map(|index| std::str::from_utf8(index).ok()?.parse::<i64>().ok())
+        .collect();
+    let Some(indices) = parsed else {
+        return slice_list(values, (offset, length), span);
+    };
+    let count = values.len() as i64;
+    let largest = indices.iter().copied().max();
+    let start = if offset < 0 {
+        match largest {
+            // One past the largest index is the array's "length" for a
+            // negative offset, so `-1` addresses the last existing element.
+            Some(largest) => largest.saturating_add(1).saturating_add(offset),
+            None => return Ok(Vec::new()),
+        }
+    } else {
+        offset
+    };
+    let first = indices
+        .iter()
+        .position(|index| *index >= start)
+        .unwrap_or(indices.len());
+    let available = count - first as i64;
+    let take = match length {
+        None => available,
+        Some(length) if length >= 0 => length.min(available),
+        Some(length) => {
+            return Err(Error::new(
+                ErrorKind::SubstringRange { value: length },
+                span,
+            ));
+        }
+    };
+    Ok(values[first..first + take.max(0) as usize].to_vec())
+}
+
 fn slice_list(
     values: &[Vec<u8>],
     (offset, length): (i64, Option<i64>),

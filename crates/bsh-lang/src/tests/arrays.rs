@@ -148,9 +148,12 @@ fn slices_of_a_list() {
         "arithmetic bounds",
     );
 
-    // List slicing of the positional parameters uses the same rules.
+    // Positional slicing is *not* the same rule: bash's offset there is
+    // one-based, so `${@:1:2}` is `$1 $2`. (Measured, bash 5.3.20.)
     let mut shell = TestShell::new().positionals(&[b"a", b"b", b"c"]);
-    assert_argv(&one("\"${@:1:2}\"", &mut shell), &["b", "c"], "${@:1:2}");
+    assert_argv(&one("\"${@:1:2}\"", &mut shell), &["a", "b"], "${@:1:2}");
+    assert_argv(&one("\"${@:2}\"", &mut shell), &["b", "c"], "${@:2}");
+    assert_argv(&one("\"${@: -1}\"", &mut shell), &["c"], "${@: -1}");
 }
 
 #[test]
