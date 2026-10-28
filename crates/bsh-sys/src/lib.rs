@@ -30,19 +30,29 @@
 //!   controlling terminal.
 //! * [`cstring`] — converting shell bytes for `exec`, failing with
 //!   [`NulByte`] instead of truncating.
+//! * [`Regex`], [`Error`] — compiled POSIX extended regular expressions for
+//!   `[[ x =~ re ]]` and `BASH_REMATCH`, using the same platform engine as
+//!   bash (`regcomp`/`regexec`). Byte offsets, POSIX ERE, no `REG_NEWLINE`;
+//!   see [`regex`] for the limits and the measured engine quirks.
 //!
 //! # Platform
 //!
 //! Linux is the primary target (`x86_64-linux`). The generic POSIX parts
 //! (spawn, wait, descriptors, termios) also build elsewhere; `signalfd`,
 //! `memfd_create` and `O_TMPFILE` are `#[cfg(target_os = "linux")]` with
-//! documented fallbacks.
+//! documented fallbacks. The `regex` module is `#[cfg(unix)]`: POSIX regular
+//! expressions are a Unix facility, and on a Unix target whose `libc` does not
+//! declare `regex_t`/`REG_*` (Solaris/illumos, Haiku and Hurd today) the crate
+//! does not build. There is no fallback engine, because a different engine
+//! would not agree with bash.
 
 #![warn(missing_docs)]
 
 pub mod bytes;
 pub mod fd;
 pub mod pty;
+#[cfg(unix)]
+pub mod regex;
 pub mod signal;
 pub mod spawn;
 pub mod term;
@@ -55,6 +65,8 @@ pub use fd::{
     lseek, open_cloexec, poll_readable, read_fd, set_cloexec, write_all, write_fd,
 };
 pub use pty::{Pty, open_pty};
+#[cfg(unix)]
+pub use regex::{CaptureRanges, Error, Regex};
 pub use signal::{
     Disposition, MaskGuard, SignalEvent, SignalFd, SignalGuard, SignalSet, ignore_signals,
     replace_signal_mask, send_group_signal, send_signal, set_disposition,
