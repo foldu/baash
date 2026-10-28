@@ -331,7 +331,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     // "command not found" diagnostics can distinguish them.
     def("builtin", Tier::Extension, Some(meta::bi_builtin)),
     def("compgen", Tier::Extension, Some(complete::bi_compgen)),
-    def("complete", Tier::Extension, None),
+    def("complete", Tier::Extension, Some(complete::bi_complete)),
     def("compopt", Tier::Extension, None),
     def("declare", Tier::Extension, None),
     def("dirs", Tier::Extension, None),

@@ -393,7 +393,7 @@ fn builtin_names_are_unique_and_implemented_set_is_explicit() {
     assert_eq!(
         implemented,
         [
-            ":", "alias", "builtin", "command", "compgen", "exit", "export",
+            ":", "alias", "builtin", "command", "compgen", "complete", "exit", "export",
             "false", "getopts", "readonly", "set", "shift", "shopt", "trap", "true", "type",
             "unalias", "unset",
         ]

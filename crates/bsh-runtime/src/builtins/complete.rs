@@ -1,4 +1,4 @@
-//! Programmable completion: `compgen`.
+//! Programmable completion: `compgen` and `complete`.
 //!
 //! Three pieces meet here. What a candidate *is* (which action means which
 //! list, how a prefix filters it) lives in [`crate::complete`]; the shell state
@@ -32,8 +32,8 @@
 //!   at all is also `0` and prints nothing, which is what bash does.
 
 use crate::complete::{
-    CompletionAction, CompletionSource, WordList, candidates, filter_prefix, has_option,
-    is_completion_option,
+    CompletionAction, CompletionSource, CompletionSpec, CompletionTable, Request, WordList,
+    candidates, filter_prefix, has_option, is_completion_option, parse_complete,
 };
 use crate::{Opts, ShellHost, Status, VarValue};
 
@@ -447,6 +447,92 @@ pub(super) fn bi_compgen(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
         Status::FAILURE
     } else {
         Status::SUCCESS
+    }
+}
+
+/// Write the lines `complete`/`complete -p` produce.
+fn write_lines(host: &mut dyn ShellHost, lines: &[Vec<u8>]) -> Status {
+    let mut out = Vec::new();
+    for line in lines {
+        out.extend_from_slice(line);
+        out.push(b'\n');
+    }
+    host.write_out(&out)
+}
+
+/// Check the parts of a spec that can be wrong when it is *defined*.
+///
+/// bash warns about a missing `-F` function and keeps going, and it does not
+/// look at a `-W` word list until a completion runs. The suite pins status 2
+/// for both at definition time, which is the more useful answer: a typo in
+/// `.bashrc` should be reported when it is typed.
+fn validate_spec(
+    host: &mut dyn ShellHost,
+    spec: &CompletionSpec,
+    unnamed: bool,
+) -> Result<(), Status> {
+    for option in &spec.options {
+        if !is_completion_option(option) {
+            diagnose(
+                host,
+                codes::USAGE,
+                format!("complete: {}: invalid option name", display(option)),
+            );
+            return Err(Status(2));
+        }
+    }
+    // A `-D`/`-E`/`-I` spec names no command, so the function is the only
+    // thing that can be wrong and a missing one is reported now. A named spec
+    // is allowed to mention a function that a later file defines, which is
+    // what the suite's `complete -F myfunc other` requires.
+    if let Some(function) = &spec.function
+        && unnamed
+        && !host.is_function(function)
+    {
+        diagnose(
+            host,
+            codes::NOT_FOUND,
+            format!("complete: {}: no such function", display(function)),
+        );
+        return Err(Status(2));
+    }
+    if let Some(wordlist) = &spec.wordlist
+        && !host.check_completion_words(wordlist)
+    {
+        diagnose(host, codes::USAGE, "complete: -W: invalid word list");
+        return Err(Status(2));
+    }
+    Ok(())
+}
+
+/// `complete [-p|-r] [-D|-E|-I] [-A action] [-W wordlist] … [name …]`.
+pub(super) fn bi_complete(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
+    let arguments: Vec<&[u8]> = argv[1..].to_vec();
+    let request = match parse_complete(&arguments) {
+        Ok(request) => request,
+        Err(message) => {
+            diagnose(host, codes::USAGE, message);
+            return Status(2);
+        }
+    };
+    if let Request::Set {
+        spec,
+        default,
+        empty,
+        initial,
+        ..
+    } = &request
+        && let Err(status) = validate_spec(host, spec, *default || *empty || *initial)
+    {
+        return status;
+    }
+    let table: &mut CompletionTable = &mut host.state().completions;
+    match table.apply(&request) {
+        Ok(lines) => write_lines(host, &lines),
+        Err(message) => {
+            diagnose(host, codes::USAGE, message);
+            Status(2)
+        }
     }
 }
 
