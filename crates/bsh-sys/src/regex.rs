@@ -138,7 +138,11 @@ impl Regex {
         let code =
             unsafe { libc::regcomp(compiled.as_mut_ptr(), pattern.as_ptr(), libc::REG_EXTENDED) };
         if code != 0 {
-            return Err(Error::Posix { code });
+            // SAFETY: this is the canonical C usage after a failed `regcomp`:
+            // `regerror` is given the same `preg` and the `REG_*` code, and
+            // for compile failures it reads the code, never the undefined
+            // compiled form.
+            return Err(Error::from_posix(code, compiled.as_ptr()));
         }
         // SAFETY: `regcomp` returned 0, so it initialised the value. Moving it
         // out of `MaybeUninit` transfers ownership to the `Regex`, whose
@@ -206,7 +210,9 @@ impl Regex {
             return Ok(None);
         }
         if code != 0 {
-            return Err(Error::Posix { code });
+            // SAFETY: `self.compiled` is live and initialised, and `code` is a
+            // `regexec` failure code, which `regerror` accepts.
+            return Err(Error::from_posix(code, &self.compiled));
         }
         Ok(Some(
             matches
@@ -266,9 +272,15 @@ pub enum Error {
     /// reports this error.
     NulInText,
     /// The platform engine returned a `REG_*` code.
+    ///
+    /// `message` is `regerror`'s text, which is what bash shows the user (for
+    /// example `Unmatched ( or \(`), so compiling a mistyped pattern produces
+    /// an explanation and not just a number.
     Posix {
         /// The `REG_*` code returned by `regcomp` or `regexec`.
         code: libc::c_int,
+        /// The `regerror` message, lossily decoded as UTF-8.
+        message: String,
     },
 }
 
@@ -276,17 +288,33 @@ impl Error {
     /// The raw `REG_*` code, or `None` for the embedded-NUL variants.
     pub fn code(&self) -> Option<libc::c_int> {
         match self {
-            Self::Posix { code } => Some(*code),
+            Self::Posix { code, .. } => Some(*code),
             Self::NulInPattern | Self::NulInText => None,
         }
     }
 
     /// A human-readable message, never empty.
+    ///
+    /// For [`Error::Posix`] this is `regerror`'s text in the current locale;
+    /// error text is subject to translation, so classify on [`Error::code`]
+    /// rather than on this string.
     pub fn message(&self) -> &str {
         match self {
             Self::NulInPattern => "embedded NUL byte in a regular expression",
             Self::NulInText => "embedded NUL byte in the text searched for a regular expression",
-            Self::Posix { .. } => "regular expression error",
+            Self::Posix { message, .. } => message,
+        }
+    }
+
+    /// Ask `regerror` for the text belonging to `code`.
+    ///
+    /// `compiled` is the `regex_t` that produced `code`: for a successful
+    /// `regexec` it is `&Regex::compiled`, and for a failed `regcomp` it is
+    /// the storage that `regcomp` was given.
+    fn from_posix(code: libc::c_int, compiled: *const libc::regex_t) -> Self {
+        Self::Posix {
+            code,
+            message: regerror_message(code, compiled),
         }
     }
 }
@@ -298,6 +326,38 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// Read `regerror`'s message for `code` into an owned `String`.
+///
+/// The two-call `regerror` protocol (ask for the size, then fill a buffer) is
+/// what POSIX specifies; the result includes the terminating NUL, so at least
+/// one byte is always written on success.
+fn regerror_message(code: libc::c_int, compiled: *const libc::regex_t) -> String {
+    // SAFETY: `regerror` reads `code` and, depending on the code, the compiled
+    // expression. A null buffer with size 0 is the documented way to ask how
+    // much space the message needs; nothing is written.
+    let needed = unsafe { libc::regerror(code, compiled, std::ptr::null_mut(), 0) };
+    let mut message = if needed == 0 {
+        String::new()
+    } else {
+        let mut buffer = vec![0u8; needed];
+        // SAFETY: `buffer` is writable for its full length and `regerror`
+        // writes at most `needed` bytes, including the terminating NUL.
+        let written =
+            unsafe { libc::regerror(code, compiled, buffer.as_mut_ptr().cast(), buffer.len()) };
+        let limit = written.min(buffer.len());
+        let end = buffer.iter().position(|&byte| byte == 0).unwrap_or(limit);
+        // Message text comes from the locale's message catalogue and is not
+        // required to be UTF-8; rendering it lossily keeps `Error: Display`.
+        String::from_utf8_lossy(&buffer[..end]).into_owned()
+    };
+    if message.is_empty() {
+        // The engine must not produce an empty explanation (a user typo is the
+        // common case), so fall back to something still actionable.
+        message = format!("regular expression error (REG_* code {code})");
+    }
+    message
+}
 
 /// Count the parenthesised subexpressions in an ERE pattern.
 ///
