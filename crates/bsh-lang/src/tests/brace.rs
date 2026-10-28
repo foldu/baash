@@ -166,6 +166,95 @@ fn non_expansions_stay_exactly_as_written() {
 }
 
 #[test]
+fn invalid_ranges_are_not_ranges() {
+    let mut shell = TestShell::new();
+    // Overflow and non-decimal spellings are not endpoints.
+    for source in [
+        "{9223372036854775807..9223372036854775809}",
+        "{0x1..0x3}",
+        "{10#1..10#3}",
+        "{1..3..}",
+        "{..3}",
+        "{1..3..2..4}",
+        "{!..$}",
+    ] {
+        assert_argv(&expand_one(source, &mut shell), &[source], source);
+    }
+    // Solely-quoted endpoints disqualify the range (bash leaves both alone).
+    assert_argv(
+        &expand_one("{1..\"3\"}", &mut shell),
+        &["{1..3}"],
+        "quoted endpoint",
+    );
+}
+
+#[test]
+fn numeric_ranges_walk_in_the_endpoints_direction() {
+    let mut shell = TestShell::new();
+    let cases: &[(&str, &[&str])] = &[
+        ("{1..3}", &["1", "2", "3"]),
+        ("{3..1}", &["3", "2", "1"]),
+        ("{1..10..3}", &["1", "4", "7", "10"]),
+        ("{1..8..3}", &["1", "4", "7"]),
+        // A step whose sign disagrees with the direction keeps its magnitude;
+        // this is what bash 5.3.20 does (`{1..8..-3}` is `1 4 7`).
+        ("{8..1..-3}", &["8", "5", "2"]),
+        ("{-3..3..2}", &["-3", "-1", "1", "3"]),
+        ("{-9..-11..2}", &["-9", "-11"]),
+        // A zero step counts as one, and a step past the end yields `start`.
+        ("{1..4..0}", &["1", "2", "3", "4"]),
+        ("{11..9..3}", &["11"]),
+        // Singletons are ranges of one, whatever the step says.
+        ("{1..1}", &["1"]),
+        ("{-9..-9..-3}", &["-9"]),
+    ];
+    for (source, want) in cases {
+        assert_argv(&expand_one(source, &mut shell), want, source);
+    }
+}
+
+#[test]
+fn numeric_ranges_keep_bashs_zero_padding() {
+    let mut shell = TestShell::new();
+    let cases: &[(&str, &[&str])] = &[
+        ("{01..03}", &["01", "02", "03"]),
+        ("{01..3}", &["01", "02", "03"]),
+        ("{001..3}", &["001", "002", "003"]),
+        ("{1..003}", &["001", "002", "003"]),
+        ("{09..12}", &["09", "10", "11", "12"]),
+        ("{12..07}", &["12", "11", "10", "09", "08", "07"]),
+        // Width includes the sign, and `0` is padded like any other value.
+        ("{-01..3}", &["-01", "000", "001", "002", "003"]),
+        ("{01..-3}", &["01", "00", "-1", "-2", "-3"]),
+        // A leading `+` suppresses padding, exactly as bash does.
+        ("{+01..3}", &["1", "2", "3"]),
+        ("{-0..3}", &["0", "1", "2", "3"]),
+        ("{-00..3}", &["000", "001", "002", "003"]),
+    ];
+    for (source, want) in cases {
+        assert_argv(&expand_one(source, &mut shell), want, source);
+    }
+}
+
+#[test]
+fn character_ranges_step_over_their_letters() {
+    let mut shell = TestShell::new();
+    let cases: &[(&str, &[&str])] = &[
+        ("{a..c}", &["a", "b", "c"]),
+        ("{a..e..2}", &["a", "c", "e"]),
+        ("{a..e..-2}", &["a", "c", "e"]),
+        ("{e..a..-2}", &["e", "c", "a"]),
+        ("{c..a..2}", &["c", "a"]),
+        ("{A..C..2}", &["A", "C"]),
+        ("{a..a}", &["a"]),
+        ("{a..a..2}", &["a"]),
+    ];
+    for (source, want) in cases {
+        assert_argv(&expand_one(source, &mut shell), want, source);
+    }
+}
+
+#[test]
 fn parameters_are_preserved_and_expanded_afterwards() {
     let mut shell = TestShell::new().var(b"a", b"A").var(b"y", b",b");
     assert_argv(&expand_one("-{$a,b}-", &mut shell), &["-A-", "-b-"], "$a");

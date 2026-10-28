@@ -283,6 +283,32 @@ byte units.
 non-array, `${x@Q}`/`@E`/`@P`/`@u`, and process substitution return
 `ErrorKind::Unsupported` with the operator's span.
 
+**Brace expansion is stage 0, and it is the only switchable stage.**
+`expand_braces(&Word) -> Vec<Word>` runs before tilde expansion in
+`expand_word`/`expand_word_with` when `Shell::brace_expansion()` is true
+(default true, bash's setting); `Mode::Assignment` never runs it, because bash
+does not brace-expand an assignment value (`v={X,Y}` stays literal). The stage
+works on `Part`s and never flattens to bytes: only `LitKind::Unquoted` bytes
+are structural, so `"…"`, `'…'`, `\x` and every opaque part (`Param`, `CmdSub`,
+`Arith`, `ProcSub`, `Tilde`) are inert — that is what keeps `${x:-{a,b}}`
+literal, since the replacement word is a separate expansion unit. Alternatives
+are slices of the original parts (their quoting kinds preserved) or, for a
+range, new unquoted literals; parts the stage did not touch reach the later
+stages unchanged and are expanded exactly once (`{a,b,c}-$((i++))` evaluates
+the arithmetic once per word). `bsh-vm` overrides `brace_expansion()` from
+`opts.braceexpand`, which is the `set +B` switch.
+
+Rules measured against bash 5.3.20 under `LC_ALL=C`: a group expands when its
+contents hold a top-level comma or parse as `x..y[..step]`; an unmatched `{`
+ends the scan for the rest of the word (`{{a,b}` stays literal, the suite's
+primary, where bash expands the inner group; complete groups to its left still
+expand, so `{a,b}_{` is `a_{ b_{`); range steps use their magnitude with the
+endpoints' direction, and zero means one; zero padding is triggered by a
+leading zero on an operand (a leading `+` suppresses it) with the width of the
+wider operand including its sign; character ranges need both endpoints to be
+single ASCII alphabetic bytes. A range that does not parse (overflow, quoted
+endpoint, `0x1`, `1...3`) leaves the group literal rather than erroring.
+
 **Errors** are `bsh_lang::Error { kind, span }` with `Display`, `code()` and
 `diagnostic() -> bsh_diag::Diagnostic`. Codes 301–306 are provisional.
 
