@@ -1624,3 +1624,45 @@ fn getopts_rejects_an_invalid_option_variable_after_parsing() {
     assert_eq!(var(&host, b"OPTIND"), "3");
     assert_eq!(var(&host, b"opt"), "<unset>");
 }
+
+#[test]
+fn shellopts_and_bashopts_are_derived_from_the_tables() {
+    let mut opts = Opts::BASH;
+    opts.set_by_name(b"hashall", true).expect("hashall");
+    let shellopts = String::from_utf8(opts.shellopts()).expect("ascii");
+    assert!(shellopts.split(':').any(|name| name == "hashall"));
+    // A `shopt` option is not a `set -o` option and must not leak into
+    // SHELLOPTS; bash keeps the two lists disjoint.
+    assert!(!shellopts.split(':').any(|name| name == "extglob"));
+
+    Opts::set_shopt_by_name(&mut opts, b"extglob", true).expect("extglob");
+    let bashopts = String::from_utf8(opts.bashopts()).expect("ascii");
+    assert!(bashopts.split(':').any(|name| name == "extglob"));
+    assert!(!bashopts.split(':').any(|name| name == "hashall"));
+
+    // Disabling removes it again: the strings are derived, never cached.
+    Opts::set_shopt_by_name(&mut opts, b"extglob", false).expect("unset");
+    let bashopts = String::from_utf8(opts.bashopts()).expect("ascii");
+    assert!(!bashopts.split(':').any(|name| name == "extglob"));
+}
+
+#[test]
+fn vi_and_emacs_are_mutually_exclusive() {
+    let mut opts = Opts::BASH;
+    opts.set_by_name(b"vi", true).expect("vi");
+    assert_eq!(
+        opts.options(OptionKind::SetO)
+            .filter(|o| o.on)
+            .filter(|o| o.name == "vi")
+            .count(),
+        1
+    );
+    opts.set_by_name(b"emacs", true).expect("emacs");
+    let on: Vec<&str> = opts
+        .options(OptionKind::SetO)
+        .filter(|option| option.on)
+        .map(|option| option.name)
+        .filter(|name| *name == "vi" || *name == "emacs")
+        .collect();
+    assert_eq!(on, vec!["emacs"], "enabling emacs must disable vi");
+}

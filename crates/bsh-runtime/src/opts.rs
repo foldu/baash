@@ -141,6 +141,19 @@ macro_rules! option_table {
                 }
             }
 
+            /// The other half of a mutually exclusive pair, if any.
+            ///
+            /// Only `vi`/`emacs` qualify: they are two names for one editing
+            /// mode, so enabling one must disable the other rather than leaving
+            /// `set -o` reporting both.
+            pub fn editor_opposite(self) -> Option<Flag> {
+                match self {
+                    Flag::Vi => Some(Flag::Emacs),
+                    Flag::Emacs => Some(Flag::Vi),
+                    _ => None,
+                }
+            }
+
             /// Whether this option is a bash extension rather than a POSIX
             /// 2024 `set -o` option (see the module docs for the exact list).
             pub fn is_bash_extension(self) -> bool {
@@ -468,6 +481,14 @@ impl Opts {
             name: name.to_vec(),
         })?;
         self.set_flag(flag, on);
+        // `vi` and `emacs` are two names for one choice: enabling either turns
+        // the other off. bash reports them as a pair, and leaving both on makes
+        // `set -o` a lie.
+        if on {
+            if let Some(other) = flag.editor_opposite() {
+                self.set_flag(other, false);
+            }
+        }
         Ok(())
     }
 
@@ -547,6 +568,47 @@ impl Opts {
     ///
     /// `i` (interactive) is not an option and is added by the caller if it
     /// wants it; POSIX leaves the letter set implementation-defined.
+    /// The value `SHELLOPTS` should have: enabled `set -o` options, in table
+    /// order, colon-separated.
+    ///
+    /// It is a *derived* variable, not stored state — bash recomputes it, and
+    /// storing a copy is how a shell ends up with a `SHELLOPTS` that disagrees
+    /// with `set -o`.
+    pub fn shellopts(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for option in self.options(OptionKind::SetO) {
+            if !option.on {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push(b':');
+            }
+            out.extend_from_slice(option.name.as_bytes());
+        }
+        out
+    }
+
+    /// The value `BASHOPTS` should have: enabled `shopt` options, in table
+    /// order, colon-separated.
+    pub fn bashopts(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for option in self.options(OptionKind::Shopt) {
+            if !option.on {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push(b':');
+            }
+            out.extend_from_slice(option.name.as_bytes());
+        }
+        out
+    }
+
+    /// The value `$-` should have: enabled single-letter `set` options, in
+    /// table order.
+    ///
+    /// The `c` (command string) and `i` (interactive) letters are not options
+    /// and are added by the caller that knows how the shell was started.
     pub fn dash_flags(&self) -> Vec<u8> {
         ALL_FLAGS
             .iter()
