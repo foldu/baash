@@ -398,15 +398,15 @@ fn builtin_names_are_unique_and_implemented_set_is_explicit() {
         implemented,
         [
             ":", "alias", "builtin", "command", "compgen", "complete", "compopt", "exit", "export",
-            "false", "getopts", "readonly", "set", "shift", "shopt", "trap", "true", "type",
-            "unalias", "unset",
+            "false", "fc", "getopts", "history", "readonly", "set", "shift", "shopt", "trap",
+            "true", "type", "unalias", "unset",
         ]
     );
     assert_eq!(stubs_in(Tier::Special), 15 - 8);
-    // `alias`, `command`, `getopts`, `type` and `unalias` are written; the
-    // rest (`bg`, `fc`, `fg`, `jobs`, `kill`, `read`, `ulimit`, `umask`,
+    // `alias`, `command`, `fc`, `getopts`, `type` and `unalias` are written;
+    // the rest (`bg`, `fg`, `jobs`, `kill`, `read`, `ulimit`, `umask`,
     // `wait`, `cd`) are the executor's or still stubs.
-    assert_eq!(stubs_in(Tier::Intrinsic), 16 - 5);
+    assert_eq!(stubs_in(Tier::Intrinsic), 16 - 6);
     // `hash` and `mapfile`/`readarray` are executor-side bodies, so the
     // registry still reports them as stubs: the executor's body runs only
     // while the entry has none.

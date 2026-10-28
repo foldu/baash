@@ -20,6 +20,7 @@ use crate::errors::{Error, ShellError, codes, display};
 
 mod complete;
 mod getopts;
+mod history;
 mod meta;
 use crate::opts::OptionKind;
 use crate::vars::{ArrayShape, CreateScope, Vars};
@@ -307,7 +308,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     def("bg", Tier::Intrinsic, None),
     def("cd", Tier::Intrinsic, None),
     def("command", Tier::Intrinsic, Some(meta::bi_command)),
-    def("fc", Tier::Intrinsic, None),
+    def("fc", Tier::Intrinsic, Some(history::bi_fc)),
     def("fg", Tier::Intrinsic, None),
     def("getopts", Tier::Intrinsic, Some(getopts::bi_getopts)),
     def("hash", Tier::Intrinsic, None),
@@ -337,7 +338,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     def("dirs", Tier::Extension, None),
     def("disown", Tier::Extension, None),
     def("enable", Tier::Extension, None),
-    def("history", Tier::Extension, None),
+    def("history", Tier::Extension, Some(history::bi_history)),
     def("let", Tier::Extension, None),
     def("local", Tier::Extension, None),
     def("mapfile", Tier::Extension, None),
