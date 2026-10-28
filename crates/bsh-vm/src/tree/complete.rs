@@ -215,6 +215,24 @@ impl CompletionSource for Interp {
 }
 
 impl Interp {
+    /// Every shell function name, sorted and deduplicated.
+    ///
+    /// The interactive completion bridge in the binary projects this shell's
+    /// state into `bsh-complete` snapshots, and the function table is the one
+    /// completion-relevant piece of state it could not read: variables, aliases
+    /// and the history ring are in [`bsh_runtime::ShellState`]. Listing names
+    /// only keeps the snapshot independent of function bodies.
+    pub fn function_names(&self) -> Vec<Vec<u8>> {
+        let mut names: Vec<Vec<u8>> = self
+            .functions
+            .iter()
+            .map(|function| function.name.clone())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
     /// Visible variable names, filtered by prefix and by a predicate on the
     /// binding that is actually in effect.
     fn visible_names(

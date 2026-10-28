@@ -22,6 +22,8 @@ use bsh_runtime::ShellHost;
 use bsh_syntax::{ParseOpts, ParseOutcome};
 use bsh_vm::Interp;
 
+mod complete;
+
 const USAGE: &str = "\
 ßhell — a POSIX- and bash-compatible shell
 
@@ -644,7 +646,11 @@ fn capture_stdout(shell: &mut Interp, command: &[u8]) -> Option<Vec<u8>> {
 /// The ring moves to the shell first for two reasons: `PROMPT_COMMAND` may
 /// call `history -a`, and `\!` is the ring's next number, which is what the
 /// line about to be typed will get.
-fn refresh_prompt(shell: &mut Interp, editor: &mut bsh_repl::Editor<'_>) {
+fn refresh_prompt(
+    shell: &mut Interp,
+    editor: &mut bsh_repl::Editor<'_>,
+    engine: &bsh_complete::CompletionEngine,
+) {
     std::mem::swap(editor.history_mut(), &mut shell.state().history);
     run_prompt_command(shell);
     // The prompt command may have changed `HISTSIZE`/`HISTFILE`; pick the
@@ -656,6 +662,11 @@ fn refresh_prompt(shell: &mut Interp, editor: &mut bsh_repl::Editor<'_>) {
     let secondary = prompt_template(shell, b"PS2").unwrap_or_else(|| b"> ".to_vec());
     let primary = shell.render_prompt(&primary);
     let secondary = shell.render_prompt(&secondary);
+    // The completion engine reads the same state the prompt does, so it is
+    // refreshed here: `PROMPT_COMMAND` may have defined a function or a
+    // `complete` rule, `cd` may have moved the working directory, and the
+    // history ring is in the shell only for this stretch of the loop.
+    complete::refresh(shell, engine);
     std::mem::swap(editor.history_mut(), &mut shell.state().history);
     editor.set_prompt(bsh_repl::Prompt::from_expanded(primary, secondary));
 }
@@ -710,7 +721,7 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
         // startup: the command just executed may have changed `PS1`, the
         // working directory, the job table or `promptvars`, and `\!` must name
         // the line about to be typed.
-        refresh_prompt(shell, &mut editor);
+        refresh_prompt(shell, &mut editor, &engine);
         // `PROMPT_COMMAND='exit'` leaves the shell before the prompt is drawn.
         if let Some(requested) = shell.state().take_exit_request() {
             break requested;
