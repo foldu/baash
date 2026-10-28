@@ -119,6 +119,11 @@ pub struct History {
     pending: Vec<Vec<u8>>,
     /// Physical lines of the history file already read, for `history -n`.
     file_read: usize,
+    /// Whether the last entry is the line the editor just read and the shell
+    /// is about to execute. `fc` hides that entry, and `history -s` removes it.
+    /// A line recorded by `history -s` itself or read from a file is not
+    /// current, and neither is a command-line `-c` chunk, which is never added.
+    current: bool,
     /// Editor navigation cursor into `entries`.
     index: Option<usize>,
     /// What the user was typing before the first Up press.
@@ -145,6 +150,7 @@ impl History {
             ignore_patterns: Vec::new(),
             pending: Vec::new(),
             file_read: 0,
+            current: false,
             index: None,
             draft: Vec::new(),
         }
@@ -287,9 +293,20 @@ impl History {
         true
     }
 
-    /// Editor entry point: add a submitted line, ignoring navigation errors.
+    /// Editor/interactive-read entry point: add the command line that is about
+    /// to run and mark it as the current entry.
     pub fn push(&mut self, line: &[u8]) {
-        self.add(line);
+        self.current = self.add(line);
+    }
+
+    /// Whether the last entry is the command line currently executing.
+    pub fn is_current(&self) -> bool {
+        self.current
+    }
+
+    /// Clear the current-line marker once the command has run.
+    pub fn clear_current(&mut self) {
+        self.current = false;
     }
 
     /// Whether `line` matches a `HISTIGNORE` pattern.
@@ -343,6 +360,7 @@ impl History {
                 .entries
                 .last()
                 .map_or(1, |entry| entry.number.saturating_add(1));
+            self.current = false;
             self.reset_navigation();
             true
         } else {
@@ -418,6 +436,9 @@ impl History {
             return false;
         };
         let first = self.entries.first().map_or(1, Entry::number);
+        if self.current && index + 1 == self.entries.len() {
+            self.current = false;
+        }
         self.entries.remove(index);
         for (offset, entry) in self.entries.iter_mut().enumerate() {
             entry.number = first.saturating_add(u32::try_from(offset).unwrap_or(u32::MAX));
@@ -437,6 +458,7 @@ impl History {
         self.pending.clear();
         self.next = 1;
         self.file_read = 0;
+        self.current = false;
         self.reset_navigation();
     }
 
@@ -745,6 +767,25 @@ mod tests {
         assert_eq!(history.get(0), None);
         assert!(history.delete(-3));
         assert_eq!(texts(&history), lines(&[b"two", b"three"]));
+    }
+
+    #[test]
+    fn only_the_interactive_push_marks_the_current_line() {
+        let mut history = History::new();
+        history.add(b"from-history-s");
+        assert!(!history.is_current());
+        history.push(b"typed");
+        assert!(history.is_current());
+        history.clear_current();
+        assert!(!history.is_current());
+        // An ignored line never became the current entry.
+        history.set_control(Control::parse(b"ignoredups"));
+        history.push(b"typed");
+        history.push(b"typed");
+        assert!(
+            !history.is_current(),
+            "the second `typed` was filtered and is not in the ring"
+        );
     }
 
     #[test]

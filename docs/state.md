@@ -22,7 +22,7 @@ cargo build -p bsh -p bsh-spec
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- --deny warnings
 cargo test --workspace --all-features
-cargo test --workspace --all-features -- --list | grep -c ': test$'   # 1068
+cargo test --workspace --all-features -- --list | grep -c ': test$'   # 1071
 
 # conformance
 target/debug/bsh-spec --shell target/debug/bsh --ratchet   # must be >= baseline
@@ -54,7 +54,7 @@ a stale brief has already cost two wrong scopes (arrays: 54 vs real; namerefs:
 | of the whole suite (3971 cases) | 50.0 % |
 | as a fraction of bash's score | 1985 / 2574 = 77.1 % |
 | share of the bash gap closed since 1013 | 972 / 1561 = 62.3 % |
-| our test count | 1068 |
+| our test count | 1071 |
 
 Measured with `bash 5.3.20` as the comparison shell, harness forced to
 `LC_ALL=C` (bash scores *worse* under `C.UTF-8`: 2574 → 2435, so the C locale

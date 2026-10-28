@@ -194,9 +194,9 @@ pub(super) fn bi_history(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
 
     if store {
         // bash records the typed line before dispatch, then `history -s`
-        // removes it and stores its arguments instead. A non-interactive shell
-        // never recorded the line in the first place.
-        if host.is_interactive() {
+        // removes it and stores its arguments instead. A command line that was
+        // never recorded (`-c`, a non-interactive shell) is left alone.
+        if host.state().history.is_current() {
             host.state().history.remove_last();
         }
         let mut line = Vec::new();
@@ -433,10 +433,11 @@ pub(super) fn bi_fc(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
     host.run_source(&command)
 }
 
-/// Whether the last entry is the command currently running.
+/// The entries `fc` may select: everything except the command line currently
+/// running, when that line was recorded.
 fn eligible_len(host: &mut dyn ShellHost) -> usize {
     let length = host.state().history.len();
-    if host.is_interactive() && length > 0 {
+    if host.state().history.is_current() && length > 0 {
         length - 1
     } else {
         length

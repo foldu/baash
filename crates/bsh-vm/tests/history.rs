@@ -294,6 +294,26 @@ fn fc_s_substitutes_prints_and_reexecutes() {
 }
 
 #[test]
+fn fc_lists_everything_when_the_invoking_line_was_not_recorded() {
+    // `bsh -i -c 'history -s foo; fc -l'`: the `-c` chunk is not a recorded
+    // command line, so nothing may be hidden from `fc`. An interactive shell
+    // is used here precisely because its recorded lines *are* hidden.
+    let mut interp = Interp::new(true);
+    run(&mut interp, "history -s foo; history -s bar");
+    assert_eq!(capture(&mut interp, "fc -l"), "1\t foo\n2\t bar");
+    assert_eq!(capture(&mut interp, "history"), "    1  foo\n    2  bar");
+}
+
+#[test]
+fn fc_hides_the_recorded_current_line_but_history_shows_it() {
+    let mut interp = Interp::new(true);
+    // Stand in for the editor: the ring records the line and marks it current.
+    run(&mut interp, "history -s foo");
+    interp.state().history.push(b"history");
+    assert_eq!(capture(&mut interp, "fc -l"), "1\t foo");
+}
+
+#[test]
 fn fc_s_without_history_fails_and_plain_fc_is_not_implemented() {
     let mut interp = shell();
     assert_eq!(run(&mut interp, "fc -s"), Status(1));

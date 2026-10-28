@@ -574,7 +574,9 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
                 // `PS1`'s `\w` must follow it (`docs/contracts.md`).
                 let after = shell.state().vars.scalar(b"PWD").map(<[u8]>::to_vec);
                 // Pick up `HISTSIZE`/`HISTFILE`/`HISTCONTROL` the command
-                // changed before the editor gets the ring back.
+                // changed before the editor gets the ring back, and retire the
+                // "currently executing line" marker.
+                shell.state().history.clear_current();
                 shell.state().sync_history();
                 std::mem::swap(editor.history_mut(), &mut shell.state().history);
                 if after != before
@@ -655,7 +657,7 @@ fn run_stdin(shell: &mut Interp) -> ExitCode {
         // terminal (`bsh -i < file`, which is how the conformance suite drives
         // the interactive cases). Non-interactive runs record nothing.
         if shell.is_interactive() && shell.state().opts.history {
-            shell.state().history.add(&chunk);
+            shell.state().history.push(&chunk);
         }
         // The status of the last chunk is the shell's exit status; an `exit`
         // inside it already requested the unwind, and the request survives in
@@ -665,6 +667,7 @@ fn run_stdin(shell: &mut Interp) -> ExitCode {
             // Stand in for bash's assignment hooks: this is where `HISTSIZE`
             // shrinking, `HISTFILESIZE` truncation and a changed `HISTFILE`
             // take effect between commands.
+            shell.state().history.clear_current();
             shell.state().sync_history();
         }
         if shell.state().take_exit_request().is_some() {
