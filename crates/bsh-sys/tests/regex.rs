@@ -5,7 +5,7 @@
 //! groups), and the documented NUL/group-count limits.
 
 use bsh_sys::regex::MAX_GROUPS;
-use bsh_sys::{RegexError, Regex};
+use bsh_sys::{Regex, RegexError};
 
 /// Compile a pattern that must be valid.
 fn compile(pattern: &[u8]) -> Regex {

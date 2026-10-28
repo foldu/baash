@@ -37,6 +37,19 @@ impl Interp {
         self.expand_operand(&word)
     }
 
+    /// Expand the right-hand side of `=~`.
+    ///
+    /// Unlike `expand_fragment`, a text that is not a well-formed shell word
+    /// does **not** become a fully quoted literal: `(a)*` legal regex is rarely
+    /// a legal shell word, and treating it as literal text would silently turn
+    /// every group into an escaped parenthesis. The bytes stay pattern text.
+    pub(crate) fn expand_regex_fragment(&mut self, text: &[u8]) -> Result<Field, bsh_lang::Error> {
+        match self.parse_fragment(text) {
+            Some(word) => self.expand_operand(&word),
+            None => Ok(Field::plain(text.to_vec())),
+        }
+    }
+
     /// Expand one `[[ … == PAT ]]` right-hand operand.
     ///
     /// The conditional's body is raw text, so an extglob group never became a
@@ -298,6 +311,11 @@ pub(crate) fn conditional_tokens(body: &[u8], extglob: bool) -> Vec<CondToken> {
     let mut tokens = Vec::new();
     let mut index = 0usize;
     let mut pattern_context = false;
+    // After `=~` the operand is one regex word, and `(`/`)` belong to it: bash
+    // reads `[[ x =~ (a|b) ]]` as a pattern, not as a parenthesised
+    // expression, and tokens splitting them would leave the operator with no
+    // right-hand side at all.
+    let mut regex_operand = false;
     while index < body.len() {
         let byte = body[index];
         if byte.is_ascii_whitespace() {
@@ -305,6 +323,13 @@ pub(crate) fn conditional_tokens(body: &[u8], extglob: bool) -> Vec<CondToken> {
             continue;
         }
         let rest = &body[index..];
+        if regex_operand {
+            let length = regex_word_end(body, index);
+            tokens.push(CondToken::Word(index..index + length));
+            index += length;
+            regex_operand = false;
+            continue;
+        }
         // A pattern operand may begin with an extglob operator, and so may an
         // ordinary operand when the dialect is on; `!` is an operator
         // character everywhere else.
@@ -346,10 +371,62 @@ pub(crate) fn conditional_tokens(body: &[u8], extglob: bool) -> Vec<CondToken> {
             continue;
         };
         pattern_context = matches!(token, CondToken::Eq | CondToken::Ne);
+        regex_operand = matches!(token, CondToken::Match);
         tokens.push(token);
         index += length;
     }
     tokens
+}
+
+/// End of a `=~` right-hand side: everything to the next unquoted whitespace.
+///
+/// Quotes, escapes and substitutions are skipped whole so a space inside them
+/// does not end the operand, and parentheses are ordinary bytes here.
+fn regex_word_end(body: &[u8], start: usize) -> usize {
+    let mut index = start;
+    while index < body.len() {
+        match body[index] {
+            byte if byte.is_ascii_whitespace() => break,
+            b'\\' => index += 2,
+            b'\'' => match body[index + 1..].iter().position(|&byte| byte == b'\'') {
+                Some(offset) => index += offset + 2,
+                None => return body.len() - start,
+            },
+            b'"' => {
+                index += 1;
+                while index < body.len() && body[index] != b'"' {
+                    if body[index] == b'\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                index += 1;
+            }
+            b'$' if body.get(index + 1) == Some(&b'(') => {
+                // Skip a command substitution or an arithmetic expansion as a
+                // unit: its closing paren does not end the operand.
+                let mut depth = 0usize;
+                while index < body.len() {
+                    match body[index] {
+                        b'(' => depth += 1,
+                        b')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                index += 1;
+                                break;
+                            }
+                        }
+                        b'\\' => index += 1,
+                        _ => {}
+                    }
+                    index += 1;
+                }
+            }
+            _ => index += 1,
+        }
+        index = index.max(start);
+    }
+    index.min(body.len()) - start
 }
 
 /// Whether `rest` begins with one of the five extglob operators.

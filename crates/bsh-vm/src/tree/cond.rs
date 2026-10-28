@@ -185,6 +185,8 @@ impl Parser<'_> {
                 // the body is parsed one word at a time.
                 let right = if matches!(operator.as_slice(), b"==" | b"=" | b"!=") {
                     self.expand_pattern(&right)?
+                } else if operator.as_slice() == b"=~" {
+                    self.expand_regex(&right)?
                 } else {
                     self.expand(&right)?
                 };
@@ -194,6 +196,18 @@ impl Parser<'_> {
 
         // A single word: true when non-empty.
         Ok(!left.bytes.is_empty())
+    }
+
+    /// Expand a `=~` right-hand side, keeping parens and braces as regex text.
+    fn expand_regex(&mut self, range: &Range<usize>) -> Result<Field, String> {
+        let text = &self.text[range.clone()];
+        match self.interp.expand_regex_fragment(text) {
+            Ok(field) => Ok(field),
+            Err(error) => {
+                self.interp.diagnose(&error.diagnostic());
+                Err(String::new())
+            }
+        }
     }
 
     fn expand(&mut self, range: &Range<usize>) -> Result<Field, String> {
@@ -248,17 +262,84 @@ impl Parser<'_> {
                     _ => left >= right,
                 })
             }
-            b"=~" => {
-                self.report(
-                    "`[[ … =~ … ]]` is not implemented yet: POSIX ERE needs regcomp/regexec (DESIGN.md §4.8)",
-                );
-                Err(String::new())
-            }
+            b"=~" => self.regex_match(left, right),
             other => Err(format!(
                 "unknown operator `{}`",
                 String::from_utf8_lossy(other)
             )),
         }
+    }
+
+    /// `[[ text =~ re ]]`.
+    ///
+    /// The right-hand side is not passed through as bytes: bash re-escapes the
+    /// metacharacters that were *quoted*, which is the only rule that explains
+    /// all four measured behaviours (`a\.b` keeps its backslash, a literal
+    /// `\b` loses it, a variable's `\b` keeps it, `"a.b"` is literal). The
+    /// quoting mask from expansion is exactly the information needed.
+    fn regex_match(&mut self, text: &Field, pattern: &Field) -> Result<bool, String> {
+        let source = regex_source(pattern);
+        let case_insensitive = self.interp.pattern_flags().nocasematch;
+        let compiled = if case_insensitive {
+            bsh_sys::Regex::new_icase(&source)
+        } else {
+            bsh_sys::Regex::new(&source)
+        };
+        let compiled = match compiled {
+            Ok(compiled) => compiled,
+            Err(error) => {
+                // bash prints the pattern as the user wrote it, then the
+                // engine's own message, and the `[[` command fails with 2.
+                let shown = String::from_utf8_lossy(&pattern.bytes).into_owned();
+                self.report(&format!(
+                    "invalid regular expression `{shown}': {}",
+                    error.message()
+                ));
+                self.clear_rematch();
+                return Err(String::new());
+            }
+        };
+        match compiled.captures(&text.bytes) {
+            Some(captures) => {
+                self.set_rematch(&captures, &text.bytes);
+                Ok(true)
+            }
+            None => {
+                // bash clears the array on a failed match; leaving the previous
+                // match visible is a real bug in a script that loops.
+                self.clear_rematch();
+                Ok(false)
+            }
+        }
+    }
+
+    /// Write `BASH_REMATCH` from a successful match: element 0 is the whole
+    /// match, a group that did not participate is the empty string.
+    fn set_rematch(&mut self, captures: &[Option<(usize, usize)>], text: &[u8]) {
+        self.clear_rematch();
+        for (index, capture) in captures.iter().enumerate() {
+            let value = match capture {
+                Some((start, end)) => text.get(*start..*end).unwrap_or(&[]),
+                None => &[][..],
+            };
+            let _ = self
+                .interp
+                .state
+                .vars
+                .set_indexed(b"BASH_REMATCH", index as i64, value);
+        }
+    }
+
+    /// Empty the array, keeping it defined: `${BASH_REMATCH[@]}` is empty, not
+    /// an unbound-variable error under `set -u`.
+    fn clear_rematch(&mut self) {
+        let _ = self.interp.state.vars.unset(b"BASH_REMATCH");
+        let _ = self.interp.state.vars.set_indexed(b"BASH_REMATCH", 0, b"");
+        let _ = self
+            .interp
+            .state
+            .vars
+            .unset_element_indexed(b"BASH_REMATCH", 0);
     }
 
     fn unary_test(&mut self, operator: &[u8], operand: &Field) -> Result<bool, String> {
@@ -341,4 +422,43 @@ impl Parser<'_> {
             }
         })
     }
+}
+
+/// Build the regex source from an expanded field: quoted metacharacters are
+/// escaped, everything else passes through.
+///
+/// `bsh-pattern`'s matcher has no quote mask, but this one can have one because
+/// the expansion produced it. Escaping only metacharacters matters: escaping a
+/// quoted `b` would turn it into `\b`, a word boundary, which is how bash
+/// itself ends up *not* matching a literal `\b`.
+fn regex_source(field: &Field) -> Vec<u8> {
+    let mut out = Vec::with_capacity(field.bytes.len());
+    for (&byte, &quoted) in field.bytes.iter().zip(&field.quoted) {
+        if quoted && is_regex_meta(byte) {
+            out.push(b'\\');
+        }
+        out.push(byte);
+    }
+    out
+}
+
+/// Characters that mean something to a POSIX ERE.
+fn is_regex_meta(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'\\'
+            | b'.'
+            | b'['
+            | b']'
+            | b'('
+            | b')'
+            | b'*'
+            | b'+'
+            | b'?'
+            | b'{'
+            | b'}'
+            | b'|'
+            | b'^'
+            | b'$'
+    )
 }
