@@ -41,6 +41,8 @@ fn assert_round_trip(original: &[u8], ctx: QuoteCtx) {
 const HOSTILE: &[&[u8]] = &[
     b"plain",
     b"with space",
+    b"space and $dollar",
+    b"a b$c",
     b"dollar$var",
     b"quo\"te",
     b"single'quote",
@@ -49,6 +51,7 @@ const HOSTILE: &[&[u8]] = &[
     b"semi;colon",
     b"new\nline",
     b"tab\there",
+    b"caf\xc3\xa9",
     b"*",
 ];
 
@@ -151,11 +154,15 @@ fn complete_hostile_file(name: &[u8]) {
 fn engine_inserts_hostile_filenames_exactly() {
     for name in [
         &b"space name"[..],
+        b"space and $dollar",
+        b"a b$c",
         b"dollar$var",
         b"double\"quote",
         b"single'quote",
         b"new\nline",
+        b"tab\there",
         b"star*glob",
+        b"caf\xc3\xa9",
         b"bad\xffbytes",
     ] {
         complete_hostile_file(name);

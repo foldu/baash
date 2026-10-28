@@ -65,15 +65,30 @@ pub trait Provider: Send + Sync {
     fn candidates(&self, ctx: &Ctx) -> Vec<Candidate>;
 }
 
+// Command position is the union bash offers: aliases, functions, builtins,
+// reserved words, `PATH` executables, and — because `$HO<TAB>` starts a word
+// here — variables. The order is bash's `compgen -A command` order (aliases
+// first, `PATH` last), which also decides which kind survives deduplication:
+// a function that shadows a built-in is one candidate, reported as a function.
 const COMMAND: &[ProviderId] = &[
-    ProviderId::Command,
+    ProviderId::Alias,
     ProviderId::Function,
     ProviderId::Builtin,
-    ProviderId::Alias,
+    ProviderId::Keyword,
+    ProviderId::Command,
+    ProviderId::Variable,
     ProviderId::History,
     ProviderId::Path,
 ];
-const WORD: &[ProviderId] = &[ProviderId::Path, ProviderId::Variable, ProviderId::Command];
+// Keyword is here for the argument of a command wrapper (`sudo wh<TAB>`),
+// which `command_slot` reports as a command position; in an ordinary argument
+// slot the keyword provider declines.
+const WORD: &[ProviderId] = &[
+    ProviderId::Path,
+    ProviderId::Variable,
+    ProviderId::Command,
+    ProviderId::Keyword,
+];
 const ARITH: &[ProviderId] = &[ProviderId::Variable];
 const PARAM: &[ProviderId] = &[ProviderId::Variable, ProviderId::ParamOp];
 const TEST: &[ProviderId] = &[ProviderId::TestOp];
@@ -397,6 +412,84 @@ pub const BUILTINS: &[&[u8]] = &[
     b"unalias",
     b"unset",
     b"wait",
+];
+
+/// Reserved words, as `compgen -A keyword` lists them.
+///
+/// This is the runtime's keyword table copied for the same reason
+/// [`BUILTINS`] is: the dependency edge runs the other way. It is what command
+/// position offers alongside commands (`fo<TAB>` → `for`), and what
+/// `complete -A keyword` maps onto.
+pub const COMMAND_KEYWORDS: &[&[u8]] = &[
+    b"!",
+    b"[[",
+    b"]]",
+    b"{",
+    b"}",
+    b"case",
+    b"coproc",
+    b"do",
+    b"done",
+    b"elif",
+    b"else",
+    b"esac",
+    b"fi",
+    b"for",
+    b"function",
+    b"if",
+    b"in",
+    b"select",
+    b"then",
+    b"time",
+    b"until",
+    b"while",
+];
+
+/// Signal names, as bash 5.3.20's `compgen -A signal` prints them.
+///
+/// `EXIT`, `DEBUG`, `ERR` and `RETURN` are pseudo-signals and are listed first,
+/// the way bash lists them. The set of real ones is the portable name set; the
+/// realtime range is deliberately not enumerated (its names are
+/// platform-dependent and would drown the menu).
+///
+/// Known inconsistency: `compgen -A signal` in this shell prints the runtime's
+/// short names (`HUP`, not `SIGHUP`). That is a `bsh-runtime` problem, recorded
+/// in `docs/contracts.md`; completion uses bash's spelling because `kill` is
+/// what the candidates are pasted into.
+pub const SIGNALS: &[&[u8]] = &[
+    b"EXIT",
+    b"DEBUG",
+    b"ERR",
+    b"RETURN",
+    b"SIGHUP",
+    b"SIGINT",
+    b"SIGQUIT",
+    b"SIGILL",
+    b"SIGTRAP",
+    b"SIGABRT",
+    b"SIGBUS",
+    b"SIGFPE",
+    b"SIGKILL",
+    b"SIGUSR1",
+    b"SIGSEGV",
+    b"SIGUSR2",
+    b"SIGPIPE",
+    b"SIGALRM",
+    b"SIGTERM",
+    b"SIGCHLD",
+    b"SIGCONT",
+    b"SIGSTOP",
+    b"SIGTSTP",
+    b"SIGTTIN",
+    b"SIGTTOU",
+    b"SIGURG",
+    b"SIGXCPU",
+    b"SIGXFSZ",
+    b"SIGVTALRM",
+    b"SIGPROF",
+    b"SIGWINCH",
+    b"SIGIO",
+    b"SIGSYS",
 ];
 
 /// Keywords offered for a given expectation.

@@ -61,6 +61,7 @@ mod ops;
 mod paths;
 mod rank;
 mod sources;
+mod spec;
 mod text;
 
 pub use bsh_lang::QuoteCtx;
@@ -75,9 +76,12 @@ pub use names::{
     VarNames, VarProvider,
 };
 pub use ops::{CaseTagProvider, KeywordProvider, ParamOpProvider, TestOpProvider};
-pub use paths::PathProvider;
+pub use paths::{PathMode, PathProvider};
 pub use rank::Ranker;
 pub use sources::{Op, PARAM_OPS, PROVIDERS, Provider, ProviderId, TEST_OPS, providers_for};
+pub use spec::{
+    Action, OPT_BASHDEFAULT, OPT_DEFAULT, OPT_DIRNAMES, OPT_NOSPACE, OPT_PLUSDIRS, Spec, SpecSource,
+};
 
 /// The default number of entries one directory may contribute.
 pub const ENTRY_CAP: usize = paths::DEFAULT_ENTRY_CAP;

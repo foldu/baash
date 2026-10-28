@@ -113,8 +113,10 @@ fn parameter_expansion_offers_variables_then_operators() {
         .iter()
         .map(|candidate| candidate.insert.clone())
         .collect::<Vec<_>>();
-    assert!(names.contains(&b"PATH".to_vec()), "{names:?}");
-    assert!(names.contains(&b"PWD".to_vec()), "{names:?}");
+    // Bash closes the expansion for a bare name: `${PA<TAB>` offers `${PATH}`,
+    // so the inserted name carries the closing brace.
+    assert!(names.contains(&b"PATH}".to_vec()), "{names:?}");
+    assert!(names.contains(&b"PWD}".to_vec()), "{names:?}");
 
     let typed = engine.complete(b"echo ${PATH", 11);
     assert_eq!(typed.expect, Expect::ParamOp);
@@ -257,7 +259,15 @@ fn command_substitution_completes_inside_the_substitution() {
     let menu = engine.complete(b"echo $(in", 9);
     assert_eq!(menu.expect, Expect::Command);
     assert_eq!(menu.replace, 7..9);
-    assert_eq!(menu.candidates[0].insert, b"inner");
+    // `in` is a reserved word and command position offers reserved words, so
+    // it legitimately sorts before the executable; the substitution's command
+    // is still what the menu is about.
+    assert!(
+        menu.candidates.iter().any(|c| c.insert == b"inner"),
+        "{:?}",
+        inserts(&menu)
+    );
+    assert!(menu.candidates.iter().any(|c| c.insert == b"in"));
 }
 
 #[test]
@@ -393,4 +403,137 @@ fn posix_profile_changes_what_the_parser_accepts() {
     // must not offer test operators.
     let menu = engine.complete(b"[[ -", 4);
     assert_ne!(menu.expect, Expect::TestOp);
+}
+
+fn shell_names(functions: &[&[u8]], aliases: &[&[u8]]) -> Arc<dyn bsh_complete::ShellNames> {
+    struct StaticNames {
+        functions: Vec<Vec<u8>>,
+        aliases: Vec<Vec<u8>>,
+    }
+    impl bsh_complete::ShellNames for StaticNames {
+        fn functions(&self) -> Vec<Vec<u8>> {
+            self.functions.clone()
+        }
+        fn aliases(&self) -> Vec<Vec<u8>> {
+            self.aliases.clone()
+        }
+    }
+    Arc::new(StaticNames {
+        functions: functions.iter().map(|name| name.to_vec()).collect(),
+        aliases: aliases.iter().map(|name| name.to_vec()).collect(),
+    })
+}
+
+#[test]
+fn command_position_is_a_deduplicated_union() {
+    let tree = TempTree::new("union");
+    tree.exe("bin/dup-name");
+    tree.exe("bin/path-only");
+    let engine = CompletionEngine::new()
+        .with_path_var(tree.path("bin").display().to_string().into_bytes())
+        .with_shell_names(shell_names(&[b"dup-name", b"func-only"], &[b"alias-only"]))
+        .with_vars(vars(&[b"unused"]));
+
+    let menu = engine.complete(b"", 0);
+    let counts = |needle: &[u8]| {
+        menu.candidates
+            .iter()
+            .filter(|candidate| candidate.insert == needle)
+            .count()
+    };
+    assert_eq!(
+        counts(b"dup-name"),
+        1,
+        "one function shadows one PATH entry"
+    );
+    assert!(counts(b"func-only") == 1);
+    assert!(counts(b"alias-only") == 1);
+    assert!(counts(b"path-only") == 1);
+    assert!(counts(b"cd") == 1, "builtins are in the union");
+    assert!(counts(b"for") == 1, "keywords are in the union");
+    // Every candidate is distinct.
+    let mut inserts: Vec<&[u8]> = menu
+        .candidates
+        .iter()
+        .map(|candidate| candidate.insert.as_slice())
+        .collect();
+    let total = inserts.len();
+    inserts.sort_unstable();
+    inserts.dedup();
+    assert_eq!(inserts.len(), total);
+}
+
+#[test]
+fn a_keyword_is_offered_in_command_position() {
+    // An empty `PATH` keeps the menu down to what the shell itself knows.
+    let engine = CompletionEngine::new().with_path_var(Vec::new());
+    let menu = engine.complete(b"fo", 2);
+    assert_eq!(menu.expect, Expect::Command);
+    assert_eq!(menu.candidates[0].insert, b"for", "{:?}", inserts(&menu));
+    assert_eq!(menu.candidates[0].kind, bsh_complete::CandKind::Keyword);
+
+    // A keyword is also a word after a wrapper, which is a command slot too.
+    let wrapper = engine.complete(b"sudo wh", 7);
+    assert!(
+        wrapper.candidates.iter().any(|c| c.insert == b"while"),
+        "{:?}",
+        inserts(&wrapper)
+    );
+}
+
+#[test]
+fn dollar_completes_variable_names() {
+    let engine = CompletionEngine::new()
+        .with_vars(vars(&[b"HOME", b"HOSTNAME", b"PATH"]))
+        .with_path_var(Vec::new());
+
+    let menu = engine.complete(b"echo $HOM", 9);
+    assert_eq!(menu.candidates[0].insert, b"$HOME", "{:?}", inserts(&menu));
+    // A fuzzy candidate may follow (`$HOSTNAME` contains `$HOM` in order), but
+    // the prefix match is first.
+    assert!(menu.candidates[0].tier == 0);
+    let mut line = b"echo $HOM".to_vec();
+    menu.apply(&mut line, 0).expect("insertion");
+    // The fuzzy alternative means this is not a unique match, so no space.
+    assert_eq!(line, b"echo $HOME");
+
+    // `$` alone is every name, not an error.
+    let bare = engine.complete(b"echo $", 6);
+    assert!(bare.candidates.iter().any(|c| c.insert == b"$PATH"));
+    assert!(bare.candidates.iter().all(|c| c.insert.starts_with(b"$")));
+}
+
+#[test]
+fn brace_completion_closes_the_expansion() {
+    let engine = CompletionEngine::new()
+        .with_vars(vars(&[b"HOME", b"HOSTNAME"]))
+        .with_path_var(Vec::new());
+    let menu = engine.complete(b"echo ${HOM", 10);
+    assert_eq!(menu.expect, Expect::ParamOp);
+    let index = menu
+        .candidates
+        .iter()
+        .position(|candidate| candidate.insert == b"HOME}")
+        .expect("closing brace");
+    assert_eq!(menu.candidates[index].display, "${HOME}");
+    let mut line = b"echo ${HOM".to_vec();
+    menu.apply(&mut line, index).expect("insertion");
+    // Operators are offered next to the closed name, so this is not a unique
+    // match and gains no trailing space.
+    assert_eq!(line, b"echo ${HOME}");
+}
+
+#[test]
+fn a_command_word_is_not_completed_from_history_words() {
+    // History candidates are real commands typed before, but a two-word
+    // history line must not turn its argument into a command candidate.
+    let engine = CompletionEngine::new()
+        .with_path_var(Vec::new())
+        .with_history(history(&[b"echo has-arg"]));
+    let menu = engine.complete(b"echo ", 5);
+    assert!(
+        menu.candidates
+            .iter()
+            .all(|candidate| candidate.insert != b"has-arg")
+    );
 }

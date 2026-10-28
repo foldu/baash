@@ -57,6 +57,15 @@ impl VarProvider {
     pub fn new(names: Arc<dyn VarNames>) -> Self {
         Self { names }
     }
+
+    /// Every variable name, without the `$`.
+    ///
+    /// `complete -A variable` inserts the bare name, which is the opposite of
+    /// what the interactive `$…` completion does, so the engine needs the list
+    /// itself and not this provider's decorated candidates.
+    pub fn names(&self) -> Vec<Vec<u8>> {
+        self.names.names()
+    }
 }
 
 impl Provider for VarProvider {
@@ -80,10 +89,21 @@ impl Provider for VarProvider {
         names
             .into_iter()
             .map(|name| {
-                if bare {
+                if ctx.param {
                     // Inside `${…}` the insertion point is already past the
-                    // `$` and `{`; inside `$((…))` arithmetic takes the name
-                    // without a `$`.
+                    // `$` and `{`. Bash closes the expansion when the name is
+                    // complete (`${HO<TAB>` → `${HOME}`), which is also the
+                    // only way the inserted word re-parses.
+                    let display = format!("${{{}}}", String::from_utf8_lossy(&name));
+                    let mut insert = name;
+                    insert.push(b'}');
+                    Candidate::source(insert, CandKind::Variable)
+                        .with_desc("variable")
+                        .with_display(display)
+                        .appending_space()
+                } else if bare {
+                    // Inside `$((…))` arithmetic takes the name without a `$`,
+                    // and there is no brace to close.
                     Candidate::source(name, CandKind::Variable).with_desc("variable")
                 } else {
                     let mut insert = Vec::with_capacity(name.len() + 1);

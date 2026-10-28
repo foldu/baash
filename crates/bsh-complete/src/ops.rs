@@ -71,7 +71,12 @@ impl Provider for TestOpProvider {
     }
 }
 
-/// Shell keywords for the contexts whose only sensible completion is a keyword.
+/// Shell keywords: the words the grammar accepts at this slot, plus — in a
+/// command slot — every reserved word.
+///
+/// Command position is a keyword position too (`fo<TAB>` → `for`, `wh<TAB>` →
+/// `while`), which is why this provider is in the command table rather than
+/// only in the per-construction ones.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct KeywordProvider;
 
@@ -81,11 +86,17 @@ impl Provider for KeywordProvider {
     }
 
     fn applies(&self, ctx: &Ctx) -> bool {
-        ctx.quote == QuoteCtx::Unquoted && !sources::keywords_for(ctx.expect).is_empty()
+        ctx.quote == QuoteCtx::Unquoted
+            && (sources::command_slot(ctx) || !sources::keywords_for(ctx.expect).is_empty())
     }
 
     fn candidates(&self, ctx: &Ctx) -> Vec<Candidate> {
-        sources::keywords_for(ctx.expect)
+        let keywords = if sources::command_slot(ctx) {
+            sources::COMMAND_KEYWORDS
+        } else {
+            sources::keywords_for(ctx.expect)
+        };
+        keywords
             .iter()
             .map(|keyword| {
                 Candidate::source(*keyword, CandKind::Keyword)

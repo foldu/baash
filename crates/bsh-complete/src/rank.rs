@@ -51,15 +51,22 @@ impl Ranker {
     ///
     /// Path candidates use [`Config::match_paths`], which adds a bonus after a
     /// `/` and is why `src/ma` ranks `src/main.rs` well.
+    ///
+    /// The greedy matcher is used deliberately: `nucleo-matcher` 0.3.1's
+    /// optimal matcher panics (`should have been caught by prefilter`) on
+    /// ordinary ASCII subsequences such as `HOSTNAME` ← `HOM`, and a menu
+    /// candidate must never take the shell down. Greedy matching is `O(n)`,
+    /// which also bounds the per-keystroke work; the tier rules below — not the
+    /// fuzzy score — decide the product behaviour.
     pub fn score(&mut self, text: &str, needle: &str, path: bool) -> Option<u16> {
         let mut haystack_buf = Vec::new();
         let mut needle_buf = Vec::new();
         let haystack = Utf32Str::new(text, &mut haystack_buf);
         let needle = Utf32Str::new(needle, &mut needle_buf);
         if path {
-            self.path.fuzzy_match(haystack, needle)
+            self.path.fuzzy_match_greedy(haystack, needle)
         } else {
-            self.plain.fuzzy_match(haystack, needle)
+            self.plain.fuzzy_match_greedy(haystack, needle)
         }
     }
 
@@ -223,6 +230,21 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].insert, b"src/main.rs");
         assert_eq!(candidates[0].tier, 2);
+    }
+
+    #[test]
+    fn an_ascii_subsequence_never_panics_the_matcher() {
+        // `nucleo-matcher` 0.3.1's optimal matcher panics on this pair; the
+        // greedy matcher used here must simply score it.
+        let mut ranker = Ranker::new();
+        assert!(ranker.score("HOSTNAME", "HOM", false).is_some());
+        let mut candidates = vec![named("HOSTNAME", 0.0), named("HOME", 0.0)];
+        ranker.rank(&mut candidates, b"HOM");
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(
+            candidates[0].insert, b"HOME",
+            "the prefix match comes first"
+        );
     }
 
     #[test]

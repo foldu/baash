@@ -56,10 +56,14 @@ impl CommandProvider {
 
     /// Replace the `PATH` used by the index.
     ///
-    /// Passing `None` switches back to the process environment. The cached
-    /// index is dropped either way, so the next completion re-reads the
-    /// directories.
+    /// Passing `None` switches back to the process environment. A changed
+    /// value drops the cached index so the next completion re-reads the
+    /// directories; setting the same value again (which the prompt refresh does
+    /// before every line) is free.
     pub fn set_path_var(&self, path: Option<Vec<u8>>) {
+        if *lock(&self.path_override) == path {
+            return;
+        }
         *lock(&self.path_override) = path;
         self.invalidate();
     }

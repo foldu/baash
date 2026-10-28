@@ -50,10 +50,26 @@ struct DirCache {
     entries: Arc<Vec<Entry>>,
 }
 
+/// Which entries a path completion may offer.
+///
+/// The default depends on the command (`cd` and friends ask for directories
+/// only). `complete -A file` and `complete -A directory` override it, which is
+/// why this is a parameter of the provider rather than a fact about the
+/// context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathMode {
+    /// Files and directories.
+    Any,
+    /// Regular files only.
+    Files,
+    /// Directories only.
+    Directories,
+}
+
 /// Provides files and directories.
 pub struct PathProvider {
     root: Mutex<PathBuf>,
-    home: Option<PathBuf>,
+    home: Mutex<Option<PathBuf>>,
     entry_cap: usize,
     cache: Mutex<HashMap<PathBuf, DirCache>>,
 }
@@ -71,7 +87,7 @@ impl PathProvider {
     pub fn with_root(root: impl Into<PathBuf>) -> Self {
         Self {
             root: Mutex::new(root.into()),
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            home: Mutex::new(std::env::var_os("HOME").map(PathBuf::from)),
             entry_cap: DEFAULT_ENTRY_CAP,
             cache: Mutex::new(HashMap::new()),
         }
@@ -80,8 +96,17 @@ impl PathProvider {
     /// Override the directory `~` expands to.
     #[must_use]
     pub fn with_home(mut self, home: impl Into<PathBuf>) -> Self {
-        self.home = Some(home.into());
+        self.home = Mutex::new(Some(home.into()));
         self
+    }
+
+    /// Replace the directory `~` expands to, as `HOME` currently says.
+    ///
+    /// The shell calls this before each prompt: `HOME=/elsewhere` must change
+    /// what `~/` completes, and the environment the process started with is
+    /// only a snapshot.
+    pub fn set_home(&self, home: Option<PathBuf>) {
+        *lock(&self.home) = home;
     }
 
     /// Override the per-directory entry cap.
@@ -163,12 +188,13 @@ impl PathProvider {
 
     /// Resolve the typed directory component to a real path.
     fn resolve_dir(&self, typed: &[u8]) -> Option<PathBuf> {
+        let home = lock(&self.home).clone();
         if typed.starts_with(b"~/") {
             let rest = path_from_bytes(&typed[2..]);
-            return self.home.as_ref().map(|home| home.join(rest));
+            return home.map(|home| home.join(rest));
         }
         if typed == b"~" || typed == b"~/" {
-            return self.home.clone();
+            return home;
         }
         if typed.starts_with(b"~") {
             // `~user` would need the password database, which is the runtime's
@@ -211,6 +237,25 @@ impl Provider for PathProvider {
     }
 
     fn candidates(&self, ctx: &Ctx) -> Vec<Candidate> {
+        let directories_only = ctx
+            .command_name
+            .as_deref()
+            .is_some_and(|name| sources::is_one_of(name, sources::DIRECTORY_COMMANDS));
+        let mode = if directories_only {
+            PathMode::Directories
+        } else {
+            PathMode::Any
+        };
+        self.candidates_in(ctx, mode)
+    }
+}
+
+impl PathProvider {
+    /// Candidates for `ctx`, restricted to `mode`.
+    ///
+    /// `complete -A file` and `complete -A directory` ask for a mode that the
+    /// command table cannot know, so the engine calls this directly.
+    pub fn candidates_in(&self, ctx: &Ctx, mode: PathMode) -> Vec<Candidate> {
         let prefix = &ctx.prefix;
         let (typed_dir, base) = if prefix == b"~" {
             // A bare `~` names the home directory; the candidate replaces the
@@ -226,10 +271,6 @@ impl Provider for PathProvider {
             return Vec::new();
         };
 
-        let directories_only = ctx
-            .command_name
-            .as_deref()
-            .is_some_and(|name| sources::is_one_of(name, sources::DIRECTORY_COMMANDS));
         let dirs_first = ctx.expect == bsh_syntax::Expect::RedirectTarget;
         let show_hidden = base.first() == Some(&b'.');
 
@@ -238,8 +279,10 @@ impl Provider for PathProvider {
             if !show_hidden && entry.name.first() == Some(&b'.') {
                 continue;
             }
-            if directories_only && !entry.is_dir {
-                continue;
+            match mode {
+                PathMode::Directories if !entry.is_dir => continue,
+                PathMode::Files if entry.is_dir => continue,
+                _ => {}
             }
             let mut insert = Vec::with_capacity(typed_dir.len() + entry.name.len() + 1);
             insert.extend_from_slice(typed_dir);
