@@ -1136,7 +1136,8 @@ After `editor.read_line`, `read_command` strips the submit newline and, when
 *without the current entry*. A changed line is echoed to stderr, the typed
 entry is removed and the expanded one recorded (`:p` included; a failed event
 is not recorded and leaves `$?` alone). `shopt -s histverify` sets the expanded
-line with `Editor::set_initial_line` and reads again instead of running it.
+line with `Editor::set_initial_line` and reads again instead of running it; a piped
+`-i` has no editing buffer, so `histverify` has no effect there (the line runs).
 The editor's ring is swapped into the shell only for `run_named`, so the
 `history`/`fc` built-ins see the same entries. A non-interactive pipe is still
 one chunk; an interactive pipe now uses the line-at-a-time reader (bash

@@ -876,7 +876,7 @@ fn read_command(
         // bash writes the expanded command to stderr, where the prompt lives;
         // stdout belongs to the command. `histverify` is the exception: the
         // line goes back to the editing buffer instead of being echoed.
-        if !shell.state().opts.histverify {
+        if !shell.state().opts.histverify && !expanded.is_empty() {
             write_stderr_bytes(&expanded);
             write_stderr_bytes(b"\n");
         }
