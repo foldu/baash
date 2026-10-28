@@ -7,8 +7,12 @@
 //!
 //! Writes go through [`Vars::resolve`], the single write entry point. Reads go
 //! through [`Vars::lookup`]/[`Vars::scalar`], so expanding `${unset}` never
-//! creates a variable as a side effect. `nameref` is the one extension point
-//! inside `resolve`; it currently always answers "not a nameref".
+//! creates a variable as a side effect.
+//!
+//! A cell with the `nameref` attribute (`declare -n`) holds the *name* it
+//! refers to; [`Vars::resolve_chain`] follows that name for reads and writes,
+//! while [`Vars::lookup`] and [`Vars::visible`] stay raw so `declare -p` can
+//! print the reference itself.
 
 use crate::Status;
 use crate::builtins::{AssignPersistence, Tier};
@@ -479,7 +483,7 @@ impl Vars {
     ///
     /// This is the single write entry point (DESIGN.md §4.6): writes to a
     /// readonly variable return [`Error::Readonly`] instead of panicking, and
-    /// this is where `nameref` will land. Reads use [`Vars::lookup`].
+    /// a nameref's chain is followed here. Reads use [`Vars::lookup`].
     ///
     /// Missing variables are created in the global scope, matching plain
     /// assignment inside a function. Use [`Vars::resolve_in`] with
