@@ -787,6 +787,24 @@ Contract points that the caller must honour:
   and mutating it would be the same class of bug as a global signal disposition.
 - **`Regex` is neither `Send` nor `Sync` nor `Clone`**: one thread, one pattern.
 
+### Arithmetic: who expands the text
+
+`bsh-vm/src/arith.rs` performs `$name`, `${name}` and `${name[expr]}` splicing
+and double-quote removal itself, because `tree/words.rs` hands it the raw
+arithmetic text. That makes it the **only** layer that may interpret escapes
+inside an arithmetic expression: if the word layer ever expands first, the two
+must not both do it, or `\$x`, single quotes, `${x:-w}`, `$(…)` and backticks
+will double-expand.
+
+The evaluator is total: every input either produces an `i64` (wrapping, like
+bash) or an error with a message, never a panic and never a silently wrong
+value. Short-circuiting is enforced by a `dead` flag: the untaken operand is
+still *parsed* (so syntax errors surface) but reads, writes and division are
+suppressed, which is what makes `0 && 1/0` and `1 ? 5 : x++` behave.
+
+One measurement worth keeping: `**` binds *below* unary sign, so `-2**2` is
+`4`, not `-4` — bash 5.3.20 and the suite agree, and the intuition is wrong.
+
 ### `[[ … =~ … ]]` and the right-hand side
 
 Measured against bash 5.3.20, because the rule is not "quote removal" and not
