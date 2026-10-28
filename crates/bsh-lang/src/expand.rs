@@ -40,10 +40,11 @@ use bsh_pattern::Flags;
 
 use crate::host::Shell;
 use crate::ifs::Ifs;
+use crate::prompt;
 use crate::vars::{ArrayKind, ArrayValue, SetError};
 use crate::word::{
-    CaseHow, DoubleQ, Lit, LitKind, ParamExp, ParamName, ParamOp, Part, ReplaceMode, UnsupportedOp,
-    Word,
+    CaseHow, DoubleQ, Lit, LitKind, ParamExp, ParamName, ParamOp, Part, ReplaceMode, Transform,
+    UnsupportedOp, Word,
 };
 
 /// Diagnostic codes produced by this crate.
@@ -828,6 +829,17 @@ fn expand_param<S: Shell>(
         ));
     }
     match &exp.op {
+        ParamOp::Transform(transform) => expand_transform(*transform, &exp.name, quoted, ctx, out),
+        ParamOp::Unsupported(UnsupportedOp::Transform) => {
+            // The parser classifies every `${x@…}` the same way, because the
+            // letter is source text it does not copy into the word. The
+            // runtime still has the source, so it resolves the letter from
+            // the span; without it the honest answer is "unsupported".
+            match ctx.shell.transform_operator(&span) {
+                Some(transform) => expand_transform(transform, &exp.name, quoted, ctx, out),
+                None => Err(Error::unsupported(UnsupportedOp::Transform, span)),
+            }
+        }
         ParamOp::Unsupported(op) => Err(Error::unsupported(*op, span)),
         ParamOp::Length => {
             let len = match &exp.name {
@@ -1118,6 +1130,50 @@ fn slice_list(
 }
 
 /// Substitute the value of `name` as an expansion result.
+/// `${x@…}`: apply a parameter transformation to the value(s).
+///
+/// The transformation runs on each element for list expansions (`"${a[@]@P}"`
+/// is one transformed field per element) and on the scalar for the other
+/// forms, exactly like the other operators. The prompt facts come from the
+/// shell once per expansion, so a prompt that reads the clock cannot show two
+/// different times in one string.
+fn expand_transform<S: Shell>(
+    transform: Transform,
+    name: &ParamName,
+    quoted: bool,
+    ctx: &mut Ctx<'_, S>,
+    out: &mut Expanded,
+) -> Result<(), Error> {
+    let prompt = ctx.shell.prompt_context();
+    match transform {
+        Transform::Prompt => {
+            let (values, star) = match name {
+                ParamName::At => (ctx.shell.positional().to_vec(), false),
+                ParamName::Star => (ctx.shell.positional().to_vec(), true),
+                ParamName::Elements { name, star } => (array_values(ctx, name), *star),
+                ParamName::Element { name, subscript } => {
+                    let value = read_element(ctx, name, subscript).unwrap_or_default();
+                    let bytes = prompt::expand_with_variables(&value, &prompt, ctx.shell);
+                    out.push(bytes, quoted, !quoted);
+                    return Ok(());
+                }
+                _ => {
+                    let value = ctx.value(name).unwrap_or_default();
+                    let bytes = prompt::expand_with_variables(&value, &prompt, ctx.shell);
+                    out.push(bytes, quoted, !quoted);
+                    return Ok(());
+                }
+            };
+            let values: Vec<Vec<u8>> = values
+                .iter()
+                .map(|value| prompt::expand_with_variables(value, &prompt, ctx.shell))
+                .collect();
+            emit_values(ctx, &values, star, quoted, out);
+            Ok(())
+        }
+    }
+}
+
 fn substitute<S: Shell>(name: &ParamName, quoted: bool, ctx: &mut Ctx<'_, S>, out: &mut Expanded) {
     match name {
         ParamName::At => emit_at(ctx, quoted, out),

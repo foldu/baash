@@ -13,10 +13,11 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::host::Shell;
+use crate::prompt::PromptContext;
 use crate::vars::{ArrayValue, SetError, Vars};
 use crate::word::{
     Arithmetic, CaseHow, CmdSubStyle, CommandSub, DoubleQ, Lit, ParamExp, ParamName, ParamOp, Part,
-    ReplaceMode, TildeSpec, UnsupportedOp, Word,
+    ReplaceMode, TildeSpec, Transform, UnsupportedOp, Word,
 };
 use crate::{Error, ErrorKind, Field};
 
@@ -60,6 +61,13 @@ pub struct TestShell {
     pub indexed: HashMap<Vec<u8>, BTreeMap<i64, Vec<u8>>>,
     /// Associative arrays, in insertion order.
     pub assoc: AssocMap,
+    /// The facts `${x@P}` reads. Defaults are deterministic (empty user and
+    /// host, a zero clock), so a prompt test never depends on the machine.
+    pub prompt: PromptContext,
+    /// When set, [`crate::Shell::transform_operator`] answers with this letter
+    /// for any span, which exercises the parser-does-not-carry-the-letter
+    /// path.
+    pub transform_letter: Option<u8>,
 }
 
 impl TestShell {
@@ -214,6 +222,14 @@ impl Vars for TestShell {
 impl Shell for TestShell {
     fn brace_expansion(&self) -> bool {
         !self.brace_expansion_off
+    }
+
+    fn transform_operator(&self, _span: &crate::Span) -> Option<Transform> {
+        self.transform_letter.and_then(Transform::from_letter)
+    }
+
+    fn prompt_context(&self) -> PromptContext {
+        self.prompt.clone()
     }
 
     fn command_substitution(&mut self, cmd: &CommandSub) -> Result<Vec<u8>, Error> {
@@ -900,6 +916,11 @@ fn parse_op(rest: &[u8]) -> ParamOp {
     }
     if let Some(body) = rest.strip_prefix(b",") {
         return case_op(body, CaseHow::LowerFirst);
+    }
+    if rest.len() == 2 && rest[0] == b'@' {
+        if let Some(transform) = Transform::from_letter(rest[1]) {
+            return ParamOp::Transform(transform);
+        }
     }
     let unsupported = match rest[0] {
         b'@' => UnsupportedOp::Transform,

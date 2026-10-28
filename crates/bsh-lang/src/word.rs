@@ -566,6 +566,15 @@ pub enum ParamOp {
     /// Only the element form is implemented: `${!x}` would re-parse arbitrary
     /// data as a name, which stays [`ParamOp::Unsupported`].
     Indirect,
+    /// `${x@P}`: expand the value as a prompt string.
+    ///
+    /// The front end classifies every `@` transformation generically as
+    /// [`ParamOp::Unsupported`] with [`UnsupportedOp::Transform`], because the
+    /// operator's letter is source text the word model does not copy; see
+    /// [`crate::Shell::transform_operator`] for how the letter is recovered at
+    /// expansion time. A front end that knows the letter can produce this
+    /// variant directly.
+    Transform(Transform),
     /// An operator this crate deliberately does not implement.
     Unsupported(UnsupportedOp),
 }
@@ -661,6 +670,34 @@ impl CaseHow {
     /// Whether matching characters are upper-cased rather than lower-cased.
     pub fn to_upper(self) -> bool {
         matches!(self, CaseHow::Upper | CaseHow::UpperFirst)
+    }
+}
+
+/// The `${x@…}` transformations this crate implements.
+///
+/// bash has several (`@Q`, `@a`, `@u`, `@U`, `@L`, `@A`, `@K`, `@k`, `@E`,
+/// `@P`); only prompt expansion is in scope here, and every other letter stays
+/// [`UnsupportedOp::Transform`] rather than being guessed at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transform {
+    /// `${x@P}`: expand the value with the prompt escape rules.
+    Prompt,
+}
+
+impl Transform {
+    /// The letter that selects this transformation in source.
+    pub fn letter(self) -> u8 {
+        match self {
+            Transform::Prompt => b'P',
+        }
+    }
+
+    /// The transformation `letter` selects, if this crate implements it.
+    pub fn from_letter(letter: u8) -> Option<Self> {
+        match letter {
+            b'P' => Some(Transform::Prompt),
+            _ => None,
+        }
     }
 }
 

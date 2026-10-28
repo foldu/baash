@@ -1,8 +1,10 @@
 //! Parameter expansion operators that need no pattern matching.
 
 use crate::fixture::TestShell;
+use crate::prompt::{PromptContext, PromptTime};
 use crate::{
-    ErrorKind, ParamExp, ParamName, ParamOp, Part, UnsupportedOp, Vars, Word, expand_word,
+    ErrorKind, ParamExp, ParamName, ParamOp, Part, Transform, UnsupportedOp, Vars, Word,
+    expand_word,
 };
 
 use super::{
@@ -211,7 +213,7 @@ fn unsupported_operators_fail_instead_of_guessing() {
     let cases = [
         ("${!x}", UnsupportedOp::Indirect),
         ("${x@Q}", UnsupportedOp::Transform),
-        ("${x@P}", UnsupportedOp::Transform),
+        ("${x@u}", UnsupportedOp::Transform),
     ];
     for (source, expected) in cases {
         let mut shell = TestShell::new().var(b"x", b"abc").positionals(&[b"a"]);
@@ -315,4 +317,173 @@ fn length_and_substring_count_characters_in_a_utf8_locale() {
     // A negative offset counts characters back from the end.
     let got = expand_one("${v: -1}", &mut chars);
     assert_argv(&got, &["x"], "${v: -1} from the end");
+}
+
+/// A deterministic context for `${x@P}` tests: the clock is frozen, the paths
+/// are explicit and root is off.
+fn prompt_context() -> PromptContext {
+    PromptContext {
+        user: b"ada".to_vec(),
+        host: b"lab.example.com".to_vec(),
+        cwd: b"/home/ada/work".to_vec(),
+        previous_cwd: b"/home/ada".to_vec(),
+        home: b"/home/ada".to_vec(),
+        shell: b"bsh".to_vec(),
+        version: b"1.2".to_vec(),
+        release: b"1.2.3".to_vec(),
+        history_number: 42,
+        command_number: 7,
+        job_count: 3,
+        root: false,
+        tty: b"tty".to_vec(),
+        time: PromptTime {
+            year: 2026,
+            month: 3,
+            day: 9,
+            hour: 14,
+            minute: 5,
+            second: 7,
+            weekday: 1,
+            yearday: 68,
+            epoch: 0,
+            utc_offset: 3_600,
+            is_dst: false,
+        },
+        ..PromptContext::default()
+    }
+}
+
+#[test]
+fn prompt_transform_renders_escapes_from_the_shell_context() {
+    let mut shell = TestShell::new().var(b"PS1", b"\\u@\\h:\\w\\$ ");
+    shell.prompt = prompt_context();
+    assert_argv(
+        &one("\"${PS1@P}\"", &mut shell),
+        &["ada@lab:~/work$ "],
+        "\"${PS1@P}\"",
+    );
+
+    // An arbitrary variable, not just PS1.
+    let mut shell = TestShell::new().var(b"x", b"\\t \\D{%Y-%m-%d}");
+    shell.prompt = prompt_context();
+    assert_argv(
+        &one("\"${x@P}\"", &mut shell),
+        &["14:05:07 2026-03-09"],
+        "\"${x@P}\"",
+    );
+}
+
+#[test]
+fn prompt_transform_obeys_quoting_for_splitting() {
+    let mut shell = TestShell::new().var(b"x", b"a  b");
+    assert_argv(&one("\"${x@P}\"", &mut shell), &["a  b"], "quoted");
+    assert_argv(&one("${x@P}", &mut shell), &["a", "b"], "unquoted");
+}
+
+#[test]
+fn prompt_transform_applies_per_element_to_lists() {
+    let mut shell = TestShell::new()
+        .positionals(&[b"a", b"b", b"c"])
+        .var(b"x", b"x");
+    shell.indexed.insert(
+        b"a".to_vec(),
+        [(0, b"x".to_vec()), (1, b"y".to_vec())]
+            .into_iter()
+            .collect(),
+    );
+    assert_argv(&one("${@@P}", &mut shell), &["a", "b", "c"], "${@@P}");
+    assert_argv(&one("\"${*@P}\"", &mut shell), &["a b c"], "\"${*@P}\"");
+    assert_argv(&one("${a@P}", &mut shell), &["x"], "${a@P}");
+    assert_argv(
+        &one("\"${a[@]@P}\"", &mut shell),
+        &["x", "y"],
+        "\"${a[@]@P}\"",
+    );
+    assert_argv(&one("\"${a[*]@P}\"", &mut shell), &["x y"], "\"${a[*]@P}\"");
+    assert_argv(&one("\"${u[@]@P}\"", &mut shell), &[], "unset array");
+    assert_argv(&one("\"${u[*]@P}\"", &mut shell), &[""], "unset [*]");
+}
+
+#[test]
+fn prompt_transform_of_unset_is_empty_but_nounset_errors() {
+    let mut shell = TestShell::new();
+    assert_argv(&one("\"${x@P}\"", &mut shell), &[""], "unset");
+
+    let mut shell = TestShell::new();
+    shell.nounset = true;
+    let err = try_expand_line("${x@P}", &mut shell).unwrap_err();
+    assert_eq!(
+        err.kind,
+        ErrorKind::ParameterUnset {
+            name: b"x".to_vec(),
+            message: None
+        }
+    );
+}
+
+/// The front end reports every `@` form as `UnsupportedOp::Transform`; the
+/// runtime resolves the letter from the span. Both halves are exercised here:
+/// with the letter the expansion works, without it the honest error remains.
+#[test]
+fn prompt_transform_resolves_the_letter_through_the_shell() {
+    let word = Word::new(vec![Part::Param(ParamExp::new(
+        ParamName::var(b"x"),
+        ParamOp::Unsupported(UnsupportedOp::Transform),
+        0..7,
+    ))]);
+
+    let mut shell = TestShell::new().var(b"x", b"abc");
+    assert!(
+        expand_word(&word, &mut shell).is_err(),
+        "no letter, no guess"
+    );
+
+    shell.transform_letter = Some(b'P');
+    assert_eq!(
+        expand_word(&word, &mut shell).unwrap(),
+        vec![b"abc".to_vec()]
+    );
+
+    shell.transform_letter = Some(b'Q');
+    assert!(
+        expand_word(&word, &mut shell).is_err(),
+        "Q is not implemented"
+    );
+    assert_eq!(Transform::from_letter(b'P'), Some(Transform::Prompt));
+}
+
+#[test]
+fn prompt_transform_expands_variables_once_after_decoding() {
+    // bash decodes the escapes first, then expands the result as if it were
+    // double quoted: `$x$y` becomes `\h`, and the `\h` is *not* decoded
+    // again, so the host name does not appear.
+    let mut shell = TestShell::new()
+        .var(b"x", b"\\")
+        .var(b"y", b"h")
+        .var(b"PS1", b"$x$y");
+    shell.prompt = prompt_context();
+    assert_argv(
+        &one("\"${PS1@P}\"", &mut shell),
+        &["\\h"],
+        "evaluation order",
+    );
+}
+
+#[test]
+fn prompt_transform_quotes_inserted_values_before_the_second_pass() {
+    // The directory name contains a dollar; `\w` must not expand it, while
+    // the `$foo` written in the template must.
+    let mut shell = TestShell::new()
+        .var(b"foo", b"foo_value")
+        .var(b"PS1", b"\\w $foo");
+    shell.prompt = PromptContext {
+        cwd: b"/tmp/$foo".to_vec(),
+        home: b"/home/ada".to_vec(),
+        ..prompt_context()
+    };
+    assert_argv(
+        &one("\"${PS1@P}\"", &mut shell),
+        &["/tmp/$foo foo_value"],
+        "cwd dollar",
+    );
 }
