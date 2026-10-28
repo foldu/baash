@@ -318,27 +318,48 @@ fn day_of_year(year: i64, month: i64, day: i64) -> u16 {
 // ---------------------------------------------------------------------------
 
 /// The UTC offset and DST flag in effect at `epoch`, from the process's zone.
+///
+/// `TZ` is resolved the way `tzset` does for the common cases: an empty value
+/// is UTC, a path is read directly, and a zone name (`Europe/Amsterdam`,
+/// `UTC`) is looked up under `TZDIR` (default `/usr/share/zoneinfo`). A POSIX
+/// rule string is not parsed; it falls back to `/etc/localtime`, and an
+/// unreadable zone is UTC.
 fn local_offset(epoch: i64) -> (i32, bool) {
     if let Some(tz) = std::env::var_os("TZ") {
         let tz = tz.as_encoded_bytes();
         if tz.is_empty() {
             return (0, false);
         }
-        let path = tz.strip_prefix(b":").unwrap_or(tz);
-        if path.contains(&b'/') || path.starts_with(b".") {
-            let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
-            if let Some(found) = std::fs::read(path)
-                .ok()
-                .and_then(|data| tzif_offset(&data, epoch))
-            {
-                return found;
-            }
+        let name = tz.strip_prefix(b":").unwrap_or(tz);
+        if let Some(found) = zone_file(name).and_then(|data| tzif_offset(&data, epoch)) {
+            return found;
         }
     }
     std::fs::read("/etc/localtime")
         .ok()
         .and_then(|data| tzif_offset(&data, epoch))
         .unwrap_or((0, false))
+}
+
+/// Read a TZif file for a `TZ` value: an explicit path, or a name under the
+/// system zoneinfo directory.
+fn zone_file(name: &[u8]) -> Option<Vec<u8>> {
+    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(name));
+    if let Ok(data) = std::fs::read(path) {
+        return Some(data);
+    }
+    if name.starts_with(b"/") {
+        return None;
+    }
+    let mut absolute = env_bytes("TZDIR")
+        .filter(|dir| !dir.is_empty())
+        .unwrap_or_else(|| b"/usr/share/zoneinfo".to_vec());
+    if !absolute.ends_with(b"/") {
+        absolute.push(b'/');
+    }
+    absolute.extend_from_slice(name);
+    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(&absolute));
+    std::fs::read(path).ok()
 }
 
 /// One TZif file's offset at `epoch`, version 1 through 3.
@@ -1426,6 +1447,26 @@ mod tests {
         let epoch = PromptTime::from_unix_utc(0);
         assert_eq!((epoch.year, epoch.month, epoch.day), (1970, 1, 1));
         assert_eq!(epoch.weekday, 4);
+    }
+
+    #[test]
+    fn zone_names_resolve_through_tzdir() {
+        // Guarded: a minimal container may ship no zoneinfo at all.
+        if let Some(data) = zone_file(b"UTC") {
+            assert_eq!(tzif_offset(&data, 0), Some((0, false)));
+        }
+        if let Some(data) = zone_file(b"Europe/Amsterdam") {
+            // 2026-07-01T00:00:00Z is CEST, two hours ahead of UTC.
+            assert_eq!(
+                tzif_offset(&data, 1_782_864_000).map(|(offset, _)| offset),
+                Some(7_200)
+            );
+            // ... and 2026-01-01T00:00:00Z is CET, one hour ahead.
+            assert_eq!(
+                tzif_offset(&data, 1_767_225_600).map(|(offset, _)| offset),
+                Some(3_600)
+            );
+        }
     }
 
     #[test]
