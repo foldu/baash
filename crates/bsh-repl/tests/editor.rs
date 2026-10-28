@@ -720,7 +720,6 @@ fn a_session_leaves_raw_mode_balanced_after_every_line() {
 /// The keys a search uses, spelled out so the tests read like the interaction.
 const CTRL_R: Key = Key::Ctrl(0x12);
 const CTRL_G: Key = Key::Ctrl(0x07);
-const CTRL_C: Key = Key::Ctrl(0x03);
 
 /// `Ctrl-R` followed by `text`.
 fn search(text: &str) -> Vec<Key> {

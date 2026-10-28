@@ -402,8 +402,19 @@ fn shell(interactive: bool, flags: &ShellFlags) -> Interp {
         std::process::exit(2);
     }
     shell.import_environment();
-    if shell.state().vars.scalar(b"PWD").is_none() {
-        if let Ok(directory) = std::env::current_dir() {
+    // `PWD` is an *assertion* about the process's directory, and an inherited
+    // one can be stale (`su`, a chroot, a wrapper script). bash replaces it
+    // with the real path in that case; otherwise `$PWD`, `cd ..` and `\w` all
+    // lie. A valid logical path (a symlinked `$PWD` that still names this
+    // directory) is kept, which is why the comparison is by device and inode
+    // rather than by string.
+    if let Ok(directory) = std::env::current_dir() {
+        let names_cwd = shell
+            .state()
+            .vars
+            .scalar(b"PWD")
+            .is_some_and(|pwd| same_directory(pwd, &directory));
+        if !names_cwd {
             let _ = shell
                 .state()
                 .vars
@@ -412,6 +423,18 @@ fn shell(interactive: bool, flags: &ShellFlags) -> Interp {
         }
     }
     shell
+}
+
+/// Whether `pwd` names the same directory as `directory`.
+fn same_directory(pwd: &[u8], directory: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(from_env) = std::fs::metadata(std::ffi::OsStr::from_bytes(pwd)) else {
+        return false;
+    };
+    let Ok(actual) = std::fs::metadata(directory) else {
+        return false;
+    };
+    from_env.dev() == actual.dev() && from_env.ino() == actual.ino()
 }
 
 fn execute(shell: &mut Interp, source: Source) -> ExitCode {

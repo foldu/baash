@@ -289,6 +289,26 @@ fn a_coloured_prompt_with_a_variable_and_a_substitution_keeps_the_cursor_right()
 }
 
 #[test]
+fn a_stale_inherited_pwd_is_replaced_by_the_real_directory() {
+    // `su`, a chroot or a wrapper script can leave a `PWD` that names some
+    // other directory; `\w` must show where the shell actually is.
+    let home = temp_dir("pwd-home");
+    let work = temp_dir("pwd-work");
+    let mut session = Session::spawn(
+        &home,
+        &work,
+        &["--norc", "-i"],
+        &[("PS1", "[\\w] $ "), ("PWD", "/nonexistent")],
+    );
+    let expected = format!("[{}] $ ", work.display());
+    session.prompt(&expected);
+    session.send(b"exit\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+#[test]
 fn prompt_command_output_appears_above_the_prompt() {
     let home = temp_dir("pc-home");
     let mut session = Session::spawn(&home, &home, &["--norc", "-i"], &[("PS1", "P> ")]);
