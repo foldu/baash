@@ -998,13 +998,50 @@ impl ShellHost for Interp {
         // associative array, is a string key rather than arithmetic.
         let open = operand.iter().position(|&byte| byte == b'[')?;
         if !operand.ends_with(b"]") {
-            return None;
+            // `unset 'a[1'` is not an element operand. Bash treats the
+            // malformed text as a name that matches nothing and succeeds.
+            return Some(Status::SUCCESS);
         }
         let name = operand[..open].to_vec();
         let subscript = operand[open + 1..operand.len() - 1].to_vec();
+        // `unset 'a[]'` is a no-op in bash 5.3.20, for both shapes. It is not
+        // an empty arithmetic subscript: the quoted spelling `unset 'a[""]'`
+        // is the one that addresses element zero.
+        if subscript.is_empty() {
+            return Some(Status::SUCCESS);
+        }
+        // `unset 'a[@]'`/`unset 'a[*]'` is not an element operation at all:
+        // bash clears an indexed array (keeping its shape), leaves an
+        // associative array alone, rejects a scalar and ignores an absent
+        // name. Compare the raw text so a *quoted* key `a["@"]` still means the
+        // literal key.
+        if subscript == b"@" || subscript == b"*" {
+            let result = self.state.vars.unset_all_elements(&name);
+            return Some(match result {
+                Ok(()) => Status::SUCCESS,
+                Err(error) => {
+                    self.report(crate::codes::ASSIGNMENT, 0..0, error.message());
+                    Status(1)
+                }
+            });
+        }
         let word = match bsh_syntax::parse_word(&subscript, &self.parse_opts()) {
             Ok(word) => word,
-            Err(_) => return Some(Status(1)),
+            // `a[1 + 2]` and `a[a b]` are one assignment subscript but more
+            // than one lexer token, which `parse_word` refuses. Re-parse them
+            // through the assignment grammar, which stitches the span back
+            // together exactly as it does for `a[1 + 2]=v`.
+            Err(_) => match self.parse_subscript_word(&subscript) {
+                Some(word) => word,
+                None => {
+                    self.report(
+                        crate::codes::ASSIGNMENT,
+                        0..0,
+                        format!("{}: bad array subscript", String::from_utf8_lossy(&name)),
+                    );
+                    return Some(Status(1));
+                }
+            },
         };
         let text = match bsh_lang::expand_assignment(&word, self) {
             Ok(text) => text,

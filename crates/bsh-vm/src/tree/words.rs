@@ -24,6 +24,34 @@ impl Interp {
         bsh_syntax::parse_word(text, &self.parse_opts()).ok()
     }
 
+    /// Parse the text between `[` and `]` of an array element *assignment*.
+    ///
+    /// `unset` and `declare` receive the operand as one byte string, but a
+    /// subscript may span several lexer tokens: `a[1 + 2]` and an associative
+    /// key with spaces (`a[x y]`) are both legal, and neither is one
+    /// `parse_word` token. The assignment grammar already stitches those spans
+    /// back together, so parse a synthetic `name[<text>]=x` and lift its
+    /// subscript word out. The text is expanded by the caller through the
+    /// ordinary assignment pipeline, so quoting, escapes and `$…` expansion
+    /// behave exactly as they do in `a[<text>]=v`.
+    pub(crate) fn parse_subscript_word(&self, text: &[u8]) -> Option<Word> {
+        let mut source = Vec::with_capacity(text.len() + 12);
+        source.extend_from_slice(b"__bsh[");
+        source.extend_from_slice(text);
+        source.extend_from_slice(b"]=x");
+        let ast = match bsh_syntax::parse_bytes(&source, &self.parse_opts()) {
+            bsh_syntax::ParseOutcome::Ok(ast) => ast,
+            _ => return None,
+        };
+        ast.nodes.iter().find_map(|node| match &node.kind {
+            bsh_syntax::NodeKind::Simple(command) => command
+                .assignments
+                .first()
+                .and_then(|assign| assign.index.clone()),
+            _ => None,
+        })
+    }
+
     /// Expand a fragment as a scalar (tilde + parameter + quote removal, with
     /// no field splitting and no pathname expansion), keeping the per-byte
     /// quoting mask so `case` and `[[ … == pat ]]` know which metacharacters

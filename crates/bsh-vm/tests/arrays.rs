@@ -307,6 +307,68 @@ fn subscripts_are_arithmetic_for_indexed_and_text_for_associative() {
     assert_eq!(text(&interp, b"assoc_keys"), "1+1 a b");
     assert_eq!(text(&interp, b"literal"), "literal");
 }
+
+#[test]
+fn unset_element_reparses_spaced_subscripts() {
+    // bash 5.3.20:
+    //   a=(0 1 2 3); unset 'a[1 + 1]'      -> keys "0 1 3"
+    //   declare -A q; q['x y']=1; unset 'q[x y]' -> key removed
+    //   unset 'q[a\ b]' processes the escape
+    let mut interp = shell();
+    run(
+        &mut interp,
+        "a=(0 1 2 3)
+         unset 'a[1 + 1]'
+         a_keys=\"${!a[@]}\"
+         unset 'a[]'
+         empty_status=$?
+         after_empty=\"${!a[@]}\"
+         unset 'a[1'
+         malformed_status=$?
+         declare -A q
+         q['x y']=1
+         q[z]=2
+         unset 'q[x y]'
+         q_keys=\"${!q[@]}\"
+         declare -A r
+         r['a b']=1
+         r['a  b']=2
+         unset 'r[a\\ b]'
+         r_keys=\"${!r[@]}\"",
+    );
+    assert_eq!(text(&interp, b"a_keys"), "0 1 3");
+    assert_eq!(text(&interp, b"empty_status"), "0");
+    assert_eq!(text(&interp, b"after_empty"), "0 1 3");
+    assert_eq!(text(&interp, b"malformed_status"), "0");
+    assert_eq!(text(&interp, b"q_keys"), "z");
+    assert_eq!(text(&interp, b"r_keys"), "a  b");
+}
+
+#[test]
+fn unset_whole_array_operands_keep_indexed_shape() {
+    // bash 5.3.20: `unset 'a[@]'` empties an indexed array but preserves its
+    // shape, so a later `a[3]=x` is an ordinary element write. An associative
+    // array is left untouched by the same operand.
+    let mut interp = shell();
+    run(
+        &mut interp,
+        "a=(1 2 3)
+         unset 'a[@]'
+         n=${#a[@]}
+         a[3]=x
+         after=\"${a[@]}\"
+         keys=\"${!a[@]}\"
+         declare -A m=([x]=1 [y]=2)
+         unset 'm[*]'
+         m_len=${#m[@]}",
+    );
+    assert_eq!(text(&interp, b"n"), "0");
+    assert_eq!(text(&interp, b"after"), "x");
+    assert_eq!(text(&interp, b"keys"), "3");
+    assert_eq!(text(&interp, b"m_len"), "2");
+    assert_eq!(values(&interp, b"a"), ["x"]);
+}
+
 #[test]
 fn declaration_builtins_apply_array_literals() {
     // bash 5.3.20: `readonly -a ra=([3]=x y)` is the array [3]=x [4]=y, and
@@ -362,4 +424,14 @@ fn empty_literal_subscript_is_rejected_but_quoted_empty_is_zero() {
     assert_eq!(text(&interp, b"declared"), "1");
     assert_eq!(text(&interp, b"declared_len"), "0");
     assert_eq!(values(&interp, b"a"), ["zero", "2", "3"]);
+}
+
+#[test]
+fn unsetting_a_scalar_through_at_is_an_error() {
+    // bash 5.3.20: `s=scalar; unset 's[@]'` is
+    // `unset: s: not an array variable` (status 1) and leaves the scalar.
+    let mut interp = shell();
+    let status = interp.run_named("<array-test>", b"s=scalar\nunset 's[@]'\n");
+    assert!(!status.is_success());
+    assert_eq!(Vars::get(&interp, b"s"), Some(b"scalar".as_slice()));
 }
