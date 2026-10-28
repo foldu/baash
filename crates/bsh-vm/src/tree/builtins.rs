@@ -213,7 +213,14 @@ fn bi_return(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
 
 fn bi_eval(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
     let mut source = Vec::new();
-    for (index, argument) in argv[1..].iter().enumerate() {
+    // `eval -- string` is the same as `eval string`: `--` ends option parsing
+    // and is not part of the code.
+    let arguments = if argv.get(1).map(Vec::as_slice) == Some(b"--") {
+        &argv[2..]
+    } else {
+        &argv[1..]
+    };
+    for (index, argument) in arguments.iter().enumerate() {
         if index > 0 {
             source.push(b' ');
         }
@@ -469,13 +476,17 @@ fn split_assignment(operand: &[u8]) -> (&[u8], Option<&[u8]>, bool) {
 
 /// `local`, `declare` and `typeset`.
 ///
-/// Supported flags: `-a -A -x -r -i -p` and `--`. `-f`/`-g` are diagnosed as
-/// deferred rather than silently ignored.
+/// Flags: `-a -A -i -n -r -x -p -f -F -g` and their `+` forms (`+n`, `+r`,
+/// `+x`, `+i` clear the attribute). `-p` prints declarations, `-f` prints
+/// function definitions, `-F` lists function names, `-g` looks in the global
+/// scope, and a bare `declare`/`local` lists `name=value`.
+///
+/// `local` and `declare` differ only in the scope a *new* variable gets: local
+/// always writes the innermost frame, declare writes the innermost frame when
+/// one is open (bash's dynamic scope) and the global scope otherwise.
 fn declare(interp: &mut Interp, argv: &[Vec<u8>], local_only: bool) -> Status {
     let name = program(argv, "declare");
-    let (mut indexed, mut associative) = (false, false);
-    let (mut export, mut readonly, mut integer) = (false, false, false);
-    let mut print = false;
+    let mut flags = DeclFlags::default();
     let mut index = 1;
     while index < argv.len() {
         let argument = &argv[index];
@@ -483,189 +494,458 @@ fn declare(interp: &mut Interp, argv: &[Vec<u8>], local_only: bool) -> Status {
             index += 1;
             break;
         }
-        let Some(flags) = argument.strip_prefix(b"-") else {
-            break;
+        let (on, flags_text) = match argument.first() {
+            Some(b'-') => (true, &argument[1..]),
+            Some(b'+') => (false, &argument[1..]),
+            _ => break,
         };
-        if flags.is_empty() {
+        if flags_text.is_empty() {
             break;
         }
-        for &flag in flags {
-            match flag {
-                b'a' => indexed = true,
-                b'A' => associative = true,
-                b'x' => export = true,
-                b'r' => readonly = true,
-                b'i' => integer = true,
-                b'p' => print = true,
-                b'f' | b'g' => {
-                    diagnose(
-                        interp,
-                        format!("{name}: -{}: not implemented yet", flag as char),
-                    );
-                    return Status(2);
+        for &flag in flags_text {
+            let ok = match flag {
+                b'a' if on => {
+                    flags.indexed = Some(true);
+                    true
                 }
-                other => {
-                    diagnose(
-                        interp,
-                        format!("{name}: -{}: invalid option", other as char),
-                    );
-                    return Status(2);
+                b'A' if on => {
+                    flags.associative = Some(true);
+                    true
                 }
+                b'x' => {
+                    flags.export = Some(on);
+                    true
+                }
+                b'r' => {
+                    flags.readonly = Some(on);
+                    true
+                }
+                b'i' => {
+                    flags.integer = Some(on);
+                    true
+                }
+                b'n' => {
+                    flags.nameref = Some(on);
+                    true
+                }
+                b'p' if on => {
+                    flags.print = true;
+                    true
+                }
+                b'f' if on => {
+                    flags.functions = true;
+                    true
+                }
+                b'F' if on => {
+                    flags.function_names = true;
+                    true
+                }
+                b'g' if on => {
+                    flags.global = true;
+                    true
+                }
+                _ => false,
+            };
+            if !ok {
+                // `+a`, `-A` with `+` and the like are not declaration
+                // operations this shell defines; bash reports an invalid
+                // option too.
+                diagnose(
+                    interp,
+                    format!(
+                        "{name}: {}{}: invalid option",
+                        if on { '-' } else { '+' },
+                        flag as char
+                    ),
+                );
+                return Status(2);
             }
         }
         index += 1;
     }
+    let operands = &argv[index..];
 
-    if index >= argv.len() {
-        // Listing forms: `declare -p` (everything), `declare -a` (indexed
-        // arrays), `declare -A` (associative arrays).
-        if print || indexed || associative {
-            let mut out = Vec::new();
-            for (variable, var) in interp.state.vars.visible() {
-                let keep = if print {
-                    true
-                } else if associative {
-                    matches!(var.value, bsh_runtime::VarValue::Assoc(_))
-                } else {
-                    matches!(var.value, bsh_runtime::VarValue::Indexed(_))
-                };
-                if keep {
-                    render_declaration(&mut out, variable, var);
-                }
-            }
-            return interp.write_out(&out);
+    if flags.functions || flags.function_names {
+        if operands.is_empty() {
+            return list_functions(interp, flags.function_names);
         }
-        diagnose(interp, format!("{name}: no names given"));
-        return Status::FAILURE;
+        return print_functions(interp, operands, flags.function_names);
     }
 
+    if operands.is_empty() {
+        return list_declarations(interp, &flags, local_only);
+    }
+
+    let strict = interp.state.opts.strict_nameref;
+    let mut status = Status::SUCCESS;
+    for operand in operands {
+        if flags.print {
+            if print_one_declaration(interp, operand, &flags, local_only) != Status::SUCCESS {
+                status = Status::FAILURE;
+            }
+            continue;
+        }
+        if let Err(failure) = declare_operand(interp, operand, &flags, local_only, &name) {
+            if failure.fatal || (strict && failure.nameref) {
+                interp.state.request_exit(Status::FAILURE);
+            }
+            status = Status::FAILURE;
+        }
+    }
+    status
+}
+
+/// How a declaration operand failed.
+///
+/// Two independent distinctions matter:
+///
+/// * `fatal` — an explicit invalid nameref value (`typeset -n ref='@'`) is a
+///   hard error that stops the shell, while an *inherited* invalid value
+///   (`ref=1; typeset -n ref`) is only reported and the shell keeps going.
+///   bash treats both as status 1 without exiting; the suite pins the OSH
+///   reading for the explicit form.
+/// * `nameref` — any nameref validation failure is fatal under
+///   `shopt -s strict_nameref`, which is that option's whole purpose.
+struct DeclFailure {
+    fatal: bool,
+    nameref: bool,
+}
+impl DeclFailure {
+    fn plain() -> Self {
+        Self {
+            fatal: false,
+            nameref: false,
+        }
+    }
+    fn nameref(fatal: bool) -> Self {
+        Self {
+            fatal,
+            nameref: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct DeclFlags {
+    indexed: Option<bool>,
+    associative: Option<bool>,
+    export: Option<bool>,
+    readonly: Option<bool>,
+    integer: Option<bool>,
+    nameref: Option<bool>,
+    print: bool,
+    functions: bool,
+    function_names: bool,
+    global: bool,
+}
+
+impl DeclFlags {
+    /// Whether a variable passes the attribute filter the flags describe.
+    ///
+    /// `declare -p` with no names lists everything; with `-n`/`-r`/`-x`/`-a`/
+    /// `-A` it lists only matching variables, and it does that with names too
+    /// (that is the OSH reading the suite pins for `declare -pn name`).
+    fn keeps(&self, var: &bsh_runtime::Var) -> bool {
+        let check = |requested: Option<bool>, present: bool| match requested {
+            Some(on) => on == present,
+            None => true,
+        };
+        check(self.nameref, var.attrs.nameref)
+            && check(self.readonly, var.attrs.readonly)
+            && check(self.export, var.attrs.exported)
+            && check(self.integer, var.attrs.integer)
+            && check(
+                self.indexed,
+                matches!(var.value, bsh_runtime::VarValue::Indexed(_)),
+            )
+            && check(
+                self.associative,
+                matches!(var.value, bsh_runtime::VarValue::Assoc(_)),
+            )
+    }
+
+    fn has_attribute_filter(&self) -> bool {
+        self.nameref.is_some()
+            || self.readonly.is_some()
+            || self.export.is_some()
+            || self.integer.is_some()
+            || self.indexed.is_some()
+            || self.associative.is_some()
+    }
+}
+
+/// The listing forms: `declare`, `declare -p`, `local`, `local -p`, and the
+/// attribute filters (`declare -pn`, `-pa`, …).
+fn list_declarations(interp: &mut Interp, flags: &DeclFlags, local_only: bool) -> Status {
+    let declarations = flags.print || flags.has_attribute_filter();
+    let mut out = Vec::new();
+    {
+        let vars = &interp.state.vars;
+        let rows: Vec<(&[u8], &bsh_runtime::Var)> = if local_only {
+            vars.locals()
+        } else if flags.global {
+            vars.globals()
+        } else {
+            vars.visible()
+        };
+        for (variable, var) in rows {
+            if !flags.keeps(var) {
+                continue;
+            }
+            if declarations {
+                bsh_runtime::declare::render_declaration(&mut out, variable, var);
+            } else {
+                bsh_runtime::declare::render_assignment(&mut out, variable, var);
+            }
+        }
+    }
+    interp.write_out(&out)
+}
+
+/// `declare -p name…`: print each declaration, and fail on a name that is not
+/// a variable (or does not pass the attribute filter).
+fn print_one_declaration(
+    interp: &mut Interp,
+    operand: &[u8],
+    flags: &DeclFlags,
+    local_only: bool,
+) -> Status {
+    // `declare -p foo=bar` is not a declaration and not a name; bash rejects
+    // the whole operand.
+    if operand.contains(&b'=') {
+        diagnose(
+            interp,
+            format!(
+                "declare: {}: not a valid identifier",
+                String::from_utf8_lossy(operand)
+            ),
+        );
+        return Status::FAILURE;
+    }
+    let var = if local_only {
+        interp.state.vars.lookup_local(operand)
+    } else if flags.global {
+        interp.state.vars.lookup_global(operand)
+    } else {
+        interp.state.vars.lookup(operand)
+    };
+    let Some(var) = var else {
+        diagnose(
+            interp,
+            format!("declare: {}: not found", String::from_utf8_lossy(operand)),
+        );
+        return Status::FAILURE;
+    };
+    if !flags.keeps(var) {
+        return Status::FAILURE;
+    }
+    let mut out = Vec::new();
+    bsh_runtime::declare::render_declaration(&mut out, operand, var);
+    let _ = interp.write_out(&out);
+    Status::SUCCESS
+}
+
+/// `declare -f` (definitions) and `declare -F` (names).
+fn print_functions(interp: &mut Interp, operands: &[Vec<u8>], names_only: bool) -> Status {
+    let extdebug = interp.state.opts.extdebug;
+    let mut status = Status::SUCCESS;
+    let mut out = Vec::new();
+    for operand in operands {
+        let name = std::str::from_utf8(operand)
+            .map(str::to_owned)
+            .unwrap_or_else(|_| String::from_utf8_lossy(operand).into_owned());
+        let Some(definition) = function_definition(interp, operand) else {
+            diagnose(interp, format!("declare: {name}: not found"));
+            status = Status::FAILURE;
+            continue;
+        };
+        if names_only {
+            if extdebug {
+                let (line, file) = function_location(interp, operand).unwrap_or((0, String::new()));
+                out.extend_from_slice(format!("{name} {line} {file}\n").as_bytes());
+            } else {
+                // `declare -F name` prints the bare name; the `declare -f`
+                // prefix belongs to the listing form with no operands.
+                out.extend_from_slice(operand);
+                out.push(b'\n');
+            }
+        } else {
+            out.extend_from_slice(&definition);
+        }
+    }
+    if !out.is_empty() {
+        let _ = interp.write_out(&out);
+    }
+    status
+}
+
+/// `declare -F`/`declare -f` with no operands: every function, sorted by name.
+///
+/// Only the bare name form is printed here — bash's `extdebug` line/file
+/// column applies to `declare -F name`, not to the listing.
+fn list_functions(interp: &mut Interp, names_only: bool) -> Status {
+    let mut names: Vec<Vec<u8>> = interp
+        .functions
+        .iter()
+        .map(|function| function.name.clone())
+        .collect();
+    names.sort();
+    names.dedup();
+    let mut out = Vec::new();
+    for name in names {
+        if names_only {
+            out.extend_from_slice(b"declare -f ");
+            out.extend_from_slice(&name);
+            out.push(b'\n');
+        } else if let Some(definition) = function_definition(interp, &name) {
+            out.extend_from_slice(&definition);
+        }
+    }
+    if out.is_empty() {
+        return Status::SUCCESS;
+    }
+    interp.write_out(&out)
+}
+
+/// The source text of a function definition, re-input safe: `name ()` followed
+/// by the body exactly as it was parsed.
+fn function_definition(interp: &Interp, name: &[u8]) -> Option<Vec<u8>> {
+    let index = interp.function_index(name)?;
+    let function = interp.functions.get(index)?;
+    let body = &function.chunk.source.bytes()[function.chunk.ast.node(function.body).span.clone()];
+    let mut out = name.to_vec();
+    out.extend_from_slice(b" ()\n");
+    out.extend_from_slice(body);
+    out.push(b'\n');
+    Some(out)
+}
+
+/// The line and file of a function's definition, for `declare -F` under
+/// `shopt -s extdebug`.
+///
+/// bash reports the line of the definition (the name, or the `{` of a
+/// multi-line form) and the file it was parsed from, with `main` for standard
+/// input — the suite compares that word, so stdin is reported as `main` the
+/// way bash's debugger view does.
+fn function_location(interp: &Interp, name: &[u8]) -> Option<(u32, String)> {
+    let index = interp.function_index(name)?;
+    let function = interp.functions.get(index)?;
+    let source = &function.chunk.source;
+    let bytes = source.bytes();
+    let offset = definition_offset(bytes, function.chunk.ast.node(function.body).span.start);
+    let (line, _) = source.line_col(offset);
+    let file = match source.name() {
+        "<stdin>" => "main".to_owned(),
+        other => other.to_owned(),
+    };
+    Some((line, file))
+}
+
+/// Start offset of the line a function definition begins on.
+///
+/// The body node starts at `{`; the definition begins on the same line for
+/// `f() { … }` and on the previous non-blank line for the common
+/// `f()\n{ … }` layout.
+fn definition_offset(bytes: &[u8], body_start: usize) -> usize {
+    let line_start = bytes[..body_start]
+        .iter()
+        .rposition(|&byte| byte == b'\n')
+        .map_or(0, |newline| newline + 1);
+    if bytes[line_start..body_start]
+        .iter()
+        .all(|byte| byte.is_ascii_whitespace())
+    {
+        return bytes[..line_start]
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(0, |newline| newline + 1);
+    }
+    line_start
+}
+
+/// One operand of a declaration builtin.
+fn declare_operand(
+    interp: &mut Interp,
+    operand: &[u8],
+    flags: &DeclFlags,
+    local_only: bool,
+    name: &str,
+) -> Result<(), DeclFailure> {
     let scope = if local_only {
         if interp.state.vars.frame_depth() == 0 {
             diagnose(interp, format!("{name}: can only be used in a function"));
-            return Status::FAILURE;
+            return Err(DeclFailure::plain());
         }
         CreateScope::Local
+    } else if flags.global {
+        CreateScope::Global
     } else {
         bsh_runtime::declaration_scope(&interp.state.vars)
     };
 
-    let mut status = Status::SUCCESS;
-    for operand in &argv[index..] {
-        // `declare -p name` prints; it never assigns.
-        if print {
-            match interp.state.vars.lookup(operand) {
-                Some(var) => {
-                    let mut out = Vec::new();
-                    render_declaration(&mut out, operand, var);
-                    let _ = interp.write_out(&out);
-                }
-                None => {
-                    diagnose(
-                        interp,
-                        format!("{name}: {}: not found", String::from_utf8_lossy(operand)),
-                    );
-                    status = Status::FAILURE;
-                }
-            }
-            continue;
+    // `declare -a a=(1 2)`: the structured literal arrives on the side
+    // channel, keyed by the raw text of this operand.
+    if let Some(literal) = interp.take_array_literal(operand) {
+        let variable = literal.name.clone();
+        if !bsh_runtime::Vars::is_name(&variable) {
+            diagnose(
+                interp,
+                format!(
+                    "{name}: {}: not a valid identifier",
+                    String::from_utf8_lossy(&variable)
+                ),
+            );
+            return Err(DeclFailure::plain());
         }
-
-        // `declare -a a=(1 2)`: the structured literal arrives on the side
-        // channel, keyed by the raw text of this operand.
-        if let Some(literal) = interp.take_array_literal(operand) {
-            let variable = literal.name.clone();
-            let shape = if associative {
-                Some(bsh_runtime::ArrayShape::Associative)
-            } else if indexed {
-                Some(bsh_runtime::ArrayShape::Indexed)
-            } else {
-                interp.state.vars.shape(&variable)
-            };
-            if scope == CreateScope::Local {
-                if let Err(error) = interp.state.vars.declare_local(&variable) {
-                    diagnose(interp, format!("{name}: {}", error.message()));
-                    status = Status::FAILURE;
-                    continue;
-                }
-            }
-            if let Some(shape) = shape {
-                if let Err(error) = interp.state.vars.declare_shape(&variable, shape) {
-                    diagnose(interp, format!("{name}: {}", error.message()));
-                    status = Status::FAILURE;
-                    continue;
-                }
-            }
-            if let Err(message) =
-                interp.assign_array_literal(&variable, &literal.elements, literal.append, shape)
-            {
-                diagnose(interp, format!("{name}: {message}"));
-                status = Status::FAILURE;
-                continue;
-            }
-            if let Err(error) =
-                apply_declaration_attrs(interp, &variable, export, readonly, integer)
-            {
+        // A nameref holds a *name*; assigning it an array would have to mean
+        // "the target becomes an array", which bash refuses as a hard error.
+        if interp
+            .state
+            .vars
+            .lookup(&variable)
+            .is_some_and(|var| var.attrs.nameref)
+        {
+            diagnose(
+                interp,
+                format!(
+                    "{name}: {}: cannot assign array to nameref",
+                    String::from_utf8_lossy(&variable)
+                ),
+            );
+            return Err(DeclFailure::nameref(true));
+        }
+        let shape = if flags.associative == Some(true) {
+            Some(bsh_runtime::ArrayShape::Associative)
+        } else if flags.indexed == Some(true) {
+            Some(bsh_runtime::ArrayShape::Indexed)
+        } else {
+            interp.state.vars.shape(&variable)
+        };
+        if scope == CreateScope::Local {
+            if let Err(error) = interp.state.vars.declare_local(&variable) {
                 diagnose(interp, format!("{name}: {}", error.message()));
-                status = Status::FAILURE;
+                return Err(DeclFailure::plain());
             }
-            continue;
         }
-
-        // `a[sub]=value`: a subscripted operand, which `declare` allows where a
-        // plain assignment word would not be split.
-        if let Some((variable, subscript, value, append)) = split_element_operand(operand) {
-            if !bsh_runtime::Vars::is_name(variable) {
-                diagnose(
-                    interp,
-                    format!(
-                        "{name}: {}: not a valid identifier",
-                        String::from_utf8_lossy(variable)
-                    ),
-                );
-                status = Status::FAILURE;
-                continue;
-            }
-            if scope == CreateScope::Local {
-                if let Err(error) = interp.state.vars.declare_local(variable) {
-                    diagnose(interp, format!("{name}: {}", error.message()));
-                    status = Status::FAILURE;
-                    continue;
-                }
-            }
-            // `declare a[]=x`: bash reports `a[]: bad array subscript`, but it
-            // has already turned the name into an (empty) indexed array. The
-            // quoted spelling `a[""]=x` is a legal write to element zero.
-            if subscript.is_empty() {
-                let shape = if associative {
-                    bsh_runtime::ArrayShape::Associative
-                } else {
-                    bsh_runtime::ArrayShape::Indexed
-                };
-                let _ = interp.state.vars.declare_shape(variable, shape);
-                diagnose(
-                    interp,
-                    format!(
-                        "{name}: {}[]: bad array subscript",
-                        String::from_utf8_lossy(variable)
-                    ),
-                );
-                status = Status::FAILURE;
-                continue;
-            }
-            if let Err(message) = interp.assign_element(variable, subscript, append, value) {
-                diagnose(interp, format!("{name}: {message}"));
-                status = Status::FAILURE;
-                continue;
-            }
-            if let Err(error) = apply_declaration_attrs(interp, variable, export, readonly, integer)
-            {
+        if let Some(shape) = shape {
+            if let Err(error) = interp.state.vars.declare_shape(&variable, shape) {
                 diagnose(interp, format!("{name}: {}", error.message()));
-                status = Status::FAILURE;
+                return Err(DeclFailure::plain());
             }
-            continue;
         }
+        if let Err(message) =
+            interp.assign_array_literal(&variable, &literal.elements, literal.append, shape)
+        {
+            diagnose(interp, format!("{name}: {message}"));
+            return Err(DeclFailure::plain());
+        }
+        apply_declaration_attrs(interp, &variable, flags).map_err(|_| DeclFailure::plain())?;
+        return Ok(());
+    }
 
-        let (variable, value, append) = split_assignment(operand);
+    // `a[sub]=value`: a subscripted operand, which `declare` allows where a
+    // plain assignment word would not be split.
+    if let Some((variable, subscript, value, append)) = split_element_operand(operand) {
         if !bsh_runtime::Vars::is_name(variable) {
             diagnose(
                 interp,
@@ -674,67 +954,198 @@ fn declare(interp: &mut Interp, argv: &[Vec<u8>], local_only: bool) -> Status {
                     String::from_utf8_lossy(variable)
                 ),
             );
-            status = Status::FAILURE;
-            continue;
+            return Err(DeclFailure::plain());
         }
         if scope == CreateScope::Local {
             if let Err(error) = interp.state.vars.declare_local(variable) {
                 diagnose(interp, format!("{name}: {}", error.message()));
-                status = Status::FAILURE;
-                continue;
+                return Err(DeclFailure::plain());
             }
         }
-        if indexed || associative {
-            if let Err(error) = interp.state.vars.declare_shape(
-                variable,
-                if associative {
-                    bsh_runtime::ArrayShape::Associative
-                } else {
-                    bsh_runtime::ArrayShape::Indexed
-                },
-            ) {
-                diagnose(interp, format!("{name}: {}", error.message()));
-                status = Status::FAILURE;
-                continue;
-            }
-        }
-        if let Some(value) = value {
-            let result = if append {
-                interp.state.vars.append(variable, value)
+        // `declare a[]=x`: bash reports `a[]: bad array subscript`, but it has
+        // already turned the name into an (empty) indexed array. The quoted
+        // spelling `a[""]=x` is a legal write to element zero.
+        if subscript.is_empty() {
+            let shape = if flags.associative == Some(true) {
+                bsh_runtime::ArrayShape::Associative
             } else {
-                interp.state.vars.assign_scalar_in(variable, value, scope)
+                bsh_runtime::ArrayShape::Indexed
             };
-            if let Err(error) = result {
-                diagnose(interp, format!("{name}: {}", error.message()));
-                status = Status::FAILURE;
-                continue;
-            }
+            let _ = interp.state.vars.declare_shape(variable, shape);
+            diagnose(
+                interp,
+                format!(
+                    "{name}: {}[]: bad array subscript",
+                    String::from_utf8_lossy(variable)
+                ),
+            );
+            return Err(DeclFailure::plain());
         }
-        if let Err(error) = apply_declaration_attrs(interp, variable, export, readonly, integer) {
+        if let Err(message) = interp.assign_element(variable, subscript, append, value) {
+            diagnose(interp, format!("{name}: {message}"));
+            return Err(DeclFailure::plain());
+        }
+        apply_declaration_attrs(interp, variable, flags).map_err(|_| DeclFailure::plain())?;
+        return Ok(());
+    }
+
+    let (variable, value, append) = split_assignment(operand);
+    if !bsh_runtime::Vars::is_name(variable) {
+        diagnose(
+            interp,
+            format!(
+                "{name}: {}: not a valid identifier",
+                String::from_utf8_lossy(variable)
+            ),
+        );
+        return Err(DeclFailure::plain());
+    }
+    if scope == CreateScope::Local {
+        if let Err(error) = interp.state.vars.declare_local(variable) {
             diagnose(interp, format!("{name}: {}", error.message()));
-            status = Status::FAILURE;
+            return Err(DeclFailure::plain());
         }
     }
-    status
+
+    // `declare -n ref=target` sets a reference; every other operation on a
+    // nameref cell must not follow it, or `declare -n r=y` would rewrite `x`.
+    if flags.nameref == Some(true) {
+        if append {
+            diagnose(
+                interp,
+                format!(
+                    "{name}: {}: cannot append to a name reference",
+                    String::from_utf8_lossy(variable)
+                ),
+            );
+            return Err(DeclFailure::nameref(true));
+        }
+        if let Err(error) = interp.state.vars.declare_nameref(variable, value, scope) {
+            diagnose(interp, format!("{name}: {}", error.message()));
+            // An explicit reference that cannot name a variable is a hard
+            // error, except for a direct self-reference, which bash reports
+            // and ignores. A bad value inherited from the cell is reported but
+            // the shell keeps running too (bash returns 1 for all of these).
+            let fatal = value.is_some() && !matches!(error, bsh_runtime::Error::NamerefSelf { .. });
+            return Err(DeclFailure::nameref(fatal));
+        }
+        apply_declaration_attrs(interp, variable, flags).map_err(|_| DeclFailure::plain())?;
+        return Ok(());
+    }
+    if flags.nameref == Some(false) {
+        if let Err(error) = interp.state.vars.unmark_nameref(variable) {
+            diagnose(interp, format!("{name}: {}", error.message()));
+            return Err(DeclFailure::plain());
+        }
+    }
+
+    if flags.indexed == Some(true) || flags.associative == Some(true) {
+        let shape = if flags.associative == Some(true) {
+            bsh_runtime::ArrayShape::Associative
+        } else {
+            bsh_runtime::ArrayShape::Indexed
+        };
+        if let Err(error) = interp.state.vars.declare_shape(variable, shape) {
+            diagnose(interp, format!("{name}: {}", error.message()));
+            return Err(DeclFailure::plain());
+        }
+    }
+
+    // `typeset +r r=2` clears the attribute *before* the assignment, which is
+    // the only reading under which the assignment can succeed.
+    if flags.readonly == Some(false) {
+        if let Err(error) = interp.state.vars.unmark_readonly(variable) {
+            diagnose(interp, format!("{name}: {}", error.message()));
+            return Err(DeclFailure::plain());
+        }
+    }
+    if flags.export == Some(false) {
+        if let Err(error) = interp.state.vars.unmark_exported(variable) {
+            diagnose(interp, format!("{name}: {}", error.message()));
+            return Err(DeclFailure::plain());
+        }
+    }
+
+    if let Some(value) = value {
+        let integer = flags.integer == Some(true)
+            || interp
+                .state
+                .vars
+                .lookup(variable)
+                .is_some_and(|var| var.attrs.integer);
+        let result = if append {
+            interp.state.vars.append(variable, value)
+        } else if integer {
+            match crate::arith::eval(value, &mut *interp) {
+                Ok(number) => interp.state.vars.assign_scalar_in(
+                    variable,
+                    number.to_string().as_bytes(),
+                    scope,
+                ),
+                Err(message) => {
+                    diagnose(interp, format!("{name}: {message}"));
+                    return Err(DeclFailure::plain());
+                }
+            }
+        } else {
+            interp.state.vars.assign_scalar_in(variable, value, scope)
+        };
+        if let Err(error) = result {
+            diagnose(interp, format!("{name}: {}", error.message()));
+            if matches!(error, bsh_runtime::Error::Readonly { .. }) {
+                interp
+                    .state
+                    .record_error(bsh_runtime::ShellError::VariableAssignment);
+            }
+            return Err(DeclFailure::plain());
+        }
+    } else if flags.indexed.is_none()
+        && flags.associative.is_none()
+        && flags.nameref.is_none()
+        && flags.export.is_none()
+        && flags.readonly.is_none()
+        && flags.integer.is_none()
+    {
+        // `declare x` declares an unset variable; that is observable through
+        // `declare -p x` and `${x+set}`.
+        if let Err(error) = interp.state.vars.declare_empty(variable, scope) {
+            diagnose(interp, format!("{name}: {}", error.message()));
+            return Err(DeclFailure::plain());
+        }
+    } else if let Err(error) = interp.state.vars.declare_empty(variable, scope) {
+        // `declare -x x` and friends also create the variable.
+        diagnose(interp, format!("{name}: {}", error.message()));
+        return Err(DeclFailure::plain());
+    }
+    apply_declaration_attrs(interp, variable, flags).map_err(|_| DeclFailure::plain())
 }
 
-/// Apply `-x`/`-r`/`-i` after a value has been written, so
-/// `readonly -a a=(1 2)` can still fill the array first.
+/// Apply the attribute flags, including their `+` forms.
 fn apply_declaration_attrs(
     interp: &mut Interp,
     variable: &[u8],
-    export: bool,
-    readonly: bool,
-    integer: bool,
+    flags: &DeclFlags,
 ) -> Result<(), bsh_runtime::Error> {
-    if export {
-        interp.state.vars.mark_exported(variable)?;
+    if let Some(export) = flags.export {
+        if export {
+            interp.state.vars.mark_exported(variable)?;
+        } else {
+            interp.state.vars.unmark_exported(variable)?;
+        }
     }
-    if readonly {
-        interp.state.vars.mark_readonly(variable)?;
+    if let Some(readonly) = flags.readonly {
+        if readonly {
+            interp.state.vars.mark_readonly(variable)?;
+        } else {
+            interp.state.vars.unmark_readonly(variable)?;
+        }
     }
-    if integer {
-        interp.state.vars.mark_integer(variable)?;
+    if let Some(integer) = flags.integer {
+        if integer {
+            interp.state.vars.mark_integer(variable)?;
+        } else {
+            interp.state.vars.unmark_integer(variable)?;
+        }
     }
     Ok(())
 }
@@ -772,125 +1183,6 @@ fn split_element_operand(operand: &[u8]) -> Option<ElementOperand<'_>> {
         &operand[equals + 1..],
         append,
     ))
-}
-
-/// Render one `declare -… name=value` line, re-input safe.
-///
-/// Array values are double-quoted and subscripts are printed explicitly, so
-/// the output can be fed back to `declare` (bash's format). Scalar values stay
-/// bare when they are safe, which is the format the suite expects for
-/// `declare -- x=1`.
-fn render_declaration(out: &mut Vec<u8>, name: &[u8], var: &bsh_runtime::Var) {
-    out.extend_from_slice(b"declare -");
-    let mut any = false;
-    if var.attrs.readonly {
-        out.push(b'r');
-        any = true;
-    }
-    if var.attrs.exported {
-        out.push(b'x');
-        any = true;
-    }
-    if var.attrs.integer {
-        out.push(b'i');
-        any = true;
-    }
-    match &var.value {
-        bsh_runtime::VarValue::Indexed(_) => {
-            out.push(b'a');
-            any = true;
-        }
-        bsh_runtime::VarValue::Assoc(_) => {
-            out.push(b'A');
-            any = true;
-        }
-        _ => {}
-    }
-    if !any {
-        out.push(b'-');
-    }
-    out.push(b' ');
-    out.extend_from_slice(name);
-    match &var.value {
-        bsh_runtime::VarValue::Unset => {}
-        bsh_runtime::VarValue::Str(bytes) => {
-            out.push(b'=');
-            quote_scalar(out, bytes);
-        }
-        bsh_runtime::VarValue::Indexed(elements) => {
-            out.extend_from_slice(b"=(");
-            for (position, (index, value)) in elements.iter().enumerate() {
-                if position > 0 {
-                    out.push(b' ');
-                }
-                out.extend_from_slice(format!("[{index}]=").as_bytes());
-                quote_double(out, value);
-            }
-            out.push(b')');
-        }
-        bsh_runtime::VarValue::Assoc(pairs) => {
-            if pairs.is_empty() {
-                out.extend_from_slice(b"=()");
-                out.push(b'\n');
-                return;
-            }
-            out.extend_from_slice(b"=(");
-            for (position, (key, value)) in pairs.iter().enumerate() {
-                if position > 0 {
-                    out.push(b' ');
-                }
-                if is_bare_word(key) && !key.is_empty() {
-                    out.push(b'[');
-                    out.extend_from_slice(key);
-                    out.extend_from_slice(b"]=");
-                } else {
-                    out.extend_from_slice(b"[");
-                    quote_double(out, key);
-                    out.extend_from_slice(b"]=");
-                }
-                quote_double(out, value);
-            }
-            // bash puts a space before the closing parenthesis for assoc
-            // arrays; keeping it makes the output byte-identical to bash's.
-            out.extend_from_slice(b" )");
-        }
-    }
-    out.push(b'\n');
-}
-
-/// Double-quote bytes with the escaping a re-input-safe `declare -p` needs.
-fn quote_double(out: &mut Vec<u8>, bytes: &[u8]) {
-    out.push(b'"');
-    for &byte in bytes {
-        match byte {
-            b'"' | b'\\' | b'$' | b'`' => {
-                out.push(b'\\');
-                out.push(byte);
-            }
-            _ => out.push(byte),
-        }
-    }
-    out.push(b'"');
-}
-
-/// Quote a scalar only when it needs it (the suite's `declare -- x=1` form).
-fn quote_scalar(out: &mut Vec<u8>, bytes: &[u8]) {
-    if is_bare_word(bytes) || bytes.is_empty() {
-        out.extend_from_slice(bytes);
-    } else {
-        quote_double(out, bytes);
-    }
-}
-
-/// Bytes that need no quoting in `declare -p` output.
-fn is_bare_word(bytes: &[u8]) -> bool {
-    bytes.iter().all(|&byte| {
-        byte.is_ascii_alphanumeric()
-            || matches!(
-                byte,
-                b'_' | b'-' | b'.' | b'/' | b':' | b'@' | b'%' | b'+' | b',' | b'='
-            )
-    })
 }
 
 /// `hash`: the `PATH` table the executor resolves commands against.
@@ -1040,55 +1332,42 @@ fn bi_declare(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
 mod tests {
     use bsh_runtime::{Attrs, Var, VarValue};
 
-    use super::render_declaration;
+    use super::split_element_operand;
 
-    fn render(var: &Var) -> String {
-        let mut out = Vec::new();
-        render_declaration(&mut out, b"v", var);
-        String::from_utf8(out).expect("ASCII output")
+    #[test]
+    fn element_operand_splits_only_assignment_shapes() {
+        let (name, subscript, value, append) =
+            split_element_operand(b"a[i+1]=v").expect("an element operand");
+        assert_eq!(name, b"a");
+        assert_eq!(subscript, b"i+1");
+        assert_eq!(value, b"v");
+        assert!(!append);
+
+        let (_, _, value, append) = split_element_operand(b"a[k]+=v").expect("append");
+        assert_eq!(value, b"v");
+        assert!(append);
+
+        assert!(split_element_operand(b"a=1").is_none());
+        assert!(split_element_operand(b"a[0]").is_none());
+        assert_eq!(
+            split_element_operand(b"m[a[b]]=v").map(|parts| parts.1.to_vec()),
+            Some(b"a[b]".to_vec())
+        );
     }
 
     #[test]
-    fn declare_p_renders_reinput_safe_arrays() {
-        let indexed = Var {
-            value: VarValue::Indexed(
-                [(0, b"1".to_vec()), (2, b"2 3".to_vec())]
-                    .into_iter()
-                    .collect(),
-            ),
-            attrs: Attrs::default(),
-        };
-        assert_eq!(render(&indexed), "declare -a v=([0]=\"1\" [2]=\"2 3\")\n");
-
-        let assoc = Var {
-            value: VarValue::Assoc(vec![
-                (b"k".to_vec(), b"v".to_vec()),
-                (b"x y".to_vec(), b"a\"b".to_vec()),
-            ]),
-            attrs: Attrs::default(),
-        };
-        assert_eq!(
-            render(&assoc),
-            "declare -A v=([k]=\"v\" [\"x y\"]=\"a\\\"b\" )\n"
-        );
-
-        // Empty arrays and attribute order.
-        let empty = Var {
-            value: VarValue::Assoc(Vec::new()),
+    fn rendered_flags_cover_every_attribute() {
+        let var = Var {
+            value: VarValue::Str(b"1".to_vec()),
             attrs: Attrs {
+                nameref: true,
                 readonly: true,
-                ..Attrs::default()
-            },
-        };
-        assert_eq!(render(&empty), "declare -rA v=()\n");
-
-        let scalar = Var {
-            value: VarValue::Str(b"111".to_vec()),
-            attrs: Attrs {
                 exported: true,
-                ..Attrs::default()
+                integer: true,
             },
         };
-        assert_eq!(render(&scalar), "declare -x v=111\n");
+        let mut out = Vec::new();
+        bsh_runtime::declare::render_flags(&mut out, &var);
+        assert_eq!(String::from_utf8(out).expect("ASCII"), "-nrxi");
     }
 }
