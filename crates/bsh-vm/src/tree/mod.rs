@@ -410,6 +410,12 @@ impl Interp {
         let _ = interp.state.vars.assign_scalar(b"OPTIND", b"1");
         // `$?`, `$$` and `$-` must answer before the first command runs.
         interp.sync_specials();
+        // bash turns history recording on for an interactive shell (the
+        // `set -o history` option), before the startup file runs so that file
+        // can turn it off. A non-interactive shell records nothing either way.
+        if interactive {
+            interp.state.opts.history = true;
+        }
         interp
     }
 
@@ -425,6 +431,43 @@ impl Interp {
             entries.push(entry);
         }
         self.state.vars.import_envp(&entries);
+    }
+
+    /// Prepare the history ring for an interactive session.
+    ///
+    /// When `HISTFILE` is unset, this shell gives it a default:
+    /// `$HOME/.bsh_history` (a deliberate deviation from bash's
+    /// `~/.bash_history`, so two shells never rewrite each other's file). The
+    /// `HIST*` knobs are read from the variables the rc file may have set, and
+    /// the file is loaded. Called after the startup file and only for an
+    /// interactive shell; a non-interactive run keeps no history at all.
+    pub fn initialize_history(&mut self) {
+        if !self.interactive {
+            return;
+        }
+        if self.state.vars.scalar(b"HISTFILE").is_none() {
+            if let Some(home) = self.state.vars.scalar(b"HOME") {
+                use std::os::unix::ffi::OsStrExt;
+                let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(home))
+                    .join(".bsh_history");
+                let _ = self
+                    .state
+                    .vars
+                    .assign_scalar(b"HISTFILE", path.as_os_str().as_bytes());
+            }
+        }
+        self.state.sync_history();
+        let _ = self.state.history.read_file();
+    }
+
+    /// Save the history ring on exit (`histappend` chooses append or rewrite).
+    ///
+    /// The interactive editor saves its own copy in `finish`, because it holds
+    /// the ring while reading a line; this is the path for `-i -c` and for
+    /// interactive stdin that is not a terminal.
+    pub fn save_history(&mut self) -> std::io::Result<()> {
+        self.state.sync_history();
+        self.state.history.save()
     }
 
     /// Set `$0`.

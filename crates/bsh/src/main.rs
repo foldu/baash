@@ -336,11 +336,20 @@ fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
             // `--rcfile` replaces the default rather than adding to it.
             if interactive {
                 read_startup_file(&mut shell, &flags);
+                // After the rc file, so `HISTFILE`/`HISTSIZE` set there win;
+                // only an interactive shell records and persists history.
+                shell.initialize_history();
             }
             if repl {
                 run_repl(&mut shell)
             } else {
-                execute(&mut shell, source)
+                let code = execute(&mut shell, source);
+                if interactive {
+                    // `-i -c` and interactive stdin that is not a terminal:
+                    // the editor is not there to save the ring.
+                    let _ = shell.save_history();
+                }
+                code
             }
         }
     }
@@ -349,9 +358,12 @@ fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
 /// A shell with the environment imported and `PWD` sane.
 /// Read the interactive startup file.
 ///
-/// `--norc` skips it; `--rcfile FILE` replaces `~/.bashrc`; a file that does
-/// not exist is silently ignored, which is what bash does and what makes
-/// `--rcfile /dev/null` the portable way to ask for no startup file.
+/// `--norc` skips it and `--rcfile FILE` replaces it. The default is
+/// `~/.bshrc` when that file exists, otherwise `~/.bashrc`; a missing file is
+/// silently ignored, which is what makes `--rcfile /dev/null` the portable way
+/// to ask for no startup file. The `.bshrc` preference is deliberate: a bash
+/// rc full of `bind`/`complete -D` half-applies in this shell, so a user who
+/// writes a bsh-specific file gets it used without renaming the bash one.
 fn read_startup_file(shell: &mut Interp, flags: &ShellFlags) {
     if flags.norc {
         return;
@@ -362,7 +374,13 @@ fn read_startup_file(shell: &mut Interp, flags: &ShellFlags) {
             let Some(home) = shell.state().vars.scalar(b"HOME") else {
                 return;
             };
-            std::path::PathBuf::from(std::ffi::OsStr::from_bytes(home)).join(".bashrc")
+            let home = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(home));
+            let ours = home.join(".bshrc");
+            if ours.is_file() {
+                ours
+            } else {
+                home.join(".bashrc")
+            }
         }
     };
     let Ok(bytes) = std::fs::read(&path) else {
@@ -512,12 +530,16 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
         .map(|bytes| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let engine = bsh_complete::CompletionEngine::new().with_root(root);
+    // There is one ring. The shell state owns it between commands (so the
+    // built-ins see it); the editor holds it while a line is being read, and
+    // the loop swaps it across at exactly those two points.
+    let history = std::mem::take(&mut shell.state().history);
     let config = bsh_repl::Config {
         // The editor paints on the controlling terminal, so colour is decided
         // by the terminal rather than by stdout (which may be redirected).
         color: bsh_repl::color_supported(0),
         prompt: bsh_repl::Prompt::from_env(),
-        history: bsh_repl::History::from_env(),
+        history,
         ..bsh_repl::Config::default()
     };
     let mut terminal = bsh_repl::RealTerminal::new();
@@ -538,11 +560,23 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
                 if bytes.iter().all(u8::is_ascii_whitespace) {
                     continue;
                 }
+                // `set +o history` must stop the line from being recorded; the
+                // editor added it before returning, so take it back out.
+                if !shell.state().opts.history {
+                    editor.history_mut().remove_last();
+                }
+                // Hand the ring to the shell for the duration of the command,
+                // so `history`/`fc` mutate the very ring the editor navigates.
+                std::mem::swap(editor.history_mut(), &mut shell.state().history);
                 let before = shell.state().vars.scalar(b"PWD").map(<[u8]>::to_vec);
                 shell.run_named("<stdin>", &bytes);
                 // `cd` changes the shell's `PWD`; the completion engine and
                 // `PS1`'s `\w` must follow it (`docs/contracts.md`).
                 let after = shell.state().vars.scalar(b"PWD").map(<[u8]>::to_vec);
+                // Pick up `HISTSIZE`/`HISTFILE`/`HISTCONTROL` the command
+                // changed before the editor gets the ring back.
+                shell.state().sync_history();
+                std::mem::swap(editor.history_mut(), &mut shell.state().history);
                 if after != before
                     && let Some(pwd) = &after
                 {
@@ -617,10 +651,22 @@ fn run_stdin(shell: &mut Interp) -> ExitCode {
             ParseOutcome::Ok(_) => {}
         }
         let chunk = std::mem::take(&mut pending);
+        // An interactive shell records what it reads even when stdin is not a
+        // terminal (`bsh -i < file`, which is how the conformance suite drives
+        // the interactive cases). Non-interactive runs record nothing.
+        if shell.is_interactive() && shell.state().opts.history {
+            shell.state().history.add(&chunk);
+        }
         // The status of the last chunk is the shell's exit status; an `exit`
         // inside it already requested the unwind, and the request survives in
         // the shell state, so the loop stops here too.
         status = shell.run_named("<stdin>", &chunk);
+        if shell.is_interactive() {
+            // Stand in for bash's assignment hooks: this is where `HISTSIZE`
+            // shrinking, `HISTFILESIZE` truncation and a changed `HISTFILE`
+            // take effect between commands.
+            shell.state().sync_history();
+        }
         if shell.state().take_exit_request().is_some() {
             break;
         }
