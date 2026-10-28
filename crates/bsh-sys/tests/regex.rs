@@ -152,6 +152,20 @@ fn a_backreference_matches_like_bash() {
 }
 
 #[test]
+fn nocasematch_folds_case_through_reg_icase() {
+    // `shopt -s nocasematch` is `REG_ICASE`, and the conformance suite checks
+    // `[[ a =~ A ]]` with it. Doing this by lowercasing the pattern would
+    // change bracket ranges, so the engine has to do the folding.
+    assert_eq!(compile(b"abc").captures(b"ABC"), None);
+    let re = Regex::new_icase(b"abc").expect("valid pattern");
+    assert_eq!(re.captures(b"ABC"), Some(vec![Some((0, 3))]));
+    let range = Regex::new_icase(b"^[a-z]+$").expect("valid pattern");
+    assert_eq!(range.captures(b"ABC"), Some(vec![Some((0, 3))]));
+    // The group count and limits are unaffected by the flag.
+    assert_eq!(range.group_count(), 0);
+}
+
+#[test]
 fn a_compile_failure_carries_a_non_empty_message() {
     let error = Regex::new(b"(a").expect_err("`(a` is not a valid ERE");
     match &error {

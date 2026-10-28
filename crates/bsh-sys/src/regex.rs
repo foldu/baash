@@ -10,8 +10,9 @@
 //!
 //! # What is compiled
 //!
-//! [`Regex::new`] compiles with `REG_EXTENDED` and nothing else. In
-//! particular **`REG_NEWLINE` is not set**, because bash does not set it:
+//! [`Regex::new`] compiles with `REG_EXTENDED` and nothing else;
+//! [`Regex::new_icase`] adds `REG_ICASE` for `shopt -s nocasematch`. In
+//! particular **`REG_NEWLINE` is never set**, because bash does not set it:
 //! `^`/`$` match only at the ends of the whole subject, `.` matches a newline,
 //! and a negated bracket expression matches a newline. A caller that wants
 //! line-oriented matching must split the subject first.
@@ -114,7 +115,8 @@ pub struct Regex {
 }
 
 impl Regex {
-    /// Compile `pattern` as a POSIX extended regular expression.
+    /// Compile `pattern` as a case-sensitive POSIX extended regular
+    /// expression.
     ///
     /// This is `regcomp` with `REG_EXTENDED` only; see the module docs for why
     /// `REG_NEWLINE` is not set. A pattern containing an embedded NUL cannot be
@@ -125,6 +127,23 @@ impl Regex {
     /// still compiles; [`Regex::captures`] reports the first [`MAX_GROUPS`]
     /// slots and the rest are dropped (see [`Regex::group_count`]).
     pub fn new(pattern: &[u8]) -> Result<Self, Error> {
+        Self::compile(pattern, libc::REG_EXTENDED)
+    }
+
+    /// Compile `pattern` as a case-insensitive POSIX extended regular
+    /// expression (`REG_EXTENDED | REG_ICASE`).
+    ///
+    /// This is what `[[ x =~ re ]]` needs when `shopt -s nocasematch` is set.
+    /// Folding is the engine's and therefore locale-dependent; a caller must
+    /// not try to get the same effect by lowercasing the pattern and the
+    /// subject, because that changes bracket expressions (glibc, like bash,
+    /// also folds `[[:upper:]]` and `[[:lower:]]` under `REG_ICASE`).
+    pub fn new_icase(pattern: &[u8]) -> Result<Self, Error> {
+        Self::compile(pattern, libc::REG_EXTENDED | libc::REG_ICASE)
+    }
+
+    /// Compile `pattern` with the given `regcomp` flags.
+    fn compile(pattern: &[u8], flags: libc::c_int) -> Result<Self, Error> {
         // Count before compiling: the scan is pure, so nothing can leak even
         // if it were to panic (it cannot).
         let groups = count_subexpressions(pattern);
@@ -135,8 +154,7 @@ impl Regex {
         // success `regcomp` initialises the storage behind `compiled`; on
         // failure the storage stays uninitialised and is never turned into a
         // `Regex`, so `regfree` cannot observe it.
-        let code =
-            unsafe { libc::regcomp(compiled.as_mut_ptr(), pattern.as_ptr(), libc::REG_EXTENDED) };
+        let code = unsafe { libc::regcomp(compiled.as_mut_ptr(), pattern.as_ptr(), flags) };
         if code != 0 {
             // SAFETY: this is the canonical C usage after a failed `regcomp`:
             // `regerror` is given the same `preg` and the `REG_*` code, and
