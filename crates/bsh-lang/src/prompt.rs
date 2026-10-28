@@ -1,13 +1,22 @@
 //! Prompt strings: `PS1`/`PS2`, and the `${x@P}` parameter transformation.
 //!
-//! One expander serves both callers so they cannot drift: the line editor
-//! renders `PS1` with [`expand`], and [`crate::expand`] produces `${x@P}` with
-//! [`expand_with_variables`]. The difference between them is the second pass
-//! bash performs for `${x@P}` — after the backslash escapes are decoded, the
-//! result is expanded again as if it were inside double quotes — and that pass
-//! needs the shell's [`Shell`] callbacks. The line editor has no shell, so it
-//! uses just the decoded text, which is exactly bash's `shopt -u promptvars`
-//! rendering.
+//! One expander serves both callers so they cannot drift: an interactive
+//! shell renders `PS1`/`PS2` with [`expand_with_variables`], and
+//! [`crate::expand`] produces `${x@P}` with the same function. Both decode the
+//! backslash escapes and then — when [`PromptContext::prompt_vars`] is on,
+//! which is bash's `shopt promptvars` default — expand the result a second
+//! time as if it were inside double quotes. That second pass needs the
+//! shell's [`Shell`] callbacks: it expands parameters, arithmetic and command
+//! substitutions, so `PS1='$(date +%H:%M) $ '` runs `date` at prompt time.
+//! [`expand`] is the single-pass form, exactly bash's `shopt -u promptvars`
+//! rendering, and is what a caller with no interpreter can do.
+//!
+//! The second pass runs **per non-printing stretch**: a prompt whose
+//! `\[`…`\]` coloured prefix also contains a variable keeps the width
+//! bookkeeping [`ExpandedPrompt::non_printing`] carries, so the editor can
+//! still compute the cursor column. A construct that straddles a `\[`/`\]`
+//! boundary (`${x` in one stretch, `}` in another) is expanded one stretch at
+//! a time, which is the only reading that keeps the spans meaningful.
 //!
 //! # What is measured, not assumed
 //!
@@ -39,7 +48,10 @@
 //! [`PromptContext`] is plain data. It is not a [`crate::Shell`] method: the
 //! editor has no interpreter and the interpreter's expansion has no terminal.
 //! Callers build the context from whatever they own and pass it in, which keeps
-//! the expander pure and lets tests freeze the clock.
+//! the expander pure and lets tests freeze the clock. The one exception is
+//! [`Shell::prompt_context`], which is how `${x@P}` asks a shell for the
+//! facts; an interactive shell builds the prompt's context the same way and
+//! then overrides the few values a prompt needs (`\!`, the terminal).
 //!
 //! Local time is computed here, without `libc` or a new dependency: the epoch
 //! is converted with the civil-calendar algorithm and the UTC offset is read
@@ -541,8 +553,13 @@ impl Default for PromptContext {
             previous_cwd: Vec::new(),
             home: Vec::new(),
             shell: b"bsh".to_vec(),
-            version: b"0.0".to_vec(),
-            release: b"0.0.0".to_vec(),
+            version: env!("CARGO_PKG_VERSION")
+                .split('.')
+                .take(2)
+                .collect::<Vec<_>>()
+                .join(".")
+                .into_bytes(),
+            release: env!("CARGO_PKG_VERSION").as_bytes().to_vec(),
             history_number: 1,
             command_number: 1,
             job_count: 0,
@@ -688,26 +705,57 @@ pub fn expand(template: &[u8], ctx: &PromptContext) -> ExpandedPrompt {
     decode(template, ctx, false)
 }
 
-/// Expand `template` the way bash's `${x@P}` does: decode the escapes, then
-/// expand the result as if it were double-quoted.
+/// Expand `template` the way a shell draws a prompt: decode the escapes, then
+/// expand the result as if it were double-quoted when `promptvars` is on.
 ///
-/// Values are double-quote escaped during the first pass when
-/// [`PromptContext::prompt_vars`] is set (bash's default), so a working
-/// directory containing `$` or a backslash survives the second pass unchanged.
-/// The second pass expands parameter and arithmetic references and applies
-/// double-quote backslash removal; it deliberately does not run the full word
-/// pipeline, so a `${x:-word}` form or a command substitution inside a prompt
-/// is copied through unchanged rather than guessed at.
+/// This is the form both callers want. `shopt promptvars` (bash's default, and
+/// [`PromptContext::prompt_vars`] here) selects the second pass; with it off
+/// the value is [`expand`]'s single pass, which is what `${x@P}` prints when
+/// the shopt is unset. Values are double-quote escaped during the first pass
+/// when the second pass will run, so a working directory containing `$` or a
+/// backslash survives unchanged.
+///
+/// The second pass applies double-quote backslash removal, expands parameter,
+/// arithmetic and command substitutions, and leaves forms it does not
+/// implement (`${x:-word}`) exactly as written rather than guessing. The
+/// non-printing stretches are recomputed over the *output*, so a prompt with a
+/// coloured `\[`…`\]` prefix that also contains a variable keeps its width
+/// bookkeeping.
 pub fn expand_with_variables<S: Shell>(
     template: &[u8],
     ctx: &PromptContext,
     shell: &mut S,
-) -> Vec<u8> {
+) -> ExpandedPrompt {
     let decoded = decode(template, ctx, ctx.prompt_vars);
     if !ctx.prompt_vars {
-        return decoded.bytes;
+        return decoded;
     }
-    expand_double_quoted(&decoded.bytes, shell)
+    second_pass(&decoded, shell)
+}
+
+/// Run the double-quoted expansion over each stretch of `decoded` separately,
+/// rebuilding the non-printing ranges around the results.
+fn second_pass<S: Shell>(decoded: &ExpandedPrompt, shell: &mut S) -> ExpandedPrompt {
+    let mut out = ExpandedPrompt::default();
+    let mut at = 0;
+    for hidden in decoded.non_printing() {
+        if hidden.start > at {
+            out.bytes.extend(expand_double_quoted(
+                &decoded.bytes[at..hidden.start],
+                shell,
+            ));
+        }
+        let start = out.bytes.len();
+        out.bytes
+            .extend(expand_double_quoted(&decoded.bytes[hidden.clone()], shell));
+        out.non_printing.push(start..out.bytes.len());
+        at = hidden.end.max(at);
+    }
+    if at < decoded.bytes.len() {
+        out.bytes
+            .extend(expand_double_quoted(&decoded.bytes[at..], shell));
+    }
+    out
 }
 
 fn decode(template: &[u8], ctx: &PromptContext, quote: bool) -> ExpandedPrompt {
@@ -911,15 +959,15 @@ fn last_component_for_wide<'a>(cwd: &'a [u8], home: &[u8]) -> &'a [u8] {
 // The second pass
 // ---------------------------------------------------------------------------
 
-/// Expand parameter and arithmetic references as if the text were inside
-/// double quotes, removing double-quote backslash escapes.
+/// Expand parameter, arithmetic and command substitutions as if the text were
+/// inside double quotes, removing double-quote backslash escapes.
 ///
 /// This is not the word pipeline and does not pretend to be: it sees bytes
-/// that a prompt template produced, where the only live syntax is `$…`, and
-/// it leaves every construct it does not implement exactly as written. The
-/// full pipeline needs a parser, which is the front end's job; a prompt that
-/// contains an unsupported form renders it literally rather than silently
-/// dropping it.
+/// that a prompt template produced, where the only live syntax is `$…` and
+/// `` `…` ``, and it leaves every construct it does not implement exactly as
+/// written. The full pipeline needs a parser, which is the front end's job; a
+/// prompt that contains an unsupported form renders it literally rather than
+/// silently dropping it.
 fn expand_double_quoted<S: Shell>(text: &[u8], shell: &mut S) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len());
     let mut at = 0;
@@ -944,6 +992,11 @@ fn expand_double_quoted<S: Shell>(text: &[u8], shell: &mut S) -> Vec<u8> {
             }
             b'$' => {
                 let (bytes, next) = expand_dollar(text, at, shell);
+                out.extend_from_slice(&bytes);
+                at = next;
+            }
+            b'`' => {
+                let (bytes, next) = expand_backtick(text, at, shell);
                 out.extend_from_slice(&bytes);
                 at = next;
             }
@@ -975,11 +1028,35 @@ fn expand_dollar<S: Shell>(text: &[u8], at: usize, shell: &mut S) -> (Vec<u8>, u
         };
     }
     if first == b'(' {
-        // Arithmetic and command substitution are syntax this pass cannot
-        // parse soundly; copy the balanced form through unchanged.
-        let close = matching_paren(text, after);
-        let end = close.map_or(text.len(), |close| close + 1);
-        return (text[at..end].to_vec(), end);
+        // `$((…))` is arithmetic; `$(…)` is a command substitution. Both are
+        // executed: bash runs them while expanding a prompt, and a prompt that
+        // says `$(date)` means it.
+        if text.get(after + 1) == Some(&b'(') {
+            return match arithmetic_close(text, after) {
+                Some((start, end, next)) => {
+                    match shell.arithmetic(&crate::word::Arithmetic::new(&text[start..end])) {
+                        // bash prints the error and leaves the unexpanded text.
+                        Ok(bytes) => (bytes, next),
+                        Err(_) => (text[at..next].to_vec(), next),
+                    }
+                }
+                // No closing `))`: what bash leaves behind is not defined
+                // enough to guess, so the text stays as written.
+                None => (text[at..].to_vec(), text.len()),
+            };
+        }
+        return match matching_paren(text, after) {
+            Some(close) => {
+                let source = &text[after + 1..close];
+                match shell.command_substitution(&crate::word::CommandSub::dollar_paren(source)) {
+                    Ok(bytes) => (bytes, close + 1),
+                    // bash prints the substitution's error and substitutes
+                    // nothing; the status is not the prompt's.
+                    Err(_) => (Vec::new(), close + 1),
+                }
+            }
+            None => (text[at..].to_vec(), text.len()),
+        };
     }
     if is_name_start(first) {
         let mut end = after + 1;
@@ -1031,6 +1108,86 @@ fn expand_dollar<S: Shell>(text: &[u8], at: usize, shell: &mut S) -> (Vec<u8>, u
         }
         _ => (vec![b'$'], after),
     }
+}
+
+/// Expand the `` `…` `` substitution at `at`.
+///
+/// An unterminated backtick is copied through, like every other construct this
+/// pass cannot delimit.
+fn expand_backtick<S: Shell>(text: &[u8], at: usize, shell: &mut S) -> (Vec<u8>, usize) {
+    let Some((source, next)) = backtick_body(text, at) else {
+        return (vec![b'`'], at + 1);
+    };
+    match shell.command_substitution(&crate::word::CommandSub::backtick(source)) {
+        Ok(bytes) => (bytes, next),
+        Err(_) => (Vec::new(), next),
+    }
+}
+
+/// The command text of the backtick substitution starting at `at`, and the
+/// offset after the closing backtick.
+///
+/// Inside backticks, the documented escapes are `\``, `\\`, `\$` and a
+/// backslash before a newline; the text handed to the runtime is
+/// unescaped, which is the contract [`crate::word::CommandSub`] documents for
+/// the backtick form.
+fn backtick_body(text: &[u8], at: usize) -> Option<(Vec<u8>, usize)> {
+    let mut source = Vec::new();
+    let mut index = at + 1;
+    while index < text.len() {
+        match text[index] {
+            b'`' => return Some((source, index + 1)),
+            b'\\' => {
+                let next = *text.get(index + 1)?;
+                match next {
+                    b'`' | b'\\' | b'$' => {
+                        source.push(next);
+                        index += 2;
+                    }
+                    b'\n' => index += 2,
+                    _ => {
+                        source.push(b'\\');
+                        index += 1;
+                    }
+                }
+            }
+            byte => {
+                source.push(byte);
+                index += 1;
+            }
+        }
+    }
+    None
+}
+
+/// The body of `$((…))` starting at the `(` at `open`, as
+/// `(expression start, expression end, offset after)`.
+///
+/// The second `(` opens a parenthesis group inside the expression, so its
+/// depth starts at one and the expression ends at the `)` that closes it —
+/// the first byte of the `))`.
+fn arithmetic_close(text: &[u8], open: usize) -> Option<(usize, usize, usize)> {
+    let start = open + 2;
+    let mut depth = 1usize;
+    let mut at = start;
+    while at < text.len() {
+        match text[at] {
+            b'\\' => at += 1,
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    if text.get(at + 1) == Some(&b')') {
+                        return Some((start, at, at + 2));
+                    }
+                    return None;
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    None
 }
 
 /// `${body}` when `body` is a plain name, a special parameter or `#name`;
@@ -1178,7 +1335,7 @@ mod tests {
     /// Rendering with the two-pass `${x@P}` path.
     fn transformed(template: &[u8], shell: &mut TestShell) -> Vec<u8> {
         let context = context();
-        expand_with_variables(template, &context, shell)
+        expand_with_variables(template, &context, shell).into_bytes()
     }
 
     #[test]
@@ -1406,7 +1563,7 @@ mod tests {
         ctx.cwd = b"/tmp/$HOME\\x\"y".to_vec();
         let mut shell = TestShell::new();
         let rendered = expand_with_variables(b"\\w", &ctx, &mut shell);
-        assert_eq!(rendered, b"/tmp/$HOME\\x\"y");
+        assert_eq!(rendered.into_bytes(), b"/tmp/$HOME\\x\"y");
     }
 
     #[test]
@@ -1416,7 +1573,7 @@ mod tests {
         ctx.cwd = b"/tmp/$HOME".to_vec();
         let mut shell = TestShell::new().var(b"HOME", b"expanded");
         assert_eq!(
-            expand_with_variables(b"\\w \\$", &ctx, &mut shell),
+            expand_with_variables(b"\\w \\$", &ctx, &mut shell).into_bytes(),
             b"/tmp/$HOME $"
         );
     }
@@ -1428,7 +1585,126 @@ mod tests {
         // rather than being silently emptied.
         assert_eq!(transformed(b"${x:-d}", &mut shell), b"${x:-d}");
         assert_eq!(transformed(b"${a[0]}", &mut shell), b"${a[0]}");
-        assert_eq!(transformed(b"$(cmd)", &mut shell), b"$(cmd)");
+    }
+
+    #[test]
+    fn the_second_pass_runs_command_substitution() {
+        // bash runs `$(…)` while expanding a prompt (measured against
+        // 5.3.20: `PS1='$(echo hi)'` shows `hi`), so the shared expander does
+        // the same for `${x@P}` and for the line editor.
+        let mut shell = TestShell::new().cmdsub(b"date +%H", b"14");
+        assert_eq!(transformed(b"$(date +%H):$ ", &mut shell), b"14:$ ");
+        assert_eq!(shell.cmdsub_calls, vec![b"date +%H".to_vec()]);
+
+        // Backticks are the other spelling of the same construct.
+        let mut shell = TestShell::new().cmdsub(b"echo bt", b"bt");
+        assert_eq!(transformed(b"`echo bt`", &mut shell), b"bt");
+
+        // A substitution that fails contributes nothing, like bash.
+        let mut shell = TestShell::new();
+        assert_eq!(transformed(b"a$(boom)b", &mut shell), b"ab");
+
+        // An unterminated form has no delimiter to execute.
+        assert_eq!(transformed(b"a$(boom", &mut shell), b"a$(boom");
+        assert_eq!(transformed(b"a`boom", &mut shell), b"a`boom");
+    }
+
+    #[test]
+    fn the_second_pass_evaluates_arithmetic() {
+        let mut shell = TestShell::new().arith(b"1+2", b"3");
+        assert_eq!(transformed(b"$((1+2)) $ ", &mut shell), b"3 $ ");
+        // Nested parentheses belong to the expression, not to the delimiter.
+        let mut shell = TestShell::new().arith(b"(1+2)*3", b"9");
+        assert_eq!(transformed(b"$(((1+2)*3))", &mut shell), b"9");
+        // A failing expression keeps its text, as bash does for `$((1/0))`.
+        let mut shell = TestShell::new();
+        assert_eq!(transformed(b"a$((1/0))b", &mut shell), b"a$((1/0))b");
+    }
+
+    #[test]
+    fn escapes_use_real_history_and_job_numbers() {
+        let mut ctx = context();
+        ctx.history_number = 501;
+        ctx.command_number = 12;
+        ctx.job_count = 2;
+        assert_eq!(expand(b"\\![\\#][\\j]", &ctx).into_bytes(), b"501[12][2]");
+        // The numbers still expand when the second pass runs.
+        let mut shell = TestShell::new();
+        assert_eq!(
+            expand_with_variables(b"\\![\\#][\\j]", &ctx, &mut shell).into_bytes(),
+            b"501[12][2]"
+        );
+        // ... and when it does not.
+        ctx.prompt_vars = false;
+        let mut shell = TestShell::new();
+        assert_eq!(
+            expand_with_variables(b"\\![\\#][\\j]", &ctx, &mut shell).into_bytes(),
+            b"501[12][2]"
+        );
+    }
+
+    #[test]
+    fn non_printing_spans_survive_the_second_pass() {
+        // The most common real-world PS1: a coloured prefix with `\u@\h`, an
+        // ordinary `\w\$`, all of it followed by promptvars expansion.
+        let mut ctx = context();
+        ctx.prompt_vars = true;
+        let mut shell = TestShell::new();
+        let prompt = expand_with_variables(
+            b"\\[\\e[1;32m\\]\\u@\\h\\[\\e[0m\\] \\w\\$ ",
+            &ctx,
+            &mut shell,
+        );
+        assert_eq!(prompt.bytes(), b"\x1b[1;32mada@lab\x1b[0m ~/work$ ");
+        assert_eq!(prompt.non_printing(), &[0..7, 14..18]);
+
+        // The same template with a variable in it: the spans must still be
+        // exactly the escape sequences, not the whole prompt.
+        let mut shell = TestShell::new().var(b"TAG", b"T");
+        let prompt = expand_with_variables(
+            b"\\[\\e[1;32m\\]${TAG}\\u@\\h\\[\\e[0m\\] \\w\\$ ",
+            &ctx,
+            &mut shell,
+        );
+        assert_eq!(prompt.bytes(), b"\x1b[1;32mTada@lab\x1b[0m ~/work$ ");
+        assert_eq!(prompt.non_printing(), &[0..7, 15..19]);
+        assert!(prompt.is_non_printing(0));
+        assert!(!prompt.is_non_printing(7));
+
+        // A hidden stretch that contains a variable stays hidden.
+        let mut shell = TestShell::new().var(b"COLOUR", b"\x1b[31m");
+        let prompt = expand_with_variables(b"\\[$COLOUR\\]x", &ctx, &mut shell);
+        assert_eq!(prompt.bytes(), b"\x1b[31mx");
+        assert_eq!(prompt.non_printing(), &[0..5]);
+    }
+
+    #[test]
+    fn prompt_vars_off_leaves_the_decoded_text_alone() {
+        let mut ctx = context();
+        ctx.prompt_vars = false;
+        let mut shell = TestShell::new()
+            .var(b"PWD", b"/tmp")
+            .cmdsub(b"date", b"never");
+        assert_eq!(
+            expand_with_variables(b"$PWD $(date) \\! $ ", &ctx, &mut shell).into_bytes(),
+            b"$PWD $(date) 42 $ "
+        );
+        assert!(shell.cmdsub_calls.is_empty(), "no command may run");
+        // `expand` is the same single pass.
+        assert_eq!(expand(b"$PWD \\! $ ", &ctx).into_bytes(), b"$PWD 42 $ ");
+    }
+
+    #[test]
+    fn prompt_vars_on_expands_variables_and_commands() {
+        let mut ctx = context();
+        ctx.prompt_vars = true;
+        let mut shell = TestShell::new()
+            .var(b"PWD", b"/tmp")
+            .cmdsub(b"date +%H:%M", b"14:05");
+        assert_eq!(
+            expand_with_variables(b"$PWD $(date +%H:%M) \\! $ ", &ctx, &mut shell).into_bytes(),
+            b"/tmp 14:05 42 $ "
+        );
     }
 
     #[test]

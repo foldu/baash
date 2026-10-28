@@ -1,94 +1,76 @@
-//! `PS1`/`PS2` expansion for the line editor.
+//! The editor's prompt: the already-rendered `PS1`/`PS2` it paints.
 //!
-//! The escapes themselves live in [`bsh_lang::prompt`], together with
-//! `${x@P}`, so the prompt a user sees and the string a script gets from
-//! `${PS1@P}` cannot drift. This module is only the editor's adapter: it
-//! reads the templates and the state from the environment and remembers the
-//! non-printing stretches so the renderer does not count them.
+//! The escape table and both expansion passes live in [`bsh_lang::prompt`],
+//! which `${x@P}` uses too, so the string a user sees and the string a script
+//! gets cannot drift. This module is only the editor's container for the
+//! result.
 //!
-//! The editor does **not** perform bash's second, double-quoted expansion of
-//! the decoded prompt (`shopt promptvars`, on by default in bash). It has no
-//! interpreter to expand `$name` or run `$(…)` with, so it renders the decoded
-//! text, exactly like `shopt -u promptvars`. The same expander with
-//! [`bsh_lang::prompt::expand_with_variables`] supplies the two-pass form to
-//! `${x@P}`.
+//! **The shell renders the prompt, not the editor.** Only the shell has a
+//! variable table (`PS1` must come from there, not from the process
+//! environment) and only the shell can run `$(…)` when `promptvars` is on, so
+//! [`crate::Editor::set_prompt`] is called with a fresh [`Prompt`] before each
+//! line is read. A `PS1` assigned by the command just run, by the rc file or
+//! by the environment therefore takes effect at the next prompt. The editor
+//! itself never reads a variable and never expands anything; a template given
+//! to [`Prompt::new`] is expanded once, with a default context, which is what
+//! tests and embedders want.
 //!
-//! The values come from the process environment for this wave: `PS1` and `PS2`
-//! themselves, plus the process's user, host, home and working directory.
-//! `$PWD` changing inside the shell updates the prompt through
-//! [`crate::Editor::set_cwd`], because the process environment is not the
-//! shell's variable table.
-//!
-//! Root is detected from `/proc/self`'s owner, which is the process's effective
-//! uid on Linux. When that is not readable we fall back to `USER=root`; when
-//! neither answers, the prompt is `$ `.
-
-use std::os::unix::ffi::OsStrExt;
+//! The rendered value is an [`ExpandedPrompt`], not bare bytes, so the
+//! `\[`/`\]` stretches that must not count toward the display width survive
+//! both expansion passes and a coloured prompt with a variable in it still
+//! puts the cursor in the right column.
 
 pub use bsh_lang::prompt::is_root;
-pub use bsh_lang::prompt::{ExpandedPrompt, expand};
+pub use bsh_lang::prompt::{ExpandedPrompt, PromptContext as PromptState, expand};
 
-/// The values the prompt escapes read.
-///
-/// This is [`bsh_lang::prompt::PromptContext`]: the expander is shared with
-/// `${x@P}`, so the editor and the interpreter must describe the same facts
-/// with the same type.
-pub type PromptState = bsh_lang::prompt::PromptContext;
-
-/// `PS1`/`PS2` and the state their escapes read.
+/// The rendered prompts the editor paints.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Prompt {
-    /// The raw `PS1` template.
-    pub primary: Vec<u8>,
-    /// The raw `PS2` template.
-    pub secondary: Vec<u8>,
-    /// Variables the escapes expand from.
-    pub state: PromptState,
+    primary: ExpandedPrompt,
+    secondary: ExpandedPrompt,
 }
 
 impl Prompt {
-    /// A prompt from explicit templates.
+    /// Expand two templates once, with a default context.
+    ///
+    /// This is the single-pass rendering (no `promptvars`), which is what a
+    /// caller with no interpreter can do. The shell uses
+    /// [`Prompt::from_expanded`] after running the real expansion.
     pub fn new(primary: impl Into<Vec<u8>>, secondary: impl Into<Vec<u8>>) -> Self {
+        Self::from_template(&primary.into(), &secondary.into(), &PromptState::default())
+    }
+
+    /// Expand two templates with an explicit context, single-pass.
+    pub fn from_template(primary: &[u8], secondary: &[u8], state: &PromptState) -> Self {
         Self {
-            primary: primary.into(),
-            secondary: secondary.into(),
-            state: PromptState::default(),
+            primary: expand(primary, state),
+            secondary: expand(secondary, state),
         }
     }
 
-    /// Read `PS1` and `PS2` from the environment, with shell defaults.
-    pub fn from_env() -> Self {
-        let mut state = PromptState::from_env();
-        // The editor does not run a second expansion, so a `$` in a value is
-        // literal and must not be backslash-escaped for a pass that will not
-        // happen.
-        state.prompt_vars = false;
-        let default_primary: &[u8] = if state.root { b"# " } else { b"$ " };
-        Self {
-            primary: env_bytes("PS1").unwrap_or_else(|| default_primary.to_vec()),
-            secondary: env_bytes("PS2").unwrap_or_else(|| b"> ".to_vec()),
-            state,
-        }
+    /// Prompts the shell has already rendered (escapes and `promptvars`).
+    pub fn from_expanded(primary: ExpandedPrompt, secondary: ExpandedPrompt) -> Self {
+        Self { primary, secondary }
     }
 
     /// The prompt before the first line of a command.
-    pub fn primary_text(&self) -> ExpandedPrompt {
-        expand(&self.primary, &self.state)
+    pub fn primary_text(&self) -> &ExpandedPrompt {
+        &self.primary
     }
 
     /// The prompt before a continuation line.
-    pub fn secondary_text(&self) -> ExpandedPrompt {
-        expand(&self.secondary, &self.state)
+    pub fn secondary_text(&self) -> &ExpandedPrompt {
+        &self.secondary
     }
 
     /// The primary prompt as plain bytes, without the width annotations.
-    pub fn primary_bytes(&self) -> Vec<u8> {
-        self.primary_text().into_bytes()
+    pub fn primary_bytes(&self) -> &[u8] {
+        self.primary.bytes()
     }
 
     /// The secondary prompt as plain bytes, without the width annotations.
-    pub fn secondary_bytes(&self) -> Vec<u8> {
-        self.secondary_text().into_bytes()
+    pub fn secondary_bytes(&self) -> &[u8] {
+        self.secondary.bytes()
     }
 }
 
@@ -96,10 +78,6 @@ impl Default for Prompt {
     fn default() -> Self {
         Self::new(b"$ ".to_vec(), b"> ".to_vec())
     }
-}
-
-fn env_bytes(name: &str) -> Option<Vec<u8>> {
-    std::env::var_os(name).map(|value| value.as_bytes().to_vec())
 }
 
 #[cfg(test)]
@@ -119,69 +97,86 @@ mod tests {
         }
     }
 
+    fn rendered(template: &[u8]) -> Vec<u8> {
+        Prompt::from_template(template, b"> ", &state())
+            .primary_bytes()
+            .to_vec()
+    }
+
     #[test]
     fn the_common_escapes() {
-        assert_eq!(
-            expand(b"\\u@\\h:\\w\\$ ", &state()).into_bytes(),
-            b"ada@lab:~/work$ ".to_vec()
-        );
+        assert_eq!(rendered(b"\\u@\\h:\\w\\$ "), b"ada@lab:~/work$ ".to_vec());
     }
 
     #[test]
     fn root_and_literal_escapes() {
         let mut state = state();
         state.root = true;
-        assert_eq!(expand(b"\\$", &state).into_bytes(), b"#");
-        assert_eq!(expand(b"\\\\", &state).into_bytes(), b"\\");
-        assert_eq!(expand(b"a\\nb", &state).into_bytes(), b"a\nb");
-        assert_eq!(expand(b"\\!", &state).into_bytes(), b"42");
+        assert_eq!(
+            Prompt::from_template(b"\\$", b"> ", &state).primary_bytes(),
+            b"#"
+        );
+        assert_eq!(rendered(b"\\\\"), b"\\".to_vec());
+        assert_eq!(rendered(b"a\\nb"), b"a\nb".to_vec());
+        assert_eq!(rendered(b"\\!"), b"42".to_vec());
     }
 
     #[test]
     fn full_host_and_basename() {
-        assert_eq!(expand(b"\\H", &state()).into_bytes(), b"lab.example.com");
-        assert_eq!(expand(b"\\W", &state()).into_bytes(), b"work");
+        assert_eq!(rendered(b"\\H"), b"lab.example.com".to_vec());
+        assert_eq!(rendered(b"\\W"), b"work".to_vec());
     }
 
     #[test]
     fn home_itself_is_a_tilde() {
         let mut state = state();
         state.cwd = b"/home/ada".to_vec();
-        assert_eq!(expand(b"\\w", &state).into_bytes(), b"~");
+        assert_eq!(
+            Prompt::from_template(b"\\w", b"> ", &state).primary_bytes(),
+            b"~"
+        );
     }
 
     #[test]
     fn a_home_prefix_without_a_slash_is_not_abbreviated() {
         let mut state = state();
         state.cwd = b"/home/adam".to_vec();
-        assert_eq!(expand(b"\\w", &state).into_bytes(), b"/home/adam");
+        assert_eq!(
+            Prompt::from_template(b"\\w", b"> ", &state).primary_bytes(),
+            b"/home/adam"
+        );
     }
 
     #[test]
     fn unknown_escapes_keep_their_backslash() {
-        assert_eq!(expand(b"\\q", &state()).into_bytes(), b"\\q");
-        assert_eq!(expand(b"trailing\\", &state()).into_bytes(), b"trailing\\");
+        assert_eq!(rendered(b"\\q"), b"\\q".to_vec());
+        assert_eq!(rendered(b"trailing\\"), b"trailing\\".to_vec());
     }
 
     #[test]
     fn root_cwd_is_its_own_basename() {
+        let mut state = state();
+        state.cwd = b"/".to_vec();
         assert_eq!(
-            expand(
-                b"\\W",
-                &PromptState {
-                    cwd: b"/".to_vec(),
-                    ..state()
-                }
-            )
-            .into_bytes(),
-            b"/".to_vec()
+            Prompt::from_template(b"\\W", b"> ", &state).primary_bytes(),
+            b"/"
         );
     }
 
     #[test]
     fn non_printing_markers_survive_the_adapter() {
-        let expanded = expand(b"\\[\\e[31m\\]$ \\[\\e[0m\\]", &state());
-        assert_eq!(expanded.bytes(), b"\x1b[31m$ \x1b[0m");
-        assert_eq!(expanded.non_printing().len(), 2);
+        let prompt = Prompt::from_template(b"\\[\\e[31m\\]$ \\[\\e[0m\\]", b"> ", &state());
+        assert_eq!(prompt.primary_bytes(), b"\x1b[31m$ \x1b[0m");
+        assert_eq!(prompt.primary_text().non_printing().len(), 2);
+    }
+
+    #[test]
+    fn an_already_expanded_prompt_is_kept_verbatim() {
+        let primary = expand(b"\\u\\$ ", &state());
+        let secondary = expand(b"\\u> ", &state());
+        let prompt = Prompt::from_expanded(primary.clone(), secondary.clone());
+        assert_eq!(prompt.primary_text(), &primary);
+        assert_eq!(prompt.secondary_text(), &secondary);
+        assert_eq!(prompt.primary_bytes(), b"ada$ ");
     }
 }

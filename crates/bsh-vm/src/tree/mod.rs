@@ -335,6 +335,14 @@ pub(crate) struct ArrayLiteral {
 /// crashes; a diagnostic is better than a crash.
 const MAX_FUNCTION_DEPTH: usize = 512;
 
+/// bash's default `PS1` for an interactive shell, as a value rather than the
+/// rendered text: `\s-\v\$ ` is what `declare -p PS1` shows and what
+/// `${PS1@P}` decodes. Measured against 5.3.20.
+const DEFAULT_PS1: &[u8] = b"\\s-\\v\\$ ";
+
+/// bash's default `PS2` for an interactive shell.
+const DEFAULT_PS2: &[u8] = b"> ";
+
 impl Interp {
     /// A fresh shell. `interactive` selects the POSIX §2.8.1 consequences and
     /// the diagnostic renderer.
@@ -415,8 +423,64 @@ impl Interp {
         // can turn it off. A non-interactive shell records nothing either way.
         if interactive {
             interp.state.opts.history = true;
+            // An interactive bash also has default prompt variables, before the
+            // environment and the startup file can replace them: measured
+            // against 5.3.20, `declare -p PS1` in `bash -i` is
+            // `PS1="\\s-\\v\\\$ "` and `PS2="> "`. `${PS1@P}` and the prompt
+            // therefore decode the same template, and the conformance case
+            // that reads `$PS1` from an interactive shell sees bash's value.
+            let _ = interp.state.vars.assign_scalar(b"PS1", DEFAULT_PS1);
+            let _ = interp.state.vars.assign_scalar(b"PS2", DEFAULT_PS2);
         }
         interp
+    }
+
+    /// The facts `PS1`/`PS2` read while the shell draws a prompt.
+    ///
+    /// This is [`bsh_lang::Shell::prompt_context`] with the two differences a
+    /// prompt has and `${x@P}` does not:
+    ///
+    /// * `\!` is the number the line being edited *will* get — the ring's next
+    ///   number, because the line has not been recorded yet — while `${x@P}`
+    ///   runs with the line already in the ring and reports its number.
+    /// * `\l` and the terminal width come from the terminal on standard
+    ///   input, which is the one the editor paints on.
+    ///
+    /// The job count, `$PWD`, `$HOME` and the user/host names come from the
+    /// shell's own state, not the process environment.
+    pub fn repl_prompt_context(&self) -> bsh_lang::prompt::PromptContext {
+        let mut context = <Self as bsh_lang::Shell>::prompt_context(self);
+        context.history_number = self.state.history.next_number();
+        if let Some((columns, _)) = bsh_sys::window_size_fd(0) {
+            context.columns = columns;
+        }
+        context
+    }
+
+    /// Put the last command's status back and refresh `$?`.
+    ///
+    /// The interactive loop runs `PROMPT_COMMAND` between commands, which
+    /// changes the status the way any other command would; bash keeps the
+    /// status the user last saw, and this restores it.
+    pub fn restore_status(&mut self, status: bsh_runtime::Status) {
+        self.state.vars.set_last_status(status);
+        self.sync_specials();
+    }
+
+    /// Render a `PS1`/`PS2` template the way the interactive prompt needs it.
+    ///
+    /// This is the shared expander with the shell as its second-pass host, so
+    /// `shopt promptvars` decides whether `$PWD` and `$(date)` are expanded.
+    /// The last status is put back afterwards: bash's prompt expansion does
+    /// not change `$?` even though it may run commands (measured against
+    /// 5.3.20 with `PS1='$(false)$ '`).
+    pub fn render_prompt(&mut self, template: &[u8]) -> bsh_lang::prompt::ExpandedPrompt {
+        let context = self.repl_prompt_context();
+        let status = self.state.vars.last_status();
+        let rendered = bsh_lang::prompt::expand_with_variables(template, &context, self);
+        self.state.vars.set_last_status(status);
+        self.sync_specials();
+        rendered
     }
 
     /// Import the process environment as exported shell variables, the way
@@ -825,6 +889,27 @@ impl bsh_lang::Vars for Interp {
     }
 }
 
+/// The `\l` value: the basename of the terminal device on standard input.
+///
+/// Measured against bash 5.3.20 on a pty: `PS1='\l '` shows `0` for
+/// `/dev/pts/0` — the *basename*, not the whole device path — and `tty` when
+/// standard input is not a terminal. `/proc/self/fd/0` is the std-only way to
+/// ask which device it is.
+fn current_tty() -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    if !bsh_sys::is_tty(0) {
+        return b"tty".to_vec();
+    }
+    std::fs::read_link("/proc/self/fd/0")
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.as_bytes().to_vec())
+                .or_else(|| Some(path.as_os_str().as_bytes().to_vec()))
+        })
+        .unwrap_or_else(|| b"tty".to_vec())
+}
+
 impl bsh_lang::Shell for Interp {
     fn brace_expansion(&self) -> bool {
         // `set -B`/`set +B`, and `set -o braceexpand`. The other stages are
@@ -857,6 +942,16 @@ impl bsh_lang::Shell for Interp {
             context.host = value.to_vec();
         }
         context.job_count = self.job_table.len() as u32;
+        // `\!`: bash's `${x@P}` reports the number of the line already in the
+        // ring, not the next one the prompt will show (`docs/contracts.md`).
+        context.history_number = self.state.history.next_number().saturating_sub(1);
+        // `\#`: the prompt for line N and `${x@P}` inside line N both report
+        // N + 1, so one counter serves both (see [`ShellState::command_number`]).
+        context.command_number = self.state.command_number.saturating_add(1);
+        context.prompt_vars = self.state.opts.promptvars;
+        context.last_failed = self.state.vars.last_status().exit_code() != 0;
+        context.root = bsh_lang::prompt::is_root();
+        context.tty = current_tty();
         context
     }
 

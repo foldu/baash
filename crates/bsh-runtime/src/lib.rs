@@ -118,6 +118,14 @@ pub struct ShellState {
     /// Command history, the one ring the `history`/`fc` built-ins and the
     /// editor share. See [`ShellState::sync_history`] for the `HIST*` knobs.
     pub history: History,
+    /// How many lines of input the interactive loop has handed to the
+    /// interpreter.
+    ///
+    /// `\#` is this plus one: the prompt for the line about to be typed and
+    /// `${x@P}` inside a running command both report the number *after* the
+    /// next one, which is bash's `current_command_number` rule. It is not a
+    /// shell variable and a non-interactive run never advances it.
+    pub command_number: u32,
     /// Where `getopts` is in the argument it is scanning.
     ///
     /// `OPTIND` names the argument and this holds the character offset inside
@@ -156,10 +164,21 @@ impl ShellState {
             completions: complete::CompletionTable::default(),
             completion: complete::CompletionRun::default(),
             history: History::new(),
+            command_number: 0,
             getopts: GetoptsState::default(),
             error: None,
             exit_request: None,
         }
+    }
+
+    /// Account for one line of input the shell is about to execute.
+    ///
+    /// Called by the interactive loop, which is the only place that knows what
+    /// a "command" is: the evaluator executes a whole chunk at a time, while
+    /// bash numbers the lines it reads. See [`ShellState::command_number`].
+    pub fn begin_command(&mut self) -> u32 {
+        self.command_number = self.command_number.saturating_add(1);
+        self.command_number
     }
 
     /// Re-read the `HIST*` knobs from the shell's variables and options.

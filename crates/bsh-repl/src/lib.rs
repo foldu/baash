@@ -70,8 +70,10 @@
 //! * **Timestamped history** and persisting multi-line entries (`HISTFILE`
 //!   is line-oriented; those are skipped). `HISTCONTROL`, `HISTSIZE` and
 //!   `HISTFILESIZE` live in the runtime ring and are wired.
-//! * **`PS1` from shell variables.** Prompts are read from the process
-//!   environment, so `PS1=…` typed at the prompt does not take effect.
+//! * **`PS1` change detection inside a line.** The shell re-renders the
+//!   prompt before each line; a `PS1` changed by the line being typed (a
+//!   `$(…)` in `PS1` with a side effect, say) is visible at the next prompt,
+//!   not mid-line.
 //! * **Bracketed-paste text inserted as real newlines**; a pasted newline is
 //!   inserted verbatim but displayed as `^J`, like any other control byte.
 //! * **Differential repaint**; every keystroke paints the whole frame.
@@ -94,7 +96,7 @@ pub use bsh_runtime::{History, HistoryControl};
 pub use editor::{Config, Editor, Flow, NeverNeedsMore, ReadResult, Syntax};
 pub use key::{Decoder, Key};
 pub use line::Line;
-pub use prompt::{Prompt, PromptState, expand, is_root};
+pub use prompt::{ExpandedPrompt, Prompt, PromptState, expand, is_root};
 pub use render::{Frame, MenuRow, MenuView, Renderer};
 pub use term::{RealTerminal, Size, Terminal};
 

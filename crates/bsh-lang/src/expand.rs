@@ -1251,19 +1251,19 @@ fn expand_transform<S: Shell>(
                 ParamName::Element { name, subscript } => {
                     let value = read_element(ctx, name, subscript).unwrap_or_default();
                     let bytes = prompt::expand_with_variables(&value, &prompt, ctx.shell);
-                    out.push(bytes, quoted, !quoted);
+                    out.push(bytes.into_bytes(), quoted, !quoted);
                     return Ok(());
                 }
                 _ => {
                     let value = ctx.value(name).unwrap_or_default();
                     let bytes = prompt::expand_with_variables(&value, &prompt, ctx.shell);
-                    out.push(bytes, quoted, !quoted);
+                    out.push(bytes.into_bytes(), quoted, !quoted);
                     return Ok(());
                 }
             };
             let values: Vec<Vec<u8>> = values
                 .iter()
-                .map(|value| prompt::expand_with_variables(value, &prompt, ctx.shell))
+                .map(|value| prompt::expand_with_variables(value, &prompt, ctx.shell).into_bytes())
                 .collect();
             emit_values(ctx, &values, star, quoted, out);
             Ok(())

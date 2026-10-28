@@ -290,13 +290,17 @@ fn colour_rendering_highlights_keywords() {
 
 #[test]
 fn the_prompt_expands_its_escapes() {
+    // The shell renders `PS1`; the editor paints what it is given. These tests
+    // go through the adapter so the escape table stays covered from here too.
     let mut term = FakeTerminal::new(b"");
     let completer = StubCompleter::empty();
-    let mut prompt = Prompt::new(b"\\u \\$ ", b"> ");
-    prompt.state.user = b"ada".to_vec();
-    prompt.state.root = false;
+    let state = bsh_repl::PromptState {
+        user: b"ada".to_vec(),
+        root: false,
+        ..bsh_repl::PromptState::default()
+    };
     let config = Config {
-        prompt,
+        prompt: Prompt::from_template(b"\\u \\$ ", b"> ", &state),
         ..plain_config()
     };
     let mut editor = Editor::new(&mut term, &completer, &bsh_repl::NeverNeedsMore);
@@ -305,27 +309,32 @@ fn the_prompt_expands_its_escapes() {
     assert!(term.text().contains("ada $ x"));
 
     let mut term = FakeTerminal::new(b"");
-    let mut prompt = Prompt::new(b"#", b"> ");
-    prompt.state.root = true;
+    let root = bsh_repl::PromptState {
+        root: true,
+        ..bsh_repl::PromptState::default()
+    };
     let config = Config {
-        prompt,
+        prompt: Prompt::from_template(b"\\$ ", b"> ", &root),
         ..plain_config()
     };
     let mut editor = Editor::with_config(&mut term, &completer, &bsh_repl::NeverNeedsMore, config);
     editor.step(Key::Char('x')).unwrap();
-    assert!(term.text().contains('#'));
+    assert!(term.text().contains("# x"));
 }
 
 #[test]
-fn the_prompt_follows_the_shell_working_directory() {
+fn a_prompt_rendered_for_a_directory_shows_it() {
     let mut term = FakeTerminal::new(b"");
     let completer = StubCompleter::empty();
+    let state = bsh_repl::PromptState {
+        cwd: b"/tmp/place".to_vec(),
+        ..bsh_repl::PromptState::default()
+    };
     let config = Config {
-        prompt: Prompt::new(b"\\w$ ", b"> "),
+        prompt: Prompt::from_template(b"\\w$ ", b"> ", &state),
         ..plain_config()
     };
     let mut editor = Editor::with_config(&mut term, &completer, &bsh_repl::NeverNeedsMore, config);
-    editor.set_cwd(b"/tmp/place");
     editor.step(Key::Char('x')).unwrap();
     assert!(term.text().contains("/tmp/place$ x"));
 }

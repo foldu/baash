@@ -182,18 +182,17 @@ impl<'a> Editor<'a> {
         &mut self.history
     }
 
-    /// Update the working directory the `\w` prompt escape reads.
-    pub fn set_cwd(&mut self, cwd: &[u8]) {
-        self.prompt.state.cwd = cwd.to_vec();
-        self.dirty = true;
-    }
-
-    /// The prompt templates and their state.
+    /// The prompts the editor paints.
     pub fn prompt(&self) -> &Prompt {
         &self.prompt
     }
 
-    /// Replace the prompt (for example after `PS1` changed in the environment).
+    /// Replace the rendered prompts.
+    ///
+    /// The shell calls this before each line: `PS1` may have changed, the
+    /// working directory may have changed, `\!` must name the line about to be
+    /// typed, and `promptvars` may have run commands. The editor cannot derive
+    /// any of that itself.
     pub fn set_prompt(&mut self, prompt: Prompt) {
         self.prompt = prompt;
         self.dirty = true;
@@ -514,7 +513,6 @@ impl<'a> Editor<'a> {
             return Ok(());
         }
         self.dirty = false;
-        self.prompt.state.history_number = self.history.next_number();
         let prompt = if self.secondary {
             self.prompt.secondary_text()
         } else {
@@ -532,7 +530,7 @@ impl<'a> Editor<'a> {
             self.suggestion()
         };
         let frame = Frame {
-            prompt: &prompt,
+            prompt,
             line: self.line.editable(),
             cursor: self.line.editable_cursor(),
             menu,

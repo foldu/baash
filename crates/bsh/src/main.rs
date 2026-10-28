@@ -509,6 +509,31 @@ impl bsh_repl::Syntax for ShellSyntax {
     }
 }
 
+/// A prompt template from the shell's variable table.
+///
+/// The environment is not the table: an rc file, a `PS1=` typed at the prompt
+/// and an exported `PS1` all end up here, and only the shell's copy is current.
+fn prompt_template(shell: &mut Interp, name: &[u8]) -> Option<Vec<u8>> {
+    shell.state().vars.scalar(name).map(<[u8]>::to_vec)
+}
+
+/// Hand the freshly rendered `PS1`/`PS2` to the editor.
+fn refresh_prompt(shell: &mut Interp, editor: &mut bsh_repl::Editor<'_>) {
+    // While the prompt is rendered the ring lives in the shell, so `\!` reads
+    // the number the line about to be typed will get.
+    std::mem::swap(editor.history_mut(), &mut shell.state().history);
+    // Pick up `HISTSIZE`/`HISTFILE` the command just run may have changed, and
+    // retire the "currently executing line" marker.
+    shell.state().history.clear_current();
+    shell.state().sync_history();
+    let primary = prompt_template(shell, b"PS1").unwrap_or_default();
+    let secondary = prompt_template(shell, b"PS2").unwrap_or_else(|| b"> ".to_vec());
+    let primary = shell.render_prompt(&primary);
+    let secondary = shell.render_prompt(&secondary);
+    std::mem::swap(editor.history_mut(), &mut shell.state().history);
+    editor.set_prompt(bsh_repl::Prompt::from_expanded(primary, secondary));
+}
+
 /// The interactive shell: prompt, line editor, completion, history.
 ///
 /// `$?` consequences, exit requests and diagnostics are the VM's; this loop
@@ -540,15 +565,13 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
         // The editor paints on the controlling terminal, so colour is decided
         // by the terminal rather than by stdout (which may be redirected).
         color: bsh_repl::color_supported(0),
-        prompt: bsh_repl::Prompt::from_env(),
+        // Replaced by `refresh_prompt` before the first line is read.
+        prompt: bsh_repl::Prompt::default(),
         history,
         ..bsh_repl::Config::default()
     };
     let mut terminal = bsh_repl::RealTerminal::new();
     let mut editor = bsh_repl::Editor::with_config(&mut terminal, &engine, &syntax, config);
-    if let Some(cwd) = &cwd {
-        editor.set_cwd(cwd);
-    }
 
     let status = loop {
         // Between commands the terminal belongs to the shell, and any job that
@@ -557,6 +580,11 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
         // stderr write cannot corrupt the prompt line.
         shell.restore_terminal();
         shell.emit_job_notices();
+        // The prompt is rendered here, not at startup: the command just
+        // executed may have changed `PS1`, the working directory, the job
+        // table or `promptvars`, and `\!` must name the line about to be
+        // typed.
+        refresh_prompt(shell, &mut editor);
         match editor.read_line() {
             Ok(bsh_repl::ReadResult::Line(bytes)) => {
                 if bytes.iter().all(u8::is_ascii_whitespace) {
@@ -571,6 +599,11 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
                 // so `history`/`fc` mutate the very ring the editor navigates.
                 std::mem::swap(editor.history_mut(), &mut shell.state().history);
                 let before = shell.state().vars.scalar(b"PWD").map(<[u8]>::to_vec);
+                // `\#` counts the lines the interactive loop reads, so the
+                // counter advances here rather than in the evaluator (which
+                // sees a whole chunk and cannot tell a REPL line from a
+                // script).
+                shell.state().begin_command();
                 shell.run_named("<stdin>", &bytes);
                 // `cd` changes the shell's `PWD`; the completion engine and
                 // `PS1`'s `\w` must follow it (`docs/contracts.md`).
@@ -585,7 +618,6 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
                     && let Some(pwd) = &after
                 {
                     engine.set_root(std::ffi::OsStr::from_bytes(pwd));
-                    editor.set_cwd(pwd);
                 }
                 if let Some(requested) = shell.state().take_exit_request() {
                     break requested;
