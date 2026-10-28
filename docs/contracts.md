@@ -696,6 +696,30 @@ Contract points that the caller must honour:
   and mutating it would be the same class of bug as a global signal disposition.
 - **`Regex` is neither `Send` nor `Sync` nor `Clone`**: one thread, one pattern.
 
+### `[[ … =~ … ]]` and the right-hand side
+
+Measured against bash 5.3.20, because the rule is not "quote removal" and not
+"pass the bytes through":
+
+- `a\.b` matches `a.b` and does **not** match `axb` — the backslash survives
+  into the regex.
+- a literal `\babc\b` does **not** match `x abc y` — the shell consumes the
+  backslash, so the engine receives `b`.
+- `r='\babc\b'; [[ $t =~ $r ]]` **does** match — a variable's backslashes
+  reach the engine, where glibc treats `\b` as a word boundary.
+- `"a.b"` matches only a literal dot, because every byte is quoted.
+
+The one rule that explains all four: expand the word normally (which yields
+bytes plus a per-byte quoting mask — [`Field`]), then **re-escape the
+metacharacters that are quoted**. Quoted `.` becomes `\.`, quoted `b` stays
+`b`. Unquoted bytes pass through untouched. This is why the matcher must take a
+`Field`, not `&[u8]`.
+
+`nocasematch` compiles with `new_icase`, not by folding the subject. An invalid
+pattern reports bash's message and makes the `[[` command fail with status 2;
+`BASH_REMATCH` is cleared on failure and otherwise holds one entry per capture
+with non-participating groups as the empty string.
+
 ### Lexing and parse-time options
 
 `lex_full` uses the default profile (`extglob` off); `lex_full_with(src,
