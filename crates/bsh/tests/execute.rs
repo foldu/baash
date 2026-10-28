@@ -963,3 +963,32 @@ fn rcfile_is_read_only_for_an_interactive_shell() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn conditional_integer_operands_are_arithmetic_expressions() {
+    // bash evaluates each side of `-eq` as an arithmetic expression, so a
+    // sum, an exponent, a base-n literal and a bare *name* all work; an
+    // unset name is 0, not an error.
+    for source in [
+        "[[ 1+2 -eq 3 ]]",
+        "[[ 2**3 -eq 8 ]]",
+        "[[ 2#101 -eq 5 ]]",
+        "[[ unset_name -eq 0 ]]",
+    ] {
+        let output = run(source);
+        assert_eq!(code(&output), 0, "{source} should be true");
+    }
+}
+
+#[test]
+fn a_unary_test_without_an_operand_is_a_syntax_error() {
+    // `[[ -z ]]` used to be quietly true (the operator read as a word). bash
+    // rejects it, and so must a shell that claims good diagnostics.
+    for source in ["[[ -z ]]", "[[ -n ]]", "[[ ]]", "[[ -z == -z ]]"] {
+        let output = run(source);
+        assert_eq!(code(&output), 2, "{source} should be a syntax error");
+    }
+    // With an operand it is an ordinary test again.
+    assert_eq!(code(&run("[[ -z \"\" ]]")), 0);
+    assert_eq!(code(&run("[[ -z a ]]")), 1);
+}

@@ -150,8 +150,18 @@ impl Parser<'_> {
         let word = self.text[range.clone()].to_vec();
 
         // A one-operand test: `[[ -f file ]]`.
-        if unary_operator(&word) && matches!(self.peek(), Some(CondToken::Word(_))) {
-            let operand = self.take_word().expect("checked");
+        //
+        // A leading unary operator demands an operand, always: bash rejects
+        // `[[ -z ]]` *and* `[[ -z == -z ]]`, because `-z` there is the
+        // operator, not a word. Falling through to "treat it as a word" makes
+        // `[[ -z ]]` quietly true, which is the wrong answer to a typo.
+        if unary_operator(&word) {
+            let Some(operand) = self.take_word() else {
+                return Err(format!(
+                    "`{}` needs an operand",
+                    String::from_utf8_lossy(&word)
+                ));
+            };
             let operand = self.expand(&operand)?;
             return self.unary_test(&word, &operand);
         }
@@ -246,10 +256,14 @@ impl Parser<'_> {
             b"<" => Ok(left.bytes < right.bytes),
             b">" => Ok(left.bytes > right.bytes),
             b"-eq" | b"-ne" | b"-lt" | b"-le" | b"-gt" | b"-ge" => {
-                let (Some(left), Some(right)) = (
-                    crate::arith::parse_int(&left.bytes),
-                    crate::arith::parse_int(&right.bytes),
-                ) else {
+                // bash parses each operand as an *arithmetic expression*, not
+                // as an integer literal: `1+2 -eq 3` and `x -eq 0` (an unset
+                // `x` is 0) are both true. `parse_int` only takes literals.
+                let value = |parser: &mut Self, field: &Field| {
+                    crate::arith::eval(&field.bytes, parser.interp)
+                };
+                let (left_value, right_value) = (value(self, left), value(self, right));
+                let (Ok(left), Ok(right)) = (left_value, right_value) else {
                     self.report("integer expression expected");
                     return Err(String::new());
                 };
