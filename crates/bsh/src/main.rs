@@ -509,6 +509,21 @@ impl bsh_repl::Syntax for ShellSyntax {
     }
 }
 
+/// The `PROMPT_COMMAND` commands, in bash's order.
+///
+/// bash 5 accepts a scalar (one command string, `;` still separates commands
+/// inside it) or an indexed array (each element is one command). Both are
+/// cheap here because [`bsh_runtime::Vars`] already stores arrays.
+fn prompt_commands(shell: &mut Interp) -> Vec<Vec<u8>> {
+    match shell.state().vars.value(b"PROMPT_COMMAND") {
+        Some(bsh_runtime::VarValue::Str(command)) if !command.is_empty() => {
+            vec![command.clone()]
+        }
+        Some(bsh_runtime::VarValue::Indexed(elements)) => elements.values().cloned().collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// A prompt template from the shell's variable table.
 ///
 /// The environment is not the table: an rc file, a `PS1=` typed at the prompt
@@ -517,13 +532,101 @@ fn prompt_template(shell: &mut Interp, name: &[u8]) -> Option<Vec<u8>> {
     shell.state().vars.scalar(name).map(<[u8]>::to_vec)
 }
 
-/// Hand the freshly rendered `PS1`/`PS2` to the editor.
+/// Run `PROMPT_COMMAND`, whose stdout appears above the prompt.
+///
+/// `$?` is restored afterwards: bash's prompt command sees the status of the
+/// last command, and the next command sees it too (measured against 5.3.20).
+/// A failure is not fatal here even under `set -e`; bash exits in that case,
+/// which is recorded as a known difference in `docs/state.md`.
+fn run_prompt_command(shell: &mut Interp) {
+    let commands = prompt_commands(shell);
+    if commands.is_empty() {
+        return;
+    }
+    let status = shell.state().vars.last_status();
+    for command in commands {
+        run_prompt_command_line(shell, &command);
+    }
+    shell.restore_status(status);
+}
+
+/// Run one `PROMPT_COMMAND` in this shell with standard output captured, then
+/// write what it produced above the prompt.
+///
+/// bash leaves its stdout on the terminal, so a command whose output does not
+/// end in a newline leaves the prompt on the same line. The editor paints from
+/// column zero because it cannot see what a command wrote, so the output is
+/// collected and re-emitted with a final newline when it needs one: the prompt
+/// then always starts on a fresh line. A write to `/dev/tty` bypasses the
+/// capture, exactly as it bypasses bash's column tracking.
+fn run_prompt_command_line(shell: &mut Interp, command: &[u8]) {
+    let Some(output) = capture_stdout(shell, command) else {
+        // The capture failed (no descriptors, no temporary file). Running the
+        // command with the terminal as its stdout is worse for the screen than
+        // not running it at all, which is what bash would do if it could not
+        // fork; stay silent and keep the shell usable.
+        return;
+    };
+    if output.is_empty() {
+        return;
+    }
+    let mut stdout = std::io::stdout().lock();
+    let _ = stdout.write_all(&output);
+    if !output.ends_with(b"\n") {
+        let _ = stdout.write_all(b"\n");
+    }
+    let _ = stdout.flush();
+}
+
+/// Run `command` in this shell and return everything it wrote to stdout.
+///
+/// A seekable temporary file, not a pipe: the command runs *in this process*
+/// (so `PROMPT_COMMAND='PS1=…'` takes effect), and a pipe could fill while the
+/// command is still writing, deadlocking the shell. `stderr` is left alone.
+fn capture_stdout(shell: &mut Interp, command: &[u8]) -> Option<Vec<u8>> {
+    use std::os::fd::AsRawFd;
+
+    let saved = bsh_sys::dup(1).ok()?;
+    let temp = bsh_sys::create_unlinked_temp(0).ok()?;
+    if bsh_sys::dup2(temp.as_raw_fd(), 1).is_err() {
+        return None;
+    }
+    // Rust's stdout is line-buffered: without this, a command that printed no
+    // newline would leave its bytes in the buffer and they would surface, in
+    // the wrong order, after the descriptor was restored.
+    let _ = std::io::stdout().flush();
+    shell.run_named("<PROMPT_COMMAND>", command);
+    let _ = std::io::stdout().flush();
+    bsh_sys::dup2(saved.as_raw_fd(), 1).ok()?;
+
+    // `SEEK_SET`, which `bsh-sys` names only as the raw `whence` argument.
+    const SEEK_SET: i32 = 0;
+    bsh_sys::lseek(temp.as_raw_fd(), 0, SEEK_SET).ok()?;
+    let mut output = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        match bsh_sys::read_fd(temp.as_raw_fd(), &mut buffer) {
+            Ok(0) => break,
+            Ok(count) => output.extend_from_slice(&buffer[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    Some(output)
+}
+
+/// Run `PROMPT_COMMAND`, then hand the freshly rendered `PS1`/`PS2` to the
+/// editor.
+///
+/// The ring moves to the shell first for two reasons: `PROMPT_COMMAND` may
+/// call `history -a`, and `\!` is the ring's next number, which is what the
+/// line about to be typed will get.
 fn refresh_prompt(shell: &mut Interp, editor: &mut bsh_repl::Editor<'_>) {
-    // While the prompt is rendered the ring lives in the shell, so `\!` reads
-    // the number the line about to be typed will get.
     std::mem::swap(editor.history_mut(), &mut shell.state().history);
-    // Pick up `HISTSIZE`/`HISTFILE` the command just run may have changed, and
-    // retire the "currently executing line" marker.
+    run_prompt_command(shell);
+    // The prompt command may have changed `HISTSIZE`/`HISTFILE`; pick the
+    // knobs up before the editor gets the ring back, and retire the
+    // "currently executing line" marker.
     shell.state().history.clear_current();
     shell.state().sync_history();
     let primary = prompt_template(shell, b"PS1").unwrap_or_default();
@@ -580,11 +683,15 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
         // stderr write cannot corrupt the prompt line.
         shell.restore_terminal();
         shell.emit_job_notices();
-        // The prompt is rendered here, not at startup: the command just
-        // executed may have changed `PS1`, the working directory, the job
-        // table or `promptvars`, and `\!` must name the line about to be
-        // typed.
+        // `PROMPT_COMMAND` runs and the prompt is rendered here, not at
+        // startup: the command just executed may have changed `PS1`, the
+        // working directory, the job table or `promptvars`, and `\!` must name
+        // the line about to be typed.
         refresh_prompt(shell, &mut editor);
+        // `PROMPT_COMMAND='exit'` leaves the shell before the prompt is drawn.
+        if let Some(requested) = shell.state().take_exit_request() {
+            break requested;
+        }
         match editor.read_line() {
             Ok(bsh_repl::ReadResult::Line(bytes)) => {
                 if bytes.iter().all(u8::is_ascii_whitespace) {
