@@ -18,6 +18,7 @@
 
 use crate::errors::{Error, ShellError, codes, display};
 
+mod complete;
 mod getopts;
 mod meta;
 use crate::opts::OptionKind;
@@ -329,7 +330,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     // Bash extensions (DESIGN.md §3.4); registered so search order and
     // "command not found" diagnostics can distinguish them.
     def("builtin", Tier::Extension, Some(meta::bi_builtin)),
-    def("compgen", Tier::Extension, None),
+    def("compgen", Tier::Extension, Some(complete::bi_compgen)),
     def("complete", Tier::Extension, None),
     def("compopt", Tier::Extension, None),
     def("declare", Tier::Extension, None),
