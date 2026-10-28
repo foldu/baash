@@ -38,9 +38,9 @@
 //!
 //! * The engine takes C strings, so an embedded NUL cannot be expressed.
 //!   [`Regex::new`] rejects a pattern containing NUL with
-//!   [`Error::NulInPattern`]; a search of text containing NUL gives up
+//!   [`RegexError::NulInPattern`]; a search of text containing NUL gives up
 //!   ([`Regex::captures`] returns `None`, [`Regex::try_captures`] returns
-//!   [`Error::NulInText`]). Truncating either would silently match something
+//!   [`RegexError::NulInText`]). Truncating either would silently match something
 //!   the caller did not ask for.
 //! * At most [`MAX_GROUPS`] capture slots are filled: the whole match plus 63
 //!   parenthesised subexpressions. bash keeps every group (a 70-group pattern
@@ -120,13 +120,13 @@ impl Regex {
     ///
     /// This is `regcomp` with `REG_EXTENDED` only; see the module docs for why
     /// `REG_NEWLINE` is not set. A pattern containing an embedded NUL cannot be
-    /// passed to the C engine and is rejected with [`Error::NulInPattern`]
+    /// passed to the C engine and is rejected with [`RegexError::NulInPattern`]
     /// rather than truncated.
     ///
     /// A pattern with more than `MAX_GROUPS - 1` parenthesised subexpressions
     /// still compiles; [`Regex::captures`] reports the first [`MAX_GROUPS`]
     /// slots and the rest are dropped (see [`Regex::group_count`]).
-    pub fn new(pattern: &[u8]) -> Result<Self, Error> {
+    pub fn new(pattern: &[u8]) -> Result<Self, RegexError> {
         Self::compile(pattern, libc::REG_EXTENDED)
     }
 
@@ -138,16 +138,16 @@ impl Regex {
     /// not try to get the same effect by lowercasing the pattern and the
     /// subject, because that changes bracket expressions (glibc, like bash,
     /// also folds `[[:upper:]]` and `[[:lower:]]` under `REG_ICASE`).
-    pub fn new_icase(pattern: &[u8]) -> Result<Self, Error> {
+    pub fn new_icase(pattern: &[u8]) -> Result<Self, RegexError> {
         Self::compile(pattern, libc::REG_EXTENDED | libc::REG_ICASE)
     }
 
     /// Compile `pattern` with the given `regcomp` flags.
-    fn compile(pattern: &[u8], flags: libc::c_int) -> Result<Self, Error> {
+    fn compile(pattern: &[u8], flags: libc::c_int) -> Result<Self, RegexError> {
         // Count before compiling: the scan is pure, so nothing can leak even
         // if it were to panic (it cannot).
         let groups = count_subexpressions(pattern);
-        let pattern = cstring(pattern).map_err(|_| Error::NulInPattern)?;
+        let pattern = cstring(pattern).map_err(|_| RegexError::NulInPattern)?;
 
         let mut compiled = MaybeUninit::<libc::regex_t>::uninit();
         // SAFETY: `pattern` is NUL-terminated and lives for the call. On
@@ -160,7 +160,7 @@ impl Regex {
             // `regerror` is given the same `preg` and the `REG_*` code, and
             // for compile failures it reads the code, never the undefined
             // compiled form.
-            return Err(Error::from_posix(code, compiled.as_ptr()));
+            return Err(RegexError::from_posix(code, compiled.as_ptr()));
         }
         // SAFETY: `regcomp` returned 0, so it initialised the value. Moving it
         // out of `MaybeUninit` transfers ownership to the `Regex`, whose
@@ -200,11 +200,11 @@ impl Regex {
     /// [`Regex::captures`], but a failure to run the search is an error.
     ///
     /// `Ok(None)` means the pattern did not match, which is not an error in
-    /// POSIX. `Err(Error::NulInText)` means the subject contains an embedded
-    /// NUL, and `Err(Error::Posix { .. })` is a `REG_*` failure from
+    /// POSIX. `Err(RegexError::NulInText)` means the subject contains an embedded
+    /// NUL, and `Err(RegexError::Posix { .. })` is a `REG_*` failure from
     /// `regexec` (for example `REG_ESPACE` when memory runs out).
-    pub fn try_captures(&self, text: &[u8]) -> Result<Option<CaptureRanges>, Error> {
-        let text = cstring(text).map_err(|_| Error::NulInText)?;
+    pub fn try_captures(&self, text: &[u8]) -> Result<Option<CaptureRanges>, RegexError> {
+        let text = cstring(text).map_err(|_| RegexError::NulInText)?;
         let mut matches = vec![
             libc::regmatch_t {
                 rm_so: -1,
@@ -230,7 +230,7 @@ impl Regex {
         if code != 0 {
             // SAFETY: `self.compiled` is live and initialised, and `code` is a
             // `regexec` failure code, which `regerror` accepts.
-            return Err(Error::from_posix(code, &self.compiled));
+            return Err(RegexError::from_posix(code, &self.compiled));
         }
         Ok(Some(
             matches
@@ -277,7 +277,7 @@ impl fmt::Debug for Regex {
 
 /// Why compiling a pattern or running a search failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Error {
+pub enum RegexError {
     /// The pattern contains an embedded NUL byte.
     ///
     /// `regcomp` takes a C string, so the pattern cannot be expressed at all.
@@ -302,7 +302,7 @@ pub enum Error {
     },
 }
 
-impl Error {
+impl RegexError {
     /// The raw `REG_*` code, or `None` for the embedded-NUL variants.
     pub fn code(&self) -> Option<libc::c_int> {
         match self {
@@ -313,8 +313,8 @@ impl Error {
 
     /// A human-readable message, never empty.
     ///
-    /// For [`Error::Posix`] this is `regerror`'s text in the current locale;
-    /// error text is subject to translation, so classify on [`Error::code`]
+    /// For [`RegexError::Posix`] this is `regerror`'s text in the current locale;
+    /// error text is subject to translation, so classify on [`RegexError::code`]
     /// rather than on this string.
     pub fn message(&self) -> &str {
         match self {
@@ -337,13 +337,13 @@ impl Error {
     }
 }
 
-impl fmt::Display for Error {
+impl fmt::Display for RegexError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.message())
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for RegexError {}
 
 /// Read `regerror`'s message for `code` into an owned `String`.
 ///
@@ -497,7 +497,7 @@ mod tests {
         assert_ne!(code, 0, "`(a` must not compile");
         // SAFETY: `compiled` is the storage passed to the failed `regcomp`,
         // which is exactly what `regerror` accepts for a compile error.
-        let error = Error::from_posix(code, compiled.as_ptr());
+        let error = RegexError::from_posix(code, compiled.as_ptr());
         assert_eq!(error.code(), Some(code));
         assert!(!error.message().is_empty());
         assert!(!error.to_string().is_empty());

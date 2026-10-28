@@ -657,6 +657,45 @@ meaning); malformed extglob groups degrade to literal text; nesting is capped at
 - `OPTIND` is initialised to 1 by the VM at startup; assigning to it is
   getopts' reset signal, which is why `Vars::optind_writes` exists.
 
+### bsh-sys: `Regex` (POSIX ERE)
+
+`bsh_sys::{Regex, RegexError, CaptureRanges}`, module `regex`, `#[cfg(unix)]`.
+The engine is the platform's `regcomp`/`regexec`, not a Rust regex crate, because
+the conformance target is bash and bash uses the platform engine: POSIX
+leftmost-**longest** matching (`[[ "abcd" =~ (ab|abcd) ]]` yields `abcd`, where
+a Perl-style engine yields `ab`), `{n,m}` parsing, and the same rejection
+messages for invalid patterns.
+
+```rust
+Regex::new(pattern: &[u8]) -> Result<Regex, RegexError>;    // REG_EXTENDED
+Regex::new_icase(pattern: &[u8]) -> Result<Regex, RegexError>; // + REG_ICASE
+Regex::group_count(&self) -> usize;                          // true count, uncapped
+Regex::captures(&self, text: &[u8]) -> Option<CaptureRanges>;
+Regex::try_captures(&self, text: &[u8]) -> Result<Option<CaptureRanges>, RegexError>;
+```
+
+Contract points that the caller must honour:
+
+- **Byte offsets.** Index 0 is the whole match, one slot per group, `None` for a
+  group that did not participate. `BASH_REMATCH` is built from exactly
+  `captures().len()` entries, `None` becomes the empty string, and a failed
+  match **clears** the array (bash does; leaving the previous match is a bug).
+- **`nocasematch` is `new_icase`**, not case folding of the subject: `REG_ICASE`
+  also folds `[[:upper:]]`/`[[:lower:]]`, which lowercasing does not.
+- **`MAX_GROUPS` is 64 slots** (whole match + 63 groups); longer patterns
+  truncate rather than error, and `group_count()` still reports the truth.
+- **NUL**: a pattern containing NUL is `RegexError::NulInPattern`; a subject
+  containing NUL makes `captures` give up with `None` (bash cannot represent
+  it either) while `try_captures` reports `NulInText`.
+- **No `REG_NEWLINE`** (bash passes none): `^`/`$` anchor at subject ends, `.`
+  matches newline, `[^x]` matches newline.
+- **Locale**: classes and collation come from the process locale, and Rust never
+  calls `setlocale`, so matching runs in the C locale whatever `LANG` says. That
+  is deterministic and matches bash under `LC_ALL=C`; bash under a UTF-8 locale
+  is Unicode-aware and we are not, because `setlocale` is process-global state
+  and mutating it would be the same class of bug as a global signal disposition.
+- **`Regex` is neither `Send` nor `Sync` nor `Clone`**: one thread, one pattern.
+
 ### Lexing and parse-time options
 
 `lex_full` uses the default profile (`extglob` off); `lex_full_with(src,

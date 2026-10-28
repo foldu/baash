@@ -66,7 +66,7 @@ pub use fd::{
 };
 pub use pty::{Pty, open_pty};
 #[cfg(unix)]
-pub use regex::{CaptureRanges, Error, Regex};
+pub use regex::{CaptureRanges, Regex, RegexError};
 pub use signal::{
     Disposition, MaskGuard, SignalEvent, SignalFd, SignalGuard, SignalSet, ignore_signals,
     replace_signal_mask, send_group_signal, send_signal, set_disposition,

@@ -5,7 +5,7 @@
 //! groups), and the documented NUL/group-count limits.
 
 use bsh_sys::regex::MAX_GROUPS;
-use bsh_sys::{Error, Regex};
+use bsh_sys::{RegexError, Regex};
 
 /// Compile a pattern that must be valid.
 fn compile(pattern: &[u8]) -> Regex {
@@ -169,7 +169,7 @@ fn nocasematch_folds_case_through_reg_icase() {
 fn a_compile_failure_carries_a_non_empty_message() {
     let error = Regex::new(b"(a").expect_err("`(a` is not a valid ERE");
     match &error {
-        Error::Posix { .. } => {}
+        RegexError::Posix { .. } => {}
         other => panic!("expected a POSIX error, got {other:?}"),
     }
     assert!(error.code().is_some(), "the REG_* code is preserved");
@@ -187,10 +187,10 @@ fn a_compile_failure_carries_a_non_empty_message() {
 fn nul_in_the_pattern_is_rejected() {
     // `regcomp` takes a C string. Truncating would compile a different
     // pattern, so the only honest answer is an error.
-    assert_eq!(Regex::new(b"a\0b").unwrap_err(), Error::NulInPattern);
-    assert_eq!(Regex::new(b"\0").unwrap_err(), Error::NulInPattern);
+    assert_eq!(Regex::new(b"a\0b").unwrap_err(), RegexError::NulInPattern);
+    assert_eq!(Regex::new(b"\0").unwrap_err(), RegexError::NulInPattern);
     assert_eq!(
-        Error::NulInPattern.message(),
+        RegexError::NulInPattern.message(),
         "embedded NUL byte in a regular expression"
     );
 }
@@ -203,7 +203,7 @@ fn nul_in_the_text_gives_up() {
     assert_eq!(re.captures(b"x\0a"), None);
     assert_eq!(re.captures(b"\0a"), None);
     assert_eq!(re.captures(b"a\0"), None);
-    assert_eq!(re.try_captures(b"x\0a"), Err(Error::NulInText));
+    assert_eq!(re.try_captures(b"x\0a"), Err(RegexError::NulInText));
     // The same subject without the NUL still matches, so the rejection is
     // about representation, not about the pattern.
     assert_eq!(re.captures(b"xa"), Some(vec![Some((1, 2))]));
