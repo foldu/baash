@@ -175,6 +175,65 @@ fn case_patterns_and_terminators() {
 }
 
 #[test]
+fn case_patterns_with_extglob_groups() {
+    // `|` inside the group belongs to the pattern, not to the case
+    // alternative list; the pattern still ends at the `)` after the group.
+    let ast = common::ast(b"case x in @(a|b)|c) :;; esac");
+    let Some(NodeKind::Case { arms, .. }) =
+        common::find_node(&ast, |k| matches!(k, NodeKind::Case { .. }))
+    else {
+        panic!("no case");
+    };
+    assert_eq!(arms.len(), 1);
+    assert_eq!(arms[0].patterns.len(), 2);
+    let src: &[u8] = b"case x in @(a|b)|c) :;; esac";
+    assert_eq!(&src[arms[0].patterns[0].span.clone()], b"@(a|b)");
+    assert_eq!(&src[arms[0].patterns[1].span.clone()], b"c");
+
+    // A single group is a single pattern, and the second `)` is its
+    // terminator.
+    let ast = common::ast(b"case x in @(a|b)) :;; esac");
+    let Some(NodeKind::Case { arms, .. }) =
+        common::find_node(&ast, |k| matches!(k, NodeKind::Case { .. }))
+    else {
+        panic!("no case");
+    };
+    assert_eq!(arms.len(), 1);
+    assert_eq!(arms[0].patterns.len(), 1);
+    assert_eq!(arms[0].patterns[0].span, 10..16);
+
+    // Quoting inside the group is preserved: the matcher needs the raw bytes
+    // and their quoting, not a dequoted literal.
+    let src: &[u8] = b"case \"a b\" in @(\"a b\"|c)) :;; esac";
+    let ast = common::ast(src);
+    let Some(NodeKind::Case { arms, .. }) =
+        common::find_node(&ast, |k| matches!(k, NodeKind::Case { .. }))
+    else {
+        panic!("no case");
+    };
+    assert_eq!(&src[arms[0].patterns[0].span.clone()], b"@(\"a b\"|c)");
+
+    // `!(…)` is a pattern word, not the conditional's `!`.
+    let ast = common::ast(b"case x in !(a)) :;; esac");
+    let Some(NodeKind::Case { arms, .. }) =
+        common::find_node(&ast, |k| matches!(k, NodeKind::Case { .. }))
+    else {
+        panic!("no case");
+    };
+    assert_eq!(arms[0].patterns.len(), 1);
+    assert_eq!(arms[0].patterns[0].span, 10..14);
+
+    // An unclosed group falls back to ordinary bytes, so the pattern is the
+    // literal word and the missing `)` is the only problem.
+    let src = b"echo @(a";
+    let ast = common::ast(src);
+    assert_eq!(
+        cmd_words(&ast, src),
+        vec![b"echo".to_vec(), b"@(a".to_vec()]
+    );
+}
+
+#[test]
 fn brace_group_and_subshell() {
     let ast = common::ast(b"{ a; }");
     assert!(matches!(
