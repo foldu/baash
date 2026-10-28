@@ -154,8 +154,11 @@ runs of spaces is not reproduced; `disown -h` marks the job but the shell still
 does not send `SIGHUP` on exit.
 
 **Known-untested:** terminal resize (there is a `TIOCGWINSZ` read; no `SIGWINCH`
-handling seen), and whether the line editor is restored correctly when a child
-leaves the tty in raw/cbreak mode. `Ctrl-C`/`Ctrl-Z` on a foreground command are
+handling seen); whether the line editor is restored correctly when a child
+leaves the tty in raw/cbreak mode; and an interactive shell started in the
+background (`bsh -i &`), where the shell is not the terminal's foreground group
+— bash stops itself with a job notice, and `enable_job_control` merely tolerates
+the failed `tcsetpgrp` (`let _ =`). `Ctrl-C`/`Ctrl-Z` on a foreground command are
 now covered by the pty test.
 
 Harnesses: `crates/bsh-sys/tests/pty.rs` (real pty, termios, window size,
