@@ -77,6 +77,20 @@ or a stopped job will look like a failure.
 `SIGTTOU`** — true for the single-threaded event loop or a fork-gated mode,
 which is why the gate exists.
 
+**Job control is `tcsetpgrp` plus process-group placement, nothing more.**
+`ProcessGroup::SetPgid { pgroup: 0 }` creates a group led by the child;
+`pgroup: leader` joins an existing one. Both the parent (immediately after
+spawn, to close the window in which the child is still in the shell's group)
+and the child call it, and either winning is correct. `set_foreground_pgrp`
+blocks `SIGTTOU` across `tcsetpgrp`, so an interactive shell that lost the
+terminal gets an error instead of being stopped. `SIGTTOU`, `SIGTTIN`, `SIGTSTP`,
+`SIGCONT`, `SIGSTOP`, `SIGCHLD` are re-exported next to `SIGINT`/`SIGQUIT`.
+
+**`become_session_leader(fd)` is the pty-test helper**: `setsid` + `TIOCSCTTY`
+in a forked child, so a test can exercise `tcsetpgrp` on a terminal that really
+is the session's controlling terminal. It is not used by the shell itself (an
+interactive shell already has one).
+
 Linux-only: `SignalFd` (elsewhere `new`/`read` return `Unsupported` and
 `as_raw_fd()` is `-1`), `memfd_create`, `O_TMPFILE`, and `ptsname`'s non-thread-
 safe static buffer on the non-Linux `open_pty` path. Everything else is generic
@@ -537,15 +551,16 @@ runtime exposes one.
 ## bsh-vm (tree evaluator)
 
 **Which built-ins the executor owns.** `break`, `continue`, `return`, `exit`,
-`exec`, `eval`, `.`/`source`, `cd`, `echo`, `read`, `wait` and `kill` are
-implemented in `bsh_vm`. They unwind control flow, re-enter the interpreter, or
-need the descriptor table, `lseek`, termios and signal delivery, which a
-`fn(host, argv) -> Status` signature cannot express. The executor consults them
-only when `BuiltinDef::is_implemented()` is false, so a runtime implementation
-takes over silently — deliberate, but it means whoever implements one of those
-in `bsh-runtime` must delete the executor's body in the same change. `trap`, by
-contrast, *is* implemented in `bsh-runtime`: its work is table mutation, and the
-execution half stays here (see below).
+`exec`, `eval`, `.`/`source`, `cd`, `echo`, `read`, `wait`, `kill`, `jobs`,
+`fg`, `bg` and `disown` are implemented in `bsh_vm`. They unwind control flow,
+re-enter the interpreter, or need the descriptor table, `lseek`, termios, signal
+delivery and process groups, which a `fn(host, argv) -> Status` signature cannot
+express. The executor consults them only when `BuiltinDef::is_implemented()` is
+false, so a runtime implementation takes over silently — deliberate, but it
+means whoever implements one of those in `bsh-runtime` must delete the
+executor's body in the same change. `trap`, by contrast, *is* implemented in
+`bsh-runtime`: its work is table mutation, and the execution half stays here
+(see below).
 
 **Trap execution is a command-boundary poll.** Caught signals are blocked in the
 shell thread and drained from a `signalfd` at the start of each simple command,
@@ -568,11 +583,32 @@ rewound by the surplus with `lseek`; a pipe is read one byte at a time because
 bytes cannot be given back to it. `Interp::read_buffers` only holds a surplus
 whose rewind failed, and a forked child starts with it empty.
 
-**Background children are tracked by pid with their statuses** (`Interp`'s
-`background`/`jobs`), so `wait PID` can report a child reaped several commands
-ago, `%1`/`%%`/`%-` resolve against the pids this shell started, and a waited
-status is consumed (a second `wait PID` is 127). `wait` reports a signalled
-child's description (`Hangup`, …) on stderr, as bash's job notification does.
+**Jobs are the table, not the pid list.** `Interp::job_table` holds a `Job` per
+job (number, pgid, member pids, per-member display parts, original command text,
+state `Running`/`Stopped`/`Done`, `notified`, `hup`); `%N`, `%%`/`%+`, `%-`,
+`%prefix` and `%?substring` resolve against it, numbers are the lowest free
+positive integer (bash reuses them), and the `+`/`-` markers are "most recently
+stopped, else highest number" — measured, not guessed. `background` remains the
+raw pid→status cache so `wait PID` can report a child reaped several commands
+ago and a waited status is consumed (a second `wait PID` is 127).
+
+**One foreground wait path.** `run_external`, `run_pipeline`, `eval_subshell`
+and `fg` all call `wait_foreground_children`: it hands the terminal to the
+group (when job control is on), waits with `WUNTRACED`, restores the terminal on
+every path (a `TerminalGuard`), and records a stopped job plus bash's
+`[1]+  Stopped  …` notice. With `monitor` off the helper degrades to the old
+blocking wait, so scripts are unchanged. `reap_background` uses
+`wait_any_nohang_wuntraced` only when job control is on, and does nothing at
+all when this shell has no tracked background child: `waitpid(-1)` is
+process-wide, and the integration tests run several interpreters in one process.
+
+**`wait` on a stopped job does not block.** `wait %job` warns
+(`wait_for_job: job N is stopped`) and returns `128 + signal` (148 for
+`SIGTSTP`); a bare `wait` warns once per stopped job, skips it, and returns 0.
+`wait -n` answers 127 when the only remaining jobs are stopped. `jobs` removes
+a `Done` job after listing it, and `emit_job_notices` (called by the REPL before
+each prompt) reports `Done`/`Stopped` jobs to stderr and removes the finished
+ones.
 
 **`exec` is a real `execve`.** `bsh_sys::exec(plan)` replaces the process; the
 VM maps its `io::Error` to 127/126 and exits. See the `bsh-sys` section for why
@@ -614,14 +650,13 @@ lvalues, so `(( a[99]=1 ))` and `${a[i+1]}` share one evaluator. A variable
 whose value is not a number is recursively evaluated as an expression, bounded
 by `MAX_RECURSION`.
 
-Deferred, and listed in `bsh_vm::tree`'s `# Deferred`: job control (`jobs`,
-`fg`, `bg`, `set -m`), `select`, `time`, `coproc`, `set -u`/nounset,
-`$LINENO`/`$RANDOM`/`$SECONDS`/`$PIPESTATUS`, `command`/`type`/`hash`/`builtin`,
-`getopts`, aliases, `mapfile`/`readarray`, pattern parameter operators,
-`[[ =~ ]]`, process substitution, `~user`, and `set -x`. An executable text file
-without a shebang is reported as 126 instead of being retried as a shell script
-(POSIX requires the retry), which is what blocks the three
-`$REPO_ROOT/spec/testdata/*.sh` trap cases.
+Deferred, and listed in `bsh_vm::tree`'s `# Deferred`: `select`, `time`,
+`coproc`, `set -u`/nounset, `$LINENO`/`$RANDOM`/`$SECONDS`/`$PIPESTATUS`,
+`command`/`type`/`hash`/`builtin`, `getopts`, aliases, `mapfile`/`readarray`,
+pattern parameter operators, `[[ =~ ]]`, process substitution, `~user`, and
+`set -x`. An executable text file without a shebang is reported as 126 instead
+of being retried as a shell script (POSIX requires the retry), which is what
+blocks the three `$REPO_ROOT/spec/testdata/*.sh` trap cases.
 
 **Platform constants come from `bsh-sys`.** `bsh_sys::{flags, SIGPIPE, c_int,
 mode_t}` are re-exported so no other crate needs `libc`; `bsh-vm` has no `libc`
