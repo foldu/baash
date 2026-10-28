@@ -408,3 +408,37 @@ fn a_default_rule_applies_when_no_command_rule_exists() {
         vec![b"for".to_vec()]
     );
 }
+
+#[test]
+fn a_rule_does_not_apply_to_redirections_or_assignments() {
+    let tree = TempTree::new("spec-redirect");
+    tree.file("alpha-file", b"");
+    let engine = CompletionEngine::new()
+        .with_root(&tree.root)
+        .with_specs(Rules::new(vec![(b"mycmd", spec_words(&["alpha"]))]));
+
+    // A redirection target is a filename, not the command's argument.
+    let redirect = engine.complete(b"mycmd > al", 10);
+    assert!(
+        redirect.candidates.iter().all(|c| c.insert != b"alpha"),
+        "{:?}",
+        inserts(&redirect)
+    );
+    assert!(
+        redirect
+            .candidates
+            .iter()
+            .any(|c| c.insert == b"alpha-file"),
+        "{:?}",
+        inserts(&redirect)
+    );
+
+    // An assignment value is a word the shell expands, not an argument slot
+    // with a rule.
+    let assign = engine.complete(b"mycmd FOO=al", 12);
+    assert!(
+        assign.candidates.iter().all(|c| c.insert != b"alpha"),
+        "{:?}",
+        inserts(&assign)
+    );
+}

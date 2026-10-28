@@ -290,7 +290,10 @@ impl CompletionEngine {
     /// applies (`-A directory` with a `default` fallback, so `cd $HO<TAB>`
     /// still reaches the variable provider).
     fn spec_for(&self, ctx: &Ctx) -> Option<Spec> {
-        if ctx.arg_index == 0 || ctx.param || ctx.arith || ctx.heredoc {
+        // Redirection targets and assignment values are files, not the
+        // command's arguments, even though they carry an argument index.
+        if ctx.arg_index == 0 || ctx.param || ctx.arith || ctx.heredoc || ctx.redirect || ctx.assign
+        {
             return None;
         }
         let command = ctx.command_name.as_deref()?;
