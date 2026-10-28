@@ -146,13 +146,20 @@ delegates everything else: line editing to `bsh-repl`, execution to the
    `key.rs`) but is unverified.
 7. **No `PROMPT_COMMAND`.**
 
-**Untested, and worth testing before writing code** — the probe was
-interrupted, so these are unknowns, not defects:
+**Measured** with a PTY probe driving `bsh -i` and a foreground `sleep 30`:
 
-* `Ctrl-C` **during** a foreground command: does the shell survive, does it
-  return to the prompt, what is `$?`? The child currently shares the shell's
-  process group, so the terminal delivers `SIGINT` to both.
-* `SIGTSTP`/`SIGCONT` while a child runs.
+* `Ctrl-C` **during** a foreground command already works. `SIGINT` to the
+  terminal's foreground group kills the child, the shell survives, the prompt
+  returns, `$?` is 130. The child shares the shell's process group today, so it
+  gets the same signal — that is why this works, and it is also why `Ctrl-Z`
+  fails.
+* `Ctrl-Z` wedges the terminal. `SIGTSTP` to the group stops the child *and*
+  the shell; nothing reaps the stopped child; after `SIGCONT` the shell is
+  still blocked in `waitpid` on a child with 30 seconds left to run. Keystrokes
+  are echoed by the tty and never read.
+
+**Still untested:**
+
 * terminal resize (there is a `TIOCGWINSZ` read; no `SIGWINCH` handling seen).
 * whether the line editor is restored correctly when a child leaves the tty in
   raw/cbreak mode.
@@ -189,6 +196,12 @@ triage (before the nameref wave; regenerate before use): `var-ref` 25,
 Known parser gaps: a subscript containing `$(…)` or `$((…))`; rejection with
 status 2 of malformed subscripts. Known diagnostic gap: sparse-array messages
 need the Oils caret format.
+
+**The suite is blind to interactive behaviour.** Job control is covered only by
+`spec/oils/stateful/job_control.py`, a Python pty harness that `bsh-spec` does
+not run, and prompt/editing behaviour is not covered at all. So the conformance
+numbers will not move when interactive work lands: the evidence for that work
+has to be PTY tests, and their absence is not a pass.
 
 ## 7. Decisions already made
 
