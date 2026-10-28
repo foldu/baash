@@ -1,10 +1,12 @@
-# Roadmap: the 1186-case gap
+# Roadmap: the 640-case gap
 
-The conformance baseline (README, DESIGN §8.2) was **1013/2787**; after the
-tranches below it is **1388/2787**. bash passes 2574/2787 on the same run, so
-1186 cases are things bash does and we do not.
-This file is the work queue, ordered by cases recovered per unit of work, with
-the suite file that measures each item.
+The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
+now **1980/2787** (1925 strict). bash passes 2574/2787 on the same run, so 640
+cases are things bash does and we do not.
+This file is the conformance queue, ordered by cases recovered per unit of
+work, with the suite file that measures each item — **not** the current work
+queue. Interactive usability now outranks script conformance; see
+[`state.md`](state.md) §8 for the order of work.
 
 Update the numbers here after each tranche by running:
 

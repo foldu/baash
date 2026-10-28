@@ -7,32 +7,42 @@ lives in [DESIGN.md](DESIGN.md); this file is the operator's manual.
 and `bsh` with no arguments gives you an interactive editor with syntax
 highlighting, TAB completion and history.
 
-**1677 of 2787 comparable cases pass** in the vendored Oils suite (60.2%; 1184
-cases skipped as out of scope), of which **1623 (58.2%) also pass strictly** —
+**1980 of 2787 comparable cases pass** in the vendored Oils suite (71.0%; 1184
+cases skipped as out of scope), of which **1925 (69.1%) also pass strictly** —
 that is, matching only a case's primary expectation rather than any
 `## OK <shell>` alternative. Both numbers are recorded in
 `crates/bsh-spec/baseline.txt` and CI fails if either drops.
 
-For scale, bash passes 2574/2787 (92.4%) on the same run, so 937 cases are
-things bash does and we do not yet. `docs/roadmap.md` is the ordered work
-queue. Run it yourself with
+For scale, bash passes 2574/2787 (92.4%) on the same run, so 640 cases are
+things bash does and we do not yet — 62% of that gap is closed. Conformance is
+measured but no longer the priority: interactive use comes first, and
+[`docs/state.md`](docs/state.md) is the resume document (what exists, what is
+proven, what is next). `docs/roadmap.md` is the conformance queue. Run it
+yourself with
 `cargo run -p bsh-spec -- --shell target/debug/bsh --compare bash`.
 
 Do not read the unit-test count as conformance: it is a different number
 measuring a different thing.
 
 What works today: expansion (words, `IFS`, `$@`/`$*`, quoting), redirections
-including here-documents, pipelines with `pipefail`, `if`/`for`/`while`/`until`/
-`case`, functions with `local`, subshells, command substitution, arithmetic,
-`[[ ]]`, globbing, `set -e`, `break`/`continue`/`return`/`exit`, `exec`, and
-the built-ins listed in `docs/contracts.md`.
+including here-documents, pipelines with `pipefail` and `$PIPESTATUS`,
+`if`/`for`/`while`/`until`/`case`, functions with `local`, subshells, command
+substitution, arithmetic, `[[ ]]` including `=~`, globbing with
+`extglob`/`failglob`, indexed and associative arrays, namerefs, `declare`/
+`typeset`/`readonly`/`export` with bash's own `-p` layout, the pattern
+operators (`${x#pat}`, `${x%pat}`, `${x//a/b}`, `${x@Q}`), traps, `set -e` and
+`set -u`, `break`/`continue`/`return`/`exit`, `exec`, and the built-ins listed
+in `docs/contracts.md`.
 
-Not implemented yet: traps, job control, arrays, the pattern parameter operators
-(`${x#pat}`, `${x%pat}`, `${x//a/b}`), `[[ =~ ]]`, process substitution,
-`~user`, `$RANDOM`/`$SECONDS`/`$PIPESTATUS`, `set -x`, and several registered
-built-ins (`read`, `wait`, `trap`, `umask`, `command`, `type`, `shopt`, …) which
-currently return status 2 with `BSH-E0508`. The interactive editor's deferred
-list (Ctrl-R, the full-screen picker, vi mode, `SIGWINCH` reflow) is at the top
+Not implemented yet: job control (`jobs`, `fg`, `bg`, `disown` — there are no
+per-job process groups), `history`/`fc`, the directory stack
+(`pushd`/`popd`/`dirs`), `umask`, `let`, `ulimit`, `times`, `enable`,
+`$RANDOM`/`$SECONDS`/`$FUNCNAME`, xtrace (`set -x`), `~user`, and process
+substitution (`<(...)`, rejected as `BSH-E0301`). Missing built-ins answer
+status 2 with `BSH-E0508`; missing special variables expand to nothing.
+`printf`, `pwd`, `test` and `[` are served from `PATH` by design.
+[`docs/state.md`](docs/state.md) has the full inventory; the interactive
+editor's deferred list (Ctrl-R, vi mode, undo, `SIGWINCH` reflow) is at the top
 of `crates/bsh-repl/src/lib.rs`.
 
 The bytecode backend is not written yet either: `bsh-vm` runs a tree-walking
@@ -46,13 +56,13 @@ crates/
   bsh-syntax     lexer, spans, parse outcomes, expectations
   bsh-highlight  token + theme -> styled spans, ANSI rendering
   bsh-lang       words, quoting, expansion
-  bsh-compile    AST -> bytecode chunk
+  bsh-compile    bytecode types (unwired; DESIGN §5)
   bsh-runtime    options, variables, the ShellHost interface
   bsh-vm         the interpreter loop
   bsh-sys        syscalls, tty detection, fork gate   <- the only `unsafe` crate
   bsh-complete   completion candidates and ranking
   bsh-repl       line editor and terminal rendering
-  bsh-tools      fmt, lint, explain, debugger
+  bsh-tools      dev helpers (stub)
   bsh            the binary
 ```
 
