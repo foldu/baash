@@ -196,6 +196,31 @@ fn ctrl_l_clears_the_screen_and_keeps_editing() {
 }
 
 #[test]
+fn a_coloured_prompt_does_not_count_its_non_printing_stretches() {
+    // PS1='\[\e[31m\]$\[\e[0m\] ': two visible cells (`$` and a space)
+    // around ANSI colour sequences, which go to the terminal but not to the
+    // cursor column.
+    let mut term = FakeTerminal::new(b"x");
+    let completer = StubCompleter::empty();
+    let config = Config {
+        color: false,
+        prompt: Prompt::new(b"\\[\\e[31m\\]$\\[\\e[0m\\] ".to_vec(), b"> ".to_vec()),
+        ..plain_config()
+    };
+    let mut editor = Editor::with_config(&mut term, &completer, &bsh_repl::NeverNeedsMore, config);
+    editor.step(Key::Char('x')).expect("step");
+    let frame = term.take_output();
+    assert!(
+        frame.contains("\x1b[31m$\x1b[0m x"),
+        "the prompt is painted with its colour: {frame:?}"
+    );
+    assert!(
+        frame.ends_with("\r\x1b[3C"),
+        "two visible prompt cells plus one character put the cursor at column 3: {frame:?}"
+    );
+}
+
+#[test]
 fn the_line_wraps_at_the_terminal_width() {
     let frame = last_frame(&chars("abcdef"), 5);
     assert!(

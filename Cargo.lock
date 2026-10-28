@@ -73,6 +73,7 @@ dependencies = [
  "bsh-complete",
  "bsh-diag",
  "bsh-highlight",
+ "bsh-lang",
  "bsh-sys",
  "unicode-width 0.2.2",
 ]

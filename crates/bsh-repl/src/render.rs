@@ -18,6 +18,7 @@
 use std::io;
 
 use bsh_highlight::{Style, Styled, Theme};
+use bsh_lang::prompt::ExpandedPrompt;
 use unicode_width::UnicodeWidthChar;
 
 use crate::display::Expanded;
@@ -47,8 +48,10 @@ pub struct MenuView<'a> {
 /// Everything one repaint needs.
 #[derive(Clone, Copy, Debug)]
 pub struct Frame<'a> {
-    /// The `PS1` or `PS2` text, already expanded.
-    pub prompt: &'a [u8],
+    /// The `PS1` or `PS2` text, already expanded, with the stretches that
+    /// were between `\[` and `\]` marked so they do not count toward the
+    /// display width.
+    pub prompt: &'a ExpandedPrompt,
     /// The editable slice of the line.
     pub line: &'a [u8],
     /// The cursor as a byte offset into [`Frame::line`].
@@ -272,11 +275,30 @@ impl Canvas {
     }
 }
 
-/// Paint a prompt, copying ANSI CSI sequences through without counting them.
+/// Paint a prompt: non-printing stretches are written without advancing the
+/// column, and visible text is measured.
 ///
-/// A user's `PS1` often starts with a colour escape; treating it as text would
-/// offset every column after it.
-fn paint_prompt(canvas: &mut Canvas, prompt: &[u8]) {
+/// `\[` and `\]` already delimit the hidden stretches, which is the reliable
+/// signal. ANSI CSI sequences are also copied through without counting them:
+/// a user who colours a prompt without the markers should not have every later
+/// column offset.
+fn paint_prompt(canvas: &mut Canvas, prompt: &ExpandedPrompt) {
+    let bytes = prompt.bytes();
+    let mut at = 0;
+    for hidden in prompt.non_printing() {
+        if hidden.start > at {
+            paint_visible(canvas, &bytes[at..hidden.start]);
+        }
+        canvas.raw(&bytes[hidden.clone()]);
+        at = hidden.end.max(at);
+    }
+    if at < bytes.len() {
+        paint_visible(canvas, &bytes[at..]);
+    }
+}
+
+/// Paint visible prompt text, splitting out ANSI CSI sequences.
+fn paint_visible(canvas: &mut Canvas, prompt: &[u8]) {
     let mut text_start = 0;
     let mut at = 0;
     while at < prompt.len() {

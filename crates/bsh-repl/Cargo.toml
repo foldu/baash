@@ -9,6 +9,7 @@ description = "Line editor and terminal rendering"
 [dependencies]
 bsh-highlight.workspace = true
 bsh-complete.workspace = true
+bsh-lang.workspace = true
 bsh-diag.workspace = true
 bsh-sys.workspace = true
 unicode-width.workspace = true
