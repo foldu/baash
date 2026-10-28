@@ -255,10 +255,14 @@ impl Interp {
                     Err(error) => return self.expansion_failed(error),
                 };
                 if !argv.is_empty() {
-                    // bash reports `a[0]': not a valid identifier` and runs
-                    // the command without applying it.
+                    // An element assignment is not an environment binding:
+                    // there is no `NAME=value` to hand a child. Report it and
+                    // drop the assignment, but still run the command — bash
+                    // does the same (with status 0), and the suite pins that
+                    // for a word like `a[1 + 2]=` that the parser accepted as
+                    // an assignment.
                     self.report(
-                        crate::codes::DEFERRED,
+                        crate::codes::ASSIGNMENT,
                         assignment.span.clone(),
                         format!("{}: not a valid identifier", String::from_utf8_lossy(&name)),
                     );
@@ -279,6 +283,18 @@ impl Interp {
             }
         }
         let assignment_status = self.last_cmdsub.take().unwrap_or(Status::SUCCESS);
+
+        // A circular nameref read is fatal: expansion cannot return an error,
+        // so `Vars::scalar` recorded it. Stop before running anything with a
+        // value that never resolved.
+        if self.nameref_cycle.take() {
+            self.report(
+                bsh_runtime::codes::NAMEREF_CYCLE,
+                span.clone(),
+                "circular name reference",
+            );
+            return Unwind::Exit(Status::FAILURE);
+        }
 
         // `DEBUG` runs before the command, after its words have been expanded
         // (bash sets `BASH_COMMAND` from the expanded text). A `DEBUG` handler
@@ -468,11 +484,27 @@ impl Interp {
                 return self.apply_consequence(error, Status::FAILURE);
             }
         };
-        if let Err(message) = self.apply_assignments(actions) {
-            self.report(crate::codes::ASSIGNMENT, 0..0, message);
+        if let Err(failure) = self.apply_assignments(actions) {
             self.restore_fds(saved);
-            self.state.record_error(ShellError::VariableAssignment);
-            return self.apply_consequence(ShellError::VariableAssignment, Status::FAILURE);
+            return match failure {
+                // A readonly write is a variable-assignment error, which POSIX
+                // §2.8.1 makes fatal for a non-interactive shell.
+                AssignmentFailure::Readonly(message) => {
+                    self.report(crate::codes::ASSIGNMENT, 0..0, message);
+                    self.state.record_error(ShellError::VariableAssignment);
+                    self.apply_consequence(ShellError::VariableAssignment, Status::FAILURE)
+                }
+                // A refused operand (invalid name, bad nameref subscript) is
+                // reported and the shell keeps running with status 1.
+                AssignmentFailure::Refused(message) => {
+                    self.report(crate::codes::ASSIGNMENT, 0..0, message);
+                    Unwind::Status(Status::FAILURE)
+                }
+                AssignmentFailure::Fatal(message) => {
+                    self.report(crate::codes::ASSIGNMENT, 0..0, message);
+                    Unwind::Exit(Status::FAILURE)
+                }
+            };
         }
         self.restore_fds(saved);
         // Array elements are expanded during `apply_assignments`, so a command
@@ -483,7 +515,7 @@ impl Interp {
     }
 
     /// Apply expanded assignment words in order.
-    fn apply_assignments(&mut self, actions: &[AssignmentAction]) -> Result<(), String> {
+    fn apply_assignments(&mut self, actions: &[AssignmentAction]) -> Result<(), AssignmentFailure> {
         for action in actions {
             match action {
                 AssignmentAction::Scalar {
@@ -491,12 +523,41 @@ impl Interp {
                     value,
                     append,
                 } => {
-                    let result = if *append {
-                        self.state.vars.append(name, value)
+                    // `declare -i n; n=3+4` evaluates the value; `n+=2*3`
+                    // adds the evaluated word to the current integer.
+                    if self.state.vars.target_has_integer(name) {
+                        let evaluated = match crate::arith::eval(value, self) {
+                            Ok(number) => number,
+                            Err(message) => {
+                                self.report(crate::codes::ARITHMETIC, 0..0, message.clone());
+                                return Err(AssignmentFailure::Refused(message));
+                            }
+                        };
+                        let number = if *append {
+                            let current = self
+                                .state
+                                .vars
+                                .scalar(name)
+                                .and_then(|text| {
+                                    std::str::from_utf8(text).ok()?.trim().parse::<i64>().ok()
+                                })
+                                .unwrap_or(0);
+                            current.wrapping_add(evaluated)
+                        } else {
+                            evaluated
+                        };
+                        self.state
+                            .vars
+                            .assign_scalar(name, number.to_string().as_bytes())
+                            .map_err(AssignmentFailure::from_error)?;
                     } else {
-                        self.state.vars.assign_scalar(name, value)
-                    };
-                    result.map_err(|error| error.message())?;
+                        let result = if *append {
+                            self.state.vars.append(name, value)
+                        } else {
+                            self.state.vars.assign_scalar(name, value)
+                        };
+                        result.map_err(AssignmentFailure::from_error)?;
+                    }
                     if self.state.opts.allexport {
                         let _ = self.state.vars.mark_exported(name);
                     }
@@ -507,14 +568,32 @@ impl Interp {
                     value,
                     append,
                 } => {
-                    self.assign_element(name, subscript, *append, value)?;
+                    self.assign_element(name, subscript, *append, value)
+                        .map_err(AssignmentFailure::Refused)?;
                 }
                 AssignmentAction::Array {
                     name,
                     elements,
                     append,
                 } => {
-                    self.assign_array_literal(name, elements, *append, None)?;
+                    // A nameref holds a name, not a value: assigning it an
+                    // array would have to replace the reference, and bash's
+                    // answer (drop the attribute, write the target) is not a
+                    // contract worth reproducing. Reject and stop the shell.
+                    if self
+                        .state
+                        .vars
+                        .lookup(name)
+                        .is_some_and(|var| var.attrs.nameref)
+                    {
+                        self.state.request_exit(Status::FAILURE);
+                        return Err(AssignmentFailure::Fatal(format!(
+                            "{}: cannot assign array to a nameref",
+                            String::from_utf8_lossy(name)
+                        )));
+                    }
+                    self.assign_array_literal(name, elements, *append, None)
+                        .map_err(AssignmentFailure::Readonly)?;
                 }
             }
         }
@@ -1395,6 +1474,30 @@ impl Interp {
         self.background.insert(pid, None);
         self.jobs.retain(|candidate| *candidate != pid);
         self.jobs.push(pid);
+    }
+}
+
+/// How an assignment word failed.
+enum AssignmentFailure {
+    /// A variable the shell cannot write (`readonly`): fatal for a
+    /// non-interactive shell.
+    Readonly(String),
+    /// A word that does not name a writable location (bad subscript, nameref
+    /// element target): status 1, keep going.
+    Refused(String),
+    /// An operation the shell refuses outright: stop with status 1.
+    Fatal(String),
+}
+
+impl AssignmentFailure {
+    fn from_error(error: bsh_runtime::Error) -> Self {
+        match error {
+            bsh_runtime::Error::Readonly { .. } => Self::Readonly(error.message()),
+            bsh_runtime::Error::NamerefCycle { .. } | bsh_runtime::Error::NamerefSelf { .. } => {
+                Self::Fatal(error.message())
+            }
+            other => Self::Refused(other.message()),
+        }
     }
 }
 

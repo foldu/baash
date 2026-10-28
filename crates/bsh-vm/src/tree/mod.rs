@@ -240,6 +240,14 @@ pub struct Interp {
     /// `bi_declare` drains it. The literal is structural so it cannot be
     /// confused with the textual placeholder `argv` carries.
     array_literals: Vec<ArrayLiteral>,
+    /// Set when expansion read a variable whose nameref chain is circular.
+    ///
+    /// `bsh_lang::Vars::get` takes `&self` and answers `Option<&[u8]>`, so it
+    /// cannot report the cycle itself. The flag records it and the next
+    /// command boundary turns it into a fatal diagnostic, which is what makes
+    /// `typeset -n a=b; typeset -n b=a; echo $a` stop instead of printing an
+    /// empty string and looking like an unset variable.
+    nameref_cycle: std::cell::Cell<bool>,
     /// Bytes a `read` pulled from a descriptor but could not give back.
     ///
     /// Only a descriptor that is not seekable can end up here; on a regular
@@ -366,6 +374,7 @@ impl Interp {
             pending: None,
             depth: 0,
             array_literals: Vec::new(),
+            nameref_cycle: std::cell::Cell::new(false),
             read_buffers: std::collections::BTreeMap::new(),
             signals: traps::SignalState::default(),
             run_depth: 0,
@@ -700,7 +709,11 @@ impl bsh_lang::Vars for Interp {
                 _ => {}
             }
         }
-        self.state.vars.scalar(name)
+        let value = self.state.vars.scalar(name);
+        if value.is_none() && self.state.vars.is_nameref_cycle(name) {
+            self.nameref_cycle.set(true);
+        }
+        value
     }
 
     fn positional(&self) -> &[Vec<u8>] {
