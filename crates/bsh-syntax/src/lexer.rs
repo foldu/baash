@@ -410,8 +410,20 @@ pub fn lex(src: &[u8]) -> Vec<Token> {
 
 /// Split `src` into tokens and report here-documents and unterminated
 /// constructs.
+///
+/// The default profile: `extglob` off at parse time, which is what a shell
+/// with `shopt -u extglob` sees. Use [`lex_full_with`] to say otherwise.
 pub fn lex_full(src: &[u8]) -> Lexed {
-    let mut lx = Lexer::new(src, 0, 0, None);
+    lex_full_with(src, false)
+}
+
+/// [`lex_full`] with the parse-affecting options the token stream depends on.
+///
+/// Only `extglob` changes the token stream: with it on, `!(` is always a
+/// group, so the parser (and everything downstream) sees the word bash would
+/// see. With it off, `!(` at the start of a statement stays pipeline negation.
+pub fn lex_full_with(src: &[u8], extglob: bool) -> Lexed {
+    let mut lx = Lexer::new(src, 0, 0, None, extglob);
     lx.run();
     let mut open = lx.nest;
     open.reverse();
@@ -641,7 +653,7 @@ pub(crate) fn skip_dquote(
                         i = end;
                     }
                     None => {
-                        scan_backtick_body(src, i + 1, depth, nest);
+                        scan_backtick_body(src, i + 1, depth, nest, false);
                         return None;
                     }
                 }
@@ -677,7 +689,7 @@ pub(crate) fn skip_param(
                         i = end;
                     }
                     None => {
-                        scan_backtick_body(src, i + 1, depth, nest);
+                        scan_backtick_body(src, i + 1, depth, nest, false);
                         return None;
                     }
                 }
@@ -728,7 +740,7 @@ pub(crate) fn scan_arith(
                         i = end;
                     }
                     None => {
-                        scan_backtick_body(src, i + 1, depth, nest);
+                        scan_backtick_body(src, i + 1, depth, nest, false);
                         return None;
                     }
                 }
@@ -832,7 +844,7 @@ pub(crate) fn scan_dollar(
                 opener: from..from + 2,
                 content_start: from + 2,
             });
-            match scan_region(src, from + 2, depth) {
+            match scan_region(src, from + 2, depth, false) {
                 Region {
                     end: Some(rparen), ..
                 } => {
@@ -875,11 +887,17 @@ fn push_backtick(nest: &mut Vec<OpenConstruct>, at: usize) {
 
 /// Lex the body of a backtick substitution that never closed, so constructs
 /// opened inside it join the nesting chain.
-fn scan_backtick_body(src: &[u8], from: usize, depth: usize, nest: &mut Vec<OpenConstruct>) {
+fn scan_backtick_body(
+    src: &[u8],
+    from: usize,
+    depth: usize,
+    nest: &mut Vec<OpenConstruct>,
+    extglob: bool,
+) {
     if depth >= MAX_NEST {
         return;
     }
-    let mut inner = Lexer::new(src, from, depth + 1, None);
+    let mut inner = Lexer::new(src, from, depth + 1, None, extglob);
     inner.run();
     nest.extend(inner.nest);
 }
@@ -951,6 +969,7 @@ pub(crate) fn scan_word(
     depth: usize,
     nest: &mut Vec<OpenConstruct>,
     statement_start: bool,
+    extglob: bool,
 ) -> WordScan {
     let mut i = start;
     // Once an extglob group runs to end of input, no later group in this word
@@ -968,7 +987,7 @@ pub(crate) fn scan_word(
                     opener: i..i + 2,
                     content_start: i + 2,
                 });
-                match scan_region(src, i + 2, depth) {
+                match scan_region(src, i + 2, depth, extglob) {
                     Region {
                         end: Some(rparen), ..
                     } => {
@@ -1030,7 +1049,7 @@ pub(crate) fn scan_word(
                         i = end;
                     }
                     None => {
-                        scan_backtick_body(src, i + 1, depth, nest);
+                        scan_backtick_body(src, i + 1, depth, nest, extglob);
                         return WordScan {
                             end: src.len(),
                             unterminated: nest.last().cloned(),
@@ -1097,14 +1116,14 @@ pub(crate) struct Region {
 /// nested substitutions and here-document bodies cannot end the substitution
 /// early. When the region never closes, its nesting stack is returned so the
 /// caller can extend its own.
-pub(crate) fn scan_region(src: &[u8], start: usize, depth: usize) -> Region {
+pub(crate) fn scan_region(src: &[u8], start: usize, depth: usize, extglob: bool) -> Region {
     if depth >= MAX_NEST {
         return Region {
             end: None,
             open: Vec::new(),
         };
     }
-    let mut lx = Lexer::new(src, start, depth + 1, Some(StopMode { depth: 0 }));
+    let mut lx = Lexer::new(src, start, depth + 1, Some(StopMode { depth: 0 }), extglob);
     lx.run();
     if lx.stopped {
         Region {
@@ -1121,7 +1140,7 @@ pub(crate) fn scan_region(src: &[u8], start: usize, depth: usize) -> Region {
 
 /// [`scan_region`] when only the close position is needed.
 pub(crate) fn region_end(src: &[u8], start: usize, depth: usize) -> Option<usize> {
-    scan_region(src, start, depth).end
+    scan_region(src, start, depth, false).end
 }
 
 /// Quote-remove a here-document delimiter word.
@@ -1207,6 +1226,12 @@ struct Lexer<'a> {
     pending: Vec<usize>,
     /// Here-document waiting for its delimiter word.
     pending_delim: Option<usize>,
+    /// Whether `extglob` was on when this chunk started being parsed.
+    ///
+    /// It decides one thing: whether a word-initial `!(` is a group or
+    /// pipeline negation. bash settles that at parse time, so a chunk parsed
+    /// with the option on must not invent the negation reading.
+    extglob: bool,
     /// A redirection was lexed with no adjacent target; the next word is it.
     redirect_target: bool,
     cmd_pos: bool,
@@ -1253,10 +1278,11 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn new(src: &'a [u8], i: usize, depth: usize, stop: Option<StopMode>) -> Self {
+    fn new(src: &'a [u8], i: usize, depth: usize, stop: Option<StopMode>, extglob: bool) -> Self {
         Self {
             src,
             i,
+            extglob,
             tokens: Vec::new(),
             heredocs: Vec::new(),
             unterminated: Vec::new(),
@@ -1576,7 +1602,14 @@ impl<'a> Lexer<'a> {
         let mut target: Option<Span> = None;
         if let Some(&b) = self.src.get(op_end) {
             if !is_meta(b) {
-                let scan = scan_word(self.src, op_end, self.depth, &mut Vec::new(), false);
+                let scan = scan_word(
+                    self.src,
+                    op_end,
+                    self.depth,
+                    &mut Vec::new(),
+                    false,
+                    self.extglob,
+                );
                 if scan.unterminated.is_none() {
                     end = scan.end;
                     target = Some(op_end..end);
@@ -1628,7 +1661,14 @@ impl<'a> Lexer<'a> {
     fn word(&mut self) {
         let start = self.i;
         let statement_start = self.at_statement_start();
-        let scan = scan_word(self.src, start, self.depth, &mut self.nest, statement_start);
+        let scan = scan_word(
+            self.src,
+            start,
+            self.depth,
+            &mut self.nest,
+            statement_start,
+            self.extglob,
+        );
         self.i = scan.end;
         let text = &self.src[start..scan.end];
         if scan.unterminated.is_none() && text == b"\\\n" {

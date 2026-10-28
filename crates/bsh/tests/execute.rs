@@ -895,3 +895,27 @@ fn the_locale_decides_whether_length_counts_bytes_or_characters() {
     assert_eq!(run_locale("C"), "3");
     assert_eq!(run_locale("C.UTF-8"), "2");
 }
+
+#[test]
+fn dash_o_sets_a_shopt_option_before_parsing() {
+    // `-O extglob` is parse-time, like bash: it is the only way a *script* can
+    // be parsed with `!(…)` as a group rather than pipeline negation.
+    let output = bsh()
+        .args(["-O", "extglob", "-c", "case abc in @(a|b)*) echo m;; esac"])
+        .output()
+        .expect("spawn bsh");
+    assert_eq!(stdout(&output), "m\n");
+
+    // Without the flag the line still *parses* (the lexer is a superset of
+    // bash's) but `@(…)` is not a pattern, so the arm does not match. bash
+    // would report a syntax error here; the divergence is deliberate and
+    // documented in the lexer.
+    let output = run("case abc in @(a|b)*) echo m;; *) echo n;; esac");
+    assert_eq!(stdout(&output), "n\n");
+
+    let output = bsh()
+        .args(["-O", "nope", "-c", "echo x"])
+        .output()
+        .expect("spawn bsh");
+    assert_eq!(code(&output), 2, "an unknown shopt name must be rejected");
+}

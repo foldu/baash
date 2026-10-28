@@ -278,7 +278,7 @@ pub fn parse_word_at(
     opts: &ParseOpts,
 ) -> Result<(Word, usize), ParseWordError> {
     let offset = offset.min(src.len());
-    let lexed = lexer::lex_full(src);
+    let lexed = lexer::lex_full_with(src, opts.extglob);
     let mut index = None;
     for (i, token) in lexed.tokens.iter().enumerate() {
         if matches!(

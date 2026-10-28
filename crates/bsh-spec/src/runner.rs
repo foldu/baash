@@ -42,6 +42,13 @@ pub struct Options {
     pub jobs: usize,
     pub keep_temp: bool,
     pub compare: Vec<Reference>,
+    /// The locale every shell runs under (`LC_ALL`).
+    ///
+    /// `C` by default: byte semantics are the reproducible baseline, and the
+    /// suite's primary expectations were written in a UTF-8 environment, so
+    /// running both the shell under test *and* the references under one locale
+    /// is what makes the comparison mean anything.
+    pub locale: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -711,7 +718,7 @@ fn run_one(
         .env("SH", shell)
         .env("TMP", &dir)
         .env("REPO_ROOT", &shim.repo)
-        .env("LC_ALL", "C")
+        .env("LC_ALL", &options.locale)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

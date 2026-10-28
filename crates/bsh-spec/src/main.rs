@@ -29,6 +29,7 @@ OPTIONS
     --ratchet           Exit 1 when the count falls below the baseline
     --strict            Ratchet and --min use the primary-expectation count
     --tolerance N       Allow a dip of N cases before the ratchet fails
+    --locale NAME       LC_ALL for every shell (default: C)
     --timeout SECS      Per-case timeout (default: 10)
     --jobs N            Cases are run in parallel across files (default: 4)
     --keep-temp         Keep the per-run temp directory
@@ -70,6 +71,7 @@ struct Cli {
     timeout: Duration,
     jobs: usize,
     keep_temp: bool,
+    locale: String,
 }
 
 fn run(started: Instant) -> Result<std::process::ExitCode, String> {
@@ -166,6 +168,7 @@ fn run(started: Instant) -> Result<std::process::ExitCode, String> {
         jobs: cli.jobs,
         keep_temp: cli.keep_temp,
         compare: references,
+        locale: cli.locale.clone(),
     };
     // Refuse to measure rather than report a number that means nothing.
     bsh_spec::runner::require_helper_runtime()?;
@@ -466,6 +469,7 @@ fn parse_args() -> Result<Cli, String> {
         timeout: Duration::from_secs(10),
         jobs: 4,
         keep_temp: false,
+        locale: "C".to_string(),
     };
     let mut args = std::env::args_os().skip(1).peekable();
     while let Some(arg) = args.next() {
@@ -511,6 +515,13 @@ fn parse_args() -> Result<Cli, String> {
                     .ok_or("--tolerance must be valid UTF-8")?
                     .parse()
                     .map_err(|_| "--tolerance requires a non-negative integer")?;
+            }
+            "--locale" => {
+                let raw = value("--locale")?;
+                cli.locale = raw
+                    .to_str()
+                    .ok_or("--locale must be valid UTF-8")?
+                    .to_string();
             }
             "--min" => {
                 let raw = value("--min")?;

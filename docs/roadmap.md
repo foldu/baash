@@ -113,6 +113,15 @@ At the start of this tranche the suite stood at 1013/2787 total. It is now
       a statement stays pipeline negation (so `if !(a && b)` works, and
       `for x in !(a)` is a group).
       Remaining extglob failures are mostly brace expansion, not matching.
+- [x] `-O`/`+O name` on the command line, so a *script* can be parsed with
+      `extglob` on (the option is parse-time, so `shopt` inside the file cannot
+      do it). The `!(…)` reading is now decided by `ParseOpts::extglob`, which
+      the lexer finally receives: with the option on, `!(x)` at line start is a
+      group; with it off, it is pipeline negation.
+- [x] `--locale NAME` in `bsh-spec`, so the suite can be run under any locale.
+      Measured: **C gives 1701, C.UTF-8 gives 1716** for us, but bash drops
+      from **2574 to 2435** under C.UTF-8 — the suite's primary expectations
+      are byte-calibrated, so C stays the baseline and UTF-8 is diagnostic.
 - [ ] `[[ =~ ]]` with `BASH_REMATCH` (34).
 - [x] `$LINENO` (from node spans) and `$PIPESTATUS`.
 - [ ] `$RANDOM`, `$SECONDS`, `$FUNCNAME`, `$BASH_SOURCE`, `BASH_LINENO`.

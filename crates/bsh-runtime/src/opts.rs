@@ -520,6 +520,24 @@ impl Opts {
         self.options(kind).map(|option| option.name)
     }
 
+    /// Set or unset a `shopt` option by name.
+    ///
+    /// Separate from [`Opts::set_by_name_in`] because the CLI has a name and no
+    /// [`OptionKind`] to offer, and because a name that is not a `shopt` option
+    /// must be an error rather than a no-op.
+    pub fn set_shopt_by_name(opts: &mut Opts, name: &[u8], on: bool) -> Result<(), Error> {
+        opts.set_by_name_in(OptionKind::Shopt, name, on)
+    }
+
+    /// Whether `name` is a `shopt` option.
+    ///
+    /// The CLI needs this before it has an [`Opts`] to mutate: `-O extglob`
+    /// must be rejected at parse time if the name does not exist, rather than
+    /// silently accepted and ignored.
+    pub fn is_shopt_name(name: &[u8]) -> bool {
+        Flag::lookup(name).is_some_and(|flag| flag.in_kind(OptionKind::Shopt))
+    }
+
     /// Every known name, regardless of table, in table order.
     pub fn all_names(&self) -> impl Iterator<Item = &'static str> + '_ {
         ALL_FLAGS.iter().map(|flag| flag.name())

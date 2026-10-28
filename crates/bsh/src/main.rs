@@ -65,10 +65,22 @@ enum Mode {
 struct ShellFlags {
     set: Vec<FlagSpec>,
     clear: Vec<FlagSpec>,
+    /// `-O name`: shopt options to set before the first parse.
+    shopt_set: Vec<Vec<u8>>,
+    /// `+O name`: shopt options to unset before the first parse.
+    shopt_clear: Vec<Vec<u8>>,
 }
 
 impl ShellFlags {
     fn apply(&self, opts: &mut bsh_runtime::Opts) -> Result<(), String> {
+        for name in &self.shopt_set {
+            bsh_runtime::Opts::set_shopt_by_name(opts, name, true)
+                .map_err(|error| format!("-O {}: {error}", String::from_utf8_lossy(name)))?;
+        }
+        for name in &self.shopt_clear {
+            bsh_runtime::Opts::set_shopt_by_name(opts, name, false)
+                .map_err(|error| format!("+O {}: {error}", String::from_utf8_lossy(name)))?;
+        }
         for spec in &self.set {
             spec.apply(opts, true)?;
         }
@@ -188,6 +200,30 @@ fn parse_args(args: &[OsString]) -> Result<(Mode, bool, ShellFlags), String> {
                     "unknown option `{}`",
                     String::from_utf8_lossy(other)
                 ));
+            }
+            other @ (b"-O" | b"+O") => {
+                // `-O extglob` is how bash lets a *script* be parsed with
+                // extglob on. The decision is parse-time, so it has to be a
+                // command-line flag, not a `shopt` the file itself runs.
+                index += 1;
+                let Some(name) = args.get(index) else {
+                    return Err(format!(
+                        "{} requires an option name",
+                        String::from_utf8_lossy(other)
+                    ));
+                };
+                let name = bytes(name);
+                if !bsh_runtime::Opts::is_shopt_name(&name) {
+                    return Err(format!(
+                        "unknown shopt option `{}`",
+                        String::from_utf8_lossy(&name)
+                    ));
+                }
+                if other == b"-O" {
+                    flags.shopt_set.push(name);
+                } else {
+                    flags.shopt_clear.push(name);
+                }
             }
             other if other.len() > 1 && (other[0] == b'-' || other[0] == b'+') => {
                 // A bundle of `set` letters: `-eu`, `+x`. The letters this CLI
