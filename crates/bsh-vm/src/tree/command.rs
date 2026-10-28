@@ -57,7 +57,7 @@ enum AssignmentAction {
 }
 
 /// Where the shell finds commands when `PATH` is unset.
-const DEFAULT_PATH: &[u8] = b"/usr/local/bin:/usr/bin:/bin";
+pub(crate) const DEFAULT_PATH: &[u8] = b"/usr/local/bin:/usr/bin:/bin";
 
 /// One place a command name resolved to, in search order.
 ///
@@ -122,7 +122,7 @@ struct Invocation<'a> {
 /// entry for `{`/`}`, which are operators there. This list is bash's `type`
 /// answer — `type -t '{'` is `keyword` — so it is spelled here rather than
 /// borrowed wrongly. It is a classification table; nothing dispatches on it.
-const KEYWORDS: &[&[u8]] = &[
+pub(crate) const KEYWORDS: &[&[u8]] = &[
     b"!",
     b"[[",
     b"]]",
@@ -780,7 +780,7 @@ impl Interp {
         Unwind::Status(status)
     }
 
-    fn call_function(
+    pub(crate) fn call_function(
         &mut self,
         chunk: &Arc<ParsedChunk>,
         index: usize,
@@ -1199,7 +1199,7 @@ impl Interp {
     }
 
     /// The newest definition of `name`, if any.
-    fn function_index(&self, name: &[u8]) -> Option<usize> {
+    pub(crate) fn function_index(&self, name: &[u8]) -> Option<usize> {
         self.functions
             .iter()
             .rposition(|function| function.name == name)
@@ -1388,7 +1388,7 @@ enum BuiltinBody<'a> {
 }
 
 /// Whether `path` names a regular file with an execute bit set.
-fn executable(path: &[u8]) -> bool {
+pub(crate) fn executable(path: &[u8]) -> bool {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
     let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path));

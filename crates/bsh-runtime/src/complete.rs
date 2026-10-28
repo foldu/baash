@@ -6,9 +6,9 @@
 //! shell (which action a name means, how a prefix filters a candidate list)
 //! lives here, where it can be tested with a fake source.
 //!
-//! This is the `compgen` half of programmable completion. The bash grammar for
-//! `complete`/`compopt` (`-F`, `-W`, `-o`, `-P`, `-S`, …) is a front end over
-//! the same actions and lands with the built-in bodies.
+//! This is the `compgen` half of programmable completion: the vocabulary the
+//! built-in bodies in `builtins::complete` are written against, and the state
+//! `complete`/`compopt` own.
 
 #![forbid(unsafe_code)]
 
@@ -259,6 +259,113 @@ pub fn filter_prefix(candidates: &mut Vec<Vec<u8>>, prefix: &[u8]) {
     candidates.retain(|candidate| candidate.starts_with(prefix));
 }
 
+/// What expanding a `-W` word list produced.
+///
+/// The three outcomes are three different statuses, which is why this is not
+/// a `Result`: a word list that does not parse is a *usage* error (2, the
+/// suite pins it) while one whose expansion fails at run time (`$((1/0))`) is
+/// an ordinary failure (1) — and in the second case nothing is printed, not
+/// even the words that had already expanded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WordList {
+    /// The candidate words, after `IFS` splitting and expansion.
+    Words(Vec<Vec<u8>>),
+    /// The list does not parse: status 2, like any other syntax error.
+    SyntaxError,
+    /// Expansion failed at run time: status 1.
+    RuntimeError,
+}
+
+/// The `-o` option names `compgen`, `complete` and `compopt` accept.
+///
+/// Bash's list; a name outside it is a usage error (the suite pins
+/// `compopt -o invalid` to status 2). The runtime implements the three that
+/// change *which candidates are generated* (`default`, `dirnames`,
+/// `plusdirs`); the rest are completion post-processing and are accepted and
+/// recorded, not applied here.
+pub const COMPLETION_OPTIONS: &[&str] = &[
+    "bashdefault",
+    "default",
+    "dirnames",
+    "filenames",
+    "fullquote",
+    "noquote",
+    "nosort",
+    "nospace",
+    "plusdirs",
+];
+
+/// Whether `name` is one of [`COMPLETION_OPTIONS`].
+pub fn is_completion_option(name: &[u8]) -> bool {
+    COMPLETION_OPTIONS
+        .iter()
+        .any(|option| option.as_bytes() == name)
+}
+
+/// The completion being generated right now — the state `compopt` edits.
+///
+/// `compopt` only works while a completion function runs, so the state it
+/// edits is not the saved spec (that is [`CompletionTable`]) but the transient
+/// option list of the completion in progress. Keeping it here rather than in
+/// the caller is what lets `compopt` be a built-in body: it needs no second
+/// opinion about whether a completion is running.
+#[derive(Clone, Debug, Default)]
+pub struct CompletionRun {
+    /// How deeply nested the generation is. A `compgen -F` inside a completion
+    /// function is still one completion, and the inner call must not clear the
+    /// outer one's options when it ends.
+    depth: usize,
+    /// The options in effect, in the order they were set.
+    options: Vec<Vec<u8>>,
+}
+
+impl CompletionRun {
+    /// Mark the start of a completion, seeded with the spec's saved options.
+    pub fn begin(&mut self, options: &[Vec<u8>]) {
+        if self.depth == 0 {
+            self.options = options.to_vec();
+        }
+        self.depth += 1;
+    }
+
+    /// Mark the end of a completion.
+    pub fn end(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+        if self.depth == 0 {
+            self.options.clear();
+        }
+    }
+
+    /// Whether a completion is being generated, which is what `compopt`
+    /// requires before it will change anything.
+    pub fn is_active(&self) -> bool {
+        self.depth > 0
+    }
+
+    /// Turn an option on or off. `compopt -o nospace +o filenames`.
+    pub fn set_option(&mut self, name: &[u8], on: bool) {
+        self.options.retain(|option| option.as_slice() != name);
+        if on {
+            self.options.push(name.to_vec());
+        }
+    }
+
+    /// The options in effect, in the order they were set.
+    pub fn options(&self) -> &[Vec<u8>] {
+        &self.options
+    }
+
+    /// Whether `name` is currently on.
+    pub fn has_option(&self, name: &[u8]) -> bool {
+        self.options.iter().any(|option| option.as_slice() == name)
+    }
+}
+
+/// Whether `options` contains `name`.
+pub fn has_option(options: &[Vec<u8>], name: &[u8]) -> bool {
+    options.iter().any(|option| option.as_slice() == name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,7 +520,10 @@ pub struct CompletionSpec {
     pub function: Option<Vec<u8>>,
     /// `-C name`: a command whose output is the candidate list.
     pub command: Option<Vec<u8>>,
-    /// `-G glob`: filter generated candidates through a pattern.
+    /// `-G glob`: a glob whose matches are candidates in their own right.
+    ///
+    /// This is bash's meaning, not a filter: `compgen -G 'o*'` offers the
+    /// files matching `o*`, and `-X` is the operand that removes candidates.
     pub glob: Option<Vec<u8>>,
     /// `-P prefix`: prepend to every candidate.
     pub prefix: Option<Vec<u8>>,
@@ -732,6 +842,64 @@ impl CompletionTable {
     /// Whether no command has a spec.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod run_tests {
+    use super::*;
+
+    #[test]
+    fn the_completion_run_is_active_only_between_begin_and_end() {
+        let mut run = CompletionRun::default();
+        assert!(!run.is_active(), "nothing is being generated at startup");
+
+        run.begin(&[b"filenames".to_vec()]);
+        assert!(run.is_active());
+        assert!(run.has_option(b"filenames"));
+        run.set_option(b"nospace", true);
+        run.set_option(b"filenames", false);
+        assert_eq!(run.options(), &[b"nospace".to_vec()]);
+
+        // Nesting — a `compgen -F` inside a completion function — must not
+        // clear the outer completion's options when the inner one ends.
+        run.begin(&[]);
+        run.set_option(b"plusdirs", true);
+        run.end();
+        assert!(run.is_active());
+        assert!(run.has_option(b"nospace"), "the outer options survive");
+
+        run.end();
+        assert!(!run.is_active());
+        assert!(run.options().is_empty(), "the run leaves no state behind");
+    }
+
+    #[test]
+    fn option_names_are_the_bash_set() {
+        for name in [
+            &b"bashdefault"[..],
+            b"default",
+            b"dirnames",
+            b"filenames",
+            b"fullquote",
+            b"noquote",
+            b"nosort",
+            b"nospace",
+            b"plusdirs",
+        ] {
+            assert!(is_completion_option(name), "{name:?}");
+        }
+        assert!(!is_completion_option(b"nope"));
+        assert!(!is_completion_option(b""));
+        assert_eq!(COMPLETION_OPTIONS.len(), 9);
+    }
+
+    #[test]
+    fn word_list_outcomes_are_distinct() {
+        // `compgen -W` returns a different status for each: 2 for a list that
+        // does not parse, 1 for one whose expansion fails, 0 for candidates.
+        assert_ne!(WordList::SyntaxError, WordList::RuntimeError);
+        assert_ne!(WordList::Words(Vec::new()), WordList::SyntaxError);
     }
 }
 

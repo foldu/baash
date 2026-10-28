@@ -102,6 +102,16 @@ pub struct ShellState {
     /// Alias definitions. They are inherited by a forked subshell (bash copies
     /// them) and, like every other piece of shell state, not by `exec`.
     pub aliases: AliasTable,
+    /// Programmable-completion specs: what `complete` defines. Kept in
+    /// definition order like [`AliasTable`], because `complete -p` prints in
+    /// that order.
+    pub completions: complete::CompletionTable,
+    /// The completion being generated, if any: the state `compopt` edits.
+    ///
+    /// Deliberately *not* part of [`ShellState::completions`]: a `compopt`
+    /// inside a completion function changes the run in progress, and only the
+    /// engine that finishes the completion decides what to save.
+    pub completion: complete::CompletionRun,
     /// Where `getopts` is in the argument it is scanning.
     ///
     /// `OPTIND` names the argument and this holds the character offset inside
@@ -137,6 +147,8 @@ impl ShellState {
             vars: Vars::default(),
             traps: TrapTable::default(),
             aliases: AliasTable::new(),
+            completions: complete::CompletionTable::default(),
+            completion: complete::CompletionRun::default(),
             getopts: GetoptsState::default(),
             error: None,
             exit_request: None,
@@ -328,6 +340,74 @@ pub trait ShellHost {
     /// host cannot render it and `type` prints the one-line form.
     fn function_source(&self, name: &[u8]) -> Option<Vec<u8>> {
         let _ = name;
+        None
+    }
+
+    /// The shell as a candidate source for `compgen`.
+    ///
+    /// The candidates are shell state — variables, functions, aliases,
+    /// built-ins, `PATH` — so the trait is implemented where that state lives
+    /// and this crate never grows a second copy of it. `None` means the host
+    /// cannot enumerate candidates, which makes `compgen` fail rather than
+    /// offer a wrong list.
+    fn completion_source(&mut self) -> Option<&mut dyn complete::CompletionSource> {
+        None
+    }
+
+    /// Split and expand one `compgen -W` / `complete -W` word list.
+    ///
+    /// The default treats the list as blank-separated literal words: no
+    /// expansion, no quoting, no `IFS`. That is honest for a host with no
+    /// parser and is what the built-in unit tests use; the VM overrides it with
+    /// the real quote-aware split and word expansion.
+    fn completion_words(&mut self, wordlist: &[u8]) -> complete::WordList {
+        let words = wordlist
+            .split(|byte| byte.is_ascii_whitespace())
+            .filter(|word| !word.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect();
+        complete::WordList::Words(words)
+    }
+
+    /// Whether a `-W` word list parses.
+    ///
+    /// `complete -W '${' name` must be rejected when it is *defined*, not when
+    /// a completion later runs (the suite pins status 2), so the syntax check
+    /// has to happen without expanding anything. The default accepts every
+    /// list, which matches a host without a parser.
+    fn check_completion_words(&mut self, wordlist: &[u8]) -> bool {
+        let _ = wordlist;
+        true
+    }
+
+    /// Whether `name` is a shell function.
+    ///
+    /// `complete -F missing` is a usage error when it is defined, so the
+    /// built-in asks before it saves the spec. The default knows no functions.
+    fn is_function(&self, name: &[u8]) -> bool {
+        let _ = name;
+        false
+    }
+
+    /// Run shell function `name` with `argv` as its positional parameters.
+    ///
+    /// This is how a completion function is called: in the current shell, so
+    /// the `COMPREPLY` it assigns is readable afterwards. `None` means there is
+    /// no such function. The caller owns the completion variables
+    /// (`COMP_LINE`, `COMP_WORDS`, …), because they are ordinary variables.
+    fn call_function(&mut self, name: &[u8], argv: &[Vec<u8>]) -> Option<Status> {
+        let _ = (name, argv);
+        None
+    }
+
+    /// Run `argv` as a command and return its standard output and status.
+    ///
+    /// This is `compgen -C` / `complete -C`: the command's output *is* the
+    /// candidate list, so it has to be captured rather than printed. `None`
+    /// means the host cannot capture, which the built-in reports instead of
+    /// letting the output escape unfiltered.
+    fn capture_command(&mut self, argv: &[Vec<u8>]) -> Option<(Vec<u8>, Status)> {
+        let _ = argv;
         None
     }
 }

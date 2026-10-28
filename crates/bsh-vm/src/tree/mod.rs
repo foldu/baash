@@ -120,6 +120,7 @@ use bsh_syntax::{Ast, NodeId, ParseOpts, ParseOutcome, parse_with};
 mod alias;
 mod builtins;
 mod command;
+mod complete;
 mod cond;
 mod eval;
 mod jobs;
@@ -1115,6 +1116,33 @@ impl ShellHost for Interp {
 
     fn function_source(&self, name: &[u8]) -> Option<Vec<u8>> {
         self.function_body(name)
+    }
+
+    fn completion_source(&mut self) -> Option<&mut dyn bsh_runtime::complete::CompletionSource> {
+        // `complete.rs` implements the trait for the interpreter, so `compgen`
+        // asks the shell itself: there is no second name table to disagree
+        // with execution.
+        Some(self)
+    }
+
+    fn completion_words(&mut self, wordlist: &[u8]) -> bsh_runtime::complete::WordList {
+        self.completion_wordlist(wordlist)
+    }
+
+    fn check_completion_words(&mut self, wordlist: &[u8]) -> bool {
+        self.completion_wordlist_parses(wordlist)
+    }
+
+    fn is_function(&self, name: &[u8]) -> bool {
+        self.function_index(name).is_some()
+    }
+
+    fn call_function(&mut self, name: &[u8], argv: &[Vec<u8>]) -> Option<Status> {
+        self.completion_call(name, argv)
+    }
+
+    fn capture_command(&mut self, argv: &[Vec<u8>]) -> Option<(Vec<u8>, Status)> {
+        self.completion_capture(argv)
     }
 }
 
