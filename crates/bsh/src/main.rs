@@ -69,6 +69,10 @@ struct ShellFlags {
     shopt_set: Vec<Vec<u8>>,
     /// `+O name`: shopt options to unset before the first parse.
     shopt_clear: Vec<Vec<u8>>,
+    /// `--rcfile FILE`: the startup file to read instead of `~/.bashrc`.
+    rcfile: Option<std::path::PathBuf>,
+    /// `--norc`: read no startup file at all.
+    norc: bool,
 }
 
 impl ShellFlags {
@@ -193,6 +197,14 @@ fn parse_args(args: &[OsString]) -> Result<(Mode, bool, ShellFlags), String> {
                 }
                 break;
             }
+            b"--rcfile" => {
+                index += 1;
+                let Some(path) = args.get(index) else {
+                    return Err("--rcfile requires a path".to_string());
+                };
+                flags.rcfile = Some(std::path::PathBuf::from(path));
+            }
+            b"--norc" => flags.norc = true,
             other if other.starts_with(b"--") => {
                 // Every long option this shell has is matched above; the rest
                 // are errors rather than a bundle of `set` letters.
@@ -311,6 +323,11 @@ fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
             let repl = from_stdin && stdin_tty;
             let interactive = interactive_flag || repl;
             let mut shell = shell(interactive, &flags);
+            // bash reads a startup file only for an interactive shell, and
+            // `--rcfile` replaces the default rather than adding to it.
+            if interactive {
+                read_startup_file(&mut shell, &flags);
+            }
             if repl {
                 run_repl(&mut shell)
             } else {
@@ -321,6 +338,30 @@ fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
 }
 
 /// A shell with the environment imported and `PWD` sane.
+/// Read the interactive startup file.
+///
+/// `--norc` skips it; `--rcfile FILE` replaces `~/.bashrc`; a file that does
+/// not exist is silently ignored, which is what bash does and what makes
+/// `--rcfile /dev/null` the portable way to ask for no startup file.
+fn read_startup_file(shell: &mut Interp, flags: &ShellFlags) {
+    if flags.norc {
+        return;
+    }
+    let path = match &flags.rcfile {
+        Some(path) => path.clone(),
+        None => {
+            let Some(home) = shell.state().vars.scalar(b"HOME") else {
+                return;
+            };
+            std::path::PathBuf::from(std::ffi::OsStr::from_bytes(home)).join(".bashrc")
+        }
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return;
+    };
+    shell.run_named(&path.to_string_lossy(), &bytes);
+}
+
 fn shell(interactive: bool, flags: &ShellFlags) -> Interp {
     let mut shell = Interp::new(interactive);
     // The one place that knows it is running for a user rather than a test:

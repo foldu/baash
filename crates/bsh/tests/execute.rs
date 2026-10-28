@@ -919,3 +919,47 @@ fn dash_o_sets_a_shopt_option_before_parsing() {
         .expect("spawn bsh");
     assert_eq!(code(&output), 2, "an unknown shopt name must be rejected");
 }
+
+#[test]
+fn rcfile_is_read_only_for_an_interactive_shell() {
+    let dir = std::env::temp_dir().join(format!("bsh-rc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let rc = dir.join("rc");
+    std::fs::write(&rc, "RC_VAR=from_rc\n").expect("write rc");
+
+    let with_rc = |args: &[&str]| {
+        let output = bsh()
+            .args(args)
+            .arg("-i")
+            .arg("-c")
+            .arg("echo \"[$RC_VAR]\"")
+            .output()
+            .expect("spawn bsh");
+        stdout(&output).trim().to_string()
+    };
+
+    // Interactive: the file is read.
+    assert_eq!(with_rc(&["--rcfile", &rc.to_string_lossy()]), "[from_rc]");
+    // `--norc` wins over `--rcfile`.
+    assert_eq!(
+        with_rc(&["--rcfile", &rc.to_string_lossy(), "--norc"]),
+        "[]"
+    );
+    // A missing file is ignored rather than an error, which is what makes
+    // `--rcfile /dev/null` the portable way to ask for no startup file.
+    assert_eq!(with_rc(&["--rcfile", "/nonexistent/rc"]), "[]");
+
+    // Non-interactive: bash does not read a startup file at all.
+    let output = bsh()
+        .args([
+            "--rcfile",
+            &rc.to_string_lossy(),
+            "-c",
+            "echo \"[$RC_VAR]\"",
+        ])
+        .output()
+        .expect("spawn bsh");
+    assert_eq!(stdout(&output).trim(), "[]");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

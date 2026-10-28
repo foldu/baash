@@ -787,6 +787,28 @@ Contract points that the caller must honour:
   and mutating it would be the same class of bug as a global signal disposition.
 - **`Regex` is neither `Send` nor `Sync` nor `Clone`**: one thread, one pattern.
 
+### Completion built-ins and the `--rcfile` startup file
+
+`compgen`, `complete` and `compopt` are wired: `impl CompletionSource for
+Interp` answers the 24 `-A` actions from shell state, `ShellState::completions`
+holds the `CompletionTable` (definition-ordered, like `AliasTable`), and
+`ShellState::completion` is the run in progress, which is what makes `compopt`
+valid inside a completion and an error outside it. `bsh-runtime` gained the
+workspace leaf `bsh-pattern` for `-G`/`-X` matching.
+
+Sources that would be lies are stubs returning nothing rather than plausible
+lists: `binding` (no line editor), `service`, `stopped` jobs, `disabled`
+built-ins (`enable -n` absent).
+
+Two status codes are deliberately not bash's, both annotated as bugs in the
+suite: `complete -p NAME` for an unknown NAME is 0 (bash 1), and `complete NAME`
+with no action is 2 (bash 0).
+
+`crates/bsh` reads a startup file only when the shell is interactive:
+`--rcfile FILE` replaces `~/.bashrc`, `--norc` disables it, and a missing file
+is ignored — which is what makes `--rcfile /dev/null` the portable way to ask
+for no startup file at all.
+
 ### Arithmetic: who expands the text
 
 `bsh-vm/src/arith.rs` performs `$name`, `${name}` and `${name[expr]}` splicing
