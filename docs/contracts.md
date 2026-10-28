@@ -280,8 +280,68 @@ word parse; the four strip operators force `nocasematch: false` whatever
 byte units.
 
 **Unsupported is still an error, not a guess** for what remains: `${!x}` on a
-non-array, `${x@Q}`/`@E`/`@P`/`@u`, and process substitution return
-`ErrorKind::Unsupported` with the operator's span.
+non-array, `${x@Q}`/`@E`/`@u` (every transformation except `@P`), and process
+substitution return `ErrorKind::Unsupported` with the operator's span.
+
+**Prompt strings have one expander.** `bsh_lang::prompt::expand(template,
+context)` decodes `PS1`-style backslash escapes into an `ExpandedPrompt`:
+`bytes()` plus `non_printing()`, the byte ranges that came from between `\[`
+and `\]` and must not count toward the display width. The line editor renders
+`PS1` with it and `${x@P}` uses the same function, so the prompt a user sees
+and the string a script gets cannot drift.
+
+- Escapes, measured against bash 5.3.20 in `LC_ALL=C`: `\a \e \r \n \t \T
+  \@ \A \d \D{…} \h \H \u \w \W \s \v \V \$ \# \! \j \l \nnn
+  \\ \[ \]`. An unknown escape (`\z`) keeps its backslash, as does a
+  trailing lone one. `\nnn` consumes up to three octal digits and fails *as a
+  whole* when any byte in that three-byte window is not octal (`\1x` stays
+  literal), wraps modulo 256, and drops a zero byte (`\400` is empty).
+  `\D{}` means `%X`; `%V` is not implemented and formats as itself.
+- `\$` is the prompt character, not a literal `$`: `#` for root, `$`
+  otherwise. With `prompt_vars` (bash's default) the non-root form is written
+  `\$` so the second pass removes the backslash; that is the whole
+  `PS1='$'`/`'\$'`/`'\\$'` table.
+- Inserted values (user, host, `\w`, `\s`, time) are double-quote escaped when
+  `prompt_vars` is on, because a directory named `$x` must not be expanded by
+  the second pass.
+- `\[`/`\]` are removed from the bytes. An unmatched `\[` hides the rest of
+  the string; a stray `\]` is ignored; a `\[` while one is open does not
+  nest. The renderer consumes `non_printing()`; a caller that only needs bytes
+  uses `into_bytes()`.
+
+`expand_with_variables(template, context, shell)` is `${x@P}`: it decodes the
+escapes and then expands the result as if it were double-quoted, which is the
+`promptvars` pass. It expands `$name`, `${name}`, `${#name}`, `$@`, `$*` and
+the specials, applies double-quote backslash removal, and copies every other
+form (`${x:-word}`, `${a[0]}`, `$(…)`, backticks) through **literally**: the
+full word pipeline needs a parser, which is the front end's job. The line
+editor has no interpreter, so it uses the one-pass form (bash's `promptvars`
+off) and does not expand `$name` in `PS1` yet.
+
+**The transform letter is a `Shell` seam.** The parser classifies every
+`${x@…}` as `ParamOp::Unsupported(UnsupportedOp::Transform)`; it does not copy
+the letter into the word. `ParamOp::Transform(Transform)` is the direct form
+(the fixture parser produces it), and expansion resolves the generic form with
+`Shell::transform_operator(&span) -> Option<Transform>`. `bsh-vm` must
+implement it by reading the byte after the last `@` from the chunk being
+evaluated — `self.line_source`, **not** `self.current`, because a command
+substitution evaluates its chunk without replacing `current`:
+
+```rust
+fn transform_operator(&self, span: &bsh_lang::Span) -> Option<bsh_lang::Transform> {
+    let text = self.line_source.bytes().get(span.clone())?;
+    let at = text.iter().rposition(|&byte| byte == b'@')?;
+    bsh_lang::Transform::from_letter(*text.get(at + 1)?)
+}
+```
+
+The default returns `None`, so a `Vars` source with no source text keeps the
+honest unsupported error. `Shell::prompt_context() -> PromptContext` has a
+default built from the process environment (user from `/etc/passwd` by
+effective uid, host from `/proc`, cwd from `current_dir`, local time from
+TZif). `bsh-vm` should override it to supply what only it knows: the logical
+`$PWD`/`$OLDPWD`/`$HOME`/`$USER`/`$HOSTNAME`, the command number (`\#`), the
+history number (`\!`), the job count (`\j`) and the terminal width.
 
 **Brace expansion is stage 0, and it is the only switchable stage.**
 `expand_braces(&Word) -> Vec<Word>` runs before tilde expansion in
@@ -572,8 +632,9 @@ dependency, which keeps "only `bsh-sys` touches the platform" true.
 ## bsh-repl
 
 **The editor takes bytes and a `Terminal`; it does not know about the shell.**
-`bsh-repl` deliberately depends on no interpreter crate — not even `bsh-syntax`.
-Two traits carry everything it needs from above:
+`bsh-repl` depends on `bsh-lang` for the one prompt expander
+(`bsh_lang::prompt`) and on no interpreter or parser crate — not even
+`bsh-syntax`. Two traits carry everything else it needs from above:
 
 ```rust
 pub trait Terminal {                       // the pty wave implements these five
@@ -607,10 +668,14 @@ Ctrl-P/Ctrl-N navigate; Esc cancels. One candidate is inserted through
 `Menu::apply` without opening a menu. Ghost text comes from history and is
 accepted with Right or End.
 
-**The editor owns the prompt** (`$PS1`/`$PS2` expanded from the environment only,
-so `PS1=…` typed at the prompt does not take effect until the runtime exposes
-shell variables to it), history (`$HISTFILE` appended, never rewritten) and the
-`cd`-driven `set_root` call, which the binary makes after each chunk.
+**The editor owns the prompt bytes, but not the escapes.** `Prompt::primary_text`
+returns `bsh_lang::prompt::ExpandedPrompt`; `Frame::prompt` carries the
+non-printing ranges so `paint_prompt` writes hidden stretches to the terminal
+without advancing the cursor column. `PS1`/`PS2` still come from the environment
+only, so `PS1=…` typed at the prompt does not take effect until the runtime
+exposes shell variables to it. The editor also owns history (`$HISTFILE`
+appended, never rewritten) and the `cd`-driven `set_cwd` call, which the binary
+makes after each chunk.
 
 Deferred, with the list maintained at the top of `crates/bsh-repl/src/lib.rs`:
 Ctrl-R reverse search, vi mode, multi-column menus and the full-screen picker,
