@@ -263,6 +263,16 @@ impl Session {
         &self.state
     }
 
+    /// Forget the partially parsed command after an expansion error.
+    ///
+    /// A failed event abandons the command, so a here-document that line
+    /// declared is not waiting for a body, and the quote state belongs to a
+    /// command that will never be parsed.
+    pub fn abandon_command(&mut self) {
+        self.quote = Quote::Open;
+        self.heredocs.clear();
+    }
+
     /// Expand one physical line, without its newline.
     ///
     /// Quote state and here-document state carry over from earlier calls, so a
@@ -761,7 +771,6 @@ fn search_contains(
     let start = index;
     let mut index = index + 1;
     let mut needle = Vec::new();
-    let mut closed = false;
     while index < line.len() {
         match line[index] {
             b'\\' if index + 1 < line.len() => {
@@ -770,7 +779,6 @@ fn search_contains(
             }
             b'?' => {
                 index += 1;
-                closed = true;
                 break;
             }
             byte => {
@@ -795,7 +803,6 @@ fn search_contains(
     };
     state.last_search = Some(needle.clone());
     state.last_match = containing_word(entry.text, &needle);
-    let _ = closed;
     Ok((entry.text().to_vec(), index))
 }
 
@@ -1129,25 +1136,6 @@ fn apply_modifiers(
                     substitute_one(line, index, value, state, false, token_start)?;
                 value = next_value;
                 index = next;
-                last_was_p = false;
-            }
-            b'G' => {
-                index += 1;
-                match line.get(index) {
-                    Some(b's') => {
-                        index += 1;
-                        let (next_value, next) =
-                            substitute_one(line, index, value, state, false, token_start)?;
-                        value = next_value;
-                        index = next;
-                    }
-                    Some(b'&') => {
-                        index += 1;
-                        value =
-                            repeat_substitution(&value, state, false, &line[token_start..index])?;
-                    }
-                    _ => return Err(Error::unknown_modifier(modifier)),
-                }
                 last_was_p = false;
             }
             _ => return Err(Error::unknown_modifier(modifier)),

@@ -352,6 +352,27 @@ impl History {
         }
     }
 
+    /// Remove the command line the interactive editor just recorded.
+    ///
+    /// Unlike [`History::remove_last`], this only does something when the last
+    /// entry really is the current line (a line filtered by `HISTCONTROL` was
+    /// never recorded). It also drops the entry's `pending` copy, so
+    /// `history -a` does not append a typed line that history expansion
+    /// replaced with the expanded one.
+    pub fn remove_current(&mut self) -> bool {
+        if !self.current {
+            return false;
+        }
+        let removed = self.entries.last().map(|entry| entry.text.clone());
+        self.remove_last();
+        if let Some(removed) = removed
+            && self.pending.last() == Some(&removed)
+        {
+            self.pending.pop();
+        }
+        true
+    }
+
     /// Remove the most recent entry. Used by the editor when recording is off
     /// and by `fc -s`, which replaces the command that invoked it.
     pub fn remove_last(&mut self) -> bool {

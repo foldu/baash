@@ -17,6 +17,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::process::ExitCode;
 
 use bsh_diag::{Diagnostic, SourceFile};
+use bsh_lang::histexpand;
 use bsh_repl::Theme;
 use bsh_runtime::ShellHost;
 use bsh_syntax::{ParseOpts, ParseOutcome};
@@ -395,6 +396,11 @@ fn read_startup_file(shell: &mut Interp, flags: &ShellFlags) {
 
 fn shell(interactive: bool, flags: &ShellFlags) -> Interp {
     let mut shell = Interp::new(interactive);
+    // bash enables history expansion for every interactive shell: `-H` is in
+    // `$-` even for `-i -c`, which never consults it because a `-c` string is
+    // not a history line. Command-line flags are applied below, so `bsh +H -i`
+    // still wins.
+    shell.state().opts.histexpand = interactive;
     // The one place that knows it is running for a user rather than a test:
     // character widths come from the environment here and nowhere else.
     shell.detect_locale();
@@ -709,6 +715,9 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
     };
     let mut terminal = bsh_repl::RealTerminal::new();
     let mut editor = bsh_repl::Editor::with_config(&mut terminal, &engine, &syntax, config);
+    // One session per REPL: `:&` and `!%` remember facts across lines, and the
+    // quote/here-document state must survive `PS2` continuation lines.
+    let mut expansion = histexpand::Session::new();
 
     let status = loop {
         // Between commands the terminal belongs to the shell, and any job that
@@ -726,16 +735,8 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
         if let Some(requested) = shell.state().take_exit_request() {
             break requested;
         }
-        match editor.read_line() {
-            Ok(bsh_repl::ReadResult::Line(bytes)) => {
-                if bytes.iter().all(u8::is_ascii_whitespace) {
-                    continue;
-                }
-                // `set +o history` must stop the line from being recorded; the
-                // editor added it before returning, so take it back out.
-                if !shell.state().opts.history {
-                    editor.history_mut().remove_last();
-                }
+        match read_command(shell, &mut editor, &mut expansion) {
+            Ok(NextCommand::Run(bytes)) => {
                 // Hand the ring to the shell for the duration of the command,
                 // so `history`/`fc` mutate the very ring the editor navigates.
                 std::mem::swap(editor.history_mut(), &mut shell.state().history);
@@ -764,12 +765,14 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
                     break requested;
                 }
             }
-            Ok(bsh_repl::ReadResult::Interrupted) => {
+            // A blank line, a failed expansion, or a `:p` consumed the read.
+            Ok(NextCommand::Skip) => continue,
+            Ok(NextCommand::Interrupted) => {
                 // `Ctrl-C` abandons the line and leaves `$?` at 130, the way a
                 // shell reports an interrupted foreground command.
                 shell.state().vars.set_last_status(bsh_runtime::Status(130));
             }
-            Ok(bsh_repl::ReadResult::Eof) => break bsh_runtime::Status::SUCCESS,
+            Ok(NextCommand::Eof) => break bsh_runtime::Status::SUCCESS,
             Err(error) => {
                 eprintln!("bsh: {error}");
                 let _ = editor.finish();
@@ -781,6 +784,125 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
     ExitCode::from(status.exit_code() as u8)
 }
 
+/// What the interactive reader should do after one `read_line`.
+enum NextCommand {
+    /// Run this text.
+    Run(Vec<u8>),
+    /// The line was consumed: blank, a failed expansion, or `:p`.
+    Skip,
+    /// `Ctrl-C`.
+    Interrupted,
+    /// End of input.
+    Eof,
+}
+
+/// The events a reader may expand: every recorded line except the one the
+/// editor has just recorded and marked current. `!!` must mean the previous
+/// *complete* command, never the line being typed.
+fn history_entries(history: &bsh_runtime::History) -> Vec<histexpand::Entry<'_>> {
+    let count = history.entries().len();
+    let current = usize::from(history.is_current() && count > 0);
+    history
+        .entries()
+        .iter()
+        .take(count - current)
+        .map(|entry| histexpand::Entry::new(entry.number(), entry.text()))
+        .collect()
+}
+
+fn write_stderr_bytes(bytes: &[u8]) {
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr.write_all(bytes);
+}
+
+/// Read one line, expand it, and say what to do with it.
+///
+/// History expansion rewrites the typed line before the parser sees it. The
+/// editor has already recorded the typed line, so when an expansion changes it
+/// the typed entry is taken back out and the expanded line is recorded in its
+/// place — that is what bash's `history` shows. `histverify` turns the next
+/// read into a review of the expanded line instead of a run, without running
+/// `PROMPT_COMMAND` again (measured).
+fn read_command(
+    shell: &mut Interp,
+    editor: &mut bsh_repl::Editor<'_>,
+    session: &mut histexpand::Session,
+) -> std::io::Result<NextCommand> {
+    loop {
+        let bytes = match editor.read_line()? {
+            bsh_repl::ReadResult::Line(bytes) => bytes,
+            bsh_repl::ReadResult::Interrupted => return Ok(NextCommand::Interrupted),
+            bsh_repl::ReadResult::Eof => return Ok(NextCommand::Eof),
+        };
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            return Ok(NextCommand::Skip);
+        }
+        // bash expands only when both options are on: `set +H` and
+        // `set +o history` each disable it, and a non-interactive shell never
+        // reaches this function.
+        let expanding =
+            shell.is_interactive() && shell.state().opts.histexpand && shell.state().opts.history;
+        if !expanding {
+            if !shell.state().opts.history {
+                editor.history_mut().remove_current();
+            }
+            return Ok(NextCommand::Run(bytes));
+        }
+        // The editor hands back the line with the newline that submitted it
+        // (and, for a continuation, the earlier lines too). Expansion is
+        // defined on the typed text, and `histverify` needs a buffer without
+        // the newline, so work on the body and restore the newline only for
+        // execution.
+        let (body, had_newline) = match bytes.strip_suffix(b"\n") {
+            Some(body) => (body, true),
+            None => (bytes.as_slice(), false),
+        };
+        let events = history_entries(editor.history());
+        let expansion = match session.expand(body, &events) {
+            Ok(expansion) => expansion,
+            Err(error) => {
+                // A `!` that begins no valid event abandons the line: bash
+                // reports it, does not record it, and leaves `$?` alone.
+                eprintln!("bsh: {error}");
+                session.abandon_command();
+                editor.history_mut().remove_current();
+                return Ok(NextCommand::Skip);
+            }
+        };
+        if !expansion.changed() {
+            return Ok(NextCommand::Run(bytes));
+        }
+        let expanded = expansion.text().to_vec();
+        // bash writes the expanded command to stderr, where the prompt lives;
+        // stdout belongs to the command. `histverify` is the exception: the
+        // line goes back to the editing buffer instead of being echoed.
+        if !shell.state().opts.histverify {
+            write_stderr_bytes(&expanded);
+            write_stderr_bytes(b"\n");
+        }
+        if expansion.print_only() || shell.state().opts.histverify {
+            editor.history_mut().remove_current();
+        } else {
+            editor.history_mut().remove_current();
+            editor.history_mut().push(&expanded);
+        }
+        if shell.state().opts.histverify && !expansion.print_only() {
+            editor.set_initial_line(&expanded);
+            continue;
+        }
+        if expansion.print_only() {
+            // `:p` prints and still records the expanded line (measured).
+            editor.history_mut().push(&expanded);
+            return Ok(NextCommand::Skip);
+        }
+        let mut command = expanded;
+        if had_newline {
+            command.push(b'\n');
+        }
+        return Ok(NextCommand::Run(command));
+    }
+}
+
 /// Non-interactive stdin is one chunk; a terminal gets a line-at-a-time loop
 /// so a half-typed compound command is not executed early.
 ///
@@ -788,7 +910,12 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
 /// fallback for a pipe or a redirected file, which must keep the script
 /// semantics of executing the whole input as one chunk.
 fn run_stdin(shell: &mut Interp) -> ExitCode {
-    if !bsh_sys::is_tty(0) {
+    // A non-interactive pipe is one chunk (script semantics). An interactive
+    // shell reading a pipe is line-at-a-time, because bash history-expands
+    // each line as it is read (`bsh -i < file`, the shape the conformance
+    // suite's interactive cases use); a whole-chunk pass would expand every
+    // line before the previous ones were recorded.
+    if !bsh_sys::is_tty(0) && !shell.is_interactive() {
         let mut bytes = Vec::new();
         if let Err(error) = std::io::stdin().read_to_end(&mut bytes) {
             eprintln!("bsh: cannot read stdin: {error}");
@@ -800,6 +927,7 @@ fn run_stdin(shell: &mut Interp) -> ExitCode {
 
     let mut pending: Vec<u8> = Vec::new();
     let mut status = bsh_runtime::Status::SUCCESS;
+    let mut expansion = histexpand::Session::new();
     let stdin = std::io::stdin();
     let mut stdin = stdin.lock();
     loop {
@@ -813,7 +941,40 @@ fn run_stdin(shell: &mut Interp) -> ExitCode {
                 return ExitCode::from(1);
             }
         }
-        pending.extend_from_slice(&line);
+        // bash expands an interactive shell that reads a pipe too (`bsh -i <
+        // file`); only a `-c` string is exempt, and that never comes here.
+        let expanding =
+            shell.is_interactive() && shell.state().opts.histexpand && shell.state().opts.history;
+        if expanding {
+            let (body, newline) = match line.strip_suffix(b"\n") {
+                Some(body) => (body, true),
+                None => (line.as_slice(), false),
+            };
+            let events = history_entries(&shell.state().history);
+            match expansion.expand_line(body, &events) {
+                Ok(expanded) => {
+                    if expanded.print_only() {
+                        // `:p` prints and records, but is not executed.
+                        write_stderr_bytes(expanded.text());
+                        write_stderr_bytes(b"\n");
+                        shell.state().history.push(expanded.text());
+                        continue;
+                    }
+                    pending.extend_from_slice(expanded.text());
+                    if newline {
+                        pending.push(b'\n');
+                    }
+                }
+                Err(error) => {
+                    eprintln!("bsh: {error}");
+                    expansion.abandon_command();
+                    pending.clear();
+                    continue;
+                }
+            }
+        } else {
+            pending.extend_from_slice(&line);
+        }
         match bsh_syntax::parse_bytes(&pending, &ParseOpts::DEFAULT) {
             ParseOutcome::NeedMoreInput { .. } => continue,
             ParseOutcome::Failed(diagnostics) => {

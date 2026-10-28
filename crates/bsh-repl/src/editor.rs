@@ -172,6 +172,9 @@ pub struct Editor<'a> {
     renderer: Renderer,
     decoder: Decoder,
     menu: Option<MenuState>,
+    /// A line to put in the buffer for the next read, used by `histverify`
+    /// after history expansion.
+    initial: Option<Vec<u8>>,
     /// The reverse search in progress, if any.
     search: Option<Search>,
     secondary: bool,
@@ -209,6 +212,7 @@ impl<'a> Editor<'a> {
             renderer: Renderer::new(),
             decoder: Decoder::new(),
             menu: None,
+            initial: None,
             search: None,
             secondary: false,
             dirty: true,
@@ -233,6 +237,16 @@ impl<'a> Editor<'a> {
     /// The prompts the editor paints.
     pub fn prompt(&self) -> &Prompt {
         &self.prompt
+    }
+
+    /// Put `bytes` on the editing line of the next [`Editor::read_line`].
+    ///
+    /// `histverify` uses this to show an expanded command for review instead
+    /// of running it: the next prompt paints the line as if the user had typed
+    /// it, and Enter submits it normally.
+    pub fn set_initial_line(&mut self, bytes: &[u8]) {
+        self.initial = Some(bytes.to_vec());
+        self.dirty = true;
     }
 
     /// Replace the rendered prompts.
@@ -278,6 +292,9 @@ impl<'a> Editor<'a> {
     /// Reset per-line state and paint the first prompt.
     fn begin(&mut self) {
         self.line.reset();
+        if let Some(initial) = self.initial.take() {
+            self.line.set_text(&initial);
+        }
         self.menu = None;
         self.search = None;
         self.history.reset_navigation();
