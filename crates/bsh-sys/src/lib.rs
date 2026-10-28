@@ -64,7 +64,7 @@ pub use fd::{
     Pipe, chdir, close, create_unlinked_temp, dup, dup_above, dup2, fd_is_cloexec, fd_is_open,
     lseek, open_cloexec, poll_readable, read_fd, set_cloexec, write_all, write_fd,
 };
-pub use pty::{Pty, open_pty};
+pub use pty::{Pty, become_session_leader, open_pty};
 #[cfg(unix)]
 pub use regex::{CaptureRanges, Regex, RegexError};
 pub use signal::{
@@ -121,6 +121,25 @@ pub const SIGQUIT: c_int = libc::SIGQUIT;
 
 /// `SIGTERM`, the default signal for `kill`.
 pub const SIGTERM: c_int = libc::SIGTERM;
+
+/// `SIGSTOP`: cannot be caught, blocked or ignored; a stopped job's signal.
+pub const SIGSTOP: c_int = libc::SIGSTOP;
+
+/// `SIGTSTP`: the terminal's stop key (`Ctrl-Z`).
+pub const SIGTSTP: c_int = libc::SIGTSTP;
+
+/// `SIGTTIN`: a background process tried to read the terminal.
+pub const SIGTTIN: c_int = libc::SIGTTIN;
+
+/// `SIGTTOU`: a background process tried to write the terminal or change its
+/// foreground group.
+pub const SIGTTOU: c_int = libc::SIGTTOU;
+
+/// `SIGCONT`: resume a stopped process group.
+pub const SIGCONT: c_int = libc::SIGCONT;
+
+/// `SIGCHLD`: a child changed state (a wakeup hint, never a per-child event).
+pub const SIGCHLD: c_int = libc::SIGCHLD;
 
 /// `ECHILD`: the pid is not a child, i.e. `wait` has nothing to report for it.
 pub const ECHILD: c_int = libc::ECHILD;

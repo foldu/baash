@@ -323,6 +323,15 @@ fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
             let repl = from_stdin && stdin_tty;
             let interactive = interactive_flag || repl;
             let mut shell = shell(interactive, &flags);
+            // A terminal shell is a job-control shell: own process group,
+            // `monitor` on, `SIGTTOU`/`SIGTTIN`/`SIGTSTP` ignored in the shell
+            // itself. Done before the startup file so an rc file can rely on
+            // `set -o monitor` and on `jobs` working. A shell that cannot get
+            // its own group still runs; it just cannot hand the terminal to a
+            // child.
+            if repl && let Err(error) = shell.enable_job_control() {
+                eprintln!("bsh: cannot enable job control: {error}");
+            }
             // bash reads a startup file only for an interactive shell, and
             // `--rcfile` replaces the default rather than adding to it.
             if interactive {
@@ -518,6 +527,12 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
     }
 
     let status = loop {
+        // Between commands the terminal belongs to the shell, and any job that
+        // finished or stopped since the last prompt is reported before the
+        // editor draws anything. Nothing has been painted yet, so a plain
+        // stderr write cannot corrupt the prompt line.
+        shell.restore_terminal();
+        shell.emit_job_notices();
         match editor.read_line() {
             Ok(bsh_repl::ReadResult::Line(bytes)) => {
                 if bytes.iter().all(u8::is_ascii_whitespace) {

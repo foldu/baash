@@ -22,6 +22,12 @@
 //!   per-command sequence; `redir` — redirections, left to right; `builtins` —
 //!   executor-side built-ins; `cond` — `[[ … ]]`; `words` — the seams back
 //!   into `bsh-lang` and `bsh-syntax`.
+//! * `jobs` — the job table, process-group handover, the single foreground
+//!   wait path, `wait`/`kill` and the job built-ins (`jobs`, `fg`, `bg`,
+//!   `disown`). Job control is active only after
+//!   [`Interp::enable_job_control`] (the interactive startup path) and while
+//!   `monitor` is on; without it the table still tracks `&` children but no
+//!   process groups or terminal handover are used.
 //!
 //! # `errexit`
 //!
@@ -37,10 +43,6 @@
 //! Deliberately not implemented in this wave, so the next one inherits an
 //! honest list rather than a surprise:
 //!
-//! * **Job control** — no process groups, no `jobs`/`fg`/`bg`/`set -m`, and no
-//!   `%` *notation* beyond the pids this shell started (which `wait`/`kill`
-//!   resolve). `&` forks, tracks the pid and keeps the child's status for
-//!   `wait`; stopped children are not tracked.
 //! * **`select`, `time`, `coproc`, `[[ x =~ re ]]`** — `select` and `time`
 //!   parse as command words (`bsh-syntax` documents that); `[[ … =~ … ]]`
 //!   reports a deferred-feature diagnostic rather than a wrong answer.
@@ -266,10 +268,16 @@ pub struct Interp {
     /// Children started with `&`, and the status of the ones already reaped
     /// (so `wait PID` can report a status after the fact).
     background: traps::Background,
-    /// The pids of those children in start order, which is what `%1`, `%%` and
-    /// `%-` name. Real job control is out of scope; this is enough for
-    /// `wait %%` and `kill -TERM %%`.
-    jobs: Vec<i32>,
+    /// Every job this shell owns, with bash's numbering and `+`/`-` strategy.
+    job_table: jobs::JobTable,
+    /// True once the interactive startup path has put the shell in its own
+    /// process group and ignored `SIGTTOU`/`SIGTTIN`/`SIGTSTP`.
+    job_control: bool,
+    /// The shell's process group (the terminal's owner between commands).
+    shell_pgid: i32,
+    /// The signals [`Interp::enable_job_control`] ignored in the shell, so a
+    /// forked child can have the default actions put back.
+    ignored_job_signals: Vec<i32>,
     /// The pending exit status while the `EXIT` trap runs, so a bare `exit`
     /// inside it keeps that status (bash's rule).
     exit_trap_status: Option<Status>,
@@ -381,7 +389,10 @@ impl Interp {
             in_trap: false,
             exiting: false,
             background: traps::Background::new(),
-            jobs: Vec::new(),
+            job_table: jobs::JobTable::default(),
+            job_control: false,
+            shell_pgid: 0,
+            ignored_job_signals: Vec::new(),
             exit_trap_status: None,
             path_cache: std::collections::BTreeMap::new(),
             empty_chunk,
@@ -676,16 +687,27 @@ impl Interp {
         chunk: &Arc<ParsedChunk>,
         body: NodeId,
         ctx: Ctx,
+        pgroup: Option<i32>,
     ) -> std::io::Result<bsh_sys::Child> {
-        bsh_sys::fork_child(|| {
+        let child = bsh_sys::fork_child(|| {
             self.enter_child();
+            if let Some(pgroup) = pgroup {
+                let _ = bsh_sys::set_process_group(0, pgroup);
+            }
             let unwind = self.eval_node(chunk, body, ctx);
             let status = match unwind {
                 Unwind::Status(status) | Unwind::Return(status) | Unwind::Exit(status) => status,
                 Unwind::Break(_) | Unwind::Continue(_) | Unwind::Trap(_) => Status::SUCCESS,
             };
             bsh_sys::exit_child(status.exit_code());
-        })
+        })?;
+        if let Some(pgroup) = pgroup {
+            // Parent-side half of the race fix: whichever of parent and child
+            // runs `setpgid` first wins.
+            let target = if pgroup == 0 { child.pid() } else { pgroup };
+            let _ = bsh_sys::set_process_group(child.pid(), target);
+        }
+        Ok(child)
     }
 }
 
@@ -783,7 +805,7 @@ impl bsh_lang::Shell for Interp {
         if let Some(value) = vars.scalar(b"HOSTNAME") {
             context.host = value.to_vec();
         }
-        context.job_count = self.jobs.len() as u32;
+        context.job_count = self.job_table.len() as u32;
         context
     }
 

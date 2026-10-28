@@ -179,9 +179,9 @@ impl CompletionSource for Interp {
 
     fn running_jobs(&mut self, prefix: &[u8]) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
-        for (index, _) in self.jobs.iter().enumerate() {
+        for job in self.job_table.iter() {
             let mut spec = vec![b'%'];
-            spec.extend_from_slice((index + 1).to_string().as_bytes());
+            spec.extend_from_slice(job.number.to_string().as_bytes());
             if spec.starts_with(prefix) {
                 out.push(spec);
             }
@@ -378,19 +378,22 @@ impl Interp {
 
         drop(pipe.write);
         // Reading the child's output is a foreground wait: `SIGINT`/`SIGQUIT`
-        // must not kill the shell in the middle of it.
-        let guard = self.ignore_int_quit();
+        // must not kill the shell in the middle of it. A completion capture is
+        // not a job: it stays in the shell's process group and never takes the
+        // terminal.
         let mut bytes = Vec::new();
         let read_result = {
             use std::io::Read;
             let mut file = std::fs::File::from(pipe.read);
             file.read_to_end(&mut bytes)
         };
-        let outcome = bsh_sys::wait_pid(child.pid(), false);
-        drop(guard);
+        let outcome = self
+            .wait_foreground_children(&[child.pid()], None, b"", Vec::new(), None)
+            .ok()?
+            .into_iter()
+            .next()?;
         let _ = self.after_foreground_wait();
         read_result.ok()?;
-        let outcome = outcome.ok()?;
         Some((bytes, Status(outcome.exit_status())))
     }
 }

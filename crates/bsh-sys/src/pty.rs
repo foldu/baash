@@ -137,6 +137,29 @@ fn slave_name(master: RawFd) -> io::Result<Vec<u8>> {
         .to_vec())
 }
 
+/// Make the calling process a session leader and acquire `fd` as its
+/// controlling terminal.
+///
+/// This is the `setsid(2)` + `TIOCSCTTY` pair a pty test needs before it can
+/// exercise `tcsetpgrp`: a terminal that is not the session's controlling
+/// terminal has no foreground process group to set. `fd` must be the slave
+/// side of a pty. The caller normally does this in the child of a `fork`
+/// immediately before `exec`.
+pub fn become_session_leader(fd: RawFd) -> io::Result<()> {
+    // SAFETY: `setsid` takes no arguments and cannot fail by dereferencing
+    // anything; it only fails when the caller is already a process-group
+    // leader, which the error reports.
+    if unsafe { libc::setsid() } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `TIOCSCTTY` takes an integer flag (0: steal the terminal) and
+    // touches no user pointer. `fd` is a live terminal descriptor.
+    if unsafe { libc::ioctl(fd, libc::TIOCSCTTY as _, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Set or clear `O_NONBLOCK` without disturbing the other status flags.
 fn set_nonblocking(fd: RawFd, enabled: bool) -> io::Result<()> {
     // SAFETY: `F_GETFL` only queries this descriptor's status flags.

@@ -134,6 +134,15 @@ impl Interp {
         for signal in self.state.traps.caught_signals() {
             set.insert(signal);
         }
+        // The shell ignores these three for its own job control. `exec`
+        // preserves `SIG_IGN`, so without an explicit reset a `Ctrl-Z` could
+        // never stop a command. A `trap '' TSTP` still wins.
+        let ignored = self.state.traps.ignored_signals();
+        for signal in &self.ignored_job_signals {
+            if !ignored.contains(signal) {
+                set.insert(*signal);
+            }
+        }
         set
     }
 
@@ -146,12 +155,26 @@ impl Interp {
     pub(crate) fn enter_child(&mut self) {
         self.state.traps.clear_for_subshell();
         self.signals = SignalState::default();
+        let ignored = self.state.traps.ignored_signals();
+        // The shell itself ignores `SIGTTOU`/`SIGTTIN`/`SIGTSTP`; a forked
+        // child must be stopable again (unless the user made it ignored).
+        for signal in self.ignored_job_signals.clone() {
+            if !ignored.contains(&signal) {
+                let _ = bsh_sys::set_disposition(signal, bsh_sys::Disposition::Default);
+            }
+        }
         let _ = bsh_sys::replace_signal_mask(&bsh_sys::SignalSet::empty());
         self.in_trap = false;
         self.exiting = false;
         self.run_depth = 0;
         self.background.clear();
+        self.job_table = super::jobs::JobTable::default();
         self.read_buffers.clear();
+        // A subshell is not an interactive job-control shell: it must not
+        // create process groups or claim the terminal for its own children.
+        self.job_control = false;
+        self.shell_pgid = 0;
+        self.ignored_job_signals.clear();
     }
 
     /// Read every pending signal, dropping the ones in `discard`.

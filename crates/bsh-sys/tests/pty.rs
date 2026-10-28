@@ -306,3 +306,35 @@ fn no_echo_clears_echo_only_and_restores_it() {
     }
     assert_same_termios(&termios(slave), &before);
 }
+
+#[test]
+fn become_session_leader_acquires_the_controlling_terminal() {
+    // The pty helper a job-control integration test needs: `setsid` plus
+    // `TIOCSCTTY` in a child, then `tcsetpgrp` must name the new session's
+    // group. Run it in a child because `setsid` cannot succeed for a process
+    // group leader such as this test binary.
+    use bsh_sys::become_session_leader;
+    let pty = open_pty().unwrap();
+    let slave = pty.slave.as_raw_fd();
+    let child = fork_child_status(|| {
+        if become_session_leader(slave).is_err() {
+            return 40;
+        }
+        let pg = process_group();
+        if pg != bsh_sys::pid() {
+            return 41;
+        }
+        if set_foreground_pgrp_fd(slave, pg).is_err() {
+            return 42;
+        }
+        if get_foreground_pgrp(slave).ok() != Some(pg) {
+            return 43;
+        }
+        0
+    })
+    .unwrap();
+    assert_eq!(
+        wait_pid(child.pid(), false).unwrap(),
+        WaitOutcome::Exited(0)
+    );
+}

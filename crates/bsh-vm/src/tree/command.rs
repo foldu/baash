@@ -22,7 +22,7 @@ use std::sync::Arc;
 use bsh_lang::{Mode, expand_assignment, expand_word, expand_word_with};
 use bsh_runtime::{ArrayShape, ShellError, ShellHost, Status, Tier, lookup_builtin};
 use bsh_syntax::{ArrayElement, Redirect, SimpleCommand};
-use bsh_sys::SpawnPlan;
+use bsh_sys::{ProcessGroup, SpawnPlan};
 
 use super::{ArrayLiteral, Ctx, Interp, ParsedChunk, Unwind};
 
@@ -109,6 +109,8 @@ struct Invocation<'a> {
     redirects: &'a [Redirect],
     assigns: &'a [(&'a [u8], &'a [u8])],
     argv: &'a [Vec<u8>],
+    /// The command exactly as written, for a job's display text.
+    display: &'a [u8],
     ctx: Ctx,
     /// Reached through `builtin`/`command`: POSIX §2.8.1 note 1 says a special
     /// built-in that fails there must not exit the shell.
@@ -349,6 +351,7 @@ impl Interp {
         }
 
         self.array_literals = array_literals;
+        let display = chunk.source.bytes()[span.clone()].to_vec();
         match self.resolve(&name) {
             Some(resolution) => self.invoke(
                 Invocation {
@@ -356,6 +359,7 @@ impl Interp {
                     redirects: &command.redirects,
                     assigns: &assign_views,
                     argv: &argv,
+                    display: &display,
                     ctx,
                     direct: false,
                 },
@@ -392,6 +396,7 @@ impl Interp {
                 invocation.redirects,
                 invocation.assigns,
                 invocation.argv,
+                invocation.display,
             ),
             // Neither can reach here: alias substitution happens before
             // parsing and keywords are consumed by the parser.
@@ -966,6 +971,7 @@ impl Interp {
         redirects: &[Redirect],
         assigns: &[(&[u8], &[u8])],
         argv: &[Vec<u8>],
+        display: &[u8],
     ) -> Unwind {
         // Redirections are expanded and opened *before* the prefix assignments
         // are applied, because POSIX orders redirections before assignments in
@@ -1028,6 +1034,10 @@ impl Interp {
         // ignore would never die on a closed pipe (DESIGN.md §4.3, §4.5).
         plan.sigmask = Some(bsh_sys::SignalSet::empty());
         plan.reset_signals = self.child_reset_signals();
+        let job_control = self.foreground_job_control();
+        if job_control {
+            plan.pgroup = ProcessGroup::SetPgid { pgroup: 0 };
+        }
 
         let result = bsh_sys::spawn(plan);
         drop(keep);
@@ -1035,14 +1045,26 @@ impl Interp {
 
         match result {
             Ok(child) => {
-                // bash ignores `SIGINT`/`SIGQUIT` delivered to the shell while
-                // it waits for a foreground job; the job has its own copy.
-                let guard = self.ignore_int_quit();
-                let waited = bsh_sys::wait_pid(child.pid(), false);
-                drop(guard);
-                match waited {
-                    Ok(outcome) => {
-                        let status = Status(outcome.exit_status());
+                let pid = child.pid();
+                // Close the window in which the child still belongs to the
+                // shell's group: whichever side gets there first wins.
+                if job_control {
+                    let _ = bsh_sys::set_process_group(pid, pid);
+                }
+                let command = display.trim_ascii().to_vec();
+                let outcomes = self.wait_foreground_children(
+                    &[pid],
+                    job_control.then_some(pid),
+                    &command,
+                    vec![command.clone()],
+                    None,
+                );
+                match outcomes {
+                    Ok(outcomes) => {
+                        let status = outcomes
+                            .last()
+                            .map(|outcome| Status(outcome.exit_status()))
+                            .unwrap_or(Status::FAILURE);
                         self.set_status(status);
                         self.sync_specials();
                         if let Some(exit) = self.after_foreground_wait() {
@@ -1142,7 +1164,7 @@ impl Interp {
             };
         plan.actions = actions;
         plan.sigmask = Some(bsh_sys::SignalSet::empty());
-        plan.reset_signals = bsh_sys::SignalSet::of(&[bsh_sys::SIGPIPE]);
+        plan.reset_signals = self.child_reset_signals();
         // In place: on success this never returns. On failure the process image
         // is intact, but the plan's fd actions and signal attributes have
         // already been applied — inherent to exec ordering — so the only sound
@@ -1429,6 +1451,7 @@ impl Interp {
                 redirects: &[],
                 assigns: &[],
                 argv,
+                display: b"",
                 ctx: Ctx::default(),
                 direct: true,
             },
@@ -1461,19 +1484,30 @@ impl Interp {
     /// not a per-child event (DESIGN.md §4.5), so this is a drain-in-the-loop,
     /// not a handler. Background statuses are kept: `wait PID` may be asked
     /// for a child that finished several commands ago.
+    ///
+    /// With job control on, the drain also reports stopped children
+    /// (`WUNTRACED`), so a background job that is stopped shows up as
+    /// `Stopped` at the next prompt instead of vanishing.
     pub(crate) fn reap_background(&mut self) {
-        while let Some((pid, outcome)) = bsh_sys::wait_any_nohang() {
-            if let Some(slot) = self.background.get_mut(&pid) {
-                *slot = Some(Status(outcome.exit_status()));
-            }
+        // `waitpid(-1)` is process-wide. With no tracked child, a drain could
+        // steal a child belonging to another shell in the same process (the
+        // integration tests run several interpreters in threads), so do not
+        // call it at all. Foreground waits reap their own pid directly.
+        if self.background.is_empty() {
+            return;
         }
-    }
-
-    /// Register a child started with `&` so `wait` and `%N` can find it.
-    pub(crate) fn track_background(&mut self, pid: i32) {
-        self.background.insert(pid, None);
-        self.jobs.retain(|candidate| *candidate != pid);
-        self.jobs.push(pid);
+        let wuntraced = self.foreground_job_control();
+        loop {
+            let reaped = if wuntraced {
+                bsh_sys::wait_any_nohang_wuntraced()
+            } else {
+                bsh_sys::wait_any_nohang()
+            };
+            let Some((pid, outcome)) = reaped else {
+                break;
+            };
+            self.note_reaped(pid, outcome);
+        }
     }
 }
 
