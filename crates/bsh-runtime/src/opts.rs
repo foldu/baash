@@ -241,8 +241,12 @@ option_table! {
     /// is reachable in strict mode through the short flag.
     Hashall => hashall, "hashall", Some(b'h'), [SetO], true, true, true, &[];
 
-    /// `set -H` / `set -o histexpand`: history expansion. Deliberately off in
-    /// the interactive default (DESIGN.md §3.2).
+    /// `set -H` / `set -o histexpand`: history expansion.
+    ///
+    /// Off in the table's default (which is the non-interactive default). The
+    /// binary turns it on for an interactive shell, as bash does; every reader
+    /// also requires the `history` option, which is what makes `set +o history`
+    /// disable expansion as well as recording.
     Histexpand => histexpand, "histexpand", Some(b'H'), [SetO], true, false, false, &[];
 
     /// `set -o history`: record command history (bash extension).

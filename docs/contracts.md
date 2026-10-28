@@ -205,6 +205,14 @@ The file operations are `read_file` (`-r`), `read_new` (`-n`), `append_file`
 `histappend` selects append or rewrite, then truncation). Measured bash quirk
 honoured: `-w` does not apply `HISTFILESIZE`; the exit save does.
 
+`History::remove_current()` removes the entry the editor just recorded **and
+its pending `-a` copy**, which is what history expansion needs when it replaces
+the typed line with the expanded one. It does nothing when the typed line was
+filtered by `HISTCONTROL` (the last entry is then an older command), so it
+cannot delete someone else's line. `History::push` records the expanded line
+and applies the same filters; a failed event removes the typed entry and
+records nothing.
+
 **Builtin tiers are exact and load-bearing** (DESIGN §2): 15 special, 16
 intrinsic, 7 regular, 18 bash extensions. `printf`, `test`, `[`, `echo`, `pwd`,
 `true` and `false` are regular, deliberately *not* intrinsic, because the
@@ -404,6 +412,54 @@ TZif). `bsh-vm` overrides it with what only it knows: the logical
 below. An interactive shell also starts with bash's `PS1='\s-\v\$ '` and
 `PS2='> '` as *variables* (unexported), which is what `${PS1}` and `${PS1@P}`
 read; `unset PS1` renders an empty prompt, like bash.
+
+**History expansion is a pure text transform in this crate.**
+`bsh_lang::histexpand` turns `(typed line, &[Entry], &mut Session)` into an
+`Expansion { text, changed, print, print_only }` or an `Error { kind, token }`.
+It does no I/O and knows nothing about options or the interpreter; the binary
+owns the policy (interactive, `histexpand` and `history` on) and the printing.
+
+- `Entry::new(number, text)` takes the history number (`history -n` is not the
+  index) and the text; the caller passes the ring *without the line being
+  typed*. `Session` carries what bash keeps across lines: the last
+  substitution (`:&`, empty `:s//new/`), the last `!?string?` search and its
+  matched word (`!?` with no operand, `%`), the quote state that spans `PS2`
+  lines, and the here-document queue whose bodies are never expanded.
+- `Session::expand_line` is the one-line form (interactive stdin);
+  `Session::expand` preserves newlines and expands each physical line with the
+  same state. `Session::abandon_command` clears the quote/here-doc state after
+  a failed event, because bash abandons that command.
+- `changed()` is false when the line contains no expandable `!`, which means
+  the caller must not record, echo or prefill anything. `print()` is a `:p`
+  that appeared; `print_only()` is true only when the *last* modifier was
+  `:p`, because bash executes `!!:p:q` after printing it (measured).
+- Syntax: `!!`, `!n`, `!-n`, `!string`, `!?string?`, `!#`; word designators
+  `0`, `n`, `^`, `$`, `*`, `%`, `x-y`, `x-` (up to but excluding the last),
+  `-y`, `x*`; modifiers `h`, `t`, `r`, `e`, `p`, `q`, `x`, `s<d>old<d>new<d>`,
+  `gs`/`as`, `&`, `g&`; and quick substitution `^old^new^` at the start of a
+  line (a remainder starting `:` continues as modifiers, anything else is
+  appended).
+- Measured bash 5.3.20 rules that the implementation encodes: single quotes
+  and `$'…'` inhibit expansion, double quotes do not (but `!"` before the
+  closing quote is literal), an odd run of backslashes escapes the `!`, `#`
+  starts a comment only at a word start, and `!` followed by a blank,
+  newline, `=`, `(`, `)`, `;`, `&`, `|`, `<` or `>` is literal. Words selected
+  by a designator are split quote-aware (the quote bytes are kept) and
+  rejoined with single spaces; `h`/`t`/`r`/`e`/`q` then apply to the whole
+  joined result, while `x` splits it again. `$` falls back to word 0 for a
+  one-word event; `*` is empty there; `^` out of range is `bad word
+  specifier`.
+- There is **no `!{…}` event form in bash**: `!{echo}` is an event named
+  `{echo}` and fails like `!{xyz}`. That is the implemented behaviour; the
+  zsh-style brace form was deliberately not invented.
+- Error messages are the bash shape (`!tok: event not found`,
+  `:spec: bad word specifier`, `c: unrecognized history modifier`,
+  `:s…: substitution failed`); the caller prefixes the shell name. A failed
+  expansion preserves `$?` and abandons the line.
+- Not implemented: `:G` (per-word substitution) and `histchars`; `histreedit`
+  is accepted by `shopt` but not wired, while `histverify` is the binary's.
+- `history -p` is **not** routed through this module yet (it still prints its
+  operands unchanged); see `docs/state.md` §4.
 
 **Brace expansion is stage 0, and it is the only switchable stage.**
 `expand_braces(&Word) -> Vec<Word>` runs before tilde expansion in
@@ -831,6 +887,12 @@ out of `ShellState`, hands it to the editor, swaps it back for the duration of
 each command (and around `PROMPT_COMMAND`), and the editor's `finish` saves it
 on exit.
 
+**`Editor::set_initial_line(&[u8])` is the `histverify` seam.** It seeds the
+next `read_line` buffer with the expanded command and puts the cursor at the
+end; the prompt is the one already rendered, so the shell does not re-render
+`PS1` or run `PROMPT_COMMAND` for the review prompt (bash 5.3.20, measured).
+The line is submitted and recorded by the normal Enter path.
+
 **`Ctrl-R` is a prompt swap, not a screen mode.** `Search` remembers the
 original line and cursor, the query, the matched history index and whether the
 last search failed; while it is active `draw` uses
@@ -846,10 +908,12 @@ newest entry downwards; an empty ring is a failed search, never a panic.
 Deferred, with the list maintained at the top of `crates/bsh-repl/src/lib.rs`:
 search-match highlighting and `Ctrl-S`, vi mode, multi-column menus and the
 full-screen picker, a `poll(2)` key timeout (a lone Esc is only distinguishable
-at end of input), `SIGWINCH` reflow, mouse, incremental/semantic highlighting,
-and history expansion. The ring's `HISTCONTROL`/`HISTSIZE` policies are wired
-in `bsh-runtime`; the pty tests are `crates/bsh/tests/interactive_jobs.rs`,
-`interactive_history.rs` and `interactive_prompt.rs`.
+at end of input), `SIGWINCH` reflow, mouse, incremental/semantic highlighting.
+History expansion itself is the binary's (`bsh_lang::histexpand`); the editor
+only supplies the `set_initial_line` prefill used by `histverify`. The ring's
+`HISTCONTROL`/`HISTSIZE` policies are wired in `bsh-runtime`; the pty tests are
+`crates/bsh/tests/interactive_jobs.rs`, `interactive_history.rs`,
+`interactive_history_expansion.rs` and `interactive_prompt.rs`.
 
 ---
 
@@ -1066,6 +1130,18 @@ pair to `editor.set_prompt`. A `PROMPT_COMMAND` that calls `exit` leaves the she
 capture is why `PROMPT_COMMAND='echo -n x'` cannot corrupt the editor's column
 model; a write straight to `/dev/tty` bypasses it. With `set -e` and a failing
 `PROMPT_COMMAND`, bash exits and this shell does not (`docs/state.md` §4).
+
+After `editor.read_line`, `read_command` strips the submit newline and, when
+`interactive && histexpand && history`, expands the line against the ring
+*without the current entry*. A changed line is echoed to stderr, the typed
+entry is removed and the expanded one recorded (`:p` included; a failed event
+is not recorded and leaves `$?` alone). `shopt -s histverify` sets the expanded
+line with `Editor::set_initial_line` and reads again instead of running it.
+The editor's ring is swapped into the shell only for `run_named`, so the
+`history`/`fc` built-ins see the same entries. A non-interactive pipe is still
+one chunk; an interactive pipe now uses the line-at-a-time reader (bash
+expands each line of `-i`, and the second line must see the first), while
+`-i -c` stays whole-string and never expands.
 
 ### bsh-vm additions
 

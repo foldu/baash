@@ -60,9 +60,11 @@ pub fn quote(bytes: &[u8], ctx: QuoteCtx) -> Vec<u8> {
                 if matches!(b, b'$' | b'`' | b'"' | b'\\') {
                     out.push(b'\\');
                 }
-                // `!` is deliberately not escaped: the interactive profile has
-                // history expansion off (DESIGN.md §3.2), and `\!` inside
-                // double quotes would keep the backslash as a literal byte.
+                // `!` is deliberately not escaped. `\!` inside double quotes
+                // would keep the backslash as a literal byte, and this
+                // function is also used for prompt text. A filename completed
+                // with a `!` is therefore expanded at the prompt; that is a
+                // known completion gap (`docs/state.md` §4), not a quote bug.
                 out.push(b);
             }
             QuoteCtx::SingleQuoted => {

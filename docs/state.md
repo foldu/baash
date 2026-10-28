@@ -22,7 +22,7 @@ cargo build -p bsh -p bsh-spec
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- --deny warnings
 cargo test --workspace --all-features
-cargo test --workspace --all-features -- --list | grep -c ': test$'   # 1096
+cargo test --workspace --all-features -- --list | grep -c ': test$'   # 1180
 
 # conformance
 target/debug/bsh-spec --shell target/debug/bsh --ratchet   # must be >= baseline
@@ -47,18 +47,18 @@ a stale brief has already cost two wrong scopes (arrays: 54 vs real; namerefs:
 
 | measure | value |
 |---|---|
-| comparable cases | **1986 / 2787 = 71.3 %** |
-| strict (primary expectation only) | 1931 / 2787 = 69.3 % |
-| failing | 801 |
+| comparable cases | **1989 / 2787 = 71.4 %** |
+| strict (primary expectation only) | 1934 / 2787 = 69.4 % |
+| failing | 798 |
 | timeouts | 0 |
-| of the whole suite (3971 cases) | 50.0 % |
-| as a fraction of bash's score | 1986 / 2574 = 77.2 % |
-| share of the bash gap closed since 1013 | 973 / 1561 = 62.3 % |
-| our test count | 1135 |
+| of the whole suite (3971 cases) | 50.1 % |
+| as a fraction of bash's score | 1989 / 2574 = 77.3 % |
+| share of the bash gap closed since 1013 | 976 / 1561 = 62.5 % |
+| our test count | 1180 |
 
 Measured with `bash 5.3.20` as the comparison shell, harness forced to
 `LC_ALL=C` (bash scores *worse* under `C.UTF-8`: 2574 → 2435, so the C locale
-is the fair denominator). We pass 46 cases bash fails; bash passes 635 we fail.
+is the fair denominator). We pass 46 cases bash fails; bash passes 631 we fail.
 
 **1184 skipped** cases: 745 from the ysh-only suite files, 417 marked
 `our_shell: ysh`, 22 needing a `python2` helper we do not provide. 100 % is not
@@ -66,8 +66,8 @@ a meaningful target: bash itself scores 92.4 %, and 55 of our passes come from
 `## OK <shell>` alternatives rather than the primary expectation — which is
 exactly the 71.1 % vs 69.1 % split, and why both numbers are ratcheted.
 
-Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 1986`,
-`strict = 1931`). `--ratchet` exits 1 below either, 2 if it cannot measure.
+Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 1989`,
+`strict = 1934`). `--ratchet` exits 1 below either, 2 if it cannot measure.
 
 ## 3. Layers
 
@@ -147,6 +147,19 @@ delegates everything else: line editing to `bsh-repl`, execution to the
   `ignoredups`, `ignoreboth`, `erasedups`), `HISTIGNORE` (including `&`), and
   the `histappend` shopt; default `~/.bsh_history`; the file is loaded at
   startup and saved on exit; `Up`/`Down` navigation and ghost text;
+* **history expansion**: `!` events are rewritten before parsing by the pure
+  `bsh_lang::histexpand` module and only in an interactive reader whose
+  `histexpand` *and* `history` options are on (`-H` is part of `$-` for every
+  interactive shell; a `-c` string and a script never expand). `!!`, `!n`,
+  `!-n`, `!string`, `!?string?`, `!#`, `!$`/`!*`/`!^`/`!%`, `!:n`, ranges,
+  `:h :t :r :e :p :q :x :s/…/…/ :gs/…/…/ :&`, and `^old^new^` are implemented
+  with bash 5.3.20's measured quoting rules (single quotes and `$'…'` inhibit,
+  double quotes do not, an odd backslash run escapes the `!`, a `#` comment is
+  skipped, here-document bodies are not expanded). The ring stores the
+  expanded line; a failed event abandons the line without recording it; `:p`
+  prints it without running it and still records it. `shopt -s histverify`
+  reloads the expansion into the editing line (the editor's
+  `set_initial_line` seam) instead of running it;
 * `Ctrl-C` on a line → discards it, `$?` = 130; `Ctrl-D` on an empty line →
   exit 0;
 * **job control**: every foreground command (and pipeline) gets its own
@@ -197,9 +210,12 @@ delegates everything else: line editing to `bsh-repl`, execution to the
 
 **Known history limitations** (measured or deliberately deferred): `fc` with
 neither `-l` nor `-s` reports "editing history is not implemented yet" instead
-of opening `$FCEDIT`/`$EDITOR`; history expansion (`!`, `!!`, `!$`) does not
-exist, so `history -p` prints its arguments unchanged (which is what bash
-prints when there is nothing to expand); a multi-line command is kept in memory
+of opening `$FCEDIT`/`$EDITOR`; `history -p` still prints its arguments
+unchanged instead of expanding them (bash expands them even non-interactively,
+so a script that relies on it is the gap); `shopt -s histreedit` is accepted
+but a failed expansion abandons the line rather than reloading it for editing
+(`histverify` *is* implemented); `:G` (per-word substitution) is not
+implemented and reports an unknown modifier; a multi-line command is kept in memory
 but skipped when the line-oriented file is written (bash's `cmdhist` joins it
 with `;`); `HISTTIMEFORMAT` is not implemented; the conformance suite's
 interactive history cases mostly still fail on the bash-only `^D` marker, not
@@ -238,6 +254,9 @@ rediscover):
   from the runtime).
 * `complete -G`/`-X` are not applied at Tab, and no rule is applied to a
   redirection target or an assignment value (those are filenames/words).
+* A completed filename containing `!` is inserted unescaped, so with history
+  expansion on it is treated as an event at Enter. Bash's readline quoting
+  avoids this; the completion insert path is out of this wave's scope.
 * Array subscripts (`${arr[`) are not completed. bash 5.3.20 rings the bell
   there too, so this matches the reference rather than missing a feature.
 * The fuzzy tier means a menu can be wider than bash's: `$HO<TAB>` lists
@@ -259,7 +278,9 @@ now covered by the pty test.
 Harnesses: `crates/bsh-sys/tests/pty.rs` (real pty, termios, window size,
 foreground pgroup, `become_session_leader`), `crates/bsh/tests/interactive_jobs.rs`
 (interactive job control end to end), `crates/bsh/tests/interactive_history.rs`
-(history persistence), `crates/bsh/tests/interactive_prompt.rs` (the rendered
+(history persistence), `crates/bsh/tests/interactive_history_expansion.rs`
+(`!!`, designators, quick substitution, `:p`, `histverify`, `set +H`, failed
+events, and the expanded ring contents at a real prompt), `crates/bsh/tests/interactive_prompt.rs` (the rendered
 prompt, `PROMPT_COMMAND`, prompt escapes, `PS1` from an rc file and from a
 command, `Ctrl-R` end to end), `crates/bsh/tests/interactive_complete.rs`
 (variable, keyword, function, `complete -W`, directory, `-o default`, history
@@ -358,6 +379,10 @@ measured finish line.
    `.bshrc`/`.bashrc` startup-file rule. **`Ctrl-R` incremental search** landed
    with the prompt wave (item 3); the ring, the editor and the built-ins share
    one ring, and the search is a prompt swap in the existing renderer.
+   ~~**History expansion**~~ landed in a later wave: `bsh_lang::histexpand`
+   (events, designators, modifiers, quick substitution), wired in `run_repl`
+   and the interactive `-i` stdin reader, with `histverify` and the measured
+   ring-record rule. Remaining gaps are `history -p` and `histreedit` (§4).
 3. ~~**Prompt parity.**~~ Landed: the prompt is rendered from the shell's
    variable table before every line, `promptvars` (with `$(…)` and `$((…))`),
    `PROMPT_COMMAND` (string and array), bash's default `PS1`/`PS2`, and
@@ -473,8 +498,22 @@ measured finish line.
   `cd`/`pushd`/`popd`/`rmdir`/`mkdir` get `-A directory -o default`, so
   `cd $HO<TAB>` falls back to the variable provider and no provider carries a
   per-command conditional.
-* **History expansion is still absent**, and `fc`'s editor form is deferred.
-  Both are recorded under the known history limitations in §4.
+* **History expansion — measured, not assumed.** bash 5.3.20 stores the
+  *expanded* line in the ring (`!!` raises the previous command's text, quick
+  substitution its rewritten text, and `:p` its expansion), a failed event is
+  not stored, and the expanded line is echoed to stderr before it runs. A
+  `-c` string is never expanded, even with `-i -H`; a piped `-i` shell is
+  line-at-a-time and does expand, which is why that path now runs the reader
+  loop rather than the whole input as one chunk. `set +o history` disables
+  expansion as well as recording, so both options gate it. `histverify`
+  reloads the expanded line into the editor without re-running
+  `PROMPT_COMMAND`; bash has no `!{…}` event form (`!{echo}` is an event named
+  `{echo}` and reports "event not found"), so none was invented. Two bash
+  quirks are deliberately reproduced because they are observable: the
+  pre-scan only lets a backslash hide a following `'` or `!` (so `echo \!!`
+  at end of line stays literal while `echo \!!x` expands), and quote state
+  spans `PS2` lines (a `!` inside a continuing single-quoted string stays
+  literal). `fc`'s editor form is still deferred.
 * **`set -o vi`** exists in the option table but has no editor behind it.
 * **Bytecode VM.** Types exist; `DESIGN.md` §5 disagrees with the code on
   `Vec<u32>` vs `Vec<Op>` and on static vs push/pop handler tables. The

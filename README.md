@@ -7,13 +7,13 @@ lives in [DESIGN.md](DESIGN.md); this file is the operator's manual.
 and `bsh` with no arguments gives you an interactive editor with syntax
 highlighting, bash-style TAB completion and history.
 
-**1986 of 2787 comparable cases pass** in the vendored Oils suite (71.3%; 1184
-cases skipped as out of scope), of which **1931 (69.3%) also pass strictly** —
+**1989 of 2787 comparable cases pass** in the vendored Oils suite (71.4%; 1184
+cases skipped as out of scope), of which **1934 (69.4%) also pass strictly** —
 that is, matching only a case's primary expectation rather than any
 `## OK <shell>` alternative. Both numbers are recorded in
 `crates/bsh-spec/baseline.txt` and CI fails if either drops.
 
-For scale, bash passes 2574/2787 (92.4%) on the same run, so 588 cases are
+For scale, bash passes 2574/2787 (92.4%) on the same run, so 585 cases are
 things bash does and we do not yet — 62% of that gap is closed. Conformance is
 measured but no longer the priority: interactive use comes first, and
 [`docs/state.md`](docs/state.md) is the resume document (what exists, what is
@@ -33,7 +33,9 @@ substitution, arithmetic, `[[ ]]` including `=~`, globbing with
 operators (`${x#pat}`, `${x%pat}`, `${x//a/b}`, `${x@Q}`), traps, `set -e` and
 `set -u`, `break`/`continue`/`return`/`exit`, `exec`, job control, history
 (`history`, `fc`, the `HIST*` knobs; persisted to `~/.bsh_history` by default),
-and the built-ins listed in `docs/contracts.md`.
+history expansion (`!!`, `!n`, `!-n`, `!string`, `!?string?`, `!#`, the word
+designators and modifiers, `^old^new^`), and the built-ins listed in
+`docs/contracts.md`.
 
 The interactive prompt is built from the shell's own variables before every
 line: `PS1`/`PS2` from an rc file, the environment or a command all take
@@ -42,6 +44,16 @@ table and history ring, `shopt promptvars` runs a second expansion (so
 `PS1='$(date +%H:%M) $ '` works), and `PROMPT_COMMAND` (string or array) runs
 before each prompt with its output above it. `Ctrl-R` is
 readline-compatible reverse incremental search.
+
+History expansion is bash's: the typed line is rewritten before parsing, so
+the expanded text is what runs. `!!`, `!$`, `!n`, `!?string?`, `!*`, `!^`, word designators,
+`:h :t :r :e :p :q :x :s :gs :&` and `^old^new^` follow the measured 5.3.20
+rules (single quotes and `$'…'`
+inhibit, double quotes do not, `\` escapes a `!`, an event that does not exist
+abandons the line). The ring stores the *expanded* line, as bash does;
+`shopt -s histverify` puts an expansion back on the editing line for review
+instead of running it; `set +H` (and `set +o history`) turns it off. A `-c`
+string and a non-interactive script never expand, even with `set -H`.
 
 TAB completion is refreshed from the shell before every prompt and follows
 bash: command position is the deduplicated union of aliases, functions,
@@ -57,8 +69,8 @@ and the completer has no mutable interpreter while the editor owns the
 terminal. The exact blockers are in [`docs/state.md`](docs/state.md) §4.
 
 Not implemented yet: the directory stack (`pushd`/`popd`/`dirs`), `umask`,
-`let`, `ulimit`, `times`, `enable`, history
-expansion, `$RANDOM`/`$SECONDS`/`$FUNCNAME`, xtrace (`set -x`), `~user`,
+`let`, `ulimit`, `times`, `enable`, `$RANDOM`/`$SECONDS`/`$FUNCNAME`, xtrace
+(`set -x`), `~user`,
 process substitution (`<(...)`, rejected as `BSH-E0301`), and `complete -F`/
 `-C`/`-G` at the prompt. Missing built-ins
 answer status 2 with `BSH-E0508`; missing special variables expand to nothing.
