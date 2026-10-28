@@ -88,7 +88,7 @@ does not yet retry `ENOEXEC` as a script) plus `command -v`.
 ## Tranche 2 — expansion and pattern work
 
 At the start of this tranche the suite stood at 1013/2787 total. It is now
-**1681/2787 total, 1626 strict** (recorded in `crates/bsh-spec/baseline.txt`).
+**1797/2787 total, 1744 strict** (recorded in `crates/bsh-spec/baseline.txt`).
 
 - [x] Shared pattern engine (`bsh-pattern`): Thompson NFA, byte and UTF-8
       modes, extglob, brackets, POSIX classes, no exponential blowup.
@@ -105,7 +105,9 @@ At the start of this tranche the suite stood at 1013/2787 total. It is now
       deterministic) drives `${#x}`, `${x:o:l}` and the matcher's `?` through
       one decoder (`bsh_pattern::char_len`). `LC_ALL=C` still counts bytes and
       still slices characters in half, like bash and dash.
-- [ ] Brace expansion `{a,b}` and `{1..3}` (92 regressions with extglob).
+- [x] Brace expansion `{a,b}`, `{1..3}`, `{01..03}`, `{a..e..2}` - stage 0,
+      before every other expansion; 21/72 -> 59/72 on the brace filter, and it
+      unblocked most of `extglob-files` (10/23 -> 21/23). `set +B` turns it off.
 - [x] `extglob` `?(…)`, `*(…)`, `+(…)`, `@(…)`, `!(…)` — lexed
       unconditionally (superset grammar, §3.3), matched per `shopt`.
       `extglob-files` 0/23 → 10/23. Two documented deviations: with extglob off
@@ -122,7 +124,10 @@ At the start of this tranche the suite stood at 1013/2787 total. It is now
       Measured: **C gives 1701, C.UTF-8 gives 1716** for us, but bash drops
       from **2574 to 2435** under C.UTF-8 — the suite's primary expectations
       are byte-calibrated, so C stays the baseline and UTF-8 is diagnostic.
-- [ ] `[[ =~ ]]` with `BASH_REMATCH` (34).
+- [x] `[[ =~ ]]` with `BASH_REMATCH` - `regex.test.sh` 0/37 -> 25/37, via libc
+      `regcomp`/`regexec` in `bsh-sys` so POSIX leftmost-longest matches bash.
+- [~] `${x@P}` / prompt expansion - in flight (prompt 0/33 and most of
+      `var-op-bash`).
 - [x] `$LINENO` (from node spans) and `$PIPESTATUS`.
 - [ ] `$RANDOM`, `$SECONDS`, `$FUNCNAME`, `$BASH_SOURCE`, `BASH_LINENO`.
 
