@@ -103,6 +103,11 @@ pub enum Error {
         /// Variable name the lookup started from.
         name: Vec<u8>,
     },
+    /// A nameref would name itself (`declare -n r=r`).
+    NamerefSelf {
+        /// Variable name.
+        name: Vec<u8>,
+    },
     /// A builtin operand was not a decimal number.
     BadNumber {
         /// The operand as written.
@@ -148,6 +153,7 @@ impl Error {
             | Error::NotAssociative { .. }
             | Error::ArrayShapeMismatch { .. } => codes::ARRAY_SHAPE,
             Error::NamerefCycle { .. } => codes::NAMEREF_CYCLE,
+            Error::NamerefSelf { .. } => codes::NAMEREF_CYCLE,
             Error::BadNumber { .. } => codes::BAD_NUMBER,
             Error::NotScalar { .. }
             | Error::ArrayOutOfBounds { .. }
@@ -194,6 +200,12 @@ impl Error {
             }
             Error::NamerefCycle { name } => {
                 format!("{}: circular name reference", display(name))
+            }
+            Error::NamerefSelf { name } => {
+                format!(
+                    "{}: nameref variable self references not allowed",
+                    display(name)
+                )
             }
             Error::BadNumber { value } => {
                 format!("{}: numeric argument required", display(value))

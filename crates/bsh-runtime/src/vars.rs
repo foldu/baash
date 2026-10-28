@@ -12,7 +12,7 @@
 
 use crate::Status;
 use crate::builtins::{AssignPersistence, Tier};
-use crate::errors::Error;
+use crate::errors::{Error, display};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
@@ -26,6 +26,13 @@ pub struct Attrs {
     /// Arithmetic on assignment. The evaluator lives in `bsh-lang`; the store
     /// keeps the attribute and the bytes the VM gives it.
     pub integer: bool,
+    /// The cell's scalar value is the *name* of another variable
+    /// (`declare -n`, bash's nameref).
+    ///
+    /// Reads and writes through the cell follow the name; `declare -p` and the
+    /// attribute-changing builtins see the cell itself. See
+    /// [`Vars::resolve_chain`].
+    pub nameref: bool,
 }
 
 /// A variable's value. Bash arrays are extensions, hence the extra shapes.
@@ -287,33 +294,63 @@ impl Vars {
     }
 
     /// The variable's value, if it exists.
+    ///
+    /// Namerefs are followed: `-n r=x; value(r)` is `x`'s value.
     pub fn value(&self, name: &[u8]) -> Option<&VarValue> {
-        self.lookup(name).map(|var| &var.value)
+        match self.resolve_chain(name).ok()? {
+            Resolved::Var(target) => self.lookup(&target).map(|var| &var.value),
+            Resolved::Indexed(..) | Resolved::Assoc(..) => None,
+            Resolved::Elements(base) => self.lookup(&base).map(|var| &var.value),
+        }
     }
 
     /// The scalar bytes of a variable, if it exists and is a string.
+    ///
+    /// Namerefs are followed, including element references: `-n r='a[2]'`
+    /// makes `scalar(r)` the bytes of `a[2]`.
     pub fn scalar(&self, name: &[u8]) -> Option<&[u8]> {
-        self.lookup(name).and_then(Var::scalar)
+        match self.resolve_chain(name).ok()? {
+            Resolved::Var(target) => self.lookup(&target).and_then(Var::scalar),
+            Resolved::Indexed(base, index) => self.element_indexed(&base, index),
+            Resolved::Assoc(base, key) => self.element_assoc(&base, &key),
+            Resolved::Elements(_) => None,
+        }
     }
 
     /// Whether the variable exists (even if it is `Unset`).
     pub fn contains(&self, name: &[u8]) -> bool {
-        self.lookup(name).is_some()
+        match self.resolve_chain(name) {
+            Ok(Resolved::Var(target)) => self.lookup(&target).is_some(),
+            Ok(_) => true,
+            Err(_) => false,
+        }
     }
 
     /// Whether the variable exists and is set.
     pub fn is_set(&self, name: &[u8]) -> bool {
-        self.lookup(name).is_some_and(|var| var.value.is_set())
+        match self.resolve_chain(name) {
+            Ok(Resolved::Var(target)) => self.lookup(&target).is_some_and(|var| var.value.is_set()),
+            Ok(Resolved::Indexed(base, index)) => self.element_indexed(&base, index).is_some(),
+            Ok(Resolved::Assoc(base, key)) => self.element_assoc(&base, &key).is_some(),
+            Ok(Resolved::Elements(base)) => self.array_len(&base) > 0,
+            Err(_) => false,
+        }
     }
 
     /// Whether the variable is readonly.
     pub fn is_readonly(&self, name: &[u8]) -> bool {
-        self.lookup(name).is_some_and(|var| var.attrs.readonly)
+        match self.resolve_chain(name) {
+            Ok(Resolved::Var(target)) => self.lookup(&target).is_some_and(|var| var.attrs.readonly),
+            _ => false,
+        }
     }
 
     /// Whether the variable is exported.
     pub fn is_exported(&self, name: &[u8]) -> bool {
-        self.lookup(name).is_some_and(|var| var.attrs.exported)
+        match self.resolve_chain(name) {
+            Ok(Resolved::Var(target)) => self.lookup(&target).is_some_and(|var| var.attrs.exported),
+            _ => false,
+        }
     }
 
     /// Number of open frames.
@@ -472,16 +509,36 @@ impl Vars {
     /// Assign a complete value.
     ///
     /// A scalar assignment to an indexed array sets element 0 and keeps the
-    /// array shape; a scalar assignment to an associative array is an error
-    /// (bash: "must use subscript when assigning associative array").
+    /// array shape; a scalar assignment to an associative array writes key
+    /// `0`, and a nameref writes through to its target. When the target is an
+    /// element reference (`-n r='a[2]'`), the value lands in that element.
     pub fn assign(&mut self, name: &[u8], value: VarValue) -> Result<(), Error> {
-        let var = self.resolve(name)?;
-        match value {
-            VarValue::Str(bytes) => set_scalar(var, name, bytes),
-            other => {
-                var.value = other;
-                Ok(())
+        match self.resolve_chain(name)? {
+            Resolved::Var(target) => {
+                let var = self.cell_mut(&target, CreateScope::Default, true)?;
+                match value {
+                    VarValue::Str(bytes) => set_scalar(var, name, bytes),
+                    other => {
+                        var.value = other;
+                        Ok(())
+                    }
+                }
             }
+            Resolved::Indexed(base, index) => match value {
+                VarValue::Str(bytes) => self.set_indexed(&base, index, &bytes),
+                _ => Err(Error::NotScalar {
+                    name: name.to_vec(),
+                }),
+            },
+            Resolved::Assoc(base, key) => match value {
+                VarValue::Str(bytes) => self.set_assoc(&base, &key, &bytes),
+                _ => Err(Error::NotScalar {
+                    name: name.to_vec(),
+                }),
+            },
+            Resolved::Elements(base) => Err(Error::InvalidName {
+                name: whole_array_name(base),
+            }),
         }
     }
 
@@ -498,32 +555,50 @@ impl Vars {
         value: &[u8],
         scope: CreateScope,
     ) -> Result<(), Error> {
-        let var = self.resolve_in(name, scope)?;
-        set_scalar(var, name, value.to_vec())
+        match self.resolve_chain(name)? {
+            Resolved::Var(target) => {
+                let var = self.cell_mut(&target, scope, true)?;
+                set_scalar(var, name, value.to_vec())
+            }
+            Resolved::Indexed(base, index) => self.set_indexed(&base, index, value),
+            Resolved::Assoc(base, key) => self.set_assoc(&base, &key, value),
+            Resolved::Elements(base) => Err(Error::InvalidName {
+                name: whole_array_name(base),
+            }),
+        }
     }
 
     /// `x+=suffix`: append to a scalar. Appending to an array requires the
     /// array operation, because the meaning depends on the shape
     /// (`a+=(x)` appends an element; `a+=x` is not the same thing).
     pub fn append(&mut self, name: &[u8], suffix: &[u8]) -> Result<(), Error> {
-        let var = self.resolve(name)?;
-        match &mut var.value {
-            VarValue::Str(bytes) => {
-                bytes.extend_from_slice(suffix);
-                Ok(())
+        match self.resolve_chain(name)? {
+            Resolved::Var(target) => {
+                let var = self.cell_mut(&target, CreateScope::Default, true)?;
+                match &mut var.value {
+                    VarValue::Str(bytes) => {
+                        bytes.extend_from_slice(suffix);
+                        Ok(())
+                    }
+                    // `a+=text` appends to element zero; bash does not treat it
+                    // as "append an element" (that spelling is `a+=(…)`).
+                    VarValue::Indexed(elements) => {
+                        elements.entry(0).or_default().extend_from_slice(suffix);
+                        Ok(())
+                    }
+                    VarValue::Unset => {
+                        var.value = VarValue::Str(suffix.to_vec());
+                        Ok(())
+                    }
+                    VarValue::Assoc(_) => Err(Error::NotScalar {
+                        name: name.to_vec(),
+                    }),
+                }
             }
-            // `a+=text` appends to element zero; bash does not treat it as
-            // "append an element" (that spelling is `a+=(…)`).
-            VarValue::Indexed(elements) => {
-                elements.entry(0).or_default().extend_from_slice(suffix);
-                Ok(())
-            }
-            VarValue::Unset => {
-                var.value = VarValue::Str(suffix.to_vec());
-                Ok(())
-            }
-            VarValue::Assoc(_) => Err(Error::NotScalar {
-                name: name.to_vec(),
+            Resolved::Indexed(base, index) => self.append_indexed(&base, index, suffix),
+            Resolved::Assoc(base, key) => self.append_assoc(&base, &key, suffix),
+            Resolved::Elements(base) => Err(Error::InvalidName {
+                name: whole_array_name(base),
             }),
         }
     }
@@ -611,11 +686,23 @@ impl Vars {
         }
     }
 
+    /// Create `name` in `scope` without a value (`declare x`), leaving an
+    /// existing cell — and its value and attributes — alone.
+    pub fn declare_empty(&mut self, name: &[u8], scope: CreateScope) -> Result<(), Error> {
+        Self::check_name(name)?;
+        self.cell_mut(name, scope, false)?;
+        Ok(())
+    }
+
     /// Mark a variable exported, creating it in the global scope if it does
     /// not exist.
+    ///
+    /// The attribute lands on the *named cell*, not on a nameref's target:
+    /// `x=foo; typeset -n -x ref=x` exports `ref` with the value `x`, which is
+    /// what bash puts in the child environment (the reference's own text, not
+    /// the target's value).
     pub fn mark_exported(&mut self, name: &[u8]) -> Result<(), Error> {
-        let target = self.deref_name(name)?;
-        self.cell_mut(&target, CreateScope::Default, false)?
+        self.cell_mut(name, CreateScope::Default, false)?
             .attrs
             .exported = true;
         Ok(())
@@ -634,19 +721,111 @@ impl Vars {
     /// variables (`readonly x` twice is not an error); only value writes are
     /// refused.
     pub fn mark_readonly(&mut self, name: &[u8]) -> Result<(), Error> {
-        let target = self.deref_name(name)?;
-        self.cell_mut(&target, CreateScope::Default, false)?
+        self.cell_mut(name, CreateScope::Default, false)?
             .attrs
             .readonly = true;
         Ok(())
     }
 
+    /// Clear the readonly attribute (`typeset +r`).
+    ///
+    /// bash's `typeset +r` is documented as doing nothing; the conformance
+    /// suite pins the OSH reading, where the attribute is cleared, and the
+    /// primary expectation is that one.
+    pub fn unmark_readonly(&mut self, name: &[u8]) -> Result<(), Error> {
+        if let Some(var) = self.lookup_mut(name) {
+            var.attrs.readonly = false;
+        }
+        Ok(())
+    }
+
     /// Mark a variable integer (`declare -i`).
     pub fn mark_integer(&mut self, name: &[u8]) -> Result<(), Error> {
-        let target = self.deref_name(name)?;
-        self.cell_mut(&target, CreateScope::Default, false)?
+        self.cell_mut(name, CreateScope::Default, false)?
             .attrs
             .integer = true;
+        Ok(())
+    }
+
+    /// Clear the integer attribute (`typeset +i`).
+    pub fn unmark_integer(&mut self, name: &[u8]) -> Result<(), Error> {
+        if let Some(var) = self.lookup_mut(name) {
+            var.attrs.integer = false;
+        }
+        Ok(())
+    }
+
+    /// Make `name` a nameref (`declare -n`) with the given reference text.
+    ///
+    /// Verified against bash 5.3.20:
+    ///
+    /// * the reference must be a plain name or a `name[subscript]` form; `1`,
+    ///   `#`, `@` and `a-b` are rejected with the word
+    ///   `invalid variable name for name reference`;
+    /// * a direct self-reference is rejected (`r: nameref variable self
+    ///   references not allowed`);
+    /// * a rejected reference leaves the variable exactly as it was, and does
+    ///   not create it;
+    /// * with no reference given the cell keeps its current value, which
+    ///   becomes the reference text.
+    ///
+    /// The attribute is set on the cell; the value is stored raw so that a
+    /// later `declare -p` round-trips and a later use can resolve it.
+    pub fn declare_nameref(
+        &mut self,
+        name: &[u8],
+        reference: Option<&[u8]>,
+        scope: CreateScope,
+    ) -> Result<(), Error> {
+        Self::check_name(name)?;
+        // `typeset -n ref` with no value promotes the cell's *current* value to
+        // a reference, and bash validates that too: `ref=1; typeset -n ref`
+        // reports `1: invalid variable name for name reference` and leaves the
+        // variable plain.
+        let inherited = reference
+            .is_none()
+            .then(|| {
+                self.lookup(name)
+                    .and_then(|var| var.value.as_str())
+                    .filter(|value| !value.is_empty())
+                    .map(<[u8]>::to_vec)
+            })
+            .flatten();
+        if let Some(candidate) = reference.or(inherited.as_deref()) {
+            match parse_reference(candidate) {
+                Some(Reference::Plain(base)) if base == name => {
+                    return Err(Error::NamerefSelf {
+                        name: name.to_vec(),
+                    });
+                }
+                Some(Reference::Element { base, .. }) if base == name => {
+                    return Err(Error::NamerefSelf {
+                        name: name.to_vec(),
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    return Err(Error::InvalidName {
+                        name: candidate.to_vec(),
+                    });
+                }
+            }
+        }
+        let var = self.cell_mut(name, scope, false)?;
+        if let Some(reference) = reference {
+            var.value = VarValue::Str(reference.to_vec());
+        }
+        var.attrs.nameref = true;
+        Ok(())
+    }
+
+    /// Clear the nameref attribute (`typeset +n`). The value, which holds the
+    /// last reference text, stays put — that is exactly what bash prints after
+    /// `typeset +n ref`.
+    pub fn unmark_nameref(&mut self, name: &[u8]) -> Result<(), Error> {
+        if let Some(var) = self.lookup_mut(name) {
+            var.attrs.nameref = false;
+        }
         Ok(())
     }
 
@@ -655,15 +834,26 @@ impl Vars {
     /// The variable is removed from the scope where it is found; a local
     /// removal reveals the outer variable, which is bash's behavior. Unsetting
     /// a readonly variable is an error. Unsetting a name that does not exist
-    /// succeeds.
+    /// succeeds. A nameref is followed, so `unset ref` removes the target and
+    /// leaves the reference dangling.
     pub fn unset(&mut self, name: &[u8]) -> Result<(), Error> {
         Self::check_name(name)?;
-        let target = self.deref_name(name)?.into_owned();
-        let Some(location) = self.location(&target) else {
+        match self.resolve_chain(name)? {
+            Resolved::Var(target) => self.remove_cell(&target),
+            Resolved::Indexed(base, index) => self.unset_element_indexed(&base, index),
+            Resolved::Assoc(base, key) => self.unset_element_assoc(&base, &key),
+            Resolved::Elements(base) => self.unset_all_elements(&base),
+        }
+    }
+
+    fn remove_cell(&mut self, name: &[u8]) -> Result<(), Error> {
+        let Some(location) = self.location(name) else {
             return Ok(());
         };
         if self.var_at(location).attrs.readonly {
-            return Err(Error::Readonly { name: target });
+            return Err(Error::Readonly {
+                name: name.to_vec(),
+            });
         }
         match location {
             Location::Global(index) => {
@@ -781,7 +971,8 @@ impl Vars {
 
     /// `${a[index]}` for an indexed array (a scalar behaves like `[0]`).
     pub fn element_indexed(&self, name: &[u8], index: i64) -> Option<&[u8]> {
-        match &self.lookup(name)?.value {
+        let name = self.deref_name(name).ok()?;
+        match &self.lookup(&name)?.value {
             VarValue::Indexed(elements) => {
                 let index = resolve_read_index(elements, index)?;
                 elements.get(&index).map(Vec::as_slice)
@@ -793,7 +984,8 @@ impl Vars {
 
     /// `${a[key]}` for an associative array.
     pub fn element_assoc(&self, name: &[u8], key: &[u8]) -> Option<&[u8]> {
-        match &self.lookup(name)?.value {
+        let name = self.deref_name(name).ok()?;
+        match &self.lookup(&name)?.value {
             VarValue::Assoc(pairs) => pairs
                 .iter()
                 .find(|(candidate, _)| candidate.as_slice() == key)
@@ -924,6 +1116,66 @@ impl Vars {
         }
         out.sort_by(|a, b| a.0.cmp(b.0));
         out
+    }
+
+    /// The global scope only, sorted by name.
+    ///
+    /// `declare -g` and `declare -pg` list the global scope even when a local
+    /// shadows the name, which `visible` cannot express.
+    pub fn globals(&self) -> Vec<(&[u8], &Var)> {
+        let mut out: Vec<(&[u8], &Var)> = self
+            .global
+            .iter()
+            .map(|(name, var)| (name.as_slice(), var))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(b.0));
+        out
+    }
+
+    /// The innermost frame's locals, sorted by name (`local`, `local -p`).
+    pub fn locals(&self) -> Vec<(&[u8], &Var)> {
+        let Some(frame) = self.frames.last() else {
+            return Vec::new();
+        };
+        let mut out: Vec<(&[u8], &Var)> = frame
+            .locals
+            .iter()
+            .map(|(name, var)| (name.as_slice(), var))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(b.0));
+        out
+    }
+
+    /// A cell from the innermost frame only (`local -p name`).
+    pub fn lookup_local(&self, name: &[u8]) -> Option<&Var> {
+        self.frames
+            .last()?
+            .locals
+            .iter()
+            .find_map(|(candidate, var)| (candidate.as_slice() == name).then_some(var))
+    }
+
+    /// A global-scope cell by name, ignoring shadowing frames (`declare -g`).
+    pub fn lookup_global(&self, name: &[u8]) -> Option<&Var> {
+        self.global
+            .iter()
+            .find(|(candidate, _)| candidate.as_slice() == name)
+            .map(|(_, var)| var)
+    }
+
+    /// Whether the variable a write to `name` would reach has the integer
+    /// attribute (namerefs followed).
+    pub fn target_has_integer(&self, name: &[u8]) -> bool {
+        match self.resolve_chain(name) {
+            Ok(Resolved::Var(target)) => self.lookup(&target).is_some_and(|var| var.attrs.integer),
+            _ => false,
+        }
+    }
+
+    /// Whether `name`'s nameref chain is circular (used to report a read that
+    /// `lookup` cannot express as an error).
+    pub fn is_nameref_cycle(&self, name: &[u8]) -> bool {
+        matches!(self.resolve_chain(name), Err(Error::NamerefCycle { .. }))
     }
 
     /// Build the child environment: `NAME=VALUE` for exported variables only.
@@ -1113,15 +1365,97 @@ impl Vars {
         }
     }
 
-    /// Follow `nameref` chains. The hook currently never answers, so this is
-    /// a borrow-free identity function; it exists so `declare -n` is a lookup
-    /// flag later rather than a refactor (DESIGN.md §3.4, §4.6).
+    /// Follow `nameref` chains and return the plain variable name at the end.
+    ///
+    /// This is the form used by operations that address a *cell* — element
+    /// assignment (`ref[0]=x`), `unset_element_*` — and by [`Vars::resolve_in`].
+    /// A chain that ends in an element reference (`declare -n r='a[2]'`) is not
+    /// a name; operations that need one report [`Error::InvalidName`] with the
+    /// whole target, which is bash's wording for `r[0]=x` over such a target.
     fn deref_name<'a>(&self, name: &'a [u8]) -> Result<Cow<'a, [u8]>, Error> {
-        let mut current: Cow<'a, [u8]> = Cow::Borrowed(name);
+        match self.resolve_chain(name)? {
+            Resolved::Var(target) => Ok(if target == name {
+                Cow::Borrowed(name)
+            } else {
+                Cow::Owned(target)
+            }),
+            Resolved::Indexed(base, index) => Err(Error::InvalidName {
+                name: format!("{}[{index}]", display(&base)).into_bytes(),
+            }),
+            Resolved::Assoc(base, key) => Err(Error::InvalidName {
+                name: {
+                    let mut out = base;
+                    out.push(b'[');
+                    out.extend_from_slice(&key);
+                    out.push(b']');
+                    out
+                },
+            }),
+            Resolved::Elements(base) => Err(Error::InvalidName {
+                name: {
+                    let mut out = base;
+                    out.extend_from_slice(b"[@]");
+                    out
+                },
+            }),
+        }
+    }
+
+    /// Follow `nameref` chains to the operation's endpoint.
+    ///
+    /// A nameref cell's scalar value is a *reference*: either a plain name
+    /// (`-n r=x`, chains allowed) or an element reference (`-n r='a[2]'`,
+    /// `-n r='m[key]'`, `-n r='a[@]'`). Bash expands the reference's subscript
+    /// again on every use, so this resolves it here — see
+    /// [`expand_reference_text`] for the part of that expansion this crate can
+    /// do (parameter references and escapes; command substitution inside a
+    /// subscript is not available without the evaluator).
+    ///
+    /// The chain limit is [`NAMEREF_MAX_DEPTH`]; running out is
+    /// [`Error::NamerefCycle`]. An empty nameref value is *not* a reference —
+    /// it names nothing, so a write creates the target on demand and a read is
+    /// empty, exactly like an unset nameref in bash.
+    fn resolve_chain(&self, name: &[u8]) -> Result<Resolved, Error> {
+        let mut current = name.to_vec();
         for _ in 0..NAMEREF_MAX_DEPTH {
-            match self.nameref_target(&current) {
-                Some(target) => current = Cow::Owned(target),
-                None => return Ok(current),
+            let Some(var) = self.lookup(&current) else {
+                return Ok(Resolved::Var(current));
+            };
+            if !var.attrs.nameref {
+                return Ok(Resolved::Var(current));
+            }
+            let Some(target) = var.value.as_str() else {
+                return Ok(Resolved::Var(current));
+            };
+            if target.is_empty() {
+                return Ok(Resolved::Var(current));
+            }
+            match parse_reference(target) {
+                Some(Reference::Plain(base)) => {
+                    if base == current {
+                        return Err(Error::NamerefCycle { name: current });
+                    }
+                    current = base;
+                }
+                Some(Reference::Element { base, subscript }) => {
+                    return self.resolve_element(&base, &subscript).map_err(|error| {
+                        // A bad subscript inside a reference is reported against
+                        // the reference itself, the way bash does.
+                        match error {
+                            Error::BadSubscript { .. } | Error::InvalidName { .. } => {
+                                Error::InvalidName {
+                                    name: target.to_vec(),
+                                }
+                            }
+                            other => other,
+                        }
+                    });
+                }
+                Some(Reference::All(base)) => return Ok(Resolved::Elements(base)),
+                // An invalid reference: bash refuses at `declare -n` time, so
+                // reaching this means the cell predates that check. Treat the
+                // cell as an ordinary variable rather than guessing.
+                None => return Ok(Resolved::Var(current)),
             }
         }
         Err(Error::NamerefCycle {
@@ -1129,15 +1463,25 @@ impl Vars {
         })
     }
 
-    /// Extension point for bash `nameref` (`declare -n`). Returns the variable
-    /// name this cell refers to, or `None` when `name` is not a nameref.
-    ///
-    /// Namerefs are deferred (DESIGN.md §3.4); when implemented this reads the
-    /// cell's scalar value and requires a `nameref` attribute, with the chain
-    /// limit enforced by [`Vars::deref_name`].
-    fn nameref_target(&self, name: &[u8]) -> Option<Vec<u8>> {
-        let _ = name;
-        None
+    /// Resolve `base[subscript]` for a reference, using the base's current
+    /// shape: an associative array treats the expanded subscript as a key, an
+    /// indexed array (or a scalar) evaluates it arithmetically.
+    fn resolve_element(&self, base: &[u8], subscript: &[u8]) -> Result<Resolved, Error> {
+        let text = expand_reference_text(self, subscript);
+        if text.is_empty() {
+            return Err(Error::BadSubscript {
+                name: base.to_vec(),
+            });
+        }
+        if self.shape(base) == Some(ArrayShape::Associative) {
+            return Ok(Resolved::Assoc(base.to_vec(), text));
+        }
+        match evaluate_subscript(self, &text) {
+            Some(index) => Ok(Resolved::Indexed(base.to_vec(), index)),
+            None => Err(Error::BadSubscript {
+                name: base.to_vec(),
+            }),
+        }
     }
 
     fn lookup_mut(&mut self, name: &[u8]) -> Option<&mut Var> {
@@ -1346,4 +1690,334 @@ fn record_export<'a>(pairs: &mut Vec<(&'a [u8], Option<&'a [u8]>)>, name: &'a [u
     } else {
         pairs.push((name, value));
     }
+}
+
+/// Where a nameref chain ends: the operation's real target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Resolved {
+    /// An ordinary variable cell.
+    Var(Vec<u8>),
+    /// One element of an indexed array (`-n r='a[3]'`).
+    Indexed(Vec<u8>, i64),
+    /// One element of an associative array (`-n r='m[key]'`).
+    Assoc(Vec<u8>, Vec<u8>),
+    /// Every element (`-n r='a[@]'`).
+    Elements(Vec<u8>),
+}
+
+/// A parsed nameref value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Reference {
+    /// `x`: another variable.
+    Plain(Vec<u8>),
+    /// `a[subscript]`: one element.
+    Element { base: Vec<u8>, subscript: Vec<u8> },
+    /// `a[@]` / `a[*]`: the whole array.
+    All(Vec<u8>),
+}
+
+/// Parse a nameref value, or `None` when it is not a usable reference.
+///
+/// Bash accepts a plain identifier or `identifier[subscript]`; anything else
+/// (`1`, `#`, `@`, `a-b`, an empty string given as a value) is rejected when
+/// the attribute is set. The subscript is kept as written: bash expands it
+/// again on every use.
+fn parse_reference(reference: &[u8]) -> Option<Reference> {
+    let Some(open) = reference.iter().position(|&byte| byte == b'[') else {
+        return Vars::is_name(reference).then(|| Reference::Plain(reference.to_vec()));
+    };
+    let base = &reference[..open];
+    if !Vars::is_name(base) || reference.last() != Some(&b']') {
+        return None;
+    }
+    let subscript = &reference[open + 1..reference.len() - 1];
+    // `a[@]`/`a[*]` is a whole-array reference; a quoted key or an arithmetic
+    // expression is an element. An unquoted `]` inside would have made the
+    // scan above ambiguous, so require balanced brackets.
+    let mut depth = 1usize;
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    for &byte in subscript {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' => escaped = true,
+            b'\'' | b'"' if quote == Some(byte) => quote = None,
+            b'\'' | b'"' if quote.is_none() => quote = Some(byte),
+            b'[' if quote.is_none() => depth += 1,
+            b']' if quote.is_none() => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() || depth != 1 {
+        return None;
+    }
+    if subscript == b"@" || subscript == b"*" {
+        return Some(Reference::All(base.to_vec()));
+    }
+    Some(Reference::Element {
+        base: base.to_vec(),
+        subscript: subscript.to_vec(),
+    })
+}
+
+/// `name[@]`, for an error message about a whole-array reference.
+fn whole_array_name(mut base: Vec<u8>) -> Vec<u8> {
+    base.extend_from_slice(b"[@]");
+    base
+}
+
+/// Expand a reference subscript the way bash does before interpreting it.
+///
+/// Verified against bash 5.3.20: a nameref value keeps the *unexpanded*
+/// subscript, and every use expands it again, so `key=K; declare -n
+/// r='A[$key]'` follows `key` when it changes. This covers the expansion that
+/// does not need the evaluator — `$name`, `${name}`, `${name[i]}`, backslash
+/// escapes and quote removal. Command substitution inside a subscript is not
+/// available here (it needs the evaluator); `bsh` therefore resolves it only
+/// if the declaration itself already expanded it.
+fn expand_reference_text(vars: &Vars, text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut index = 0;
+    while index < text.len() {
+        match text[index] {
+            b'\\' if index + 1 < text.len() => {
+                out.push(text[index + 1]);
+                index += 2;
+            }
+            b'\'' => {
+                // Single quotes: literal until the closing quote.
+                index += 1;
+                while index < text.len() && text[index] != b'\'' {
+                    out.push(text[index]);
+                    index += 1;
+                }
+                index += 1;
+            }
+            b'"' => index += 1,
+            b'$' => {
+                let (value, next) = expand_dollar(vars, text, index);
+                out.extend_from_slice(&value);
+                index = next;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Expand one `$…` reference starting at `text[start]`, returning its value and
+/// the index just past it. An unrecognised `$` is literal.
+fn expand_dollar(vars: &Vars, text: &[u8], start: usize) -> (Vec<u8>, usize) {
+    let rest = &text[start + 1..];
+    if rest.is_empty() {
+        return (vec![b'$'], start + 1);
+    }
+    if rest[0] == b'{' {
+        let Some(close) = rest.iter().position(|&byte| byte == b'}') else {
+            return (vec![b'$'], start + 1);
+        };
+        let inner = &rest[1..close];
+        return (expand_braced(vars, inner), start + 2 + close);
+    }
+    if rest[0] == b'(' {
+        // Command substitution: leave it as written; the caller's arithmetic
+        // will refuse it rather than silently guessing.
+        return (text[start..].to_vec(), text.len());
+    }
+    if Vars::is_name(&rest[..1]) {
+        let mut end = 1;
+        while end < rest.len() && (rest[end] == b'_' || rest[end].is_ascii_alphanumeric()) {
+            end += 1;
+        }
+        return (
+            vars.scalar(&rest[..end]).unwrap_or_default().to_vec(),
+            start + 1 + end,
+        );
+    }
+    (vec![b'$'], start + 1)
+}
+
+/// `${…}` inside a reference subscript: only the simple parameter forms are
+/// meaningful there, so anything else is kept literally.
+fn expand_braced(vars: &Vars, inner: &[u8]) -> Vec<u8> {
+    if let Some(open) = inner.iter().position(|&byte| byte == b'[')
+        && inner.last() == Some(&b']')
+    {
+        let base = &inner[..open];
+        let subscript = &inner[open + 1..inner.len() - 1];
+        if Vars::is_name(base) {
+            let subscript = expand_reference_text(vars, subscript);
+            if let Some(index) = parse_integer(&subscript) {
+                if let Some(value) = vars.element_indexed(base, index) {
+                    return value.to_vec();
+                }
+            }
+            if let Some(value) = vars.element_assoc(base, &subscript) {
+                return value.to_vec();
+            }
+            return Vec::new();
+        }
+    }
+    if Vars::is_name(inner) {
+        return vars.scalar(inner).unwrap_or_default().to_vec();
+    }
+    let mut out = vec![b'$', b'{'];
+    out.extend_from_slice(inner);
+    out.push(b'}');
+    out
+}
+
+/// Evaluate a nameref subscript as arithmetic, for an indexed array.
+///
+/// This is the subset of bash arithmetic a subscript needs in practice:
+/// decimal integers, variables holding integers, `+ - * / %`, parentheses and
+/// whitespace. Anything else (ranges, `**`, base prefixes, side effects)
+/// returns `None`, and the read is empty rather than wrong.
+fn evaluate_subscript(vars: &Vars, text: &[u8]) -> Option<i64> {
+    let mut parser = SubscriptParser {
+        vars,
+        text,
+        index: 0,
+    };
+    let value = parser.expression()?;
+    parser.skip_space();
+    (parser.index == parser.text.len()).then_some(value)
+}
+
+/// A tiny recursive-descent evaluator for reference subscripts.
+struct SubscriptParser<'a> {
+    vars: &'a Vars,
+    text: &'a [u8],
+    index: usize,
+}
+
+impl SubscriptParser<'_> {
+    fn skip_space(&mut self) {
+        while self.index < self.text.len() && self.text[self.index].is_ascii_whitespace() {
+            self.index += 1;
+        }
+    }
+
+    fn expression(&mut self) -> Option<i64> {
+        let mut value = self.term()?;
+        loop {
+            self.skip_space();
+            match self.text.get(self.index) {
+                Some(b'+') => {
+                    self.index += 1;
+                    value = value.wrapping_add(self.term()?);
+                }
+                Some(b'-') => {
+                    self.index += 1;
+                    value = value.wrapping_sub(self.term()?);
+                }
+                _ => return Some(value),
+            }
+        }
+    }
+
+    fn term(&mut self) -> Option<i64> {
+        let mut value = self.unary()?;
+        loop {
+            self.skip_space();
+            match self.text.get(self.index) {
+                Some(b'*') => {
+                    self.index += 1;
+                    value = value.wrapping_mul(self.unary()?);
+                }
+                Some(b'/') => {
+                    self.index += 1;
+                    let divisor = self.unary()?;
+                    if divisor == 0 {
+                        return None;
+                    }
+                    value = value.wrapping_div(divisor);
+                }
+                Some(b'%') => {
+                    self.index += 1;
+                    let divisor = self.unary()?;
+                    if divisor == 0 {
+                        return None;
+                    }
+                    value = value.wrapping_rem(divisor);
+                }
+                _ => return Some(value),
+            }
+        }
+    }
+
+    fn unary(&mut self) -> Option<i64> {
+        self.skip_space();
+        match self.text.get(self.index) {
+            Some(b'-') => {
+                self.index += 1;
+                Some(self.unary()?.wrapping_neg())
+            }
+            Some(b'+') => {
+                self.index += 1;
+                self.unary()
+            }
+            _ => self.primary(),
+        }
+    }
+
+    fn primary(&mut self) -> Option<i64> {
+        self.skip_space();
+        match self.text.get(self.index)? {
+            b'(' => {
+                self.index += 1;
+                let value = self.expression()?;
+                self.skip_space();
+                if self.text.get(self.index) != Some(&b')') {
+                    return None;
+                }
+                self.index += 1;
+                Some(value)
+            }
+            byte if byte.is_ascii_digit() => {
+                let start = self.index;
+                while self.text.get(self.index).is_some_and(u8::is_ascii_digit) {
+                    self.index += 1;
+                }
+                std::str::from_utf8(&self.text[start..self.index])
+                    .ok()?
+                    .parse()
+                    .ok()
+            }
+            byte if *byte == b'_' || byte.is_ascii_alphabetic() => {
+                let start = self.index;
+                while self
+                    .text
+                    .get(self.index)
+                    .is_some_and(|byte| *byte == b'_' || byte.is_ascii_alphanumeric())
+                {
+                    self.index += 1;
+                }
+                parse_integer(self.vars.scalar(&self.text[start..self.index])?)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Parse a decimal integer with bash's surrounding-whitespace tolerance.
+fn parse_integer(bytes: &[u8]) -> Option<i64> {
+    let bytes = bytes.strip_prefix(b"+").unwrap_or(bytes);
+    let text = std::str::from_utf8(bytes).ok()?;
+    let text = text.trim();
+    if text.is_empty() {
+        return Some(0);
+    }
+    text.parse().ok()
 }
