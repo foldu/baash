@@ -31,8 +31,13 @@
 //! `**` is right-associative and binds after the unary signs (`-2 ** 2` is
 //! four in bash), and the comma operator evaluates its left side first.
 //!
-//! Deferred: `?:`, `base#digits` literals, and recursive evaluation of a
-//! variable whose value is itself an expression.
+//! `?:` is right-associative and short-circuits: only the selected arm is
+//! evaluated, so `(( x ? y++ : z ))` increments exactly one variable. The
+//! middle arm is a full expression (comma included) while the third is a
+//! conditional-expression, matching bash.
+//!
+//! Deferred: `base#digits` literals, and recursive evaluation of a variable
+//! whose value is itself an expression.
 
 use std::collections::HashMap;
 
@@ -248,9 +253,11 @@ impl<'a, V: IntVars> Parser<'a, V> {
             // subscript twice would double its side effects.
             let current = self.read_lvalue(name, subscript);
             let current = self.take_postfix(current, name, subscript)?;
-            return self.binary_from(current, 1);
+            let current = self.binary_from(current, 1)?;
+            return self.conditional_from(current);
         }
-        self.binary(1)
+        let value = self.binary(1)?;
+        self.conditional_from(value)
     }
 
     fn assign_op(&self) -> Option<&'static str> {
@@ -401,6 +408,41 @@ impl<'a, V: IntVars> Parser<'a, V> {
             b"||" => i64::from(lhs != 0 || rhs != 0),
             _ => return Err("unknown operator".to_owned()),
         })
+    }
+
+    /// `cond ? then : else`, right-associative. Exactly one arm is
+    /// evaluated; the other is parsed with `dead` set.
+    fn conditional_from(&mut self, condition: i64) -> Result<i64, String> {
+        self.skip_space();
+        if !self.eat(b"?") {
+            return Ok(condition);
+        }
+        let outer_dead = self.dead;
+        let taken = !outer_dead && condition != 0;
+        // The middle arm is a full expression, so `1 ? 2, 3 : 4` is three.
+        self.dead = !taken;
+        let then_value = self.expression()?;
+        self.skip_space();
+        if !self.eat(b":") {
+            return Err("expected `:` in conditional".to_owned());
+        }
+        // The third arm is a conditional-expression: `1 ? 2 : 3, 4` applies
+        // the comma to the whole conditional, so it is four.
+        self.dead = outer_dead || taken;
+        let else_value = self.conditional()?;
+        self.dead = outer_dead;
+        if outer_dead {
+            Ok(0)
+        } else if taken {
+            Ok(then_value)
+        } else {
+            Ok(else_value)
+        }
+    }
+
+    fn conditional(&mut self) -> Result<i64, String> {
+        let value = self.binary(1)?;
+        self.conditional_from(value)
     }
 
     fn unary(&mut self) -> Result<i64, String> {
@@ -802,6 +844,40 @@ mod tests {
         assert_eq!(eval(b"b", &mut vars), Ok(1));
         assert_eq!(eval(b"b = 2, +++b", &mut vars), Ok(3));
         assert_eq!(eval(b"b", &mut vars), Ok(3));
+    }
+
+    #[test]
+    fn ternary_selects_and_nests() {
+        assert_eq!(value("1 ? 2 : 3"), 2);
+        assert_eq!(value("0 ? 2 : 3"), 3);
+        assert_eq!(value("5 > 3 ? 7 : 8"), 7);
+        assert_eq!(value("1 ? 2 : 3 ? 4 : 5"), 2);
+        assert_eq!(value("0 ? 2 : 3 ? 4 : 5"), 4);
+        assert_eq!(value("1 ? 2 ? 3 : 4 : 5"), 3);
+        assert_eq!(value("(1 ? 2 : 3) ? 4 : 5"), 4);
+        assert_eq!(value("1 ? 2, 3 : 4"), 3, "comma is allowed in the middle");
+        assert_eq!(
+            value("1 ? 2 : 3, 4"),
+            4,
+            "a trailing comma applies to the whole conditional"
+        );
+    }
+
+    #[test]
+    fn ternary_is_short_circuit() {
+        let mut vars = MapVars::default();
+        assert_eq!(eval(b"1 ? 5 : 1 / 0", &mut vars), Ok(5));
+        assert_eq!(eval(b"0 ? 1 / 0 : 7", &mut vars), Ok(7));
+        // The untaken `x++` must not write.
+        assert_eq!(eval(b"1 ? 5 : x++", &mut vars), Ok(5));
+        assert_eq!(eval(b"x", &mut vars), Ok(0));
+        assert_eq!(eval(b"0 ? x++ : 7", &mut vars), Ok(7));
+        assert_eq!(eval(b"x", &mut vars), Ok(0));
+        // The taken one must.
+        assert_eq!(eval(b"1 ? y++ : 9", &mut vars), Ok(0));
+        assert_eq!(eval(b"y", &mut vars), Ok(1));
+        assert_eq!(eval(b"0 ? 9 : z++", &mut vars), Ok(0));
+        assert_eq!(eval(b"z", &mut vars), Ok(1));
     }
 
     #[test]
