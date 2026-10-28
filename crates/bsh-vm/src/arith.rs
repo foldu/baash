@@ -28,8 +28,11 @@
 //! when it is unset — bash's "empty cell is zero" rule, which is what makes
 //! `(( a[99] += 1 ))` a sparse increment rather than an error.
 //!
-//! Deferred: `**`, the comma operator, `?:`, `base#digits` literals, and
-//! recursive evaluation of a variable whose value is itself an expression.
+//! `**` is right-associative and binds after the unary signs (`-2 ** 2` is
+//! four in bash), and the comma operator evaluates its left side first.
+//!
+//! Deferred: `?:`, `base#digits` literals, and recursive evaluation of a
+//! variable whose value is itself an expression.
 
 use std::collections::HashMap;
 
@@ -100,7 +103,7 @@ fn eval_depth(src: &[u8], vars: &mut impl IntVars, depth: usize) -> Result<i64, 
         vars,
         depth,
     };
-    let value = parser.assignment()?;
+    let value = parser.expression()?;
     parser.skip_space();
     if parser.pos < parser.src.len() {
         return Err(format!(
@@ -146,6 +149,12 @@ pub fn parse_int(bytes: &[u8]) -> Option<i64> {
     })
 }
 
+/// Assignment spellings, longest first. `=` is listed after the shifts so a
+/// prefix search never mistakes `<<=` for `<<` plus `=`.
+const ASSIGN_OPS: &[&str] = &[
+    "<<=", ">>=", "=", "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=",
+];
+
 struct Parser<'a, V: IntVars> {
     src: &'a [u8],
     pos: usize,
@@ -167,6 +176,7 @@ const BINOPS: &[(&[u8], u8)] = &[
     (b"!=", 7),
     (b"&&", 2),
     (b"||", 1),
+    (b"**", 12),
     (b"+", 10),
     (b"-", 10),
     (b"*", 11),
@@ -195,47 +205,42 @@ impl<'a, V: IntVars> Parser<'a, V> {
         false
     }
 
+    /// The comma operator: lowest precedence, left-associative, both sides
+    /// evaluated (the left only for its side effects).
+    fn expression(&mut self) -> Result<i64, String> {
+        let mut value = self.assignment()?;
+        while self.eat(b",") {
+            value = self.assignment()?;
+        }
+        Ok(value)
+    }
+
     /// `name = expr`, `a[i] += expr`, and the compound assignment operators.
     fn assignment(&mut self) -> Result<i64, String> {
         self.skip_space();
-        let start = self.pos;
         if let Some(name) = self.peek_name() {
             self.pos += name.len();
             self.skip_space();
             let subscript = self.take_subscript()?;
             self.skip_space();
-            const ASSIGN: &[&str] = &[
-                "<<=", ">>=", "=", "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=",
-            ];
-            let found = ASSIGN.iter().find(|token| {
-                self.src[self.pos..].starts_with(token.as_bytes())
-                    && !(token.starts_with('=') && self.src[self.pos..].starts_with(b"=="))
-            });
-            if let Some(&token) = found {
+            if let Some(token) = self.assign_op() {
                 self.pos += token.len();
-                let value = self.assignment()?;
-                let current = self.read_lvalue(name, subscript);
-                let value = if self.dead {
+                if self.dead {
+                    self.assignment()?;
+                    return Ok(0);
+                }
+                // bash reads a compound assignment's current value *before*
+                // evaluating the right-hand side: with `a=3`, `a += a++` is
+                // 6 (3 + 3), not 7 (4 + 3). A plain `=` reads nothing, so
+                // `a='not a number'; a=5` does not fail.
+                let current = if token == "=" {
                     0
                 } else {
-                    match token {
-                        "=" => value,
-                        "+=" => current.wrapping_add(value),
-                        "-=" => current.wrapping_sub(value),
-                        "*=" => current.wrapping_mul(value),
-                        "/=" => divide(current, value)?,
-                        "%=" => remainder(current, value)?,
-                        "&=" => current & value,
-                        "^=" => current ^ value,
-                        "|=" => current | value,
-                        "<<" => current.wrapping_shl(value as u32),
-                        ">>" => current.wrapping_shr(value as u32),
-                        _ => value,
-                    }
+                    self.read_lvalue(name, subscript)
                 };
-                if !self.dead {
-                    self.write_lvalue(name, subscript, value)?;
-                }
+                let value = self.assignment()?;
+                let value = assign_value(token, current, value)?;
+                self.write_lvalue(name, subscript, value)?;
                 return Ok(value);
             }
             // No assignment operator after all: the name (and any subscript)
@@ -245,8 +250,14 @@ impl<'a, V: IntVars> Parser<'a, V> {
             let current = self.take_postfix(current, name, subscript)?;
             return self.binary_from(current, 1);
         }
-        let _ = start;
         self.binary(1)
+    }
+
+    fn assign_op(&self) -> Option<&'static str> {
+        let rest = &self.src[self.pos..];
+        ASSIGN_OPS.iter().copied().find(|token| {
+            rest.starts_with(token.as_bytes()) && !(rest.starts_with(b"==") && *token == "=")
+        })
     }
 
     /// Parse `[expr]` when present, returning the evaluated subscript.
@@ -340,7 +351,13 @@ impl<'a, V: IntVars> Parser<'a, V> {
             } else if operator == b"||" {
                 self.dead = dead || lhs != 0;
             }
-            let rhs = self.binary(precedence + 1);
+            // `**` is right-associative; everything else climbs to `prec + 1`.
+            let next = if operator == b"**" {
+                precedence
+            } else {
+                precedence + 1
+            };
+            let rhs = self.binary(next);
             self.dead = dead;
             lhs = self.apply(operator, lhs, rhs?)?;
         }
@@ -348,10 +365,14 @@ impl<'a, V: IntVars> Parser<'a, V> {
     }
 
     fn peek_binop(&self, minimum: u8) -> Option<(&'static [u8], u8)> {
-        BINOPS.iter().find_map(|&(token, precedence)| {
-            (precedence >= minimum && self.src[self.pos..].starts_with(token))
-                .then_some((token, precedence))
-        })
+        // Longest spelling first: at `||` the single `|` must never win just
+        // because the `||` is below the caller's minimum precedence.
+        let rest = &self.src[self.pos..];
+        let &(token, precedence) = BINOPS
+            .iter()
+            .filter(|(token, _)| rest.starts_with(token))
+            .max_by_key(|(token, _)| token.len())?;
+        (precedence >= minimum).then_some((token, precedence))
     }
 
     fn apply(&self, operator: &[u8], lhs: i64, rhs: i64) -> Result<i64, String> {
@@ -364,6 +385,7 @@ impl<'a, V: IntVars> Parser<'a, V> {
             b"*" => lhs.wrapping_mul(rhs),
             b"/" => divide(lhs, rhs)?,
             b"%" => remainder(lhs, rhs)?,
+            b"**" => power(lhs, rhs)?,
             b"<<" => lhs.wrapping_shl(rhs as u32),
             b">>" => lhs.wrapping_shr(rhs as u32),
             b"&" => lhs & rhs,
@@ -400,11 +422,23 @@ impl<'a, V: IntVars> Parser<'a, V> {
             if matches!(token, b"!" | b"-" | b"+") && rest[1..].starts_with(b"=") {
                 continue;
             }
+            // In a run of three or more signs bash takes the first one as an
+            // ordinary unary sign: `---b` is `-(--b)`, and `+++b` is
+            // `+(++b)`. Skipping the two-character token here lets the
+            // one-character arm below do exactly that.
+            if kind <= 2 && rest.get(2) == rest.first() {
+                continue;
+            }
             self.pos += token.len();
             if kind <= 2 {
+                let step = if kind == 1 { 1 } else { -1 };
+                // bash accepts prefix `++`/`--` on a non-lvalue and returns
+                // the operand unchanged (`++(5)` is 5, `++!0` is 1).
+                if self.peek_name().is_none() {
+                    return self.unary();
+                }
                 let name = self.take_name()?;
                 let subscript = self.take_subscript()?;
-                let step = if kind == 1 { 1 } else { -1 };
                 let value = self.read_lvalue(&name, subscript).wrapping_add(step);
                 if !self.dead {
                     self.write_lvalue(&name, subscript, value)?;
@@ -425,7 +459,7 @@ impl<'a, V: IntVars> Parser<'a, V> {
     fn primary(&mut self) -> Result<i64, String> {
         self.skip_space();
         if self.eat(b"(") {
-            let value = self.assignment()?;
+            let value = self.expression()?;
             if !self.eat(b")") {
                 return Err("missing `)`".to_owned());
             }
@@ -507,6 +541,42 @@ fn name_len(rest: &[u8]) -> Option<usize> {
             .take_while(|b| **b == b'_' || b.is_ascii_alphanumeric())
             .count(),
     )
+}
+
+fn assign_value(operator: &str, current: i64, value: i64) -> Result<i64, String> {
+    Ok(match operator {
+        "=" => value,
+        "+=" => current.wrapping_add(value),
+        "-=" => current.wrapping_sub(value),
+        "*=" => current.wrapping_mul(value),
+        "/=" => divide(current, value)?,
+        "%=" => remainder(current, value)?,
+        "<<=" => current.wrapping_shl(value as u32),
+        ">>=" => current.wrapping_shr(value as u32),
+        "&=" => current & value,
+        "^=" => current ^ value,
+        "|=" => current | value,
+        _ => return Err("unknown assignment operator".to_owned()),
+    })
+}
+
+fn power(base: i64, exponent: i64) -> Result<i64, String> {
+    if exponent < 0 {
+        return Err("exponent less than 0".to_owned());
+    }
+    let mut result: i64 = 1;
+    let mut factor = base;
+    let mut remaining = exponent as u64;
+    while remaining > 0 {
+        if remaining & 1 == 1 {
+            result = result.wrapping_mul(factor);
+        }
+        remaining >>= 1;
+        if remaining > 0 {
+            factor = factor.wrapping_mul(factor);
+        }
+    }
+    Ok(result)
 }
 
 fn divide(lhs: i64, rhs: i64) -> Result<i64, String> {
@@ -638,5 +708,109 @@ mod tests {
         assert_eq!(parse_int(b"0xff"), Some(255));
         assert_eq!(parse_int(b"nope"), None);
         assert_eq!(parse_int(b""), None);
+    }
+
+    #[test]
+    fn exponentiation_is_right_associative_and_binds_after_unary() {
+        assert_eq!(value("2**10"), 1024);
+        assert_eq!(value("2 ** 3 ** 2"), 512);
+        assert_eq!(value("3 ** 0"), 1);
+        assert_eq!(value("0 ** 0"), 1);
+        assert_eq!(value("-2 ** 2"), 4, "unary minus binds tighter than **");
+        assert_eq!(value("-3 ** 2"), 9);
+        assert_eq!(value("!2 ** 2"), 0);
+        assert_eq!(value("~2 ** 2"), 9);
+        assert_eq!(value("2 * 3 ** 2"), 18);
+        assert_eq!(value("2 ** 2 * 3"), 12);
+        assert_eq!(value("2 ** 63"), i64::MIN, "exponentiation wraps");
+        assert_eq!(value("2 ** 64"), 0);
+        assert_eq!(value("(-2) ** 3"), -8);
+        assert_eq!(value("2 ** -0"), 1);
+    }
+
+    #[test]
+    fn negative_exponent_is_an_error() {
+        assert!(fails("2 ** -1").contains("exponent less than 0"));
+        assert!(fails("0 ** -1").contains("exponent less than 0"));
+    }
+
+    #[test]
+    fn comma_evaluates_left_to_right() {
+        assert_eq!(value("1, 2, 3"), 3);
+        assert_eq!(value("(1, 2)"), 2);
+        let mut vars = MapVars::default();
+        assert_eq!(eval(b"a = 1, b = 2, a + b", &mut vars), Ok(3));
+        assert_eq!(eval(b"a", &mut vars), Ok(1));
+        assert_eq!(eval(b"b", &mut vars), Ok(2));
+        assert_eq!(eval(b"x = 5, x++", &mut vars), Ok(5));
+        assert_eq!(eval(b"x", &mut vars), Ok(6));
+        assert_eq!(eval(b"x = 5, ++x", &mut vars), Ok(6));
+    }
+
+    #[test]
+    fn every_assignment_operator_writes_back() {
+        let mut vars = MapVars::default();
+        let cases: &[(&str, i64, &str)] = &[
+            ("v = 6", 6, "v"),
+            ("v += 4", 10, "v"),
+            ("v -= 3", 7, "v"),
+            ("v *= 3", 21, "v"),
+            ("v /= 2", 10, "v"),
+            ("v %= 3", 1, "v"),
+            ("v = 1", 1, "v"),
+            ("v <<= 5", 32, "v"),
+            ("v >>= 2", 8, "v"),
+            ("v = 6", 6, "v"),
+            ("v &= 3", 2, "v"),
+            ("v ^= 7", 5, "v"),
+            ("v |= 8", 13, "v"),
+        ];
+        for (src, expected, name) in cases {
+            assert_eq!(eval(src.as_bytes(), &mut vars), Ok(*expected), "{src}");
+            assert_eq!(eval(name.as_bytes(), &mut vars), Ok(*expected), "{src}");
+        }
+        assert_eq!(eval(b"a = b = 2", &mut vars), Ok(2));
+        assert_eq!(eval(b"a", &mut vars), Ok(2));
+        assert_eq!(eval(b"b", &mut vars), Ok(2));
+    }
+
+    #[test]
+    fn compound_assignment_reads_before_the_right_hand_side() {
+        let mut vars = MapVars::default();
+        assert_eq!(eval(b"a = 3", &mut vars), Ok(3));
+        assert_eq!(eval(b"a += a++", &mut vars), Ok(6));
+        assert_eq!(eval(b"a", &mut vars), Ok(6));
+        assert_eq!(eval(b"a = 3", &mut vars), Ok(3));
+        assert_eq!(eval(b"a += ++a", &mut vars), Ok(7));
+        assert_eq!(eval(b"a = 3", &mut vars), Ok(3));
+        assert_eq!(eval(b"a += (a = 5)", &mut vars), Ok(8));
+        assert_eq!(eval(b"a", &mut vars), Ok(8));
+    }
+
+    #[test]
+    fn prefix_increment_on_a_non_lvalue_is_a_no_op() {
+        assert_eq!(value("++5"), 5);
+        assert_eq!(value("--5"), 5);
+        assert_eq!(value("++(5) + 1"), 6);
+        assert_eq!(value("++!0"), 1);
+        assert_eq!(value("++~5"), -6);
+        assert_eq!(value("+++5"), 5, "`+` then `++`");
+        let mut vars = MapVars::default();
+        assert_eq!(eval(b"b = 2, ---b", &mut vars), Ok(-1));
+        assert_eq!(eval(b"b", &mut vars), Ok(1));
+        assert_eq!(eval(b"b = 2, ----b", &mut vars), Ok(1));
+        assert_eq!(eval(b"b", &mut vars), Ok(1));
+        assert_eq!(eval(b"b = 2, +++b", &mut vars), Ok(3));
+        assert_eq!(eval(b"b", &mut vars), Ok(3));
+    }
+
+    #[test]
+    fn logical_chains_do_not_confuse_single_and_double_operators() {
+        assert_eq!(value("1 && 0 || 1"), 1);
+        assert_eq!(value("0 && 0 || 1"), 1);
+        assert_eq!(value("1 && 1 || 0"), 1);
+        assert_eq!(value("0 || 1 && 0"), 0);
+        assert_eq!(value("0 && 1 | 1"), 0);
+        assert_eq!(value("1 && 2 | 1"), 1);
     }
 }
