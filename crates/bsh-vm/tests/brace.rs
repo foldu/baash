@@ -82,6 +82,18 @@ fn quoted_and_parameter_brace_text_stays_literal() {
 }
 
 #[test]
+fn the_braceexpand_option_switches_the_stage() {
+    assert_eq!(words("set +B; set -- a{b,c}d"), ["a{b,c}d"]);
+    assert_eq!(words("set +B; set -B; set -- a{b,c}d"), ["abd", "acd"]);
+    // The short flag is reported in `$-` only while the stage is on.
+    let mut interp = shell();
+    run(&mut interp, "set -B");
+    assert!(text(&interp, b"-").contains('B'));
+    run(&mut interp, "set +B");
+    assert!(!text(&interp, b"-").contains('B'));
+}
+
+#[test]
 fn parameters_expand_after_the_stage_runs() {
     assert_eq!(words("x=A; set -- -{$x,b}-"), ["-A-", "-b-"]);
     assert_eq!(

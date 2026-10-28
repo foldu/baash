@@ -217,10 +217,10 @@ option_table! {
 
     /// `set -B` / `set -o braceexpand`: brace expansion (bash extension).
     ///
-    /// Off by default until brace expansion is implemented: `$-` reporting `B`
-    /// while `{a,b}` expands to nothing would be a lie, and a script that
-    /// turned it off would see no difference.
-    Braceexpand => braceexpand, "braceexpand", Some(b'B'), [SetO], true, false, false, &[];
+    /// On in the bash profile, as in bash. A strict POSIX profile starts with
+    /// it off because POSIX has no brace expansion, but `set -o posix` at run
+    /// time does not change it — bash keeps expanding braces in POSIX mode.
+    Braceexpand => braceexpand, "braceexpand", Some(b'B'), [SetO], true, false, true, &[];
 
     /// `set -o emacs`: emacs line editing (bash extension; `vi` is POSIX).
     Emacs => emacs, "emacs", None, [SetO], true, false, false, &[];

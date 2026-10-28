@@ -316,6 +316,18 @@ fn assignment_values_are_never_brace_expanded() {
 }
 
 #[test]
+fn the_braceexpand_option_turns_the_stage_off() {
+    let mut shell = TestShell::new().without_brace_expansion();
+    assert_argv(&expand_one("a{b,c}d", &mut shell), &["a{b,c}d"], "set +B");
+    assert_argv(&expand_one("{1..3}", &mut shell), &["{1..3}"], "ranges too");
+    assert_argv(
+        &expand_one("{a,b}{1,2}", &mut shell),
+        &["{a,b}{1,2}"],
+        "nothing at all",
+    );
+}
+
+#[test]
 fn tilde_expansion_sees_the_expanded_word() {
     let mut shell = TestShell::new().var(b"HOME", b"/home/bob");
     // The brace stage runs first, so the second word starts with `~` and the

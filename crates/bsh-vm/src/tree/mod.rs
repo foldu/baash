@@ -739,6 +739,12 @@ impl bsh_lang::Vars for Interp {
 }
 
 impl bsh_lang::Shell for Interp {
+    fn brace_expansion(&self) -> bool {
+        // `set -B`/`set +B`, and `set -o braceexpand`. The other stages are
+        // not switchable, which is why this is the pipeline's only option.
+        self.state.opts.braceexpand
+    }
+
     fn pattern_flags(&self) -> bsh_pattern::Flags {
         // `utf8` stays at its default (byte units): expansion forces the C
         // locale, the same policy `${#x}` uses. What comes from `shopt` is

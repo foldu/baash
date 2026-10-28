@@ -53,6 +53,9 @@ pub struct TestShell {
     pub read_only: bool,
     /// `set -u`: expanding an unset parameter is an error.
     pub nounset: bool,
+    /// `set +B`: brace expansion is off. The field is negative so `Default`
+    /// selects the bash behaviour (on), like every other switch here.
+    pub brace_expansion_off: bool,
     /// Arrays, by name. Separate from `vars` so a name cannot be both.
     pub indexed: HashMap<Vec<u8>, BTreeMap<i64, Vec<u8>>>,
     /// Associative arrays, in insertion order.
@@ -131,6 +134,13 @@ impl TestShell {
         self
     }
 
+    /// Turn `set +B` (disable brace expansion) on the fixture.
+    #[must_use]
+    pub fn without_brace_expansion(mut self) -> Self {
+        self.brace_expansion_off = true;
+        self
+    }
+
     /// Refuse assignments.
     #[must_use]
     pub fn read_only(mut self) -> Self {
@@ -202,6 +212,10 @@ impl Vars for TestShell {
 }
 
 impl Shell for TestShell {
+    fn brace_expansion(&self) -> bool {
+        !self.brace_expansion_off
+    }
+
     fn command_substitution(&mut self, cmd: &CommandSub) -> Result<Vec<u8>, Error> {
         self.cmdsub_calls.push(cmd.source.clone());
         self.cmdsub.get(&cmd.source).cloned().ok_or_else(|| {
