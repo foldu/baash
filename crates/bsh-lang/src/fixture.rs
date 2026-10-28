@@ -378,16 +378,24 @@ fn parse_parts(src: &[u8], index: &mut usize, stop_at_blank: bool) -> Vec<Part> 
         }
         let byte = src[*index];
         if byte == b'~' && builder.at_start() {
-            let end = src[*index..]
-                .iter()
-                .position(|&b| b == b'/')
-                .map_or(src.len(), |offset| *index + offset);
-            let user = src[*index + 1..end].to_vec();
-            if user
-                .iter()
-                .all(|&b| !is_blank(b) && !matches!(b, b'$' | b'"' | b'\'' | b'\\'))
+            // The same rule as the front end's `tilde_prefix_end`: a login
+            // name is `[A-Za-z0-9_.+-]*`, and the prefix is only a tilde when
+            // the name ends at `/` or at the end of the word. That is what
+            // keeps `~{a,b}` and `~"x"` out of the tilde stage, so brace
+            // expansion can see the group.
+            let mut end = *index + 1;
+            while end < src.len()
+                && (src[end].is_ascii_alphanumeric()
+                    || matches!(src[end], b'_' | b'.' | b'+' | b'-'))
             {
-                builder.part(Part::Tilde(TildeSpec { user }));
+                end += 1;
+            }
+            let at_end =
+                end == src.len() || src[end] == b'/' || (stop_at_blank && is_blank(src[end]));
+            if at_end {
+                builder.part(Part::Tilde(TildeSpec {
+                    user: src[*index + 1..end].to_vec(),
+                }));
                 *index = end;
                 continue;
             }

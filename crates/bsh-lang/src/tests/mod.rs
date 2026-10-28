@@ -11,6 +11,7 @@ use crate::{expand_word, expand_words};
 
 mod arrays;
 mod at_star;
+mod brace;
 mod params;
 mod pattern;
 mod pattern_case;

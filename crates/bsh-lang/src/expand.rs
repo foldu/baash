@@ -1,7 +1,11 @@
-//! The expansion pipeline, in five separately callable stages.
+//! The expansion pipeline, in five separately callable stages, plus the bash
+//! stage that runs before all of them.
 //!
 //! POSIX XCU 2.6 fixes the order (and DESIGN.md §4.2 makes it explicit):
 //!
+//! 0. brace expansion — [`crate::expand_braces`], a bash extension, and the
+//!    only stage that turns one word into several. It is not part of POSIX and
+//!    it is the only one that is optional at run time (`set +B`).
 //! 1. tilde expansion — [`expand_tilde`]
 //! 2. parameter, command and arithmetic expansion, left to right —
 //!    [`expand_parameters`]
@@ -9,7 +13,7 @@
 //! 4. pathname expansion — [`expand_pathnames`]
 //! 5. quote removal — [`remove_quotes`]
 //!
-//! [`expand_word`] runs all five; [`expand_word_with`] runs them in a chosen
+//! [`expand_word`] runs all six; [`expand_word_with`] runs them in a chosen
 //! [`Mode`]. Each stage is a separate function over inspectable data so a
 //! future `bsh explain` can print the intermediate result at every step
 //! (DESIGN.md §5.6, §9).
@@ -38,8 +42,8 @@ use crate::host::Shell;
 use crate::ifs::Ifs;
 use crate::vars::{ArrayKind, ArrayValue, SetError};
 use crate::word::{
-    CaseHow, DoubleQ, Lit, LitKind, ParamExp, ParamName, ParamOp, Part, ReplaceMode, TildeSpec,
-    UnsupportedOp, Word,
+    CaseHow, DoubleQ, Lit, LitKind, ParamExp, ParamName, ParamOp, Part, ReplaceMode, UnsupportedOp,
+    Word,
 };
 
 /// Diagnostic codes produced by this crate.
@@ -483,46 +487,87 @@ fn expand_assignment_tildes<S: Shell>(word: &mut Word, shell: &mut S) {
     }
 }
 
+/// Expand a word-initial `~`/`~user` in unquoted literal text.
+///
+/// The tilde prefix is read from the *text* of the word, so it can span
+/// several literal parts: brace expansion splits `~{/src,root}` into `~` plus
+/// the alternative (`/src` or `root`), and the second word must still see
+/// `~root` as one prefix. A quoted or opaque part ends the prefix without
+/// ending the word, and that is why `~\x`, `~"root"` and `~$x` are *not*
+/// expanded: bash only treats `~name` as a prefix when the name runs to a `/`
+/// or to the end of the word, and the next source byte in those forms is not a
+/// name byte.
 fn expand_leading_tilde<S: Shell>(word: &mut Word, shell: &mut S) {
-    enum Leading {
-        Tilde(TildeSpec),
-        Lit(Vec<u8>),
-        Other,
-    }
-    let leading = match word.parts.first() {
-        Some(Part::Tilde(spec)) => Leading::Tilde(spec.clone()),
-        Some(Part::Lit(Lit {
-            kind: LitKind::Unquoted,
-            bytes,
-        })) => Leading::Lit(bytes.clone()),
-        _ => Leading::Other,
-    };
-    match leading {
-        Leading::Tilde(spec) => {
-            if let Some(home) = resolve_tilde(&spec.user, shell) {
-                word.parts[0] = Part::Lit(Lit::quoted(home));
-            }
+    if let Some(Part::Tilde(spec)) = word.parts.first() {
+        // The front end already recognised a prefix, so resolve it directly.
+        let spec = spec.clone();
+        if let Some(home) = resolve_tilde(&spec.user, shell) {
+            word.parts[0] = Part::Lit(Lit::quoted(home));
         }
-        Leading::Lit(bytes) => {
-            if bytes.first() != Some(&b'~') {
+        return;
+    }
+    let Some(Part::Lit(first)) = word.parts.first() else {
+        return;
+    };
+    if first.kind != LitKind::Unquoted || first.bytes.first() != Some(&b'~') {
+        return;
+    }
+
+    // Walk the text after the `~`, across adjacent unquoted literal parts,
+    // stopping at the first `/` (the prefix is valid) or at a byte that cannot
+    // be part of a login name (the prefix is not valid).
+    let mut name: Vec<u8> = Vec::new();
+    let mut rest: Option<(usize, usize)> = None;
+    let mut consumed = 0usize;
+    'parts: for (index, part) in word.parts.iter().enumerate() {
+        let Part::Lit(lit) = part else {
+            break;
+        };
+        if lit.kind != LitKind::Unquoted {
+            break;
+        }
+        let from = if index == 0 { 1 } else { 0 };
+        for (offset, &byte) in lit.bytes[from..].iter().enumerate() {
+            if byte == b'/' {
+                rest = Some((index, from + offset));
+                break 'parts;
+            }
+            if !is_tilde_name_byte(byte) {
                 return;
             }
-            let end = bytes.iter().position(|&b| b == b'/').unwrap_or(bytes.len());
-            let user = &bytes[1..end];
-            let Some(home) = resolve_tilde(user, shell) else {
+            name.push(byte);
+        }
+        consumed = index + 1;
+    }
+    // A prefix that stopped at a non-literal part is only valid when the name
+    // reached the end of the word (`~` followed by a quote is literal).
+    if rest.is_none() && consumed != word.parts.len() {
+        return;
+    }
+    let Some(home) = resolve_tilde(&name, shell) else {
+        return;
+    };
+    let mut parts = Vec::with_capacity(word.parts.len() + 1);
+    parts.push(Part::Lit(Lit::quoted(home)));
+    match rest {
+        Some((index, offset)) => {
+            let Part::Lit(lit) = &word.parts[index] else {
                 return;
             };
-            let rest = bytes[end..].to_vec();
-            let mut parts = Vec::with_capacity(word.parts.len() + 1);
-            parts.push(Part::Lit(Lit::quoted(home)));
-            if !rest.is_empty() {
-                parts.push(Part::Lit(Lit::unquoted(rest)));
+            if offset < lit.bytes.len() {
+                parts.push(Part::Lit(Lit::unquoted(lit.bytes[offset..].to_vec())));
             }
-            parts.extend(word.parts.drain(1..));
-            word.parts = parts;
+            parts.extend(word.parts[index + 1..].iter().cloned());
         }
-        Leading::Other => {}
+        None => parts.extend(word.parts[consumed..].iter().cloned()),
     }
+    word.parts = parts;
+}
+
+/// The bytes a login name may contain, mirroring the front end's tilde-prefix
+/// scanner (`~`, `~user`, `~+`, `~-`, `~+N`).
+fn is_tilde_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'+' | b'-')
 }
 
 fn resolve_tilde<S: Shell>(user: &[u8], shell: &mut S) -> Option<Vec<u8>> {
@@ -1745,10 +1790,12 @@ pub fn remove_quotes(fields: Vec<Field>) -> Vec<Vec<u8>> {
     fields.into_iter().map(|field| field.bytes).collect()
 }
 
-/// Expand one command word: all five stages, in order.
+/// Expand one command word: the brace stage then all five POSIX stages, in
+/// order.
 ///
-/// Tilde expansion, parameter expansion, splitting, pathname expansion and
-/// quote removal — exactly the order POSIX XCU 2.6 requires.
+/// Brace expansion (when `shell` has `braceexpand` on), tilde expansion,
+/// parameter expansion, splitting, pathname expansion and quote removal —
+/// exactly the order bash and POSIX XCU 2.6 require.
 pub fn expand_word<S: Shell>(word: &Word, shell: &mut S) -> Result<Vec<Vec<u8>>, Error> {
     expand_word_with(word, shell, Mode::Command)
 }
@@ -1756,13 +1803,33 @@ pub fn expand_word<S: Shell>(word: &Word, shell: &mut S) -> Result<Vec<Vec<u8>>,
 /// Expand one word in the given [`Mode`].
 ///
 /// [`Mode::Assignment`] runs stages 1, 2 and 5 only: an assignment value is
-/// neither field-split nor pathname-expanded (POSIX XCU 2.6), so the result
-/// is always exactly one string.
+/// neither brace-expanded, field-split nor pathname-expanded (bash leaves
+/// `v={X,Y}` literal, and POSIX XCU 2.6 says an assignment value is not split
+/// or globbed), so the result is always exactly one string.
+///
+/// [`Mode::Command`] additionally runs the brace stage when
+/// [`Shell::brace_expansion`] says the option is on, which is how `set +B`
+/// disables it. Brace expansion is the one stage that can return *several*
+/// words, so each of its results is fed through the rest of the pipeline
+/// separately — that is what makes `a{b,c}$x` pair each alternative with the
+/// same unexpanded `$x`.
 pub fn expand_word_with<S: Shell>(
     word: &Word,
     shell: &mut S,
     mode: Mode,
 ) -> Result<Vec<Vec<u8>>, Error> {
+    if mode == Mode::Assignment || !shell.brace_expansion() {
+        return expand_one(word, shell, mode);
+    }
+    let mut argv = Vec::new();
+    for word in crate::expand_braces(word) {
+        argv.extend(expand_one(&word, shell, mode)?);
+    }
+    Ok(argv)
+}
+
+/// Stages 1–5 for one word, after any brace expansion has happened.
+fn expand_one<S: Shell>(word: &Word, shell: &mut S, mode: Mode) -> Result<Vec<Vec<u8>>, Error> {
     let word = match mode {
         Mode::Command => expand_tilde(word, shell)?,
         Mode::Assignment => expand_assignment_tilde(word, shell)?,

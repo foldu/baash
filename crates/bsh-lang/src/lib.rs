@@ -25,11 +25,13 @@
 //! expansion's replacement word counts as part of that expansion's result, so
 //! `${x:-a:b}` is two fields as well. [`LitKind`] and [`Chunk`] encode this.
 //!
-//! # The five stages
+//! # The stages
 //!
 //! POSIX XCU 2.6 fixes the order, and each stage is a separate documented
 //! function so `bsh explain` can show intermediate results:
 //!
+//! 0. [`expand_braces`] — brace expansion: a bash extension, and the only
+//!    stage that produces several words from one. `set +B` turns it off.
 //! 1. [`expand_tilde`] — tilde expansion.
 //! 2. [`expand_parameters`] — parameter, command and arithmetic expansion,
 //!    left to right. Command substitution and arithmetic are [`Shell`]
@@ -39,8 +41,8 @@
 //!    passthrough stub that leaves the field unchanged.
 //! 5. [`remove_quotes`] — quote removal.
 //!
-//! [`expand_word`] runs all five. [`Mode::Assignment`] runs only the stages
-//! an assignment value needs (no splitting, no globbing).
+//! [`expand_word`] runs all six. [`Mode::Assignment`] runs only the stages
+//! an assignment value needs (no braces, no splitting, no globbing).
 //!
 //! # Seams
 //!
@@ -72,6 +74,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod brace;
 mod expand;
 mod host;
 mod ifs;
@@ -79,6 +82,7 @@ mod quote;
 mod vars;
 mod word;
 
+pub use brace::expand_braces;
 pub use bsh_diag::Span;
 pub use expand::{
     Chunk, Error, ErrorKind, Expanded, Field, Mode, codes, expand_assignment, expand_parameters,

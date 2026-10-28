@@ -103,6 +103,19 @@ pub trait Shell: Vars {
     fn pattern_flags(&self) -> bsh_pattern::Flags {
         bsh_pattern::Flags::default()
     }
+
+    /// Whether `set -B` (brace expansion) is in effect.
+    ///
+    /// Brace expansion is the one stage of the pipeline that is not POSIX and
+    /// is switchable at run time, so the setting travels through the same seam
+    /// as [`Shell::pattern_flags`]. It is on by default because it is on in
+    /// bash: a [`Vars`] implementation with no options table should behave
+    /// like the shell it models rather than silently disabling a documented
+    /// expansion. `bsh-vm` overrides it from its option bundle, which is how
+    /// `set +B` turns the stage off.
+    fn brace_expansion(&self) -> bool {
+        true
+    }
 }
 
 /// A [`Vars`] with no variables at all.
