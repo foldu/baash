@@ -433,3 +433,56 @@ fn after_bracket_expression(pattern: &[u8], start: usize) -> usize {
     pattern.len()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_groups_outside_bracket_expressions() {
+        // The expected counts were cross-checked against glibc's public
+        // `re_nsub` field with a C probe; they follow from the POSIX ERE
+        // grammar, not from this implementation.
+        assert_eq!(count_subexpressions(b""), 0);
+        assert_eq!(count_subexpressions(b"(a)"), 1);
+        assert_eq!(count_subexpressions(b"(a)(b)?(c)"), 3);
+        assert_eq!(count_subexpressions(b"(a(b)c)"), 2);
+        assert_eq!(count_subexpressions(b"[(]"), 0);
+        assert_eq!(count_subexpressions(b"[)]"), 0);
+        assert_eq!(count_subexpressions(b"[]]"), 0);
+        assert_eq!(count_subexpressions(b"[^]]"), 0);
+        assert_eq!(count_subexpressions(b"[a(b]"), 0);
+        assert_eq!(count_subexpressions(b"[[]"), 0);
+        assert_eq!(count_subexpressions(b"[[:alpha:]]"), 0);
+        assert_eq!(count_subexpressions(b"[[:alpha:](]"), 0);
+        assert_eq!(count_subexpressions(b"[[.a.]]"), 0);
+        assert_eq!(count_subexpressions(b"[[.a.](]"), 0);
+        assert_eq!(count_subexpressions(b"[[=a=]]"), 0);
+        // A backslash is a literal member inside a bracket expression.
+        assert_eq!(count_subexpressions(b"[a\\]b]"), 0);
+        assert_eq!(count_subexpressions(b"\\[(a)"), 1);
+        assert_eq!(count_subexpressions(b"\\(a\\)"), 0);
+        assert_eq!(count_subexpressions(b"\\\\(a)"), 1);
+        assert_eq!(count_subexpressions(b"[[:alpha:]]+(x)"), 1);
+        assert_eq!(count_subexpressions(b"[[:alpha:]]+(x)(y)"), 2);
+    }
+
+    #[test]
+    fn a_failed_compile_still_has_a_message() {
+        // The `regerror` path is exercised without going through `Regex`, so
+        // it is tested even if the public wrapper changes shape.
+        let mut compiled = MaybeUninit::<libc::regex_t>::uninit();
+        let pattern = std::ffi::CString::new("(a").unwrap();
+        // SAFETY: the pattern is NUL-terminated and `regcomp` either
+        // initialises the storage or leaves it untouched.
+        let code =
+            unsafe { libc::regcomp(compiled.as_mut_ptr(), pattern.as_ptr(), libc::REG_EXTENDED) };
+        assert_ne!(code, 0, "`(a` must not compile");
+        // SAFETY: `compiled` is the storage passed to the failed `regcomp`,
+        // which is exactly what `regerror` accepts for a compile error.
+        let error = Error::from_posix(code, compiled.as_ptr());
+        assert_eq!(error.code(), Some(code));
+        assert!(!error.message().is_empty());
+        assert!(!error.to_string().is_empty());
+        assert!(!format!("{error:?}").is_empty());
+    }
+}
