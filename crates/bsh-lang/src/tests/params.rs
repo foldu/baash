@@ -211,9 +211,10 @@ fn case_conversion_is_ascii() {
 #[test]
 fn unsupported_operators_fail_instead_of_guessing() {
     let cases = [
+        // Still unimplemented: `@E` needs escape decoding, `${!x}` needs to
+        // re-parse a value as a name.
         ("${!x}", UnsupportedOp::Indirect),
-        ("${x@Q}", UnsupportedOp::Transform),
-        ("${x@u}", UnsupportedOp::Transform),
+        ("${x@E}", UnsupportedOp::Transform),
     ];
     for (source, expected) in cases {
         let mut shell = TestShell::new().var(b"x", b"abc").positionals(&[b"a"]);
@@ -448,7 +449,8 @@ fn prompt_transform_comes_from_the_parser() {
         "an unknown transform letter is not guessed"
     );
     assert_eq!(Transform::from_letter(b'P'), Some(Transform::Prompt));
-    assert_eq!(Transform::from_letter(b'Q'), None);
+    assert_eq!(Transform::from_letter(b'Q'), Some(Transform::Quote));
+    assert_eq!(Transform::from_letter(b'E'), None);
 }
 
 #[test]

@@ -682,6 +682,16 @@ impl CaseHow {
 pub enum Transform {
     /// `${x@P}`: expand the value with the prompt escape rules.
     Prompt,
+    /// `${x@Q}`: quote the value so it re-reads as one word.
+    Quote,
+    /// `${x@U}`: upper-case every character.
+    Upper,
+    /// `${x@u}`: upper-case the first character.
+    UpperFirst,
+    /// `${x@L}`: lower-case every character.
+    Lower,
+    /// `${x@l}`: lower-case the first character.
+    LowerFirst,
 }
 
 impl Transform {
@@ -689,6 +699,11 @@ impl Transform {
     pub fn letter(self) -> u8 {
         match self {
             Transform::Prompt => b'P',
+            Transform::Quote => b'Q',
+            Transform::Upper => b'U',
+            Transform::UpperFirst => b'u',
+            Transform::Lower => b'L',
+            Transform::LowerFirst => b'l',
         }
     }
 
@@ -696,6 +711,11 @@ impl Transform {
     pub fn from_letter(letter: u8) -> Option<Self> {
         match letter {
             b'P' => Some(Transform::Prompt),
+            b'Q' => Some(Transform::Quote),
+            b'U' => Some(Transform::Upper),
+            b'u' => Some(Transform::UpperFirst),
+            b'L' => Some(Transform::Lower),
+            b'l' => Some(Transform::LowerFirst),
             _ => None,
         }
     }

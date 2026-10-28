@@ -1168,7 +1168,90 @@ fn expand_transform<S: Shell>(
             emit_values(ctx, &values, star, quoted, out);
             Ok(())
         }
+        // The rest operate on the value itself and vectorise over a list the
+        // same way `@P` does, so `${a[@]@Q}` quotes each element separately
+        // rather than the joined string.
+        Transform::Quote
+        | Transform::Upper
+        | Transform::UpperFirst
+        | Transform::Lower
+        | Transform::LowerFirst => {
+            let (values, star) = match name {
+                ParamName::At => (ctx.shell.positional().to_vec(), false),
+                ParamName::Star => (ctx.shell.positional().to_vec(), true),
+                ParamName::Elements { name, star } => (array_values(ctx, name), *star),
+                ParamName::Element { name, subscript } => {
+                    // Unset is not empty: `${x@Q}` on an unset name is the
+                    // empty string, while a set-but-empty one is `''`, so a
+                    // re-read assigns something rather than nothing.
+                    let value = read_element(ctx, name, subscript)
+                        .map(|value| apply_transform(value, transform))
+                        .unwrap_or_default();
+                    out.push(value, quoted, !quoted);
+                    return Ok(());
+                }
+                _ => {
+                    let value = ctx
+                        .value(name)
+                        .map(|value| apply_transform(value, transform))
+                        .unwrap_or_default();
+                    out.push(value, quoted, !quoted);
+                    return Ok(());
+                }
+            };
+            let values: Vec<Vec<u8>> = values
+                .into_iter()
+                .map(|value| apply_transform(value, transform))
+                .collect();
+            emit_values(ctx, &values, star, quoted, out);
+            Ok(())
+        }
     }
+}
+
+/// Apply a value-only transformation.
+///
+/// `@Q` produces text that re-reads as the same word: bash wraps it in single
+/// quotes and closes/reopens around an embedded quote (`a'b` becomes
+/// `'a'\''b'`). An empty value is `''`, not nothing, so `${x@Q}` on an unset
+/// variable still yields one empty word.
+fn apply_transform(value: Vec<u8>, transform: Transform) -> Vec<u8> {
+    match transform {
+        Transform::Quote => quote_for_reinput(&value),
+        Transform::Upper => value.to_ascii_uppercase(),
+        Transform::Lower => value.to_ascii_lowercase(),
+        Transform::UpperFirst => {
+            let mut out = value;
+            if let Some(first) = out.first_mut() {
+                first.make_ascii_uppercase();
+            }
+            out
+        }
+        Transform::LowerFirst => {
+            let mut out = value;
+            if let Some(first) = out.first_mut() {
+                first.make_ascii_lowercase();
+            }
+            out
+        }
+        // `@P` is handled above, where it needs the prompt context.
+        Transform::Prompt => value,
+    }
+}
+
+/// Single-quote `value` so a shell reads it back as one word.
+fn quote_for_reinput(value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(value.len() + 2);
+    out.push(b'\'');
+    for &byte in value {
+        if byte == b'\'' {
+            out.extend_from_slice(b"'\\''");
+        } else {
+            out.push(byte);
+        }
+    }
+    out.push(b'\'');
+    out
 }
 
 fn substitute<S: Shell>(name: &ParamName, quoted: bool, ctx: &mut Ctx<'_, S>, out: &mut Expanded) {

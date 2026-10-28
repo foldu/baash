@@ -5,7 +5,7 @@ mod common;
 
 use bsh_syntax::{
     AndOrOp, CaseHow, CaseTerm, CmdSubStyle, DoubleQ, Lit, LitKind, NodeKind, ParamExp, ParamName,
-    ParamOp, Part, PipeOp, RedirectOp, ReplaceMode, Separator, UnsupportedOp, Word,
+    ParamOp, Part, PipeOp, RedirectOp, ReplaceMode, Separator, Transform, UnsupportedOp, Word,
 };
 
 fn first_simple(ast: &bsh_syntax::Ast) -> &bsh_syntax::SimpleCommand {
@@ -786,8 +786,15 @@ fn parameter_operators_map_to_bsh_lang() {
                 mode: ReplaceMode::Suffix,
             },
         ),
+        (b"echo ${x@P}", ParamOp::Transform(Transform::Prompt)),
+        (b"echo ${x@Q}", ParamOp::Transform(Transform::Quote)),
+        (b"echo ${x@U}", ParamOp::Transform(Transform::Upper)),
+        (b"echo ${x@u}", ParamOp::Transform(Transform::UpperFirst)),
+        (b"echo ${x@L}", ParamOp::Transform(Transform::Lower)),
+        // A letter this shell does not implement stays an unsupported
+        // operator: the parser saw it and declined it, rather than losing it.
         (
-            b"echo ${x@Q}",
+            b"echo ${x@E}",
             ParamOp::Unsupported(UnsupportedOp::Transform),
         ),
     ];
