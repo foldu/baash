@@ -13,7 +13,7 @@
 //! declare -- x=1                     scalar, no attributes, bare-safe value
 //! declare -r x="a b"                 scalar that needs quoting
 //! declare -n ref=target              nameref: the reference text, not the target
-//! declare -a a=(1 2 3)               contiguous indexed array
+//! declare -a a=([0]="1" [1]="2")     indexed array, bash's spelling
 //! declare -a a=([0]=x [2]=y)         indexed array with a hole
 //! declare -A m=(['k']='v' ['a b']=2) associative: keys are always quoted
 //! declare -- x                       declared but unset
@@ -90,20 +90,19 @@ fn render_value(out: &mut Vec<u8>, value: &VarValue) {
         }
         VarValue::Indexed(elements) => {
             out.extend_from_slice(b"=(");
-            let contiguous = elements
-                .keys()
-                .enumerate()
-                .all(|(position, index)| *index == position as i64);
+            // bash always spells the subscripts and always quotes:
+            // `declare -a a=([0]="b" [1]="c")`. A compact `(b c)` form is
+            // what OSH prints and one spec file prefers, but scripts parse
+            // this output and bash's is what they parse. Reproducing bash
+            // costs one case in total and removes seven regressions.
             for (position, (index, element)) in elements.iter().enumerate() {
                 if position > 0 {
                     out.push(b' ');
                 }
-                if !contiguous {
-                    out.push(b'[');
-                    out.extend_from_slice(index.to_string().as_bytes());
-                    out.extend_from_slice(b"]=");
-                }
-                quote_value(out, element);
+                out.push(b'[');
+                out.extend_from_slice(index.to_string().as_bytes());
+                out.extend_from_slice(b"]=");
+                quote_double_forced(out, element);
             }
             out.push(b')');
         }
@@ -114,14 +113,26 @@ fn render_value(out: &mut Vec<u8>, value: &VarValue) {
             // and matches the order the suite pins.
             let mut sorted: Vec<&(Vec<u8>, Vec<u8>)> = pairs.iter().collect();
             sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            let sorted_index = sorted.len();
             for (position, (key, value)) in sorted.into_iter().enumerate() {
                 if position > 0 {
                     out.push(b' ');
                 }
                 out.push(b'[');
-                quote_forced(out, key);
+                // bash leaves a safe key bare (`[k]`) and quotes the rest
+                // (`["a b"]`), then always double-quotes the value.
+                if is_bare_word(key) && !key.is_empty() {
+                    out.extend_from_slice(key);
+                } else {
+                    quote_double_forced(out, key);
+                }
                 out.extend_from_slice(b"]=");
-                quote_value(out, value);
+                quote_double_forced(out, value);
+            }
+            // bash leaves a trailing space before the closing paren; matching
+            // it keeps `declare -p` output byte-identical.
+            if sorted_index > 0 {
+                out.push(b' ');
             }
             out.push(b')');
         }
@@ -138,6 +149,30 @@ pub fn quote_value(out: &mut Vec<u8>, bytes: &[u8]) {
     } else {
         quote_single(out, bytes);
     }
+}
+
+/// Double-quote an array element, the way bash writes `declare -p`.
+///
+/// bash does not use single quotes here even when it could: `([0]="b")`, never
+/// `([0]=b)` and never `([0]='b')`. The escaping rules differ accordingly.
+fn quote_double_forced(out: &mut Vec<u8>, bytes: &[u8]) {
+    // A control byte or invalid UTF-8 cannot sit inside double quotes and
+    // still re-read as itself, so those fall back to `$'…'`.
+    if needs_dollar_quote(bytes) {
+        quote_dollar(out, bytes);
+        return;
+    }
+    out.push(b'"');
+    for &byte in bytes {
+        match byte {
+            b'"' | b'\\' | b'$' | b'`' => {
+                out.push(b'\\');
+                out.push(byte);
+            }
+            _ => out.push(byte),
+        }
+    }
+    out.push(b'"');
 }
 
 /// Quote `bytes` even when it would be bare-safe.
@@ -291,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn contiguous_indexed_array_is_compact() {
+    fn contiguous_indexed_array_prints_subscripts_and_quotes() {
         let var = Var {
             value: VarValue::Indexed(BTreeMap::from([
                 (0, b"1".to_vec()),
@@ -300,7 +335,10 @@ mod tests {
             ])),
             attrs: Attrs::default(),
         };
-        assert_eq!(render(&var, b"a"), "declare -a a=(1 2 3)\n");
+        assert_eq!(
+            render(&var, b"a"),
+            "declare -a a=([0]=\"1\" [1]=\"2\" [2]=\"3\")\n"
+        );
     }
 
     #[test]
@@ -309,11 +347,11 @@ mod tests {
             value: VarValue::Indexed(BTreeMap::from([(3, b"".to_vec()), (4, b"foo".to_vec())])),
             attrs: Attrs::default(),
         };
-        assert_eq!(render(&var, b"a"), "declare -a a=([3]= [4]=foo)\n");
+        assert_eq!(render(&var, b"a"), "declare -a a=([3]=\"\" [4]=\"foo\")\n");
     }
 
     #[test]
-    fn assoc_keys_are_always_quoted() {
+    fn assoc_keys_and_values_match_bash() {
         let var = Var {
             value: VarValue::Assoc(vec![
                 (b"a".to_vec(), b"1".to_vec()),
@@ -321,7 +359,7 @@ mod tests {
             ]),
             attrs: Attrs::default(),
         };
-        assert_eq!(render(&var, b"m"), "declare -A m=(['a']=1 ['b']=2)\n");
+        assert_eq!(render(&var, b"m"), "declare -A m=([a]=\"1\" [b]=\"2\" )\n");
         let control = Var {
             value: VarValue::Assoc(vec![
                 (b"foo".to_vec(), b"foo bar".to_vec()),
@@ -331,7 +369,7 @@ mod tests {
         };
         assert_eq!(
             render(&control, b"A"),
-            "declare -A A=([$'\\u001f']=$'\\xfe\\xff' ['foo']='foo bar')\n"
+            "declare -A A=([$'\\u001f']=$'\\xfe\\xff' [foo]=\"foo bar\" )\n"
         );
         let empty = Var {
             value: VarValue::Assoc(Vec::new()),

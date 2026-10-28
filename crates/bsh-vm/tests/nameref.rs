@@ -212,7 +212,7 @@ fn declaration_listing_forms() {
         "a=(1 2 3)
          b=()
          b[3]=x
-         declare -A m=(['k']=v)
+         declare -A m=([k]=v)
          declare -r ro=1
          declare -n ref=a
          a_decl=$(declare -p a)
@@ -221,9 +221,12 @@ fn declaration_listing_forms() {
          ro_decl=$(declare -p ro)
          filtered=$(declare -pn)",
     );
-    assert_eq!(text(&interp, b"a_decl"), "declare -a a=(1 2 3)");
-    assert_eq!(text(&interp, b"b_decl"), "declare -a b=([3]=x)");
-    assert_eq!(text(&interp, b"m_decl"), "declare -A m=(['k']=v)");
+    assert_eq!(
+        text(&interp, b"a_decl"),
+        "declare -a a=([0]=\"1\" [1]=\"2\" [2]=\"3\")"
+    );
+    assert_eq!(text(&interp, b"b_decl"), "declare -a b=([3]=\"x\")");
+    assert_eq!(text(&interp, b"m_decl"), "declare -A m=([k]=\"v\" )");
     assert_eq!(text(&interp, b"ro_decl"), "declare -r ro=1");
     assert_eq!(text(&interp, b"filtered"), "declare -n ref=a");
 }
