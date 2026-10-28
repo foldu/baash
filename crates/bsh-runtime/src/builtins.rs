@@ -332,7 +332,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     def("builtin", Tier::Extension, Some(meta::bi_builtin)),
     def("compgen", Tier::Extension, Some(complete::bi_compgen)),
     def("complete", Tier::Extension, Some(complete::bi_complete)),
-    def("compopt", Tier::Extension, None),
+    def("compopt", Tier::Extension, Some(complete::bi_compopt)),
     def("declare", Tier::Extension, None),
     def("dirs", Tier::Extension, None),
     def("disown", Tier::Extension, None),

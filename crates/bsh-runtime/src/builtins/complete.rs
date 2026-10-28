@@ -1,4 +1,4 @@
-//! Programmable completion: `compgen` and `complete`.
+//! Programmable completion: `compgen`, `complete` and `compopt`.
 //!
 //! Three pieces meet here. What a candidate *is* (which action means which
 //! list, how a prefix filters it) lives in [`crate::complete`]; the shell state
@@ -534,6 +534,57 @@ pub(super) fn bi_complete(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
             Status(2)
         }
     }
+}
+
+/// `compopt [-o option] [+o option] …`.
+///
+/// It edits only the completion *in progress*: outside one there is nothing to
+/// change and bash returns 1, which the suite pins. The options it sets are
+/// recorded in [`crate::complete::CompletionRun`] for the engine that is
+/// generating the completion.
+pub(super) fn bi_compopt(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
+    let mut changes: Vec<(Vec<u8>, bool)> = Vec::new();
+    let mut index = 1;
+    while index < argv.len() {
+        let argument = argv[index];
+        if argument == b"--" {
+            break;
+        }
+        let sign = argument.first().copied().unwrap_or(b'-');
+        if argument.len() > 1 && matches!(sign, b'-' | b'+') {
+            if &argument[1..] != b"o" {
+                return usage(host, argv, "usage: compopt [-o option] [+o option]");
+            }
+            let Some(value) = argv.get(index + 1) else {
+                return usage(host, argv, "-o: option requires an argument");
+            };
+            if !is_completion_option(value) {
+                diagnose(
+                    host,
+                    codes::USAGE,
+                    format!("compopt: {}: invalid option name", display(value)),
+                );
+                return Status(2);
+            }
+            changes.push((value.to_vec(), sign == b'-'));
+            index += 2;
+            continue;
+        }
+        return usage(host, argv, "usage: compopt [-o option] [+o option]");
+    }
+
+    if !host.state().completion.is_active() {
+        diagnose(
+            host,
+            codes::USAGE,
+            "compopt: not currently executing completion function",
+        );
+        return Status::FAILURE;
+    }
+    for (name, on) in changes {
+        host.state().completion.set_option(&name, on);
+    }
+    Status::SUCCESS
 }
 
 #[cfg(test)]
