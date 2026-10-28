@@ -175,7 +175,7 @@ fn option_tables_are_separate_but_share_members() {
     let shopt: Vec<&str> = opts.names(OptionKind::Shopt).collect();
 
     assert_eq!(set_o.len(), 27);
-    assert_eq!(shopt.len(), 44);
+    assert_eq!(shopt.len(), 45);
     assert!(set_o.contains(&"errexit"));
     assert!(set_o.contains(&"pipefail"));
     assert!(!set_o.contains(&"extglob"));
@@ -184,6 +184,9 @@ fn option_tables_are_separate_but_share_members() {
     assert!(!shopt.contains(&"errexit"));
     assert!(set_o.contains(&"interactive_comments"));
     assert!(shopt.contains(&"interactive_comments"));
+    // bash has no `strict_nameref`; it is the OSH extension the nameref suite
+    // drives, and it is off by default.
+    assert!(shopt.contains(&"strict_nameref"));
 
     assert_eq!(
         ALL_FLAGS.len(),
@@ -927,7 +930,7 @@ fn export_and_unset_builtins() {
 
     assert_eq!(host.run(&[b"export"]), Status::SUCCESS);
     let printed = String::from_utf8_lossy(&host.out).into_owned();
-    assert!(printed.contains("export x=1"), "{printed}");
+    assert!(printed.contains("declare -x x=1"), "{printed}");
 
     assert_eq!(host.run(&[b"export", b"-n", b"x"]), Status::SUCCESS);
     assert!(!host.state.vars.is_exported(b"x"));

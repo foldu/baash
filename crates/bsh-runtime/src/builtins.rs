@@ -571,9 +571,15 @@ fn push_assignment(
     out.push(b'\n');
 }
 
+/// List variables in `declare -… name=value` form.
+///
+/// `readonly`/`export` list in the same format bash does — their own keyword
+/// is not printed — because that output is re-input safe and is what the
+/// conformance suite compares. The `keyword` argument is kept for the caller's
+/// grammar and no longer changes the rendering.
 fn list_variables(
     host: &mut dyn ShellHost,
-    keyword: Option<&[u8]>,
+    _keyword: Option<&[u8]>,
     filter: fn(&crate::Var) -> bool,
 ) -> Status {
     let mut out = Vec::new();
@@ -581,7 +587,7 @@ fn list_variables(
         let state = host.state();
         for (name, var) in state.vars.visible() {
             if filter(var) {
-                push_assignment(&mut out, keyword, name, &var.value);
+                crate::declare::render_declaration(&mut out, name, var);
             }
         }
     }

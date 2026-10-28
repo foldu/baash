@@ -31,6 +31,7 @@ mod alias;
 mod builtins;
 mod command;
 pub mod complete;
+pub mod declare;
 mod errors;
 mod opts;
 mod traps;

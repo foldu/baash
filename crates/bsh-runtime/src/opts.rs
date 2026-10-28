@@ -451,6 +451,11 @@ option_table! {
     /// `shopt -s sourcepath`: `.`/`source` searches `PATH`.
     Sourcepath => sourcepath, "sourcepath", None, [Shopt], true, false, true, &[];
 
+    /// `shopt -s strict_nameref`: an invalid or unset nameref target is an
+    /// error instead of an empty string (an OSH extension; bash has no such
+    /// option, and it is off by default).
+    StrictNameref => strict_nameref, "strict_nameref", None, [Shopt], true, false, false, &[];
+
     /// `shopt -s varredir_close`: close `{var}>file` descriptors on command
     /// completion.
     VarredirClose => varredir_close, "varredir_close", None, [Shopt], true, false, false, &[];
