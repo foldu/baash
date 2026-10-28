@@ -729,7 +729,16 @@ impl Vars {
     }
 
     /// `a[key]=value`: set an associative element, inserting in order.
+    ///
+    /// An empty key is refused: bash reports `name[]: bad array subscript`
+    /// for `declare -A a; a[""]=x`, and accepting it would make `a[$unset]`
+    /// silently create a key no other shell can address.
     pub fn set_assoc(&mut self, name: &[u8], key: &[u8], value: &[u8]) -> Result<(), Error> {
+        if key.is_empty() {
+            return Err(Error::BadSubscript {
+                name: name.to_vec(),
+            });
+        }
         let var = self.resolve(name)?;
         let old = std::mem::replace(&mut var.value, VarValue::Unset);
         var.value = match old {
@@ -823,6 +832,27 @@ impl Vars {
         let var = self.resolve(name)?;
         var.value = shape.empty();
         Ok(())
+    }
+
+    /// `unset 'a[@]'` / `unset 'a[*]'`: remove every element.
+    ///
+    /// Bash 5.3.20 distinguishes the shapes, verified directly:
+    ///
+    /// * an indexed array keeps its shape and becomes empty
+    ///   (`declare -a a=()`), so a later `a[3]=x` is a plain element write;
+    /// * an associative array is left untouched (the operand is not a key, and
+    ///   unlike an indexed array it is not a request to clear);
+    /// * an unset name succeeds without creating anything;
+    /// * a scalar is an error (`unset: e: not an array variable`).
+    pub fn unset_all_elements(&mut self, name: &[u8]) -> Result<(), Error> {
+        match self.value(name) {
+            None => Ok(()),
+            Some(VarValue::Indexed(_)) => self.clear_array(name, ArrayShape::Indexed),
+            Some(VarValue::Assoc(_)) => Ok(()),
+            Some(VarValue::Str(_) | VarValue::Unset) => Err(Error::NotArray {
+                name: name.to_vec(),
+            }),
+        }
     }
 
     /// Remove one indexed element. A negative index counts like a read; an
@@ -1261,6 +1291,12 @@ fn set_scalar(var: &mut Var, name: &[u8], value: Vec<u8>) -> Result<(), Error> {
 }
 
 /// Resolve a subscript for a write: negative counts from `greatest index + 1`.
+///
+/// The arithmetic wraps, because bash's subscripts are C `intmax_t`: after
+/// `a[0x7FFFFFFFFFFFFFFF]=x`, `a[-1]` addresses `INTMAX_MAX` again (the
+/// reference point overflows to `INTMAX_MIN`), and `a[-2]` addresses
+/// `INTMAX_MAX - 1`. Saturating there would silently address a different
+/// element. Ordinary arrays never come near the wrap.
 fn resolve_write_index(
     elements: &BTreeMap<i64, Vec<u8>>,
     index: i64,
@@ -1272,8 +1308,8 @@ fn resolve_write_index(
     let length = elements
         .keys()
         .next_back()
-        .map_or(0, |last| last.saturating_add(1));
-    let resolved = length.saturating_add(index);
+        .map_or(0, |last| last.wrapping_add(1));
+    let resolved = length.wrapping_add(index);
     if resolved < 0 {
         return Err(Error::ArrayOutOfBounds {
             name: name.to_vec(),
@@ -1284,7 +1320,7 @@ fn resolve_write_index(
 }
 
 /// Resolve a subscript for a read; `None` when a negative index falls before
-/// the start.
+/// the start. The same wrapping rule as [`resolve_write_index`] applies.
 fn resolve_read_index(elements: &BTreeMap<i64, Vec<u8>>, index: i64) -> Option<i64> {
     if index >= 0 {
         return Some(index);
@@ -1292,8 +1328,8 @@ fn resolve_read_index(elements: &BTreeMap<i64, Vec<u8>>, index: i64) -> Option<i
     let length = elements
         .keys()
         .next_back()
-        .map_or(0, |last| last.saturating_add(1));
-    let resolved = length.saturating_add(index);
+        .map_or(0, |last| last.wrapping_add(1));
+    let resolved = length.wrapping_add(index);
     (resolved >= 0).then_some(resolved)
 }
 

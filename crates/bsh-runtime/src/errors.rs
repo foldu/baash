@@ -120,6 +120,17 @@ pub enum Error {
         /// The subscript as written.
         index: i64,
     },
+    /// An array element operation was applied to a scalar (bash:
+    /// `unset: x: not an array variable`).
+    NotArray {
+        /// Variable name.
+        name: Vec<u8>,
+    },
+    /// A subscript that must carry a value is empty (`a[]=x`).
+    BadSubscript {
+        /// Variable name.
+        name: Vec<u8>,
+    },
 }
 
 impl Error {
@@ -138,7 +149,10 @@ impl Error {
             | Error::ArrayShapeMismatch { .. } => codes::ARRAY_SHAPE,
             Error::NamerefCycle { .. } => codes::NAMEREF_CYCLE,
             Error::BadNumber { .. } => codes::BAD_NUMBER,
-            Error::NotScalar { .. } | Error::ArrayOutOfBounds { .. } => codes::ARRAY_SHAPE,
+            Error::NotScalar { .. }
+            | Error::ArrayOutOfBounds { .. }
+            | Error::NotArray { .. }
+            | Error::BadSubscript { .. } => codes::ARRAY_SHAPE,
         }
     }
 
@@ -189,6 +203,12 @@ impl Error {
             }
             Error::ArrayOutOfBounds { name, index } => {
                 format!("{}[{index}]: index out of bounds", display(name))
+            }
+            Error::NotArray { name } => {
+                format!("{}: not an array variable", display(name))
+            }
+            Error::BadSubscript { name } => {
+                format!("{}: bad array subscript", display(name))
             }
         }
     }

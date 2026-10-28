@@ -182,3 +182,128 @@ fn arithmetic_subscripts_read_and_write() {
     assert_eq!(text(&interp, b"sum2"), "61");
     assert_eq!(text(&interp, b"shifted"), "30");
 }
+
+// Everything below was checked against bash 5.3.20 before it was written; the
+// trailing comments give the exact shell snippet that establishes the rule.
+
+#[test]
+fn sparse_holes_survive_every_reader() {
+    // bash 5.3.20:
+    //   a=(one two three); unset 'a[1]'; a[5]=five
+    //   "${a[@]}" -> "one three five", "${a[*]}" joins the same elements,
+    //   ${#a[@]} -> 3, ${!a[@]} -> "0 2 5", ${a[1]} -> "".
+    let mut interp = shell();
+    run(
+        &mut interp,
+        "a=(one two three)
+         unset 'a[1]'
+         a[5]=five
+         at=\"${a[@]}\"
+         star=\"${a[*]}\"
+         n=${#a[@]}
+         keys=\"${!a[@]}\"
+         hole=\"${a[1]}\"
+         last=\"${a[5]}\"",
+    );
+    assert_eq!(text(&interp, b"at"), "one three five");
+    assert_eq!(text(&interp, b"star"), "one three five");
+    assert_eq!(text(&interp, b"n"), "3");
+    assert_eq!(text(&interp, b"keys"), "0 2 5");
+    assert_eq!(text(&interp, b"hole"), "");
+    assert_eq!(text(&interp, b"last"), "five");
+    assert_eq!(values(&interp, b"a"), ["one", "three", "five"]);
+
+    // Appending starts after the *greatest* subscript, not after the count:
+    // bash 5.3.20 gives ${!a[@]} = "0 2 5 6".
+    run(&mut interp, "a+=(six)\n n=${#a[@]}\n keys=\"${!a[@]}\"");
+    assert_eq!(text(&interp, b"keys"), "0 2 5 6");
+}
+
+#[test]
+fn assignment_forms_write_the_intended_subscript() {
+    // bash 5.3.20:
+    //   a=(1 2 3); a[1]+=X          -> "1 2X 3"
+    //   a[5]+=Y on a missing element -> creates it
+    //   i=1; a[i+1]=Z                -> writes a[2]
+    //   declare -a d=([3]=x y)       -> [3]=x, [4]=y
+    //   s=hi; s[2]+=x                -> element 0 stays "hi"
+    let mut interp = shell();
+    run(
+        &mut interp,
+        "a=(1 2 3)
+         a[1]+=X
+         a[5]+=Y
+         i=1
+         a[i+1]=Z
+         append=\"${a[@]}\"
+         keys=\"${!a[@]}\"
+         declare -a d=([3]=x y)
+         d_at=\"${d[@]}\"
+         d_keys=\"${!d[@]}\"
+         s=hi
+         s[2]+=x
+         s_at=\"${s[@]}\"
+         s_keys=\"${!s[@]}\"",
+    );
+    assert_eq!(text(&interp, b"append"), "1 2X Z Y");
+    assert_eq!(text(&interp, b"keys"), "0 1 2 5");
+    assert_eq!(text(&interp, b"d_at"), "x y");
+    assert_eq!(text(&interp, b"d_keys"), "3 4");
+    assert_eq!(text(&interp, b"s_at"), "hi x");
+    assert_eq!(text(&interp, b"s_keys"), "0 2");
+}
+
+#[test]
+fn local_arrays_and_read_a_keep_the_shape() {
+    // bash 5.3.20: `local -a la; la[4]=z` keeps the hole, and `read -a`
+    // clears the target array and fills it densely from zero.
+    let mut interp = shell();
+    run(
+        &mut interp,
+        "f() {
+           local -a la=(one)
+           la[4]=five
+           local_at=\"${la[@]}\"
+           local_keys=\"${!la[@]}\"
+         }
+         f
+         read -r -a ra <<< 'x y z'
+         ra[5]=w
+         read_at=\"${ra[@]}\"
+         read_keys=\"${!ra[@]}\"",
+    );
+    assert_eq!(text(&interp, b"local_at"), "one five");
+    assert_eq!(text(&interp, b"local_keys"), "0 4");
+    assert_eq!(text(&interp, b"read_at"), "x y z w");
+    assert_eq!(text(&interp, b"read_keys"), "0 1 2 5");
+}
+
+#[test]
+fn subscripts_are_arithmetic_for_indexed_and_text_for_associative() {
+    // bash 5.3.20: an indexed subscript is an arithmetic expression, so an
+    // unset name is 0 and `i+1` is evaluated; an associative subscript is the
+    // expanded *text*, so `1+1` is the literal key "1+1".
+    let mut interp = shell();
+    run(
+        &mut interp,
+        "a=(zero one two)
+         unset i
+         unset_value=\"${a[i]}\"
+         i=1
+         shifted=\"${a[i+1]}\"
+         paren=\"${a[$((i+1))]}\"
+         negative=\"${a[-1]}\"
+         declare -A m
+         k='1+1'
+         m[$k]=literal
+         m[a b]='spaced key'
+         assoc_keys=\"${!m[@]}\"
+         literal=${m[1+1]}",
+    );
+    assert_eq!(text(&interp, b"unset_value"), "zero");
+    assert_eq!(text(&interp, b"shifted"), "two");
+    assert_eq!(text(&interp, b"paren"), "two");
+    assert_eq!(text(&interp, b"negative"), "two");
+    assert_eq!(text(&interp, b"assoc_keys"), "1+1 a b");
+    assert_eq!(text(&interp, b"literal"), "literal");
+}

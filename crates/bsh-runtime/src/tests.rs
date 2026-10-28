@@ -3,6 +3,7 @@
 
 use crate::*;
 use bsh_diag::Diagnostic;
+use std::collections::BTreeMap;
 
 /// A host that records everything, so builtins can be tested without a VM.
 pub(crate) struct TestHost {
@@ -1296,6 +1297,95 @@ fn associative_arrays_keep_insertion_order_and_removal() {
     assert_eq!(vars.array_len(b"m"), 1);
     // Removing an absent key succeeds.
     vars.unset_element_assoc(b"m", b"zzz").unwrap();
+}
+
+#[test]
+fn negative_subscripts_wrap_like_bash_intmax() {
+    // bash 5.3.20: `a[0x7FFFFFFFFFFFFFFF]=x; a[-1]=y` overwrites that element,
+    // because the reference point `greatest + 1` wraps to INTMAX_MIN and
+    // `INTMAX_MIN + -1` wraps back to INTMAX_MAX. Same for reads.
+    let mut vars = Vars::default();
+    vars.set_indexed(b"a", i64::MAX, b"x").unwrap();
+    vars.set_indexed(b"a", -1, b"y").unwrap();
+    assert_eq!(
+        vars.value(b"a"),
+        Some(&VarValue::Indexed(BTreeMap::from([(
+            i64::MAX,
+            b"y".to_vec()
+        )])))
+    );
+    assert_eq!(vars.element_indexed(b"a", -1), Some(b"y".as_slice()));
+    assert_eq!(vars.element_indexed(b"a", -2), None);
+    vars.set_indexed(b"a", -2, b"z").unwrap();
+    assert_eq!(vars.max_index(b"a"), Some(i64::MAX));
+    assert_eq!(
+        vars.element_indexed(b"a", i64::MAX - 1),
+        Some(b"z".as_slice())
+    );
+}
+
+#[test]
+fn unset_all_elements_keeps_the_shape_and_refuses_a_scalar() {
+    // bash 5.3.20: an indexed array keeps its shape after `unset 'a[@]'`,
+    // an associative array is untouched, an absent name succeeds, and a
+    // scalar is `not an array variable`.
+    let mut vars = Vars::default();
+    vars.set_indexed(b"a", 0, b"one").unwrap();
+    vars.set_indexed(b"a", 4, b"five").unwrap();
+    vars.unset_all_elements(b"a").unwrap();
+    assert_eq!(
+        vars.value(b"a"),
+        Some(&VarValue::Indexed(BTreeMap::new())),
+        "the indexed array becomes empty but stays an array"
+    );
+    assert_eq!(vars.shape(b"a"), Some(ArrayShape::Indexed));
+    // Appending to the cleared array starts at zero, not at the old maximum.
+    vars.set_indexed(b"a", 0, b"again").unwrap();
+    assert_eq!(vars.max_index(b"a"), Some(0));
+
+    vars.declare_shape(b"m", ArrayShape::Associative).unwrap();
+    vars.set_assoc(b"m", b"k", b"v").unwrap();
+    vars.unset_all_elements(b"m").unwrap();
+    assert_eq!(
+        vars.array_len(b"m"),
+        1,
+        "bash leaves an associative array alone"
+    );
+
+    vars.unset_all_elements(b"absent").unwrap();
+    assert!(!vars.contains(b"absent"));
+
+    vars.assign_scalar(b"s", b"scalar").unwrap();
+    assert!(matches!(
+        vars.unset_all_elements(b"s"),
+        Err(Error::NotArray { .. })
+    ));
+    assert_eq!(vars.scalar(b"s"), Some(b"scalar".as_slice()));
+}
+
+#[test]
+fn associative_arrays_refuse_an_empty_key() {
+    // bash 5.3.20: `declare -A a; a[""]=x` is `a[""]: bad array subscript`.
+    let mut vars = Vars::default();
+    vars.declare_shape(b"m", ArrayShape::Associative).unwrap();
+    assert!(matches!(
+        vars.set_assoc(b"m", b"", b"x"),
+        Err(Error::BadSubscript { .. })
+    ));
+    assert!(matches!(
+        vars.append_assoc(b"m", b"", b"x"),
+        Err(Error::BadSubscript { .. })
+    ));
+    assert_eq!(vars.array_len(b"m"), 0, "a refused write changes nothing");
+    vars.set_assoc(b"m", b"k", b"v").unwrap();
+    assert!(matches!(
+        vars.set_assoc(b"m", b"", b"x"),
+        Err(Error::BadSubscript { .. })
+    ));
+    assert_eq!(
+        vars.value(b"m"),
+        Some(&VarValue::Assoc(vec![(b"k".to_vec(), b"v".to_vec())]))
+    );
 }
 
 // ---------------------------------------------------------------------------
