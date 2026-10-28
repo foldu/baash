@@ -234,6 +234,74 @@ fn case_patterns_with_extglob_groups() {
 }
 
 #[test]
+fn extglob_groups_parse_in_every_word_position() {
+    // Command argument.
+    let src = b"echo @(a|b)";
+    let ast = common::ast(src);
+    assert_eq!(
+        cmd_words(&ast, src),
+        vec![b"echo".to_vec(), b"@(a|b)".to_vec()]
+    );
+
+    // Assignment value.
+    let src = b"g=--@(help|verbose)";
+    let ast = common::ast(src);
+    let cmd = first_simple(&ast);
+    assert_eq!(cmd.assignments.len(), 1);
+    assert_eq!(
+        &src[cmd.assignments[0].value.span.clone()],
+        b"--@(help|verbose)"
+    );
+
+    // Redirect target, fused to the operator and separate from it.
+    for (src, want) in [
+        (&b"cmd >@(out|err).txt"[..], &b"@(out|err).txt"[..]),
+        (&b"cmd > @(out|err).txt"[..], &b"@(out|err).txt"[..]),
+    ] {
+        let ast = common::ast(src);
+        let cmd = first_simple(&ast);
+        assert_eq!(
+            &src[cmd.redirects[0].target.as_ref().unwrap().span.clone()],
+            want
+        );
+    }
+
+    // Array literal element.
+    let src = b"A=(zzz @(a|b).py)";
+    let ast = common::ast(src);
+    let cmd = first_simple(&ast);
+    let array = cmd.assignments[0].array.as_ref().expect("array literal");
+    assert_eq!(array.len(), 2);
+    assert_eq!(&src[array[1].value.span.clone()], b"@(a|b).py");
+
+    // `for … in` list.
+    let src = b"for f in @(a|b) c; do :; done";
+    let ast = common::ast(src);
+    let Some(NodeKind::For {
+        in_list: Some(list),
+        ..
+    }) = common::find_node(&ast, |k| matches!(k, NodeKind::For { .. }))
+    else {
+        panic!("no for list");
+    };
+    assert_eq!(list.len(), 2);
+    assert_eq!(&src[list[0].span.clone()], b"@(a|b)");
+
+    // Function body.
+    let src = b"f() { echo @(a|b); }";
+    let ast = common::ast(src);
+    let inner = ast
+        .nodes
+        .iter()
+        .find_map(|node| match &node.kind {
+            NodeKind::Simple(cmd) if !cmd.words.is_empty() => Some(cmd),
+            _ => None,
+        })
+        .expect("simple command in function body");
+    assert_eq!(&src[inner.words[1].span.clone()], b"@(a|b)");
+}
+
+#[test]
 fn brace_group_and_subshell() {
     let ast = common::ast(b"{ a; }");
     assert!(matches!(
