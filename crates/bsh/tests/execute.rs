@@ -877,3 +877,21 @@ fn failglob_fails_the_command_but_not_the_shell() {
     assert_eq!(code(&output), 1);
     assert_eq!(stdout(&output), "");
 }
+
+#[test]
+fn the_locale_decides_whether_length_counts_bytes_or_characters() {
+    // Same bytes, two answers. `μ` is two bytes and one character; under
+    // LC_ALL=C bash and dash both count 3 here, which is why the default must
+    // be bytes rather than a guess from the terminal.
+    let run_locale = |locale: &str| {
+        let output = bsh()
+            .env("LC_ALL", locale)
+            .arg("-c")
+            .arg(r#"v=$(printf "\316\274x"); echo "${#v}""#)
+            .output()
+            .expect("spawn bsh");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    assert_eq!(run_locale("C"), "3");
+    assert_eq!(run_locale("C.UTF-8"), "2");
+}

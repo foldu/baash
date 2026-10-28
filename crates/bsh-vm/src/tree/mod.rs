@@ -212,6 +212,13 @@ pub(crate) struct Ctx {
 pub struct Interp {
     state: ShellState,
     interactive: bool,
+    /// Whether the locale counts characters rather than bytes.
+    ///
+    /// Off by default, and set only by [`Interp::detect_locale`], so a
+    /// constructed shell never depends on the environment of whatever process
+    /// built it — a test that silently changed behaviour with `LC_ALL` would
+    /// be worse than no test.
+    utf8_locale: bool,
     /// The source of the chunk being evaluated, for diagnostics.
     current: Arc<SourceFile>,
     functions: Vec<Function>,
@@ -318,6 +325,22 @@ impl Interp {
         Self::with_opts(Opts::default(), interactive)
     }
 
+    /// Take the character-width model from the environment.
+    ///
+    /// POSIX precedence is `LC_ALL` > `LC_CTYPE` > `LANG`; a value naming
+    /// UTF-8 (in any case) means characters, anything else means bytes. This is
+    /// deliberately *not* done in [`Interp::new`]: a shell built by a test must
+    /// not change behaviour with the developer's locale, and the binary is the
+    /// only place that knows it is running for a user.
+    pub fn detect_locale(&mut self) {
+        self.utf8_locale = locale_is_utf8(
+            std::env::var_os("LC_ALL")
+                .or_else(|| std::env::var_os("LC_CTYPE"))
+                .or_else(|| std::env::var_os("LANG"))
+                .as_deref(),
+        );
+    }
+
     /// A fresh shell with explicit options (a profile preset, per the runtime
     /// contract: never an exhaustive `Opts` literal).
     pub fn with_opts(opts: Opts, interactive: bool) -> Self {
@@ -354,6 +377,7 @@ impl Interp {
             empty_chunk,
             alias_eval_depth: 0,
             pipeline_status: std::collections::BTreeMap::new(),
+            utf8_locale: false,
             line_source: Arc::new(SourceFile::new("<none>", &b""[..])),
             line_offset: 0,
             line_number: 1,
@@ -686,6 +710,10 @@ impl bsh_lang::Vars for Interp {
         self.state.opts.nounset
     }
 
+    fn utf8(&self) -> bool {
+        self.utf8_locale
+    }
+
     fn set(&mut self, name: &[u8], value: Vec<u8>) -> Result<(), bsh_lang::SetError> {
         match self.state.vars.assign_scalar(name, &value) {
             Ok(()) => Ok(()),
@@ -719,7 +747,7 @@ impl bsh_lang::Shell for Interp {
             extglob: self.state.opts.extglob,
             nocasematch: self.state.opts.nocasematch,
             pathname: false,
-            utf8: false,
+            utf8: self.utf8_locale,
         }
     }
 
@@ -1053,5 +1081,47 @@ impl ShellHost for Interp {
 
     fn function_source(&self, name: &[u8]) -> Option<Vec<u8>> {
         self.function_body(name)
+    }
+}
+
+/// Whether a locale name means UTF-8.
+///
+/// Free-standing and pure, so it can be tested without touching the process
+/// environment: `LC_ALL=C.UTF-8`, `en_US.utf8` and `de_DE.UTF-8@euro` are
+/// UTF-8, while `C`, `POSIX` and an empty value are not.
+fn locale_is_utf8(locale: Option<&std::ffi::OsStr>) -> bool {
+    let Some(locale) = locale else {
+        return false;
+    };
+    let text = locale.to_string_lossy().to_ascii_lowercase();
+    text.contains("utf-8") || text.contains("utf8")
+}
+
+#[cfg(test)]
+mod locale_tests {
+    use super::locale_is_utf8;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn recognises_utf8_locale_names() {
+        for utf8 in [
+            "C.UTF-8",
+            "c.utf8",
+            "en_US.UTF-8",
+            "en_US.utf8",
+            "de_DE.UTF-8@euro",
+        ] {
+            assert!(
+                locale_is_utf8(Some(OsStr::new(utf8))),
+                "{utf8} should mean characters"
+            );
+        }
+        for bytes in ["C", "POSIX", "", "en_US.ISO-8859-1"] {
+            assert!(
+                !locale_is_utf8(Some(OsStr::new(bytes))),
+                "{bytes} should mean bytes"
+            );
+        }
+        assert!(!locale_is_utf8(None), "an unset locale means bytes");
     }
 }

@@ -1288,13 +1288,14 @@ fn expand_word_to_scalar<S: Shell>(
 
 /// The flags every pattern operator in this module matches with.
 ///
-/// [`Flags::utf8`] is forced off, not taken from the runtime: the shell's unit
-/// policy is bytes (the C locale), the same policy `${#x}` counts with and what
-/// the conformance harness (`LC_ALL=C`) sees. A pattern operator that measured
-/// characters while `${#x}` counted bytes would disagree with itself.
+/// The unit mode comes from the shell (`Vars::utf8`), the same source `${#x}`
+/// counts with: a pattern operator that measured characters while `${#x}`
+/// counted bytes would disagree with itself, and the two must agree whichever
+/// locale is in force. The conformance harness runs `LC_ALL=C`, so this is
+/// byte mode there.
 fn match_flags<S: Shell>(ctx: &Ctx<'_, S>) -> Flags {
     Flags {
-        utf8: false,
+        utf8: ctx.shell.utf8(),
         ..ctx.shell.pattern_flags()
     }
 }

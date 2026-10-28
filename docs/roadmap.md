@@ -100,21 +100,19 @@ At the start of this tranche the suite stood at 1013/2787 total. It is now
       reach the matcher.
 - [x] `failglob` — fails the command, not the shell (bash's script behaviour);
       `${x:?}` still ends a non-interactive shell.
-- [x] UTF-8 character units in `bsh-lang`: `${#x}` and `${x:o:l}` count
-      characters when the locale says so, through `Vars::utf8()` and
-      `bsh_pattern::char_len`. The VM side (detect the locale, answer `utf8()`)
-      and the matcher flags follow in the next wave.
+- [x] UTF-8 character units end to end: `Vars::utf8()` (from
+      `LC_ALL`/`LC_CTYPE`/`LANG`, detected only by the binary so tests stay
+      deterministic) drives `${#x}`, `${x:o:l}` and the matcher's `?` through
+      one decoder (`bsh_pattern::char_len`). `LC_ALL=C` still counts bytes and
+      still slices characters in half, like bash and dash.
 - [ ] Brace expansion `{a,b}` and `{1..3}` (92 regressions with extglob).
-- [~] `extglob` `?(…)`, `*(…)`, `+(…)`, `@(…)`, `!(…)` — the matcher is done
-      (110 tests in `bsh-pattern`); the **lexer** cannot parse the syntax yet,
-      so `case x in @(a|b))` is a syntax error. That is `extglob-files` 0/23
-      and most of the remaining glob failures. In flight.
-      Design note: bash decides extglob at parse time, and ßhell parses a whole
-      script before running it, so the option cannot reach the parser without
-      incremental top-level parsing. The plan is to lex the syntax
-      unconditionally (superset grammar, §3.3) and let the matcher honour
-      `shopt` — which makes us *more* permissive when extglob is off
-      (`echo @(a)` prints instead of failing).
+- [x] `extglob` `?(…)`, `*(…)`, `+(…)`, `@(…)`, `!(…)` — lexed
+      unconditionally (superset grammar, §3.3), matched per `shopt`.
+      `extglob-files` 0/23 → 10/23. Two documented deviations: with extglob off
+      `echo @(a)` prints where bash errors, and unspaced `!(…)` at the start of
+      a statement stays pipeline negation (so `if !(a && b)` works, and
+      `for x in !(a)` is a group).
+      Remaining extglob failures are mostly brace expansion, not matching.
 - [ ] `[[ =~ ]]` with `BASH_REMATCH` (34).
 - [x] `$LINENO` (from node spans) and `$PIPESTATUS`.
 - [ ] `$RANDOM`, `$SECONDS`, `$FUNCNAME`, `$BASH_SOURCE`, `BASH_LINENO`.

@@ -287,6 +287,9 @@ fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
 /// A shell with the environment imported and `PWD` sane.
 fn shell(interactive: bool, flags: &ShellFlags) -> Interp {
     let mut shell = Interp::new(interactive);
+    // The one place that knows it is running for a user rather than a test:
+    // character widths come from the environment here and nowhere else.
+    shell.detect_locale();
     if let Err(message) = flags.apply(&mut shell.state().opts) {
         eprintln!("bsh: {message}");
         eprintln!("Try 'bsh --help' for more information.");
