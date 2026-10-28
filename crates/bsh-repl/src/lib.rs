@@ -45,8 +45,10 @@
 //!   indistinguishable from the start of `Alt-<key>`. Pressing `Esc` twice
 //!   cancels the menu (`Ctrl-C` and typing also do), and a timeout in the
 //!   `Terminal` implementation is the real fix; it does not touch the editor.
-//! * **Pty integration tests.** `bsh-sys` has none yet; every test here drives
-//!   a fake [`Terminal`]. The trait is the seam a pty harness will implement.
+//! * **Pty-driven editor tests.** The editor's tests drive a fake
+//!   [`Terminal`]; pty coverage lives in the binary
+//!   (`crates/bsh/tests/interactive_jobs.rs`, `interactive_history.rs`),
+//!   because a real terminal needs a real process.
 //! * **`SIGWINCH` handling.** The size is read on every repaint, but a resize
 //!   mid-line forces a fresh frame rather than reflowing history above it.
 //! * **A prompt after output that did not end in a newline.** The editor

@@ -143,8 +143,7 @@ delegates everything else: line editing to `bsh-repl`, execution to the
    bash's second expansion, so `PS1='$PWD $ '` prints literally (equivalent to
    `shopt -u promptvars`). Documented in `bsh-repl/src/prompt.rs`.
 5. **Editor depth.** No undo, no `vi` mode (`set -o vi` sets a shopt today but
-   the editor ignores it), no `Ctrl-R`, no word-level kill/yank verification,
-   no `Ctrl-L`. Bracketed paste appears in the key decoder (`Paste` in
+   the editor ignores it), no word-level kill/yank verification, no `Ctrl-L`. Bracketed paste appears in the key decoder (`Paste` in
    `key.rs`) but is unverified.
 6. **No `PROMPT_COMMAND`.**
 
@@ -293,10 +292,14 @@ measured finish line.
   `~/.bsh_history`, not bash's `~/.bash_history`. Sharing bash's file means two
   shells rewriting each other's history (and bash's `histappend` default is
   off), so the history would be lost or interleaved. The default is applied
-  only to an interactive shell, after the startup file, and only when neither
-  the environment nor the startup file set `HISTFILE`; an explicitly empty
-  `HISTFILE` disables persistence. `/bin/sh` compatibility is unaffected
-  because non-interactive shells neither load nor save.
+  only to the terminal REPL, after the startup file, and only when neither the
+  environment nor the startup file set `HISTFILE`; an explicitly empty
+  `HISTFILE` disables persistence. A non-terminal `-i` (piped stdin, `-c`)
+  does not invent a file: it would otherwise make an interactive conformance
+  run read and write the user's home directory. Verified: the ratchet reports
+  the same 1985/1930 with a `~/.bsh_history` full of unrelated entries, and
+  the file is left untouched. `/bin/sh` compatibility is unaffected because
+  non-interactive shells neither load nor save.
 * **History expansion is still absent**, and `fc`'s editor form is deferred.
   Both are recorded under the known history limitations in §4.
 * **`set -o vi`** exists in the option table but has no editor behind it.

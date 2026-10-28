@@ -435,17 +435,23 @@ impl Interp {
 
     /// Prepare the history ring for an interactive session.
     ///
-    /// When `HISTFILE` is unset, this shell gives it a default:
-    /// `$HOME/.bsh_history` (a deliberate deviation from bash's
+    /// When `HISTFILE` is unset and `default_file` is true, this shell gives
+    /// it a default: `$HOME/.bsh_history` (a deliberate deviation from bash's
     /// `~/.bash_history`, so two shells never rewrite each other's file). The
     /// `HIST*` knobs are read from the variables the rc file may have set, and
-    /// the file is loaded. Called after the startup file and only for an
-    /// interactive shell; a non-interactive run keeps no history at all.
-    pub fn initialize_history(&mut self) {
+    /// the file is loaded.
+    ///
+    /// Called after the startup file, only for an interactive shell. The
+    /// caller passes `default_file = true` for the terminal REPL and false for
+    /// a non-terminal `-i` (piped stdin, `-c`): inventing a file there would
+    /// make an interactive conformance run depend on, and write to, the user's
+    /// home directory. An explicit `HISTFILE` from the environment or the rc
+    /// file is always honoured and loaded.
+    pub fn initialize_history(&mut self, default_file: bool) {
         if !self.interactive {
             return;
         }
-        if self.state.vars.scalar(b"HISTFILE").is_none() {
+        if default_file && self.state.vars.scalar(b"HISTFILE").is_none() {
             if let Some(home) = self.state.vars.scalar(b"HOME") {
                 use std::os::unix::ffi::OsStrExt;
                 let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(home))
@@ -457,7 +463,9 @@ impl Interp {
             }
         }
         self.state.sync_history();
-        let _ = self.state.history.read_file();
+        if self.state.history.file().is_some() {
+            let _ = self.state.history.read_file();
+        }
     }
 
     /// Save the history ring on exit (`histappend` chooses append or rewrite).

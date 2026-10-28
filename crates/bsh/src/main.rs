@@ -336,9 +336,11 @@ fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
             // `--rcfile` replaces the default rather than adding to it.
             if interactive {
                 read_startup_file(&mut shell, &flags);
-                // After the rc file, so `HISTFILE`/`HISTSIZE` set there win;
-                // only an interactive shell records and persists history.
-                shell.initialize_history();
+                // After the rc file, so `HISTFILE`/`HISTSIZE` set there win.
+                // Only the terminal REPL invents the default `~/.bsh_history`;
+                // a piped `-i` must not depend on (or write to) the user's
+                // home directory, which is what keeps conformance deterministic.
+                shell.initialize_history(repl);
             }
             if repl {
                 run_repl(&mut shell)
