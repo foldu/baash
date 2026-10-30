@@ -1,12 +1,10 @@
-//! Interactive job control on a real pseudo-terminal.
+//! Interactive signal behaviour on a real pseudo-terminal.
 //!
-//! `bsh -i` is spawned on a pty slave that is its controlling terminal, so the
-//! kernel's job-control paths are the real ones: `Ctrl-Z` sends `SIGTSTP` to
-//! the terminal's foreground process group, `tcsetpgrp` decides which group
-//! that is, and a stopped child is visible to `waitpid(WUNTRACED)`.
-//!
-//! The assertions are on the prompt's own output (`Stopped`, `Running`,
-//! `$?`), not on internals: this is the user-visible contract the wave is for.
+//! `Ctrl-C` is a terminal-generated `SIGINT` for the foreground process group.
+//! With no job control the shell and its foreground child share the shell's
+//! group, so the child dies and the shell must survive the wait and report
+//! status 130. This is the surviving part of the old job-control pty test: the
+//! `^Z`/`jobs`/`fg`/`bg` half was deleted with job control.
 
 #![forbid(unsafe_code)]
 
@@ -18,7 +16,7 @@ use bsh_sys::{
     poll_readable, read_fd, send_signal, write_fd,
 };
 
-/// The prompt the tests look for. Plain ASCII with no prompt escapes.
+/// The prompt the test looks for. Plain ASCII with no prompt escapes.
 const PROMPT: &[u8] = b"@@ ";
 
 struct Session {
@@ -157,7 +155,7 @@ impl Session {
         if self.reaped {
             return;
         }
-        let status = bsh_sys::wait_pid(self.child, false).expect("reap the shell");
+        let status = bsh_sys::wait_pid(self.child).expect("reap the shell");
         self.reaped = true;
         assert_eq!(
             status,
@@ -171,7 +169,7 @@ impl Drop for Session {
     fn drop(&mut self) {
         if !self.reaped {
             let _ = send_signal(self.child, bsh_sys::SIGTERM);
-            let _ = bsh_sys::wait_pid(self.child, false);
+            let _ = bsh_sys::wait_pid(self.child);
         }
     }
 }
@@ -185,64 +183,14 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-/// Give a freshly started foreground command time to reach its own process
-/// group and `tcsetpgrp`; a `Ctrl-Z` sent before that would go to the shell.
+/// Give a freshly started foreground command time to install its signal
+/// handling; a `Ctrl-C` sent before that would only be seen by the shell.
 fn settle() {
     std::thread::sleep(Duration::from_millis(400));
 }
 
 #[test]
-fn ctrl_z_stops_the_foreground_job_and_the_shell_survives() {
-    let mut session = Session::spawn();
-    session.prompt();
-
-    session.line("sleep 100");
-    settle();
-    session.send(b"\x1a"); // Ctrl-Z
-
-    // The stop notice names the job, then the prompt returns.
-    session.expect(b"Stopped", Duration::from_secs(10));
-    session.expect(b"sleep 100", Duration::from_secs(10));
-    session.prompt();
-
-    // `jobs` lists it as stopped, with the `+` marker.
-    session.line("jobs");
-    session.expect(b"[1]+  Stopped", Duration::from_secs(10));
-    session.expect(b"sleep 100", Duration::from_secs(10));
-    session.prompt();
-
-    // `bg` resumes it in the background and prints bash's line.
-    session.line("bg");
-    session.expect(b"[1]+ sleep 100 &", Duration::from_secs(10));
-    session.prompt();
-    session.line("jobs");
-    session.expect(b"[1]+  Running", Duration::from_secs(10));
-    session.expect(b"sleep 100 &", Duration::from_secs(10));
-    session.prompt();
-
-    // `fg` brings it back; Ctrl-C kills it and reports 130.
-    session.line("fg");
-    session.expect(b"sleep 100", Duration::from_secs(10));
-    settle();
-    session.send(b"\x03");
-    session.prompt();
-    session.line("echo $?");
-    session.expect(b"130", Duration::from_secs(10));
-    session.prompt();
-    session.line("jobs");
-    session.prompt();
-
-    // The shell is still there.
-    session.line("echo alive");
-    session.expect(b"alive", Duration::from_secs(10));
-    session.prompt();
-
-    session.line("exit");
-    session.wait_child();
-}
-
-#[test]
-fn ctrl_c_on_a_foreground_job_leaves_status_130_and_the_shell_alive() {
+fn ctrl_c_on_a_foreground_command_leaves_status_130_and_the_shell_alive() {
     let mut session = Session::spawn();
     session.prompt();
 
@@ -254,33 +202,10 @@ fn ctrl_c_on_a_foreground_job_leaves_status_130_and_the_shell_alive() {
     session.expect(b"status=130", Duration::from_secs(10));
     session.prompt();
 
-    // No job was left behind.
-    session.line("jobs");
-    session.prompt();
     session.line("echo still-here");
     session.expect(b"still-here", Duration::from_secs(10));
     session.prompt();
 
-    session.line("exit");
-    session.wait_child();
-}
-
-#[test]
-fn a_finished_job_is_reported_before_the_next_prompt() {
-    let mut session = Session::spawn();
-    session.prompt();
-
-    session.line("sleep 0.1 &");
-    // The start notice, then a command that gives the child time to finish.
-    session.expect(b"[1]", Duration::from_secs(10));
-    session.line("sleep 0.4");
-    session.expect(b"Done", Duration::from_secs(10));
-    session.expect(b"sleep 0.1", Duration::from_secs(10));
-    session.prompt();
-
-    // Reported once, and the job is gone.
-    session.line("jobs");
-    session.prompt();
     session.line("exit");
     session.wait_child();
 }

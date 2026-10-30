@@ -992,3 +992,59 @@ fn a_unary_test_without_an_operand_is_a_syntax_error() {
     assert_eq!(code(&run("[[ -z \"\" ]]")), 0);
     assert_eq!(code(&run("[[ -z a ]]")), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Removed job control: known names, capability diagnostics, inert `set -m`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn job_builtins_report_the_capability_gap() {
+    // The names stay known (an rc file with `jobs` must not get "command not
+    // found"), but running one says what is missing. Status 1 is the documented
+    // failure for a capability rejection.
+    for name in ["jobs", "fg", "bg", "disown"] {
+        let output = run(name);
+        assert_eq!(code(&output), 1, "`{name}` must fail");
+        let text = stderr(&output);
+        assert!(text.contains("error[BSH-E0302]"), "`{name}` stderr: {text}");
+        assert!(
+            text.contains(&format!(
+                "{name}: job control is not implemented in this shell"
+            )),
+            "`{name}` stderr: {text}"
+        );
+        assert!(stdout(&output).is_empty(), "`{name}` wrote to stdout");
+    }
+}
+
+#[test]
+fn job_spec_operands_are_capability_errors() {
+    // `wait %1` and `kill %1` used to resolve against a job table. With no
+    // table they are the same capability error, not "no such job".
+    for script in ["wait %1", "kill %1"] {
+        let output = run(script);
+        assert_eq!(code(&output), 1, "`{script}` must fail");
+        let text = stderr(&output);
+        assert!(text.contains("BSH-E0302"), "`{script}` stderr: {text}");
+        assert!(
+            text.contains("%1: job control is not implemented in this shell"),
+            "`{script}` stderr: {text}"
+        );
+    }
+}
+
+#[test]
+fn monitor_option_is_accepted_and_inert() {
+    // rc files and scripts may say `set -m`; it must parse, take effect in the
+    // option table, and change no behaviour here.
+    let output = run("set -m; set -o monitor; set +m; set +o monitor; echo ok");
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "ok\n");
+
+    // The option is still readable as an option.
+    assert_eq!(out("set -m; set -o | grep '^monitor'"), "monitor\ton\n");
+    assert_eq!(
+        out("set -m; set +m; set -o | grep '^monitor'"),
+        "monitor\toff\n"
+    );
+}
