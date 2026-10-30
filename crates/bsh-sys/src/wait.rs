@@ -4,8 +4,13 @@
 //! The event loop uses the non-blocking form: a readable signal descriptor (or
 //! any other wakeup) means "reap whatever is ready", because `SIGCHLD` is a
 //! hint and not a per-child event (DESIGN.md §4.5).
+//!
+//! `rustix` decodes the wait status, so this module never interprets a `status`
+//! word by hand.
 
 use std::io;
+
+use rustix::process::{Pid, WaitOptions, WaitStatus};
 
 /// What happened to a child.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,24 +40,17 @@ impl WaitOutcome {
 /// There is no `WUNTRACED`: the shell has no job control, so a stopped child
 /// is not a state it knows how to resume.
 pub fn wait_pid(pid: libc::pid_t) -> io::Result<WaitOutcome> {
-    let mut status: libc::c_int = 0;
+    let pid = Pid::from_raw(pid).ok_or_else(|| io::Error::from_raw_os_error(libc::ECHILD))?;
     loop {
-        // SAFETY: `status` is valid for writes and `waitpid` does not retain
-        // the pointer. `pid` is a child of this process by contract.
-        let rc = unsafe { libc::waitpid(pid, &mut status, 0) };
-        if rc < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error);
+        match rustix::process::waitpid(Some(pid), WaitOptions::empty()) {
+            Ok(Some((_, status))) => return decode(status),
+            // Without `WNOHANG` a `None` means the child is not waitable; POSIX
+            // reports that as `ECHILD`, which is what `wait PID` turns into
+            // status 127.
+            Ok(None) => return Err(io::Error::from_raw_os_error(libc::ECHILD)),
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(error) => return Err(error.into()),
         }
-        if rc == 0 {
-            // Not possible without WNOHANG; avoid spinning if a platform
-            // disagrees.
-            return Err(io::Error::from_raw_os_error(libc::ECHILD));
-        }
-        return decode(status);
     }
 }
 
@@ -62,32 +60,29 @@ pub fn wait_pid(pid: libc::pid_t) -> io::Result<WaitOutcome> {
 /// children at all". Interrupted waits are retried; `ECHILD` is reported as
 /// `None` because it is the steady state of a shell between commands.
 pub fn wait_any_nohang() -> Option<(libc::pid_t, WaitOutcome)> {
-    let mut status: libc::c_int = 0;
     loop {
-        // SAFETY: `status` is valid for writes and `waitpid` does not retain
-        // the pointer.
-        let rc = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-        if rc > 0 {
-            return decode(status).ok().map(|outcome| (rc, outcome));
-        }
-        if rc == 0 {
-            return None;
-        }
-        let raw = io::Error::last_os_error().raw_os_error();
-        match raw {
-            Some(libc::EINTR) => continue,
+        match rustix::process::waitpid(None, WaitOptions::NOHANG) {
+            Ok(Some((pid, status))) => {
+                return decode(status)
+                    .ok()
+                    .map(|outcome| (pid.as_raw_pid(), outcome));
+            }
+            Ok(None) => return None,
+            Err(rustix::io::Errno::INTR) => continue,
             // ECHILD: no unreaped children. Every other error means the same
             // thing for an event loop: nothing to report right now.
-            _ => return None,
+            Err(_) => return None,
         }
     }
 }
 
-fn decode(status: libc::c_int) -> io::Result<WaitOutcome> {
-    if libc::WIFEXITED(status) {
-        Ok(WaitOutcome::Exited(libc::WEXITSTATUS(status)))
-    } else if libc::WIFSIGNALED(status) {
-        Ok(WaitOutcome::Signaled(libc::WTERMSIG(status)))
+fn decode(status: WaitStatus) -> io::Result<WaitOutcome> {
+    if status.exited() {
+        Ok(WaitOutcome::Exited(status.exit_status().unwrap_or(0)))
+    } else if status.signaled() {
+        Ok(WaitOutcome::Signaled(
+            status.terminating_signal().unwrap_or(0),
+        ))
     } else {
         // Neither `WIFSTOPPED` nor `WIFCONTINUED` can appear: the wait never
         // passes `WUNTRACED` or `WCONTINUED`.

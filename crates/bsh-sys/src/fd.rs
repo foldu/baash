@@ -13,10 +13,26 @@
 //! [`create_unlinked_temp`] additionally makes the body invisible in the
 //! filesystem: `memfd_create(2)` and `O_TMPFILE` never create a name at all,
 //! and the named fallback unlinks immediately after opening.
+//!
+//! # Why `rustix` rather than `libc`
+//!
+//! These are leaf syscalls, and `rustix` already wraps every one of them with
+//! the right `io-safety` shape (`OwnedFd` in, `OwnedFd` out), the right
+//! `Errno` type and, unlike these declarations, the right layout on every
+//! architecture it supports. Hand-written `libc` bindings buy nothing here.
+//!
+//! The two calls that stay raw are the ones `rustix` deliberately does not let
+//! a safe caller express: [`dup2`] installs a descriptor at a *number* the
+//! caller chose (which is exactly what a shell redirection is, and which
+//! `rustix::io::dup2` refuses because the number is not a slot it can own), and
+//! [`close`] is `unsafe` in `rustix` for the same reason it is here.
 
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use rustix::fs::{AtFlags, Mode, OFlags, SeekFrom};
+use rustix::io::FdFlags;
 
 use crate::bytes::cstring;
 
@@ -35,7 +51,7 @@ pub struct Pipe {
 impl Pipe {
     /// Create a pipe with `O_CLOEXEC` on both ends.
     pub fn new() -> io::Result<Self> {
-        let (read, write) = create_pipe()?;
+        let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
         Ok(Self { read, write })
     }
 
@@ -50,32 +66,38 @@ impl Pipe {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn create_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
-    let mut fds: [libc::c_int; 2] = [0; 2];
-    // SAFETY: `pipe2` writes exactly two descriptors into the array on success
-    // and does not retain the pointer.
-    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: both descriptors were just created and are not owned elsewhere.
-    unsafe { Ok((OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))) }
+/// Borrow a descriptor number for the duration of one call.
+///
+/// # Why this is one `unsafe` block instead of thirty
+///
+/// The shell stores descriptors as numbers: `exec 3<&1`, `>&2` and a here-doc's
+/// saved stdin are all "the descriptor with this number", and `dup2` needs a
+/// number to install onto. `rustix` takes `BorrowedFd`, which carries a
+/// lifetime because closing a descriptor while another owner still holds a
+/// `BorrowedFd` breaks `io-safety`.
+///
+/// The borrow here never outlives the call it was made for: every use is
+/// `rustix::…(borrowed(fd), …)` on the shell thread, which owns the descriptor
+/// table. Misuse would address the wrong file — a bug to fix, not undefined
+/// behaviour — because a descriptor is a number, not a pointer.
+pub(crate) fn borrowed(fd: RawFd) -> BorrowedFd<'static> {
+    // SAFETY: the number names a descriptor the caller owns; the borrow is
+    // consumed by the immediately following call, and every caller is shell
+    // code on the thread that owns the descriptor table.
+    unsafe { BorrowedFd::borrow_raw(fd) }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn create_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
-    let mut fds: [libc::c_int; 2] = [0; 2];
-    // SAFETY: `pipe` writes exactly two descriptors into the array.
-    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
+/// Convert `libc` open flags into `rustix` flags.
+///
+/// The public API speaks `libc` constants because that is what the shell's
+/// redirection data structures store; the syscall layer speaks `rustix`. A flag
+/// this build does not know is rejected rather than dropped.
+fn open_flags(flags: libc::c_int) -> io::Result<OFlags> {
+    // `libc` `O_*` values are non-negative `c_int` bit patterns.
+    match OFlags::from_bits(flags as u32) {
+        Some(flags) => Ok(flags),
+        None => Err(io::Error::from_raw_os_error(libc::EINVAL)),
     }
-    // SAFETY: both descriptors were just created and are not owned elsewhere.
-    let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-    set_cloexec(read.as_raw_fd(), true)?;
-    set_cloexec(write.as_raw_fd(), true)?;
-    Ok((read, write))
 }
 
 /// Open `path` with `O_CLOEXEC` added to `flags`.
@@ -84,14 +106,9 @@ fn create_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
 /// `open(2)`. An embedded NUL in `path` is rejected rather than truncated.
 pub fn open_cloexec(path: &[u8], flags: libc::c_int, mode: libc::mode_t) -> io::Result<OwnedFd> {
     let path = cstring(path)?;
-    // SAFETY: `path` is NUL-terminated and alive for the call; `open` is
-    // variadic and takes `mode` only for the creating flags.
-    let fd = unsafe { libc::open(path.as_ptr(), flags | libc::O_CLOEXEC, mode) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: the descriptor is newly opened and unowned.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    let flags = open_flags(flags)? | OFlags::CLOEXEC;
+    let mode = Mode::from_bits_truncate(mode);
+    Ok(rustix::fs::open(&path, flags, mode)?)
 }
 
 /// Duplicate `from` onto `to`, clearing `FD_CLOEXEC` on the result, exactly as
@@ -99,8 +116,13 @@ pub fn open_cloexec(path: &[u8], flags: libc::c_int, mode: libc::mode_t) -> io::
 ///
 /// `to` is closed first if it was open. This is the primitive that applies a
 /// shell redirection; the destination is the caller's responsibility.
+///
+/// `rustix::io::dup2` cannot express this: it installs into an `&mut OwnedFd`
+/// (refusing to clobber a descriptor it does not own), whereas a redirection
+/// names a destination number and *must* clobber it.
 pub fn dup2(from: RawFd, to: RawFd) -> io::Result<()> {
-    // SAFETY: `dup2` only reads descriptor numbers.
+    // SAFETY: `dup2` only reads descriptor numbers, closes the destination and
+    // installs a duplicate. `to` is the caller's to clobber by contract.
     if unsafe { libc::dup2(from, to) } < 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -134,15 +156,7 @@ pub fn dup(fd: RawFd) -> io::Result<OwnedFd> {
 /// `min` must be non-negative; a negative value is rejected by the kernel with
 /// `EINVAL` rather than being clamped.
 pub fn dup_above(fd: RawFd, min: RawFd) -> io::Result<OwnedFd> {
-    // SAFETY: `F_DUPFD_CLOEXEC` duplicates a live descriptor and returns a new
-    // one; it reads only integers and retains no pointers.
-    let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, min) };
-    if duplicate < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: the kernel just produced this descriptor and nothing else owns
-    // it; taking ownership closes it if the caller drops it.
-    Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
+    Ok(rustix::io::fcntl_dupfd_cloexec(borrowed(fd), min)?)
 }
 
 /// Change the working directory to `path`, which is shell bytes.
@@ -156,13 +170,7 @@ pub fn dup_above(fd: RawFd, min: RawFd) -> io::Result<OwnedFd> {
 /// process must serialise it with every other user of the working directory.
 pub fn chdir(path: &[u8]) -> io::Result<()> {
     let path = cstring(path)?;
-    // SAFETY: `path` is NUL-terminated and lives until the call returns;
-    // `chdir` copies what it needs and retains no pointer.
-    if unsafe { libc::chdir(path.as_ptr()) } != 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    Ok(rustix::process::chdir(&path)?)
 }
 
 /// Close a descriptor the caller owns.
@@ -171,12 +179,23 @@ pub fn chdir(path: &[u8]) -> io::Result<()> {
 /// `EINTR`; callers must not retry it or use `fd` afterwards. Use
 /// [`OwnedFd`] wherever ownership can be expressed in the type instead.
 pub fn close(fd: RawFd) -> io::Result<()> {
-    // SAFETY: `close` only reads the descriptor number. Ownership was
-    // transferred by the caller, so the descriptor is not used afterwards.
+    // SAFETY: ownership was transferred by the caller, who promises not to use
+    // the number again; `close` touches nothing else.
     if unsafe { libc::close(fd) } != 0 {
         Err(io::Error::last_os_error())
     } else {
         Ok(())
+    }
+}
+
+/// Run `op`, retrying while it reports `EINTR`.
+fn retrying<T>(mut op: impl FnMut() -> Result<T, rustix::io::Errno>) -> io::Result<T> {
+    loop {
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(error) => return Err(error.into()),
+        }
     }
 }
 
@@ -187,18 +206,7 @@ pub fn close(fd: RawFd) -> io::Result<()> {
 /// over-read: it reads exactly one buffer at a time and keeps any surplus
 /// itself, so a second reader on the same descriptor still sees the rest.
 pub fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
-    loop {
-        // SAFETY: `buf` is a valid writable slice of `buf.len()` bytes, and
-        // the kernel writes at most that many.
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-        if n >= 0 {
-            return Ok(n as usize);
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
+    retrying(|| rustix::io::read(borrowed(fd), &mut *buf))
 }
 
 /// Write `buf` to `fd` in one call, returning the number of bytes accepted.
@@ -206,17 +214,7 @@ pub fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
 /// Short writes are the caller's problem; use [`write_all`] unless you are
 /// testing partial-write behaviour.
 pub fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
-    loop {
-        // SAFETY: `buf` is a valid readable slice of `buf.len()` bytes.
-        let n = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
-        if n >= 0 {
-            return Ok(n as usize);
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
+    retrying(|| rustix::io::write(borrowed(fd), buf))
 }
 
 /// Write all of `buf` to `fd`, retrying short writes and `EINTR`.
@@ -244,23 +242,25 @@ pub fn write_all(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
 /// timeout waits indefinitely. This is what `read -t` needs; it must not be
 /// used to poll anything but readability.
 pub fn poll_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
-    let mut pollfd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
+    let source = borrowed(fd);
+    let mut pollfd = [rustix::event::PollFd::new(
+        &source,
+        rustix::event::PollFlags::IN,
+    )];
+    // `poll(2)` takes a `timespec` on Linux and a millisecond count elsewhere;
+    // `rustix` accepts the portable form and refuses a timeout it cannot
+    // represent.
+    let timeout = (timeout_ms >= 0).then(|| rustix::event::Timespec {
+        tv_sec: i64::from(timeout_ms / 1000),
+        // `tv_nsec` is `i64` or `c_long` depending on the chosen backend.
+        tv_nsec: (i64::from(timeout_ms % 1000) * 1_000_000) as _,
+    });
     loop {
-        // SAFETY: `pollfd` points at one initialised `pollfd`.
-        let result = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
-        if result > 0 {
-            return Ok(true);
-        }
-        if result == 0 {
-            return Ok(false);
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
+        match rustix::event::poll(&mut pollfd, timeout.as_ref()) {
+            Ok(0) => return Ok(false),
+            Ok(_) => return Ok(true),
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(error) => return Err(error.into()),
         }
     }
 }
@@ -283,18 +283,14 @@ pub mod seek {
 /// (DESIGN.md §4.4). On a pipe the call fails with `ESPIPE`, which is also how
 /// a caller discovers that the descriptor is not seekable.
 pub fn lseek(fd: RawFd, offset: i64, whence: i32) -> io::Result<i64> {
-    loop {
-        // SAFETY: `lseek` only reads and writes the descriptor's offset and
-        // dereferences no pointer.
-        let result = unsafe { libc::lseek(fd, offset, whence) };
-        if result >= 0 {
-            return Ok(result);
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
+    let position = match whence {
+        seek::SET => SeekFrom::Start(offset as u64),
+        seek::CUR => SeekFrom::Current(offset),
+        seek::END => SeekFrom::End(offset),
+        _ => return Err(io::Error::from_raw_os_error(libc::EINVAL)),
+    };
+    let offset = retrying(|| rustix::fs::seek(borrowed(fd), position))?;
+    Ok(offset as i64)
 }
 
 /// Whether `fd` currently names an open descriptor.
@@ -302,35 +298,21 @@ pub fn lseek(fd: RawFd, offset: i64, whence: i32) -> io::Result<i64> {
 /// The answer is a snapshot: another thread may close or reuse the descriptor
 /// immediately afterwards.
 pub fn fd_is_open(fd: RawFd) -> bool {
-    // SAFETY: `fcntl(F_GETFD)` only inspects the descriptor table entry.
-    unsafe { libc::fcntl(fd, libc::F_GETFD) != -1 }
+    rustix::io::fcntl_getfd(borrowed(fd)).is_ok()
 }
 
 /// Whether `fd` is open and has `FD_CLOEXEC` set.
 pub fn fd_is_cloexec(fd: RawFd) -> bool {
-    // SAFETY: `fcntl(F_GETFD)` only inspects the descriptor table entry. A
-    // negative result is `-1` (EBADF), which must not be mistaken for a flag.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    flags >= 0 && flags & libc::FD_CLOEXEC != 0
+    rustix::io::fcntl_getfd(borrowed(fd))
+        .map(|flags| flags.contains(FdFlags::CLOEXEC))
+        .unwrap_or(false)
 }
 
 /// Set or clear `FD_CLOEXEC` on an open descriptor.
 pub fn set_cloexec(fd: RawFd, enabled: bool) -> io::Result<()> {
-    // SAFETY: `fcntl(F_GETFD)` only inspects the descriptor table entry.
-    let current = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if current < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let flags = if enabled {
-        current | libc::FD_CLOEXEC
-    } else {
-        current & !libc::FD_CLOEXEC
-    };
-    // SAFETY: `fcntl(F_SETFD)` only updates this descriptor's flags.
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    let mut flags = rustix::io::fcntl_getfd(borrowed(fd))?;
+    flags.set(FdFlags::CLOEXEC, enabled);
+    Ok(rustix::io::fcntl_setfd(borrowed(fd), flags)?)
 }
 
 /// Create a writable, close-on-exec file with no directory entry.
@@ -379,39 +361,28 @@ fn temp_dir() -> Vec<u8> {
 
 #[cfg(target_os = "linux")]
 fn memfd() -> io::Result<OwnedFd> {
-    // SAFETY: the name is a valid NUL-terminated string and `MFD_CLOEXEC` is a
-    // valid flag; the call returns a fresh descriptor or -1.
-    let fd = unsafe { libc::memfd_create(c"bsh-heredoc".as_ptr(), libc::MFD_CLOEXEC) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: the descriptor is newly created and unowned.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    Ok(rustix::fs::memfd_create(
+        "bsh-heredoc",
+        rustix::fs::MemfdFlags::CLOEXEC,
+    )?)
 }
 
 #[cfg(target_os = "linux")]
 fn tmpfile_in(dir: &[u8]) -> io::Result<OwnedFd> {
     let dir = cstring(dir)?;
-    // SAFETY: `dir` is a NUL-terminated directory path; `O_TMPFILE` makes the
-    // opened file nameless, and `open` does not retain the pointer.
-    let fd = unsafe {
-        libc::open(
-            dir.as_ptr(),
-            libc::O_TMPFILE | libc::O_RDWR | libc::O_CLOEXEC,
-            0o600 as libc::mode_t,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: the descriptor is newly opened and unowned.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    let flags = OFlags::TMPFILE | OFlags::RDWR | OFlags::CLOEXEC;
+    Ok(rustix::fs::open(
+        &dir,
+        flags,
+        Mode::from_bits_truncate(0o600),
+    )?)
 }
 
 fn unlinked_named_temp(dir: &[u8]) -> io::Result<OwnedFd> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let pid = std::process::id();
+    let flags = OFlags::CREATE | OFlags::EXCL | OFlags::RDWR | OFlags::CLOEXEC;
     for _ in 0..100 {
         let serial = COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut path = Vec::with_capacity(dir.len() + 32);
@@ -420,32 +391,14 @@ fn unlinked_named_temp(dir: &[u8]) -> io::Result<OwnedFd> {
         path.extend_from_slice(format!("bsh-heredoc-{pid}-{serial}").as_bytes());
         let name = cstring(&path)?;
 
-        // SAFETY: `name` is a NUL-terminated path; `O_EXCL` makes creation
-        // atomic so a stale name can never be reused, and `open` does not
-        // retain the pointer.
-        let fd = unsafe {
-            libc::open(
-                name.as_ptr(),
-                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR | libc::O_CLOEXEC,
-                0o600 as libc::mode_t,
-            )
+        let fd = match rustix::fs::open(&name, flags, Mode::from_bits_truncate(0o600)) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::EXIST) => continue,
+            Err(error) => return Err(error.into()),
         };
-        if fd < 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::EEXIST) {
-                continue;
-            }
-            return Err(error);
-        }
-        // SAFETY: the descriptor is newly opened and unowned from here on.
-        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-
-        // SAFETY: `name` is still NUL-terminated and alive; the open
-        // descriptor keeps the data readable after the name disappears.
-        if unsafe { libc::unlink(name.as_ptr()) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        return Ok(owned);
+        // The open descriptor keeps the data readable after the name goes.
+        rustix::fs::unlinkat(rustix::fs::CWD, &name, AtFlags::empty())?;
+        return Ok(fd);
     }
 
     Err(io::Error::new(

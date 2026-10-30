@@ -23,6 +23,14 @@ bsh-repl = { path = "crates/bsh-repl" }
 bsh-tools = { path = "crates/bsh-tools" }
 
 libc = "0.2"
+rustix = { version = "1.1", default-features = false, features = [
+    "std",
+    "fs",
+    "pipe",
+    "termios",
+    "event",
+    "process",
+] }
 memchr = "2"
 smallvec = "1"
 unicode-width = "0.2"

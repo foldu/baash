@@ -80,7 +80,7 @@ the machinery. Future waves re-baseline the same way.
 
 | crate | lines | responsibility |
 |---|---|---|
-| `bsh-sys` | 3547 | the only `unsafe`. fork/exec (`posix_spawn` by default), descriptors, pipes/pty, termios, signals, `wait_any`, process-group spawn placement, libc regex, global `fork_gate()` |
+| `bsh-sys` | 3332 | the only `unsafe`. fork/exec (`posix_spawn` by default), descriptors, pipes/pty, signals, libc regex, global `fork_gate()`; descriptors, termios and `wait` go through `rustix`, and the 77 remaining blocks are leaf syscalls or `posix_spawn` plumbing |
 | `bsh-syntax` | 6607 | lexer + recursive-descent parser producing `Word`/`Command`; the superset grammar |
 | `bsh-lang` | 9862 | shell *text* semantics: word expansion, patterns (`bsh-pattern`), parameter operators, prompt escapes, arithmetic; no I/O |
 | `bsh-runtime` | 11736 | shell *state*: variables/arrays/namerefs, options, builtin registry and state-only bodies, the history ring and `HIST*` policies, traps bookkeeping, completion registry, `declare -p` rendering |
@@ -339,7 +339,14 @@ Do not re-litigate these without a reason; several were expensive.
 
 * **Bytes, never `String`**, for anything the shell can hold or print.
 * **`bsh-sys` is the only crate with `unsafe`**; everything else is
-  `#![forbid(unsafe_code)]`. `fork_gate()` is global.
+  `#![forbid(unsafe_code)]`. `fork_gate()` is global. Inside it, every block
+  carries a `// SAFETY:` comment and `clippy::undocumented_unsafe_blocks` is
+  denied, so the invariant is enforced rather than remembered. Leaf syscalls
+  prefer `rustix` over hand-written `libc` bindings: it already owns the
+  `io-safety` shape, the `Errno` type and the per-architecture layouts. What
+  stays raw is what no crate expresses with the shell's semantics —
+  `posix_spawn` with file actions and `sigdefault`/`sigmask`, `execve`,
+  target-number `dup2`, `trap` dispositions, and `regcomp`.
 * **One superset grammar + post-parse gating.** No profile-dependent parsing;
   portability is a linter over one AST.
 * **Ambiguity budget, three tiers:** lexical ties go to bash; the parser uses

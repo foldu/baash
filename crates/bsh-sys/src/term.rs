@@ -1,8 +1,15 @@
 //! Terminal state: raw mode and window size.
+//!
+//! `rustix` owns the `termios` and `winsize` layouts, so this module only
+//! decides *which* settings apply; the two calls that mutate the terminal are
+//! `tcsetattr` and nothing else.
 
 use std::io;
-use std::mem::MaybeUninit;
 use std::os::fd::RawFd;
+
+use rustix::termios::{LocalModes, OptionalActions, Termios};
+
+use crate::fd::borrowed;
 
 /// A saved `termios`, restored when the guard is dropped.
 ///
@@ -13,47 +20,22 @@ use std::os::fd::RawFd;
 #[derive(Debug)]
 pub struct RawMode {
     fd: RawFd,
-    saved: libc::termios,
+    saved: Termios,
 }
 
 impl RawMode {
     /// Put `fd` into raw mode, returning a guard that restores the previous
     /// settings.
     ///
-    /// The exact flags are the ones `cfmakeraw(3)` clears: input translation
-    /// and flow control off, output post-processing off, canonical mode, echo,
-    /// signal generation and extended input processing off, 8-bit characters,
-    /// and one-byte reads (`VMIN = 1`, `VTIME = 0`).
+    /// The settings are `cfmakeraw(3)`: input translation and flow control off,
+    /// output post-processing off, canonical mode, echo, signal generation and
+    /// extended input processing off, 8-bit characters, and one-byte reads
+    /// (`VMIN = 1`, `VTIME = 0`).
     pub fn enable(fd: RawFd) -> io::Result<Self> {
-        let mut saved = MaybeUninit::<libc::termios>::uninit();
-        // SAFETY: `saved` is valid for writes; `tcgetattr` does not retain it.
-        if unsafe { libc::tcgetattr(fd, saved.as_mut_ptr()) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: success initialises `saved`.
-        let saved = unsafe { saved.assume_init() };
-
-        let mut raw = saved;
-        raw.c_iflag &= !(libc::IGNBRK
-            | libc::BRKINT
-            | libc::PARMRK
-            | libc::ISTRIP
-            | libc::INLCR
-            | libc::IGNCR
-            | libc::ICRNL
-            | libc::IXON);
-        raw.c_oflag &= !libc::OPOST;
-        raw.c_lflag &= !(libc::ECHO | libc::ECHONL | libc::ICANON | libc::ISIG | libc::IEXTEN);
-        raw.c_cflag &= !(libc::CSIZE | libc::PARENB);
-        raw.c_cflag |= libc::CS8;
-        raw.c_cc[libc::VMIN] = 1;
-        raw.c_cc[libc::VTIME] = 0;
-
-        // SAFETY: `raw` is an initialised `termios` and `fd` is a terminal (or
-        // the call fails); `tcsetattr` does not retain the pointer.
-        if unsafe { libc::tcsetattr(fd, libc::TCSADRAIN, &raw) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let saved = rustix::termios::tcgetattr(borrowed(fd))?;
+        let mut raw = saved.clone();
+        raw.make_raw();
+        rustix::termios::tcsetattr(borrowed(fd), OptionalActions::Drain, &raw)?;
         Ok(Self { fd, saved })
     }
 
@@ -64,23 +46,21 @@ impl RawMode {
 
     /// Restore explicitly, reporting a failure instead of ignoring it.
     pub fn restore(self) -> io::Result<()> {
-        let fd = self.fd;
-        let saved = self.saved;
-        std::mem::forget(self);
-        // SAFETY: `saved` came from `tcgetattr` on this descriptor.
-        if unsafe { libc::tcsetattr(fd, libc::TCSADRAIN, &saved) } != 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
+        // `Termios` is not `Copy` and the guard implements `Drop`, so take a
+        // reference out of the forgotten value instead of moving it.
+        let this = std::mem::ManuallyDrop::new(self);
+        Ok(rustix::termios::tcsetattr(
+            borrowed(this.fd),
+            OptionalActions::Drain,
+            &this.saved,
+        )?)
     }
 }
 
 impl Drop for RawMode {
     fn drop(&mut self) {
-        // SAFETY: `self.saved` came from `tcgetattr` on `self.fd`. Errors are
-        // ignored: a panic must still make a best-effort restore.
-        unsafe { libc::tcsetattr(self.fd, libc::TCSADRAIN, &self.saved) };
+        // Errors are ignored: a panic must still make a best-effort restore.
+        let _ = rustix::termios::tcsetattr(borrowed(self.fd), OptionalActions::Drain, &self.saved);
     }
 }
 
@@ -94,7 +74,7 @@ impl Drop for RawMode {
 #[derive(Debug)]
 pub struct NoEcho {
     fd: RawFd,
-    saved: libc::termios,
+    saved: Termios,
 }
 
 impl NoEcho {
@@ -103,22 +83,10 @@ impl NoEcho {
     /// `fd` must be a terminal; on anything else `tcgetattr` fails with
     /// `ENOTTY` and the caller degrades to reading without echo control.
     pub fn enable(fd: RawFd) -> io::Result<Self> {
-        let mut saved = MaybeUninit::<libc::termios>::uninit();
-        // SAFETY: `saved` is valid for writes; `tcgetattr` does not retain it.
-        if unsafe { libc::tcgetattr(fd, saved.as_mut_ptr()) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: success initialises `saved`.
-        let saved = unsafe { saved.assume_init() };
-
-        let mut quiet = saved;
-        quiet.c_lflag &= !(libc::ECHO | libc::ECHONL);
-
-        // SAFETY: `quiet` is an initialised `termios` and `fd` is a terminal
-        // (or the call fails); `tcsetattr` does not retain the pointer.
-        if unsafe { libc::tcsetattr(fd, libc::TCSADRAIN, &quiet) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let saved = rustix::termios::tcgetattr(borrowed(fd))?;
+        let mut quiet = saved.clone();
+        quiet.local_modes -= LocalModes::ECHO | LocalModes::ECHONL;
+        rustix::termios::tcsetattr(borrowed(fd), OptionalActions::Drain, &quiet)?;
         Ok(Self { fd, saved })
     }
 
@@ -129,23 +97,22 @@ impl NoEcho {
 
     /// Restore explicitly, reporting a failure instead of ignoring it.
     pub fn restore(self) -> io::Result<()> {
-        let fd = self.fd;
-        let saved = self.saved;
-        std::mem::forget(self);
-        // SAFETY: `saved` came from `tcgetattr` on this descriptor.
-        if unsafe { libc::tcsetattr(fd, libc::TCSADRAIN, &saved) } != 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
+        // `Termios` is not `Copy` and the guard implements `Drop`, so take a
+        // reference out of the forgotten value instead of moving it.
+        let this = std::mem::ManuallyDrop::new(self);
+        Ok(rustix::termios::tcsetattr(
+            borrowed(this.fd),
+            OptionalActions::Drain,
+            &this.saved,
+        )?)
     }
 }
 
 impl Drop for NoEcho {
     fn drop(&mut self) {
-        // SAFETY: `self.saved` came from `tcgetattr` on `self.fd`. Errors are
-        // ignored: the guard's Drop runs on every path, including a panic.
-        unsafe { libc::tcsetattr(self.fd, libc::TCSADRAIN, &self.saved) };
+        // Errors are ignored: the guard's Drop runs on every path, including a
+        // panic.
+        let _ = rustix::termios::tcsetattr(borrowed(self.fd), OptionalActions::Drain, &self.saved);
     }
 }
 
@@ -162,27 +129,18 @@ pub fn window_size() -> Option<(u16, u16)> {
 ///
 /// See [`window_size`] for the meaning of the returned pair.
 pub fn window_size_fd(fd: RawFd) -> Option<(u16, u16)> {
-    // SAFETY: `zeroed` is a valid `winsize`; `TIOCGWINSZ` fills it on success.
-    let mut size = MaybeUninit::<libc::winsize>::zeroed();
-    // SAFETY: `size` is valid for writes and the ioctl does not retain it.
-    if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, size.as_mut_ptr()) } != 0 {
-        return None;
-    }
-    // SAFETY: success means the kernel filled in `size`.
-    let size = unsafe { size.assume_init() };
+    let size = rustix::termios::tcgetwinsize(borrowed(fd)).ok()?;
     (size.ws_col > 0 && size.ws_row > 0).then_some((size.ws_col, size.ws_row))
 }
 
 /// This process's id (`$$`).
 pub fn pid() -> libc::pid_t {
-    // SAFETY: `getpid` cannot fail and touches no pointers.
-    unsafe { libc::getpid() }
+    rustix::process::getpid().as_raw_pid()
 }
 
 /// This process's parent id (`$PPID`).
 pub fn parent_pid() -> libc::pid_t {
-    // SAFETY: `getppid` cannot fail and touches no pointers.
-    unsafe { libc::getppid() }
+    rustix::process::getppid().map_or(0, |pid| pid.as_raw_pid())
 }
 
 #[cfg(test)]
