@@ -10,8 +10,12 @@
 //! pty harness added later implements the same trait and changes nothing above
 //! this module.
 
+#[cfg(unix)]
 use std::fs::File;
-use std::io::{self, Write};
+use std::io;
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 
 /// Terminal dimensions, in character cells.
@@ -98,6 +102,7 @@ pub trait Terminal {
 /// `bsh > transcript` still wants the prompt, the highlighted line and the
 /// completion menu on their terminal — not interleaved with the command output
 /// they are capturing. Standard output remains the command output's business.
+#[cfg(unix)]
 #[derive(Debug, Default)]
 pub struct RealTerminal {
     /// The controlling terminal, when one could be opened.
@@ -113,6 +118,7 @@ pub struct RealTerminal {
     read_source: Option<compio::runtime::fd::PollFd<std::os::fd::OwnedFd>>,
 }
 
+#[cfg(unix)]
 impl RealTerminal {
     /// A terminal backed by `/dev/tty`, falling back to standard input and
     /// output when there is no controlling terminal.
@@ -134,6 +140,56 @@ impl RealTerminal {
     }
 }
 
+/// On Windows the editor has no console host yet, so every operation reports
+/// `Unsupported`; the type exists so `bsh` builds and `-c` runs. ConPTY is the
+/// last W4 step (`docs/portability.md` §10).
+#[cfg(windows)]
+#[derive(Debug, Default)]
+pub struct RealTerminal {
+    _private: (),
+}
+
+#[cfg(windows)]
+impl RealTerminal {
+    /// Windows has no terminal to open until ConPTY exists.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[cfg(windows)]
+impl Terminal for RealTerminal {
+    fn read_byte(&mut self) -> io::Result<Option<u8>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "interactive input needs a console host (docs/portability.md §10)",
+        ))
+    }
+
+    fn write_all(&mut self, _bytes: &[u8]) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "interactive output needs a console host (docs/portability.md §10)",
+        ))
+    }
+
+    fn size(&self) -> Size {
+        Size::FALLBACK
+    }
+
+    fn enter_raw(&mut self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "raw mode needs a console host (docs/portability.md §10)",
+        ))
+    }
+
+    fn leave_raw(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
 impl Terminal for RealTerminal {
     fn read_byte(&mut self) -> io::Result<Option<u8>> {
         use std::os::fd::AsFd;
@@ -196,6 +252,7 @@ impl Terminal for RealTerminal {
     }
 }
 
+#[cfg(unix)]
 impl Drop for RealTerminal {
     fn drop(&mut self) {
         // `RawMode`'s own `Drop` is the panic-safe half; taking it here just

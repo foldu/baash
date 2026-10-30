@@ -13,7 +13,6 @@
 
 use std::ffi::OsString;
 use std::io::{BufRead, Read, Write};
-use std::os::unix::ffi::OsStrExt;
 use std::process::ExitCode;
 
 use bsh_diag::{Diagnostic, SourceFile};
@@ -145,7 +144,7 @@ fn main() -> ExitCode {
 }
 
 fn bytes(value: &OsString) -> Vec<u8> {
-    value.as_os_str().as_bytes().to_vec()
+    bsh_sys::os::bytes_from_os(value)
 }
 
 fn parse_args(args: &[OsString]) -> Result<(Mode, bool, ShellFlags), String> {
@@ -371,7 +370,7 @@ fn read_startup_file(shell: &mut Interp, flags: &ShellFlags) {
             let Some(home) = shell.state().vars.scalar(b"HOME") else {
                 return;
             };
-            let home = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(home));
+            let home = bsh_sys::os::path_from_bytes(home);
             let ours = home.join(".bshrc");
             if ours.is_file() {
                 ours
@@ -418,7 +417,7 @@ fn shell(interactive: bool, flags: &ShellFlags) -> Interp {
             let _ = shell
                 .state()
                 .vars
-                .assign_scalar(b"PWD", directory.as_os_str().as_bytes());
+                .assign_scalar(b"PWD", &bsh_sys::os::bytes_from_os(&directory));
             let _ = shell.state().vars.mark_exported(b"PWD");
         }
     }
@@ -427,14 +426,30 @@ fn shell(interactive: bool, flags: &ShellFlags) -> Interp {
 
 /// Whether `pwd` names the same directory as `directory`.
 fn same_directory(pwd: &[u8], directory: &std::path::Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let Ok(from_env) = std::fs::metadata(std::ffi::OsStr::from_bytes(pwd)) else {
-        return false;
-    };
-    let Ok(actual) = std::fs::metadata(directory) else {
-        return false;
-    };
-    from_env.dev() == actual.dev() && from_env.ino() == actual.ino()
+    let env_path = bsh_sys::os::path_from_bytes(pwd);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(from_env) = std::fs::metadata(env_path) else {
+            return false;
+        };
+        let Ok(actual) = std::fs::metadata(directory) else {
+            return false;
+        };
+        from_env.dev() == actual.dev() && from_env.ino() == actual.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        // There is no device/inode pair; canonical paths answer the same
+        // question for a directory that exists under both spellings.
+        match (
+            std::fs::canonicalize(env_path),
+            std::fs::canonicalize(directory),
+        ) {
+            (Ok(env), Ok(actual)) => env == actual,
+            _ => false,
+        }
+    }
 }
 
 fn execute(shell: &mut Interp, source: Source) -> ExitCode {
@@ -463,19 +478,17 @@ fn read_source(shell: &mut Interp, source: Source) -> Result<(Vec<u8>, Vec<u8>),
             shell.set_positional(arguments);
             Ok((name, text))
         }
-        Source::File(path, argv) => {
-            match std::fs::read(std::path::Path::new(std::ffi::OsStr::from_bytes(&path))) {
-                Ok(bytes) => {
-                    shell.set_arg0(path.clone());
-                    shell.set_positional(argv);
-                    Ok((path, bytes))
-                }
-                Err(error) => {
-                    eprintln!("bsh: {}: {error}", String::from_utf8_lossy(&path));
-                    Err(ExitCode::from(127))
-                }
+        Source::File(path, argv) => match std::fs::read(bsh_sys::os::path_from_bytes(&path)) {
+            Ok(bytes) => {
+                shell.set_arg0(path.clone());
+                shell.set_positional(argv);
+                Ok((path, bytes))
             }
-        }
+            Err(error) => {
+                eprintln!("bsh: {}: {error}", String::from_utf8_lossy(&path));
+                Err(ExitCode::from(127))
+            }
+        },
         Source::Stdin => {
             let mut bytes = Vec::new();
             if let Err(error) = std::io::stdin().read_to_end(&mut bytes) {
@@ -607,7 +620,7 @@ fn run_prompt_command_line(shell: &mut Interp, command: &[u8]) {
 /// (so `PROMPT_COMMAND='PS1=…'` takes effect), and a pipe could fill while the
 /// command is still writing, deadlocking the shell. `stderr` is left alone.
 fn capture_stdout(shell: &mut Interp, command: &[u8]) -> Option<Vec<u8>> {
-    use std::os::fd::AsRawFd;
+    use bsh_sys::AsRawFd;
 
     let saved = bsh_sys::dup(1).ok()?;
     let temp = bsh_sys::create_unlinked_temp(0).ok()?;
@@ -712,14 +725,10 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
         .vars
         .scalar(b"PWD")
         .map(<[u8]>::to_vec)
-        .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .map(|path| path.as_os_str().as_bytes().to_vec())
-        });
+        .or_else(|| std::env::current_dir().ok().map(bsh_sys::os::bytes_from_os));
     let root = cwd
         .as_deref()
-        .map(|bytes| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+        .map(bsh_sys::os::path_from_bytes)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let engine = bsh_complete::CompletionEngine::new().with_root(root);
     // There is one ring. The shell state owns it between commands (so the
@@ -773,7 +782,7 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
             .state()
             .vars
             .scalar(b"PWD")
-            .map(|bytes| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+            .map(bsh_sys::os::path_from_bytes)
             .or_else(|| std::env::current_dir().ok());
         if let Some(cwd) = cwd {
             git.tick(&cwd);
@@ -811,7 +820,7 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
                 if after != before
                     && let Some(pwd) = &after
                 {
-                    engine.set_root(std::ffi::OsStr::from_bytes(pwd));
+                    engine.set_root(bsh_sys::os::os_from_bytes(pwd));
                 }
                 if let Some(requested) = shell.state().take_exit_request() {
                     break requested;

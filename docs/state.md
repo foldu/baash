@@ -460,12 +460,13 @@ Where the waves stand:
   `bsh-lang`'s prompt helpers are portable, and deleting the history file took
   the last unix-only code out of `bsh-runtime`. `bsh-sys`, `bsh-lang`,
   `bsh-history` (turso 0.8.3 included, with the `windres` wrapper in
-  `portability.md` §10) and `bsh-runtime` now cross-compile to
-  `x86_64-pc-windows-gnu`. `bsh-vm` is the remaining wall: the `OsStrExt` byte
-  conversions, the `std::os::fd` imports, `bsh_sys::Fd` conversions
-  (`as_raw_fd`, `From<Fd> for File`), `bsh_sys::Regex`, `SpawnPlan::new_with_env`,
-  the `SignalSet`/`NoEcho` helpers and two `PermissionsExt::mode` calls. Then
-  `bsh-repl`, then `bsh`, then `bsh -c 'echo hi'` under Wine.
+  `portability.md` §10), `bsh-runtime`, `bsh-vm`, `bsh-repl` and `bsh` itself
+  cross-compile to `x86_64-pc-windows-gnu`. `bsh.exe -c 'echo hi'` runs under
+  Wine, and so does a script with `$( … )`, `for`, `if`, a function, `case`,
+  arithmetic, brace expansion and `while`. What is left: the standard utilities
+  are exec-able by design and a Windows `PATH` has none (`printf`, `[`, `cat`
+  report "not implemented" there — the embedded-uutils wave), ConPTY for the
+  interactive editor, and PATHEXT-based command resolution.
 
 ## 9. Open questions
 

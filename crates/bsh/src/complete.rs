@@ -11,9 +11,6 @@
 //! full picker may later move providers to a worker thread, and completion must
 //! never observe a half-mutated shell.
 
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use bsh_complete::{History, ShellNames, Spec, SpecSource, VarNames};
@@ -189,10 +186,10 @@ pub fn refresh(shell: &mut Interp, engine: &bsh_complete::CompletionEngine) {
         engine.set_path_var(Some(path));
         engine.set_home(
             home.as_deref()
-                .map(|home| PathBuf::from(OsStr::from_bytes(home))),
+                .map(bsh_sys::os::path_from_bytes),
         );
         if let Some(pwd) = pwd.as_deref() {
-            engine.set_root(PathBuf::from(OsStr::from_bytes(pwd)));
+            engine.set_root(bsh_sys::os::path_from_bytes(pwd));
         }
     }
     // One snapshot is both the variable-name and the function/alias source.
