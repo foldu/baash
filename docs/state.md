@@ -409,8 +409,13 @@ Where the waves stand:
      Conformance is net zero (3 gained, 3 lost): `mapfile` from a pipeline and
      both "`shopt -s lastpipe` is always on in OSH" cases pass now; the losses
      are `trap ERR` in a pipeline of non-simple commands (two cases) and nested
-     backticks, which need the stage to keep the parent's `ERR` trap while still
-     clearing signal traps.
+     backticks. Diagnosis for the `ERR` pair: bash fires the trap **once per
+     pipeline**, and we fire it once per failing *stage* —
+     `{ false; } | { false; }` prints `E` twice here and once under bash, while
+     `false | false | false` (built-in stages) is already correct. The fix is to
+     suppress the `ERR` consequence inside a stage (a stage is a subshell, and
+     bash does not fire the trap there) and apply it once at the pipeline
+     boundary, from the combined status.
   2. **Rejections:** shell-code `&` reports `BSH-E0302` (`cmd &` for externals
      keeps working); `( exec cmd )` needs no rejection — the exit request is
      caught by the scope, so it already ends the subshell and not the shell.
