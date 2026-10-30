@@ -7,7 +7,7 @@
 //! context (DESIGN.md §4.7). Keeping that in one function is the whole point
 //! of modelling control flow as unwinding instead of `Result` at every node.
 
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 
 use bsh_diag::Diagnostic;
@@ -15,7 +15,7 @@ use bsh_lang::Shell as _;
 use bsh_runtime::{ShellHost, Status};
 use bsh_syntax::{CaseTerm, NodeId, NodeKind, PipeOp, Separator};
 
-use super::{Ctx, Function, Interp, ParsedChunk, Unwind};
+use super::{Ctx, Function, Interp, ParsedChunk, Unwind, traps};
 
 /// Which trap a [`Unwind::Trap`] is asking for.
 ///
@@ -316,6 +316,14 @@ impl Interp {
     /// Run every stage in its own process and collect their statuses in
     /// order. The parent owns no pipe descriptors once this returns, so a
     /// stage that exits early cannot keep a sibling blocked on a write.
+    /// Run the stages of a pipeline.
+    ///
+    /// External commands are spawned and *not* waited for here, so the stages
+    /// overlap as they did under `fork`; everything else runs in this process.
+    /// A non-final stage that turns out to be shell code cannot write into a
+    /// pipe — its writer is this process, which would block against its own
+    /// read end — so [`Interp::buffer_pipeline_output`] diverts its output to an
+    /// unlinked temporary file and the next stage reads that instead.
     fn run_pipeline(
         &mut self,
         chunk: &Arc<ParsedChunk>,
@@ -323,73 +331,139 @@ impl Interp {
         links: &[PipeOp],
         ctx: Ctx,
     ) -> Result<Vec<Status>, String> {
-        let mut pipes = Vec::new();
-        for _ in 1..stages.len() {
-            pipes.push(
-                bsh_sys::Pipe::new().map_err(|error| format!("cannot create a pipe: {error}"))?,
-            );
-        }
-        // Raw numbers, so the children can close every end they did not use.
-        let ends: Vec<(i32, i32)> = pipes
-            .iter()
-            .map(|pipe| (pipe.read_fd(), pipe.write_fd()))
-            .collect();
+        let count = stages.len();
+        let mut statuses = vec![Status::SUCCESS; count];
+        let mut spawned: Vec<Vec<bsh_sys::Child>> = vec![Vec::new(); count];
+        // The descriptor the next stage reads as its standard input.
+        let mut input: Option<OwnedFd> = None;
+        // A nested pipeline must not inherit the outer stage's armed buffer.
+        let outer_buffer = self.pipeline_buffer.take();
 
-        let mut children = Vec::with_capacity(stages.len());
         for (index, stage) in stages.iter().enumerate() {
-            let stdin = if index == 0 {
-                None
-            } else {
-                Some(ends[index - 1].0)
-            };
-            let stdout = ends.get(index).map(|end| end.1);
+            let last = index + 1 == count;
             let stderr_to_stdout = links
                 .get(index)
                 .is_some_and(|link| *link == PipeOp::PipeStderr);
-            let ends = ends.clone();
-            let result = bsh_sys::fork_child(|| {
-                self.enter_child();
-                if let Some(fd) = stdin {
-                    bsh_sys::dup2(fd, 0)?;
-                }
-                if let Some(fd) = stdout {
-                    bsh_sys::dup2(fd, 1)?;
-                    if stderr_to_stdout {
-                        bsh_sys::dup2(fd, 2)?;
-                    }
-                }
-                // Every pipe end the child inherited must go, or the reader
-                // never sees EOF.
-                for (read, write) in ends {
-                    let _ = bsh_sys::close(read);
-                    let _ = bsh_sys::close(write);
-                }
-                let unwind = self.eval_node(chunk, *stage, ctx);
-                bsh_sys::exit_child(unwind.status().exit_code());
-            });
-            match result {
-                Ok(child) => {
-                    children.push(child);
-                }
-                Err(error) => {
-                    for child in &children {
-                        let _ = bsh_sys::wait_pid(child.pid());
-                    }
-                    drop(pipes);
-                    return Err(format!("cannot start a pipeline stage: {error}"));
+
+            let pipe = if last {
+                None
+            } else {
+                Some(
+                    bsh_sys::Pipe::new()
+                        .map_err(|error| format!("cannot create a pipe: {error}"))?,
+                )
+            };
+            let output = pipe.as_ref().map(bsh_sys::Pipe::write_fd);
+
+            // Wire the descriptors in this process: a child inherits them at
+            // `spawn` and shell code writes to them directly.
+            // `None` means "this stage does not touch that descriptor", so the
+            // restore must leave it alone: closing an untouched 0/1/2 would
+            // hand the number to the next `open`.
+            let saved_stdin = input.as_ref().map(|fd| save_and_replace(0, fd.as_raw_fd()));
+            let saved_stdout = output.map(|fd| save_and_replace(1, fd));
+            let saved_stderr = match output {
+                Some(fd) if stderr_to_stdout => Some(save_and_replace(2, fd)),
+                _ => None,
+            };
+
+            // Only a non-final stage needs the swap. A compound command never
+            // reaches `invoke`, so it is armed here as well.
+            self.pipeline_buffer = (!last).then(|| traps::PipelineBuffer { file: None });
+            if self.pipeline_buffer.is_some()
+                && !matches!(node_kind(chunk, *stage), NodeKind::Simple(_))
+            {
+                self.buffer_pipeline_output();
+            }
+
+            // Only a stage that *is* an external command may overlap with the
+            // others; a compound stage runs here and waits for its own
+            // children, so `$?` inside it means what it says.
+            self.defer_next_spawn =
+                !last && matches!(node_kind(chunk, *stage), NodeKind::Simple(_));
+            let mark = self.pending_children.len();
+            // Every stage but the last is a subshell in bash: it sees the
+            // parent's state and leaves nothing behind, and `exit` inside it
+            // ends the stage rather than the shell. The last stage runs in the
+            // current shell (lastpipe, always on here), which is what makes
+            // `cmd | while read …` useful.
+            let scope = (!last).then(|| self.open_scope());
+            let unwind = self.eval_node(chunk, *stage, ctx);
+            statuses[index] = unwind.status();
+            if let Some(scope) = scope {
+                self.close_scope(scope);
+            }
+            self.defer_next_spawn = false;
+            spawned[index].extend(self.pending_children.drain(mark..));
+
+            let buffered_size = self
+                .pipeline_buffer
+                .as_ref()
+                .and_then(traps::PipelineBuffer::size);
+
+            if let Some(saved) = saved_stdout {
+                restore_saved(1, saved);
+            }
+            if let Some(saved) = saved_stderr {
+                restore_saved(2, saved);
+            }
+            if let Some(saved) = saved_stdin {
+                restore_saved(0, saved);
+            }
+
+            let buffered = self.pipeline_buffer.take().and_then(|buffer| buffer.file);
+            if let Some(size) = buffered_size {
+                if size > MAX_BUFFERED_STAGE {
+                    let _ = bsh_sys::close(0);
+                    let _ = bsh_sys::close(1);
+                    return Err(format!(
+                        "pipeline stage buffered {size} bytes of output, more than the {MAX_BUFFERED_STAGE} byte limit for shell code in a pipeline"
+                    ));
                 }
             }
+            if let Some(pipe) = pipe {
+                // The parent must not hold the write end, or the reader never
+                // sees end of file. Destructuring drops each end exactly once:
+                // an explicit `close` plus the `OwnedFd` drop would be an
+                // io-safety violation.
+                let bsh_sys::Pipe { read, write } = pipe;
+                drop(write);
+                input = match buffered {
+                    Some(file) => {
+                        let _ = bsh_sys::lseek(
+                            std::os::fd::AsRawFd::as_raw_fd(&file),
+                            0,
+                            bsh_sys::seek::SET,
+                        );
+                        Some(file)
+                    }
+                    None => Some(read),
+                };
+            }
         }
-        drop(pipes);
+        self.pipeline_buffer = outer_buffer;
 
-        let pids: Vec<i32> = children.iter().map(bsh_sys::Child::pid).collect();
-        let outcomes = self
-            .wait_foreground_children(&pids)
-            .map_err(|error| format!("cannot wait for a pipeline stage: {error}"))?;
-        Ok(outcomes
-            .into_iter()
-            .map(|outcome| Status(outcome.exit_status()))
-            .collect())
+        // Drop our copy of the last stage's input before waiting: an earlier
+        // writer blocked on a full pipe only learns that nobody is reading when
+        // the read end goes away, and `cat /dev/urandom | sleep 0.1` needs the
+        // writer to die of `SIGPIPE`.
+        drop(input);
+
+        // Children were spawned in pipeline order, so waiting for each stage's
+        // group in turn keeps `$PIPESTATUS` aligned with the stages.
+        for (index, group) in spawned.into_iter().enumerate() {
+            if group.is_empty() {
+                continue;
+            }
+            let pids: Vec<i32> = group.iter().map(bsh_sys::Child::pid).collect();
+            let outcomes = self
+                .wait_foreground_children(&pids)
+                .map_err(|error| format!("cannot wait for a pipeline stage: {error}"))?;
+            if let Some(outcome) = outcomes.last() {
+                statuses[index] = Status(outcome.exit_status());
+            }
+        }
+        Ok(statuses)
     }
 
     fn eval_for(
@@ -750,4 +824,64 @@ fn literal_name(chunk: &Arc<ParsedChunk>, word: &bsh_lang::Word) -> Option<Vec<u
     }
     let _ = chunk;
     (!out.is_empty()).then_some(out)
+}
+
+/// The largest amount of output a non-final pipeline stage may buffer.
+///
+/// A stage that is shell code runs in this process, so it cannot write into a
+/// pipe without the shell blocking on its own read end; its output goes to a
+/// temporary file instead. That is bounded so an unbounded producer (`while
+/// true; do echo x; done | head -1`) fails with a diagnostic rather than
+/// filling the disk.
+const MAX_BUFFERED_STAGE: u64 = 64 * 1024 * 1024;
+
+/// Point `target` at `source`, returning the descriptor `target` used to name.
+///
+/// `None` means `target` was closed on entry, so the restore closes it again
+/// rather than pointing it somewhere invented.
+fn save_and_replace(target: RawFd, source: RawFd) -> Option<OwnedFd> {
+    let saved = bsh_sys::dup(target).ok();
+    if bsh_sys::dup2(source, target).is_err() {
+        return saved;
+    }
+    saved
+}
+
+/// Put a descriptor back the way [`save_and_replace`] found it.
+fn restore_saved(target: RawFd, saved: Option<OwnedFd>) {
+    match saved {
+        Some(fd) => {
+            let _ = bsh_sys::dup2(fd.as_raw_fd(), target);
+        }
+        None => {
+            let _ = bsh_sys::close(target);
+        }
+    }
+}
+
+/// The kind of a node, for callers that must know before evaluating it.
+fn node_kind(chunk: &ParsedChunk, node: NodeId) -> NodeKind {
+    chunk.ast.node(node).kind.clone()
+}
+
+impl Interp {
+    /// Divert a pipeline stage's output to a temporary file.
+    ///
+    /// Called at the dispatch site when a non-final stage turns out to be shell
+    /// code: a pipe would deadlock, because the writer and the reader would
+    /// both be this process. A no-op unless a pipeline stage armed the switch.
+    pub(crate) fn buffer_pipeline_output(&mut self) {
+        let Some(buffer) = self.pipeline_buffer.as_mut() else {
+            return;
+        };
+        if buffer.file.is_some() {
+            return;
+        }
+        let Ok(file) = bsh_sys::create_unlinked_temp(0) else {
+            return;
+        };
+        if bsh_sys::dup2(file.as_raw_fd(), 1).is_ok() {
+            buffer.file = Some(file);
+        }
+    }
 }

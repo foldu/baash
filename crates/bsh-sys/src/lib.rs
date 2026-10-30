@@ -66,7 +66,7 @@ pub mod wait;
 pub use bytes::{NulByte, cstring, cstrings};
 pub use fd::{
     Pipe, chdir, close, create_unlinked_temp, dup, dup_above, dup2, fd_is_cloexec, fd_is_open,
-    lseek, open_cloexec, poll_readable, read_fd, set_cloexec, write_all, write_fd,
+    lseek, open_cloexec, poll_readable, read_fd, seek, set_cloexec, write_all, write_fd,
 };
 pub use pty::{Pty, become_session_leader, open_pty};
 #[cfg(unix)]

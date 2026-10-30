@@ -270,6 +270,24 @@ pub struct Interp {
     /// Children started with `&`, and the status of the ones already reaped
     /// (so `wait PID` can report a status after the fact).
     background: traps::Background,
+    /// Armed by [`Interp::run_pipeline`] for a stage whose output is a pipe.
+    ///
+    /// A pipe is right for an external command, whose writer is a different
+    /// process. A built-in or compound command would write from *this* process
+    /// and deadlock once the pipe filled, so the dispatch site moves descriptor
+    /// 1 to an unlinked temporary file before the stage writes anything and
+    /// records it for the next stage.
+    pipeline_buffer: Option<traps::PipelineBuffer>,
+    /// Children spawned by pipeline stages that have not been waited for.
+    pending_children: Vec<bsh_sys::Child>,
+    /// Set for the top-level command of a pipeline stage that is nothing but
+    /// an external command: it spawns and hands its child to `pending_children`
+    /// instead of waiting, so the stages overlap.
+    ///
+    /// Consumed by the first spawn, so a *compound* stage's own children are
+    /// waited for normally — inside a stage, `$?` after an external command is
+    /// that command's status, as in a subshell.
+    defer_next_spawn: bool,
     /// How many subshell scopes are open around the command being run.
     ///
     /// Zero at the top level. A committed redirection is journalled only while
@@ -404,6 +422,9 @@ impl Interp {
             in_trap: false,
             exiting: false,
             background: traps::Background::new(),
+            pipeline_buffer: None,
+            pending_children: Vec::new(),
+            defer_next_spawn: false,
             scope_depth: 0,
             committed: Vec::new(),
             exit_trap_status: None,

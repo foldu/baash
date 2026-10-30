@@ -371,6 +371,13 @@ impl Interp {
     /// §2.8.1 note 1 says a special built-in that fails there must not exit the
     /// shell, so its error class is rewritten before the consequence table runs.
     fn invoke(&mut self, invocation: Invocation<'_>, resolution: Resolution) -> Unwind {
+        // A non-final pipeline stage whose output is a pipe must not write from
+        // this process: the shell would block against its own read end. Only an
+        // external command gets to keep the pipe, so everything else diverts
+        // its output to a temporary file before it writes a byte.
+        if !matches!(resolution, Resolution::External(_)) {
+            self.buffer_pipeline_output();
+        }
         match resolution {
             Resolution::Vm(builtin, tier) => {
                 self.run_builtin(&invocation, tier, BuiltinBody::Vm(builtin))
@@ -1035,6 +1042,14 @@ impl Interp {
 
         match result {
             Ok(child) => {
+                if self.defer_next_spawn {
+                    // This stage *is* the command: the next stage starts before
+                    // it is waited for, so the stages overlap. `run_pipeline`
+                    // collects the status.
+                    self.defer_next_spawn = false;
+                    self.pending_children.push(child);
+                    return Unwind::Status(Status::SUCCESS);
+                }
                 let pid = child.pid();
                 let outcomes = self.wait_foreground_children(&[pid]);
                 match outcomes {

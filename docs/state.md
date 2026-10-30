@@ -397,7 +397,8 @@ Where the waves stand:
 * **W2 (no-fork subshells)** is in progress. `( … )` and `$( … )` now run in
   a scope (`crates/bsh-vm/src/tree/scope.rs`) instead of a child; conformance is
   unchanged to the case. What is left, in order:
-  1. **Pipelines.** Externals keep `posix_spawn` and still run concurrently;
+  1. **Pipelines — landed, with three follow-ups.** Externals keep
+     `posix_spawn` and still run concurrently;
      the last stage runs in the parent (lastpipe, always on); a non-last stage
      that turns out to be shell code is buffered to an unlinked temp file with
      a 64 MiB cap and a diagnostic, because a pipe would deadlock against our
@@ -405,6 +406,11 @@ Where the waves stand:
      word twice — that would run `$( … )`-bearing words twice — so the swap
      happens at the one dispatch site, after resolution: if the stage is not an
      external, descriptor 1 is moved from the pipe to the temp file there.
+     Conformance is net zero (3 gained, 3 lost): `mapfile` from a pipeline and
+     both "`shopt -s lastpipe` is always on in OSH" cases pass now; the losses
+     are `trap ERR` in a pipeline of non-simple commands (two cases) and nested
+     backticks, which need the stage to keep the parent's `ERR` trap while still
+     clearing signal traps.
   2. **Rejections:** shell-code `&` reports `BSH-E0302` (`cmd &` for externals
      keeps working); `( exec cmd )` needs no rejection — the exit request is
      caught by the scope, so it already ends the subshell and not the shell.

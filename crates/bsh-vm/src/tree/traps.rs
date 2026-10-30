@@ -380,6 +380,29 @@ impl Drop for Interp {
 /// kept after the child is reaped so `wait PID` can still report it.
 pub(crate) type Background = BTreeMap<i32, Option<Status>>;
 
+/// Where a non-final pipeline stage's output actually went.
+///
+/// `file` stays `None` while the stage is expected to spawn an external
+/// command, whose writer is a different process and can use the pipe. It is
+/// filled when the stage turns out to be shell code: descriptor 1 has been
+/// moved to an unlinked temporary file and the next stage must read that
+/// instead of the pipe.
+#[derive(Debug)]
+pub(crate) struct PipelineBuffer {
+    /// The capture file, once the swap happened.
+    pub(crate) file: Option<std::os::fd::OwnedFd>,
+}
+
+impl PipelineBuffer {
+    /// Bytes buffered so far, if the swap happened.
+    pub(crate) fn size(&self) -> Option<u64> {
+        let file = self.file.as_ref()?;
+        use std::os::fd::AsRawFd;
+        let len = bsh_sys::lseek(file.as_raw_fd(), 0, bsh_sys::seek::END).ok()?;
+        u64::try_from(len).ok()
+    }
+}
+
 /// The name a `wait`/`kill` diagnostic should print for itself.
 pub(crate) fn builtin_name(argv: &[Vec<u8>], fallback: &str) -> String {
     argv.first()

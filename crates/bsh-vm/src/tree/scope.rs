@@ -106,7 +106,11 @@ impl Interp {
                 self.restore_fds(saved);
             }
         }
+        // History stays with the shell: the snapshot does not carry it (see
+        // `open_scope`), so putting the state back must not take the ring away.
+        let history = std::mem::take(&mut self.state.history);
         self.state = scope.state;
+        self.state.history = history;
         self.read_buffers = scope.read_buffers;
         self.path_cache = scope.path_cache;
         self.pipeline_status = scope.pipeline_status;
