@@ -13,7 +13,8 @@ an architecture that is not poisoned by `fork`. This document supersedes the
    rejected with a diagnostic, not approximated.
 2. **Windows is a first-class target.** Cross-compiled, not CI-tested at first.
 3. **Interactive first.** No lag at the prompt, in completion, or in prompt
-   refresh; enabled by a tokio runtime and worker threads for pure I/O.
+   refresh; enabled by a completion-based runtime (compio: io_uring on Linux,
+   IOCP on Windows) and worker threads for pure CPU work.
 4. **Shell code runs on the main thread.** Workers handle I/O and data, never
    the interpreter.
 5. **uutils embedded** as built-ins (curated set), so installation does not
@@ -24,7 +25,7 @@ an architecture that is not poisoned by `fork`. This document supersedes the
 | question | decision |
 |---|---|
 | job control | **removed for now.** No `jobs`/`fg`/`bg`/`disown`, no `%` specs, no process groups, no `^Z` handling. Revisit only if it is actually missed. |
-| event loop | **tokio**, not a hand-rolled `poll`. No custom async machinery where a crate exists. |
+| event loop | **compio**, not a hand-rolled `poll` and not tokio. Completion-based I/O maps onto io_uring (Linux) and IOCP (Windows); tokio's file I/O is a blocking thread pool on both, which is the part we do not want. Tokio ecosystem compatibility is not a goal. |
 | thread ownership | interpreter on the main thread; workers only touch snapshots and I/O. |
 | profiles | **hard cut.** No `--profile=fork`. The fork path is deleted, not kept behind a flag. |
 | conformance | a **curated subset** later; for now measure what works. The Oils number stops being a goal and becomes a regression signal we re-baseline. |
@@ -40,8 +41,9 @@ an architecture that is not poisoned by `fork`. This document supersedes the
   `SIGTTOU`/`SIGTTIN`/`SIGTSTP` manipulation, `%` job specifications.
 * The completion-`-F` plan as scoped: shell functions may still be callable from
   completion, but on the main thread (no worker).
-* The `poll`-based live-prompt design in `prompt-watch.md` — replaced by tokio
-  tasks (the document's cost model stays valid, its plumbing does not).
+* The `poll`-based live-prompt design in `prompt-watch.md` — replaced by
+  compio operations (the document's cost model stays valid, its plumbing does
+  not).
 
 ## 4. What gets rejected, and how
 
@@ -84,12 +86,23 @@ builtin in a non-last pipeline position) *before* the body runs, so a rejection
 cannot leave half its side effects behind. `eval` can still introduce one at run
 time; that case rejects at the point of failure and is documented.
 
-**tokio.** One runtime, main thread. The REPL is an async loop; the interpreter
-remains synchronous and is called from it. Work that can block — completion's
-filesystem scan, `git status` for the prompt, history file I/O — runs on worker
-threads and returns through channels; workers never receive `&mut Interp`.
-Background jobs and foreground waits use tokio's process API where it helps the
-reactor, and `bsh-sys`'s own `wait` where it does not.
+**compio.** One runtime, main thread. The REPL is an async loop; the interpreter
+remains synchronous and is called from it, and blocking it during a command is
+accepted (the prompt is not visible then). File I/O — directory scans, `stat`,
+the `git status` subprocess — uses compio's completion-based operations instead
+of a thread per blocked read. CPU-bound work (ranking thousands of completion
+candidates) goes to a worker thread and returns through a channel. Inotify is
+not provided by compio: the watcher is a raw inotify fd awaited through the
+runtime's poll support (`winio_pollable` guarantees the fd is actively
+pollable). Workers never receive `&mut Interp`.
+
+**Why not tokio.** Our I/O is files and processes, not sockets. Tokio's `fs` is
+`spawn_blocking` underneath on both platforms — a thread parked per operation,
+which is the "hacky file solution" this pivot is trying to leave behind — and
+tokio's Windows file support is likewise readiness-based with a blocking pool.
+compio's model is the one Windows actually exposes (IOCP) and the one Linux
+prefers (io_uring). The cost is maturity: compio is pre-1.0, so W3 begins with a
+spike, not a migration.
 
 **Windows.** See `portability.md` §5 for the four boundaries (process creation,
 UTF-16 at the edges, ConPTY, job control — the last now deleted, which
@@ -102,7 +115,7 @@ simplifies it). No job control means no `tcsetpgrp`, no process groups, and
 |---|---|---|
 | W1 | delete job control | gate green; `jobs`/`fg`/`bg` report `CAPABILITY`; `wait`/`kill`/`$!` still work for pids; baseline re-recorded |
 | W2 | no-fork subshells | `( … )` and `$( … )` in-process; `exec` in subshell, shell-code `&`, non-last builtin pipeline stages rejected with 302; the four fork call sites and `fork_gate` deleted |
-| W3 | tokio event loop | completion scan and prompt refresh off the main thread; no custom poll code; no input lag while a scan runs |
+| W3 | compio event loop | spike: async raw-mode stdin read, inotify fd awaited, `git status` spawned and awaited, directory scan; then completion scan and prompt refresh off the main thread; no custom poll code; no input lag while a scan runs; a documented fallback when io_uring is unavailable (seccomp, old kernel) |
 | W4 | Windows build | cross-compiles; `bsh -c 'echo hi'` runs; a simple script with `$( … )`, `for`, `if`, functions runs in a ConPTY |
 | W5 | uutils embedded | curated set as built-ins behind a feature; measured size/build cost; `ls`/`cat`/`cp`/`rm`/`mkdir`/`head`/`tail`/`wc` work without external binaries |
 | W6 | curated conformance | a "supported subset" document and a differential runner asserting *match bash or reject*, with silent divergence = 0 |
@@ -141,3 +154,8 @@ simplifies it). No job control means no `tcsetpgrp`, no process groups, and
   ConPTY and path semantics need a hand-run harness until a runner exists.
 * **uutils size.** Curated set only; measure binary size and build time before
   adding a utility.
+* **Runtime immaturity.** compio is pre-1.0 and its API moves; `io_uring` is
+  denied by some seccomp profiles (containers, sandboxes), so the polling
+  fallback is a requirement, not a nicety. The W3 spike is the go/no-go: if
+  raw-mode stdin and inotify cannot both be awaited cleanly, fall back to tokio
+  rather than hand-rolling a driver.
