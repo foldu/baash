@@ -395,6 +395,19 @@ Where the waves stand:
 * **W1 (delete job control) — this change.** No job table, no `%` specs, no
   process groups/terminal handover, no `WUNTRACED`; the job built-ins report
   `BSH-E0302`; `set -m` is inert; the baseline is re-recorded at 1982/1927.
+* **W3 (compio event loop) — in progress.** Done: the REPL runs inside one
+  `compio` runtime (`Runtime::enter`, so individual operations can `block_on`
+  without nesting the executor); raw stdin is read after a `PollFd` readiness
+  wait instead of a blocking read; the `PATH` completion index is built on a
+  worker and installed at the prompt; the prompt's git segment reads
+  `.git/HEAD` synchronously and gets its dirty count from a worker's
+  `git status` (500 ms minimum interval, coalesced, discarded if the directory
+  changed). `read -t` keeps `poll(2)` on purpose: no runtime on the `-c` path.
+  Measured with `scripts/bench.py` (release): startup 0.56 ms per spawn. The
+  bench also shows the W2 cost clearly — `$( … )` 170 ms per 1000 against
+  bash's 7.5 ms, `( : )` 145 ms against 4.3 ms — because a scope clones
+  `ShellState`; that is the next thing worth attacking, and it is not a W3
+  regression.
 * **W2 (no-fork subshells)** is in progress. `( … )` and `$( … )` now run in
   a scope (`crates/bsh-vm/src/tree/scope.rs`) instead of a child; conformance is
   unchanged to the case. What is left, in order:

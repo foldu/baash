@@ -370,3 +370,48 @@ fn history_words_are_offered_after_a_command() {
     session.prompt();
     cleanup(&mut session, &home, &work);
 }
+
+/// A `PATH` with thousands of entries must not be walked on the keystroke path.
+///
+/// The index is built on a worker at startup (`docs/direction.md` §6, W3), so
+/// by the time the first Tab arrives it is a lookup. Before that change the
+/// first command completion walked every directory here on the thread reading
+/// keys, which is the one scan that could be felt as lag.
+#[test]
+fn a_large_path_is_scanned_off_the_keystroke_path() {
+    let home = temp_dir("lag-home");
+    let work = temp_dir("lag-work");
+    let bin = work.join("many-bin");
+    std::fs::create_dir_all(&bin).expect("create bin");
+    for index in 0..5_000 {
+        let path = bin.join(format!("bsh-lag-probe-{index:05}"));
+        std::fs::write(&path, b"#!/bin/sh\n").expect("write probe");
+        let mut permissions = std::fs::metadata(&path).expect("stat probe").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&path, permissions).expect("chmod probe");
+    }
+    let bin_arg = bin.to_str().expect("utf-8 path");
+
+    let mut session = Session::spawn(&home, &work, &[("PS1", "P> "), ("PATH", bin_arg)]);
+    session.prompt();
+    // Typing must echo immediately even while the worker is still scanning.
+    let typed_at = Instant::now();
+    session.send(b"bsh-lag");
+    session.expect(b"bsh-lag", Duration::from_millis(400));
+    assert!(
+        typed_at.elapsed() < Duration::from_millis(400),
+        "typing waited {:?} on a scan",
+        typed_at.elapsed()
+    );
+
+    let completed_at = Instant::now();
+    session.send(b"\t");
+    session.expect(b"bsh-lag-probe-", Duration::from_secs(10));
+    assert!(
+        completed_at.elapsed() < Duration::from_millis(400),
+        "the first completion took {:?} with 5000 PATH entries",
+        completed_at.elapsed()
+    );
+    session.send(b"\x15");
+    cleanup(&mut session, &home, &work);
+}
