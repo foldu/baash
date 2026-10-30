@@ -280,6 +280,13 @@ pub struct Interp {
     pipeline_buffer: Option<traps::PipelineBuffer>,
     /// Children spawned by pipeline stages that have not been waited for.
     pending_children: Vec<bsh_sys::Child>,
+    /// Non-zero while a pipeline stage is being evaluated.
+    ///
+    /// A stage is a subshell, and bash does not fire the `ERR` trap inside one:
+    /// the trap belongs to the pipeline, which fires once from the combined
+    /// status at the next command boundary. Without this, `{ false; } | { false; }`
+    /// fires twice — once per stage — where bash fires once.
+    err_trap_suppressed: usize,
     /// Set for the top-level command of a pipeline stage that is nothing but
     /// an external command: it spawns and hands its child to `pending_children`
     /// instead of waiting, so the stages overlap.
@@ -424,6 +431,7 @@ impl Interp {
             background: traps::Background::new(),
             pipeline_buffer: None,
             pending_children: Vec::new(),
+            err_trap_suppressed: 0,
             defer_next_spawn: false,
             scope_depth: 0,
             committed: Vec::new(),

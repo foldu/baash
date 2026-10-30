@@ -406,16 +406,11 @@ Where the waves stand:
      word twice — that would run `$( … )`-bearing words twice — so the swap
      happens at the one dispatch site, after resolution: if the stage is not an
      external, descriptor 1 is moved from the pipe to the temp file there.
-     Conformance is net zero (3 gained, 3 lost): `mapfile` from a pipeline and
-     both "`shopt -s lastpipe` is always on in OSH" cases pass now; the losses
-     are `trap ERR` in a pipeline of non-simple commands (two cases) and nested
-     backticks. Diagnosis for the `ERR` pair: bash fires the trap **once per
-     pipeline**, and we fire it once per failing *stage* —
-     `{ false; } | { false; }` prints `E` twice here and once under bash, while
-     `false | false | false` (built-in stages) is already correct. The fix is to
-     suppress the `ERR` consequence inside a stage (a stage is a subshell, and
-     bash does not fire the trap there) and apply it once at the pipeline
-     boundary, from the combined status.
+     Conformance is **+3** (`mapfile` from a pipeline, the two "`shopt -s
+     lastpipe` is always on in OSH" cases, and the `ERR`-in-a-pipeline pairs),
+     with one known loss: nested backticks. The `ERR` fix was a suppression
+     counter: bash fires `ERR` once per *pipeline*, so a stage must not fire it
+     at all — `{ false; } | { false; }` used to print twice.
   2. **Rejections:** shell-code `&` reports `BSH-E0302` (`cmd &` for externals
      keeps working); `( exec cmd )` needs no rejection — the exit request is
      caught by the scope, so it already ends the subshell and not the shell.

@@ -274,7 +274,7 @@ impl Interp {
         let Some(TrapAction::Command(code)) = self.state.traps.get(TrapKey::Err).cloned() else {
             return None;
         };
-        if self.in_trap {
+        if self.in_trap || self.err_trap_suppressed > 0 {
             return None;
         }
         self.set_status(failing);

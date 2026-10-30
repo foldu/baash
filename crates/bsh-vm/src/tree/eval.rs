@@ -388,7 +388,11 @@ impl Interp {
             // current shell (lastpipe, always on here), which is what makes
             // `cmd | while read …` useful.
             let scope = (!last).then(|| self.open_scope());
+            // `ERR` belongs to the pipeline, not to a stage (see
+            // `err_trap_suppressed`).
+            self.err_trap_suppressed += 1;
             let unwind = self.eval_node(chunk, *stage, ctx);
+            self.err_trap_suppressed -= 1;
             statuses[index] = unwind.status();
             if let Some(scope) = scope {
                 self.close_scope(scope);
