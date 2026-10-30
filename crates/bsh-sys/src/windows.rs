@@ -415,27 +415,27 @@ mod windows_sys_handle {
     const FILE_TYPE_PIPE: u32 = 0x0003;
 
     pub(super) fn available(handle: RawHandle) -> bool {
-            // SAFETY: `handle` comes from `_get_osfhandle`; the out-parameters
-            // are a live `u32` each.
-            let file_type = unsafe { GetFileType(handle) };
-            if file_type != FILE_TYPE_PIPE {
-                // A console or a file: a read either blocks on the console (so
-                // report it ready and let the read decide) or cannot block.
-                return true;
-            }
-            let mut available = 0u32;
-            // SAFETY: as above, and the null buffers are allowed.
-            let rc = unsafe {
-                PeekNamedPipe(
-                    handle,
-                    std::ptr::null_mut(),
-                    0,
-                    std::ptr::null_mut(),
-                    &mut available,
-                    std::ptr::null_mut(),
-                )
-            };
-            rc != 0 && available > 0
+        // SAFETY: `handle` comes from `_get_osfhandle`; the out-parameters
+        // are a live `u32` each.
+        let file_type = unsafe { GetFileType(handle) };
+        if file_type != FILE_TYPE_PIPE {
+            // A console or a file: a read either blocks on the console (so
+            // report it ready and let the read decide) or cannot block.
+            return true;
+        }
+        let mut available = 0u32;
+        // SAFETY: as above, and the null buffers are allowed.
+        let rc = unsafe {
+            PeekNamedPipe(
+                handle,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        };
+        rc != 0 && available > 0
     }
 }
 

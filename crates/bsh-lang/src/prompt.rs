@@ -59,8 +59,6 @@
 //! that is a POSIX rule string rather than a file falls back to
 //! `/etc/localtime`; when nothing is readable the offset is zero.
 
-use std::os::unix::ffi::OsStrExt;
-
 use crate::Span;
 use crate::host::Shell;
 
@@ -356,7 +354,7 @@ fn local_offset(epoch: i64) -> (i32, bool) {
 /// Read a TZif file for a `TZ` value: an explicit path, or a name under the
 /// system zoneinfo directory.
 fn zone_file(name: &[u8]) -> Option<Vec<u8>> {
-    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(name));
+    let path = os_path(name);
     if let Ok(data) = std::fs::read(path) {
         return Some(data);
     }
@@ -370,7 +368,7 @@ fn zone_file(name: &[u8]) -> Option<Vec<u8>> {
         absolute.push(b'/');
     }
     absolute.extend_from_slice(name);
-    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(&absolute));
+    let path = os_path(&absolute);
     std::fs::read(path).ok()
 }
 
@@ -583,7 +581,7 @@ impl PromptContext {
     /// `cd` changes the process directory but not its inherited environment.
     pub fn from_env() -> Self {
         let cwd = std::env::current_dir()
-            .map(|path| path.as_os_str().as_bytes().to_vec())
+            .map(|path| os_bytes(path.as_os_str()))
             .unwrap_or_default();
         Self {
             user: current_user(),
@@ -601,7 +599,7 @@ impl PromptContext {
 }
 
 fn env_bytes(name: &str) -> Option<Vec<u8>> {
-    std::env::var_os(name).map(|value| value.as_bytes().to_vec())
+    std::env::var_os(name).map(|value| os_bytes(&value))
 }
 
 /// The effective user's login name.
@@ -611,9 +609,53 @@ fn env_bytes(name: &str) -> Option<Vec<u8>> {
 /// same source `getpwuid` reads, keyed by the effective uid `/proc/self`
 /// reports. The environment is the fallback for a container whose uid has no
 /// passwd entry.
-fn current_user() -> Vec<u8> {
+// The prompt reports paths and users, and both are byte strings on Unix and
+// UTF-16 on Windows. These three helpers are the only platform-specific code in
+// this file (`bsh-lang` deliberately does not depend on `bsh-sys`).
+
+/// A shell byte string as a path.
+#[cfg(unix)]
+fn os_path(bytes: &[u8]) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+}
+
+/// A shell byte string as a path.
+#[cfg(windows)]
+fn os_path(bytes: &[u8]) -> std::path::PathBuf {
+    std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// An OS string as shell bytes.
+#[cfg(unix)]
+fn os_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    value.as_bytes().to_vec()
+}
+
+/// An OS string as shell bytes.
+#[cfg(windows)]
+fn os_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
+    value.to_string_lossy().into_owned().into_bytes()
+}
+
+/// This process's effective uid, where the platform has one.
+#[cfg(unix)]
+fn own_uid() -> Option<u32> {
     use std::os::unix::fs::MetadataExt;
-    if let Some(uid) = std::fs::metadata("/proc/self").ok().map(|meta| meta.uid())
+    std::fs::metadata("/proc/self")
+        .ok()
+        .map(|metadata| metadata.uid())
+}
+
+/// This process's effective uid; Windows has none.
+#[cfg(windows)]
+fn own_uid() -> Option<u32> {
+    None
+}
+
+fn current_user() -> Vec<u8> {
+    if let Some(uid) = own_uid()
         && let Some(name) = passwd_name(uid)
     {
         return name;
@@ -650,9 +692,8 @@ fn read_hostname() -> Option<Vec<u8>> {
 /// `/proc/<pid>` is owned by the process's effective uid on Linux; reading the
 /// owner is a `stat` the standard library can do without `libc`.
 pub fn is_root() -> bool {
-    use std::os::unix::fs::MetadataExt;
-    if let Ok(metadata) = std::fs::metadata("/proc/self") {
-        return metadata.uid() == 0;
+    if let Some(uid) = own_uid() {
+        return uid == 0;
     }
     env_bytes("USER").is_some_and(|user| user == b"root")
 }

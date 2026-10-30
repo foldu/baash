@@ -36,9 +36,9 @@ use std::io;
 use std::mem::MaybeUninit;
 use std::os::fd::RawFd;
 
+use crate::WaitOutcome;
 use crate::bytes::{cstring, cstrings};
 use crate::signal::SignalSet;
-use crate::WaitOutcome;
 use crate::wait::wait_pid;
 
 /// One step in the ordered list of descriptor changes applied in the child.

@@ -55,9 +55,9 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod bytes;
-pub mod outcome;
 #[cfg(unix)]
 pub mod fd;
+pub mod outcome;
 #[cfg(unix)]
 pub mod pty;
 #[cfg(unix)]
@@ -79,6 +79,7 @@ pub use fd::{
     Pipe, chdir, close, create_unlinked_temp, dup, dup_above, dup2, fd_is_cloexec, fd_is_open,
     lseek, open_cloexec, poll_readable, read_fd, seek, set_cloexec, write_all, write_fd,
 };
+pub use outcome::WaitOutcome;
 #[cfg(unix)]
 pub use pty::{Pty, become_session_leader, open_pty};
 #[cfg(unix)]
@@ -94,27 +95,26 @@ pub use spawn::{Child, FdAction, SpawnPlan, exec, fork_child_status, spawn};
 pub use term::{NoEcho, RawMode, parent_pid, pid, window_size, window_size_fd};
 #[cfg(unix)]
 pub use wait::{wait_any_nohang, wait_pid};
-pub use outcome::WaitOutcome;
 
 #[cfg(windows)]
 pub use windows::{
     Child, Disposition, FdAction, MaskGuard, NoEcho, Pipe, Pty, RawMode, SignalEvent, SignalFd,
-    SignalGuard, SignalSet, SpawnPlan, become_session_leader, chdir, close,
-    create_unlinked_temp, dup, dup_above, dup2, exec, fd_is_cloexec, fd_is_open, fork_child_status,
-    ignore_signals, lseek, open_cloexec, open_pty, parent_pid, pid, poll_readable, read_fd,
-    replace_signal_mask, seek, send_signal, set_cloexec, set_disposition, spawn, wait_any_nohang,
-    wait_pid, window_size, window_size_fd, write_all, write_fd,
+    SignalGuard, SignalSet, SpawnPlan, become_session_leader, chdir, close, create_unlinked_temp,
+    dup, dup_above, dup2, exec, fd_is_cloexec, fd_is_open, fork_child_status, ignore_signals,
+    lseek, open_cloexec, open_pty, parent_pid, pid, poll_readable, read_fd, replace_signal_mask,
+    seek, send_signal, set_cloexec, set_disposition, spawn, wait_any_nohang, wait_pid, window_size,
+    window_size_fd, write_all, write_fd,
 };
 
 // `FdAction::Open` and the signal APIs name C types in their signatures, so a
 // consumer would otherwise need its own `libc` dependency just to call us.
 // Re-exporting keeps the rule that this crate is the only one depending on the
 // platform.
+#[cfg(windows)]
+pub use crate::windows::mode_t;
 pub use libc::c_int;
 #[cfg(unix)]
 pub use libc::mode_t;
-#[cfg(windows)]
-pub use crate::windows::mode_t;
 
 /// `open(2)` access flags, for building [`spawn::FdAction::Open`] without a
 /// `libc` dependency.
@@ -232,4 +232,85 @@ pub const ECHILD: c_int = libc::ECHILD;
 pub fn is_tty(fd: i32) -> bool {
     // SAFETY: `isatty` only inspects the descriptor and cannot retain it.
     unsafe { libc::isatty(fd) == 1 }
+}
+
+/// Paths and OS strings in shell bytes.
+///
+/// Shell strings are bytes; `OsStr` is only bytes on Unix. Every crate that
+/// needs to convert between them goes through here so the Windows encoding
+/// question (`docs/portability.md` §9) has one home instead of a `cfg` per
+/// call site.
+pub mod os {
+    use std::ffi::{OsStr, OsString};
+    use std::path::PathBuf;
+
+    /// A shell byte string as a path.
+    #[cfg(unix)]
+    pub fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+        use std::os::unix::ffi::OsStrExt;
+        PathBuf::from(OsStr::from_bytes(bytes))
+    }
+
+    /// A shell byte string as a path.
+    #[cfg(windows)]
+    pub fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+        PathBuf::from(os_from_bytes(bytes))
+    }
+
+    /// A shell byte string as an `OsString`.
+    #[cfg(unix)]
+    pub fn os_from_bytes(bytes: &[u8]) -> OsString {
+        use std::os::unix::ffi::OsStrExt;
+        OsStr::from_bytes(bytes).to_os_string()
+    }
+
+    /// A shell byte string as an `OsString`.
+    ///
+    /// Windows names are UTF-16; a byte string that is not UTF-8 cannot be
+    /// spelled, so it is replaced rather than rejected — the gap §9 records.
+    #[cfg(windows)]
+    pub fn os_from_bytes(bytes: &[u8]) -> OsString {
+        OsString::from(String::from_utf8_lossy(bytes).into_owned())
+    }
+
+    /// An OS string as shell bytes.
+    #[cfg(unix)]
+    pub fn bytes_from_os(value: impl AsRef<OsStr>) -> Vec<u8> {
+        use std::os::unix::ffi::OsStrExt;
+        value.as_ref().as_bytes().to_vec()
+    }
+
+    /// An OS string as shell bytes.
+    #[cfg(windows)]
+    pub fn bytes_from_os(value: impl AsRef<OsStr>) -> Vec<u8> {
+        value.as_ref().to_string_lossy().into_owned().into_bytes()
+    }
+
+    /// This user's id, when the platform has one.
+    #[cfg(unix)]
+    pub fn own_uid() -> Option<u32> {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata("/proc/self")
+            .ok()
+            .map(|metadata| metadata.uid())
+    }
+
+    /// This user's id; Windows has no uid.
+    #[cfg(windows)]
+    pub fn own_uid() -> Option<u32> {
+        None
+    }
+
+    /// The owner of `path`, when the platform has one.
+    #[cfg(unix)]
+    pub fn owner_uid(path: &std::path::Path) -> Option<u32> {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).ok().map(|metadata| metadata.uid())
+    }
+
+    /// The owner of `path`; Windows has no uid.
+    #[cfg(windows)]
+    pub fn owner_uid(_path: &std::path::Path) -> Option<u32> {
+        None
+    }
 }

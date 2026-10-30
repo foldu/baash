@@ -14,7 +14,6 @@ use rustix::process::{Pid, WaitOptions, WaitStatus};
 
 use crate::WaitOutcome;
 
-
 /// Wait for one child, retrying when the wait is interrupted.
 ///
 /// There is no `WUNTRACED`: the shell has no job control, so a stopped child
