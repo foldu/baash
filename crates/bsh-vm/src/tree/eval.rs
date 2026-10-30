@@ -669,46 +669,6 @@ impl Interp {
         Unwind::Status(status)
     }
 
-    #[allow(dead_code)]
-    fn eval_subshell_forked(&mut self, chunk: &Arc<ParsedChunk>, body: NodeId, ctx: Ctx) -> Unwind {
-        match self.fork_shell(chunk, body, ctx) {
-            Ok(child) => {
-                let pid = child.pid();
-                let outcomes = self.wait_foreground_children(&[pid]);
-                match outcomes {
-                    Ok(outcomes) => {
-                        let status = outcomes
-                            .last()
-                            .map(|outcome| Status(outcome.exit_status()))
-                            .unwrap_or(Status::FAILURE);
-                        self.set_status(status);
-                        self.sync_specials();
-                        if let Some(exit) = self.after_foreground_wait() {
-                            return Unwind::Exit(exit);
-                        }
-                        Unwind::Status(status)
-                    }
-                    Err(error) => {
-                        self.report(
-                            crate::codes::INTERNAL,
-                            0..0,
-                            format!("cannot wait for a subshell: {error}"),
-                        );
-                        Unwind::Status(Status::FAILURE)
-                    }
-                }
-            }
-            Err(error) => {
-                self.report(
-                    crate::codes::INTERNAL,
-                    0..0,
-                    format!("cannot start a subshell: {error}"),
-                );
-                Unwind::Status(Status::FAILURE)
-            }
-        }
-    }
-
     /// Run a `$(…)` body in a scope, capture its stdout and strip trailing
     /// newlines (POSIX XCU 2.6.3).
     ///

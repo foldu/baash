@@ -353,11 +353,13 @@ impl Interp {
 
     /// Run `argv` with its stdout captured, for `-C`.
     ///
-    /// The same mechanism as `$(…)`: fork, point fd 1 at a pipe, run the
-    /// command in the child and read what it produced. The candidate list has
-    /// to be *captured* rather than printed because `-X`/`-P`/`-S` and the
-    /// "was anything generated?" status all need to see it first.
+    /// The same mechanism as `$(…)`: run the command with descriptor 1 on a
+    /// file and read what it produced. The candidate list has to be *captured*
+    /// rather than printed because `-X`/`-P`/`-S` and the "was anything
+    /// generated?" status all need to see it first.
     pub(crate) fn completion_capture(&mut self, argv: &[Vec<u8>]) -> Option<(Vec<u8>, Status)> {
+        use std::os::fd::AsRawFd;
+
         let name = argv.first()?.clone();
         let mut resolution = None;
         self.each_candidate(
@@ -369,42 +371,23 @@ impl Interp {
             },
         );
         let resolution = resolution?;
-        let pipe = bsh_sys::Pipe::new().ok()?;
-        let read = pipe.read_fd();
-        let write = pipe.write_fd();
-        let argv = argv.to_vec();
-        let child = bsh_sys::fork_child(|| {
-            self.enter_child();
-            let status = match bsh_sys::dup2(write, 1) {
-                Ok(()) => {
-                    let _ = bsh_sys::close(write);
-                    let _ = bsh_sys::close(read);
-                    self.run_direct(resolution, &argv)
-                }
-                Err(_) => Status::FAILURE,
-            };
-            bsh_sys::exit_child(status.exit_code());
-        })
-        .ok()?;
 
-        drop(pipe.write);
-        // Reading the child's output is a foreground wait: `SIGINT`/`SIGQUIT`
-        // must not kill the shell in the middle of it. A completion capture is
-        // not a command of its own: it never takes the terminal.
+        let capture = bsh_sys::create_unlinked_temp(0).ok()?;
+        let saved = bsh_sys::dup(1).ok();
+        bsh_sys::dup2(capture.as_raw_fd(), 1).ok()?;
+        let status = self.run_direct(resolution, argv);
+        if let Some(saved) = saved {
+            let _ = bsh_sys::dup2(saved.as_raw_fd(), 1);
+        }
         let mut bytes = Vec::new();
-        let read_result = {
-            use std::io::Read;
-            let mut file = std::fs::File::from(pipe.read);
-            file.read_to_end(&mut bytes)
-        };
-        let outcome = self
-            .wait_foreground_children(&[child.pid()])
-            .ok()?
-            .into_iter()
-            .next()?;
+        {
+            use std::io::{Read, Seek};
+            let mut file = std::fs::File::from(capture);
+            file.seek(std::io::SeekFrom::Start(0)).ok()?;
+            file.read_to_end(&mut bytes).ok()?;
+        }
         let _ = self.after_foreground_wait();
-        read_result.ok()?;
-        Some((bytes, Status(outcome.exit_status())))
+        Some((bytes, status))
     }
 }
 

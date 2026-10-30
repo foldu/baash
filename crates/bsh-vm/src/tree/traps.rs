@@ -142,18 +142,6 @@ impl Interp {
     /// POSIX §2.11: a subshell starts with traps cleared, except that an
     /// ignored signal stays ignored (it is a process disposition, not a trap).
     /// The child also unblocks the signals the parent blocked for its
-    /// `signalfd`, so `kill -INT` on a subshell behaves like it does in bash.
-    pub(crate) fn enter_child(&mut self) {
-        self.state.traps.clear_for_subshell();
-        self.signals = SignalState::default();
-        let _ = bsh_sys::replace_signal_mask(&bsh_sys::SignalSet::empty());
-        self.in_trap = false;
-        self.exiting = false;
-        self.run_depth = 0;
-        self.background.clear();
-        self.read_buffers.clear();
-    }
-
     /// Read every pending signal, dropping the ones in `discard`.
     ///
     /// `SIGINT`/`SIGQUIT` are discarded after a foreground wait: bash ignores

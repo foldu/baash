@@ -833,31 +833,6 @@ impl Interp {
         }
         Unwind::Exit(status)
     }
-
-    /// Run `body` in a forked child and return its exit status.
-    ///
-    /// Used for subshells, `&`, pipeline stages and `$(…)`: shell code cannot
-    /// be `posix_spawn`ed, so it needs a real `fork` (DESIGN.md §4.3). The
-    /// child runs the interpreter — which is safe only because the fork gate
-    /// guarantees the parent had no helper threads — and exits with the
-    /// status the body produced.
-    pub(crate) fn fork_shell(
-        &mut self,
-        chunk: &Arc<ParsedChunk>,
-        body: NodeId,
-        ctx: Ctx,
-    ) -> std::io::Result<bsh_sys::Child> {
-        let child = bsh_sys::fork_child(|| {
-            self.enter_child();
-            let unwind = self.eval_node(chunk, body, ctx);
-            let status = match unwind {
-                Unwind::Status(status) | Unwind::Return(status) | Unwind::Exit(status) => status,
-                Unwind::Break(_) | Unwind::Continue(_) | Unwind::Trap(_) => Status::SUCCESS,
-            };
-            bsh_sys::exit_child(status.exit_code());
-        })?;
-        Ok(child)
-    }
 }
 
 impl bsh_lang::Vars for Interp {
