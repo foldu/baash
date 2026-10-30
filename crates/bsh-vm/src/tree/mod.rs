@@ -126,6 +126,7 @@ mod mapfile;
 mod process;
 mod read;
 mod redir;
+mod scope;
 mod traps;
 mod words;
 
@@ -208,7 +209,11 @@ pub(crate) struct Ctx {
 }
 
 /// The evaluator.
-#[derive(Clone, Debug)]
+///
+/// Not `Clone`: it owns the descriptor journal and the child bookkeeping, so a
+/// copy would restore the same descriptors twice. A subshell is a
+/// [`scope`](self::scope) over one interpreter, not a second interpreter.
+#[derive(Debug)]
 pub struct Interp {
     state: ShellState,
     interactive: bool,
@@ -265,6 +270,21 @@ pub struct Interp {
     /// Children started with `&`, and the status of the ones already reaped
     /// (so `wait PID` can report a status after the fact).
     background: traps::Background,
+    /// How many subshell scopes are open around the command being run.
+    ///
+    /// Zero at the top level. A committed redirection is journalled only while
+    /// this is non-zero, because only a scope can undo one: at the top level the
+    /// change is permanent, and keeping the saved descriptor would leak a
+    /// descriptor per `exec >file`.
+    scope_depth: usize,
+    /// Redirections that `exec` committed to the shell's own descriptor table,
+    /// newest last.
+    ///
+    /// A committed redirection is the only fd state that outlives a command, so
+    /// this is what a subshell scope has to undo when its body ends
+    /// (`tree/scope.rs`). Ordinary redirections are restored per command and
+    /// never reach this list.
+    committed: Vec<redir::SavedFds>,
     /// The pending exit status while the `EXIT` trap runs, so a bare `exit`
     /// inside it keeps that status (bash's rule).
     exit_trap_status: Option<Status>,
@@ -384,6 +404,8 @@ impl Interp {
             in_trap: false,
             exiting: false,
             background: traps::Background::new(),
+            scope_depth: 0,
+            committed: Vec::new(),
             exit_trap_status: None,
             path_cache: std::collections::BTreeMap::new(),
             empty_chunk,

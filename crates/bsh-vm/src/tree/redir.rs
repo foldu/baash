@@ -46,6 +46,7 @@ enum Step {
 
 /// Descriptors saved so a built-in's redirections can be undone, in the order
 /// they were applied.
+#[derive(Debug)]
 pub(crate) struct SavedFds {
     entries: Vec<(RawFd, Option<RawFd>)>,
 }
@@ -89,8 +90,24 @@ impl Interp {
         chunk: &Arc<ParsedChunk>,
         redirects: &[Redirect],
     ) -> Result<(), ()> {
-        for step in self.redirect_steps(chunk, redirects)? {
+        let steps = self.redirect_steps(chunk, redirects)?;
+        let targets: Vec<RawFd> = steps.iter().map(step_target).collect();
+        // Only a scope can undo a committed redirection; at the top level the
+        // change is permanent and saving the old binding would leak a
+        // descriptor per `exec >file`.
+        let tracked = self.scope_depth > 0;
+        let mut saved = SavedFds {
+            entries: Vec::with_capacity(steps.len()),
+        };
+        for (index, step) in steps.into_iter().enumerate() {
+            let target = targets[index];
+            if tracked {
+                saved
+                    .entries
+                    .push((target, save_descriptor(target, &targets)));
+            }
             if let Err(error) = apply_step(step) {
+                self.restore_fds(saved);
                 self.report(
                     crate::codes::REDIRECTION,
                     0..0,
@@ -98,6 +115,11 @@ impl Interp {
                 );
                 return Err(());
             }
+        }
+        // Kept rather than restored: this is `exec 3>file`. A subshell scope
+        // pops the journal and restores them when its body ends.
+        if tracked {
+            self.committed.push(saved);
         }
         Ok(())
     }

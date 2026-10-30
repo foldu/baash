@@ -578,6 +578,19 @@ impl Interp {
     }
 
     fn eval_subshell(&mut self, chunk: &Arc<ParsedChunk>, body: NodeId, ctx: Ctx) -> Unwind {
+        // In process, not in a child: the body reads and writes the same shell
+        // state, and the scope restores what it changed (`tree/scope.rs`).
+        let status = self.run_in_scope(chunk, body, ctx);
+        self.set_status(status);
+        self.sync_specials();
+        if let Some(exit) = self.after_foreground_wait() {
+            return Unwind::Exit(exit);
+        }
+        Unwind::Status(status)
+    }
+
+    #[allow(dead_code)]
+    fn eval_subshell_forked(&mut self, chunk: &Arc<ParsedChunk>, body: NodeId, ctx: Ctx) -> Unwind {
         match self.fork_shell(chunk, body, ctx) {
             Ok(child) => {
                 let pid = child.pid();
