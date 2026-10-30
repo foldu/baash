@@ -253,6 +253,10 @@ fn parse_timeout(bytes: &[u8]) -> Option<(u64, u32)> {
 }
 
 fn read_line(interp: &mut Interp, options: &Options) -> Status {
+    // `poll_readable` stays here rather than moving to compio (`docs/direction.md`
+    // §6, W3): this is one `poll(2)` with a deadline on one descriptor, not an
+    // event loop, and `bsh -c 'read -t 1 x'` deliberately starts no runtime —
+    // giving it one would put a driver on the fastest path the shell has.
     // `-t 0` only asks whether input is available; it never reads or assigns.
     if let Some((0, 0)) = options.timeout {
         return match bsh_sys::poll_readable(options.fd, 0) {
