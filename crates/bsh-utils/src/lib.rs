@@ -25,7 +25,11 @@ type Entry = fn(Vec<OsString>) -> i32;
 ///
 /// The first argument passed to [`run`] is the name itself, because that is
 /// what `argv[0]` would be and what clap parses.
-const UTILITIES: &[(&str, Entry)] = &[("printf", run_printf)];
+const UTILITIES: &[(&str, Entry)] = &[
+    ("printf", run_printf),
+    ("test", run_test),
+    ("[", run_bracket),
+];
 
 /// Run `argv` if `argv[0]` names an embedded utility.
 ///
@@ -53,6 +57,29 @@ fn run_printf(args: Vec<OsString>) -> i32 {
     uu_printf::uumain(args.into_iter())
 }
 
+fn run_test(args: Vec<OsString>) -> i32 {
+    uu_test::uumain(args.into_iter())
+}
+
+/// `[ … ]` is `test …` with a closing bracket.
+///
+/// `uu_test` decides bracket mode from the *process* name
+/// (`uucore::util_name()`), which is `bsh` here, so an embedded call would see
+/// the `]` as an operand and report "extra argument". The bracket is therefore
+/// removed here and the utility is entered as `test`, which is the definition.
+fn run_bracket(mut args: Vec<OsString>) -> i32 {
+    if args.last().is_some_and(|last| last == "]") {
+        args.pop();
+    } else if args.len() > 1 {
+        eprintln!("bsh: [: missing `]'");
+        return 2;
+    }
+    if let Some(first) = args.first_mut() {
+        *first = OsString::from("test");
+    }
+    uu_test::uumain(args.into_iter())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,11 +89,16 @@ mod tests {
     }
 
     #[test]
-    fn test_is_not_embedded_yet() {
-        // `uu_test`'s `uumain` takes its operands differently from `printf`'s
-        // (an argv[0]-style first item makes it report usage), so it is not
-        // wired until that contract is pinned down.
-        assert_eq!(run(&argv(&["test", "1", "=", "1"])), None);
+    fn test_is_embedded_and_returns_its_status() {
+        assert_eq!(run(&argv(&["test", "1", "=", "1"])), Some(0));
+        assert_eq!(run(&argv(&["test", "1", "=", "2"])), Some(1));
+    }
+
+    #[test]
+    fn bracket_is_test_with_the_closing_bracket_removed() {
+        assert_eq!(run(&argv(&["[", "1", "=", "1", "]"])), Some(0));
+        assert_eq!(run(&argv(&["[", "1", "=", "2", "]"])), Some(1));
+        assert_eq!(run(&argv(&["[", "1", "=", "1"])), Some(2));
     }
 
     #[test]

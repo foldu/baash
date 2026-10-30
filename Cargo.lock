@@ -383,6 +383,7 @@ version = "0.0.0"
 dependencies = [
  "bsh-sys",
  "uu_printf",
+ "uu_test",
 ]
 
 [[package]]
@@ -2976,6 +2977,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "uu_test"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd87ca6ccd3d84b6c1dbb2633fe8b93a6bb5aee3a20e3923f3c4b88985e67a75"
+dependencies = [
+ "clap",
+ "fluent",
+ "libc",
+ "thiserror",
+ "uucore",
+]
+
+[[package]]
 name = "uucore"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2988,6 +3002,7 @@ dependencies = [
  "fluent-syntax",
  "icu_locale",
  "itertools 0.14.0",
+ "libc",
  "nix",
  "num-traits",
  "os_display",

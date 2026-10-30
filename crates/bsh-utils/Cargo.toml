@@ -12,3 +12,4 @@ bsh-sys.workspace = true
 # with a `uumain(args) -> UResult<()>` entry point, and only the ones that are
 # listed here are linked.
 uu_printf = "0.8"
+uu_test = "0.8"
