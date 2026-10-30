@@ -13,13 +13,27 @@
 //! meta(name, value)
 //! ```
 //!
-//! `text` and `cwd` are `BLOB`: shell text is bytes, not UTF-8. `seq` numbers
-//! the commands inside one session, so `(session, seq)` identifies a command
-//! before the row is written and without a round trip for a row id.
+//! `text` and `cwd` are `BLOB`: shell text is bytes, not UTF-8. `id` is the
+//! row id, and it is also the history *number*: global, assigned by the
+//! database, and what `history` prints and `-d` names. `seq` numbers the
+//! commands inside one session, which is what `history -c` uses to forget this
+//! session without touching the rest of the table.
+//!
+//! # Deletion is a tombstone
+//!
+//! `history -d` and `history -c` set `deleted`; reads filter it out. That is
+//! deliberate: a row id is a history *number*, and the number must never name
+//! a different command. Turso reuses `max(id)+1`, so a real `DELETE` of the
+//! newest row would hand the same number to the next command. Hidden rows are
+//! therefore kept, and pruned at startup only when a newer row exists
+//! (`deleted = 1 AND id < max(id)`), which cannot shrink the maximum and so
+//! cannot cause reuse.
 //!
 //! One row is written when a line is submitted (so a crashed shell still
 //! leaves the command behind) and updated when it finishes, with `$?` and the
-//! wall time. Both are fire-and-forget.
+//! wall time. The insert is the one write the shell waits for, because the id
+//! it returns is the number the line will be shown with; the update is
+//! fire-and-forget.
 
 use std::fmt;
 use std::path::Path;
@@ -29,14 +43,15 @@ use std::thread;
 
 use turso::{Builder, Connection, Database, Row, Value};
 
-/// The schema this build writes. A database written by another version is
-/// refused rather than migrated: there has only ever been one version.
-const SCHEMA_VERSION: i64 = 1;
+/// The schema this build writes.
+///
+/// Version 1 was the first cut of this table, before `deleted` existed; a
+/// database carrying it is migrated in place by adding the column.
+const SCHEMA_VERSION: i64 = 2;
 
 /// A command read back from the database, in the order it ran.
 pub(crate) struct Stored {
-    pub(crate) session: i64,
-    pub(crate) seq: i64,
+    pub(crate) id: i64,
     pub(crate) text: Vec<u8>,
 }
 
@@ -46,10 +61,10 @@ enum Request {
         text: Vec<u8>,
         cwd: Option<Vec<u8>>,
         started_at: i64,
+        reply: SyncSender<Option<i64>>,
     },
     Finish {
-        session: i64,
-        seq: i64,
+        id: i64,
         status: Option<i32>,
         duration_ms: Option<i64>,
     },
@@ -58,10 +73,11 @@ enum Request {
         reply: SyncSender<Vec<Stored>>,
     },
     Delete {
-        session: i64,
-        seq: i64,
+        id: i64,
     },
-    Clear,
+    ClearSession {
+        session: i64,
+    },
     Flush {
         reply: SyncSender<()>,
     },
@@ -150,27 +166,31 @@ impl Store {
         self.session
     }
 
-    /// Record that a line was submitted, before it runs.
-    pub(crate) fn begin(&self, seq: i64, text: &[u8], cwd: Option<Vec<u8>>) {
-        self.send(Request::Begin {
+    /// Record that a line was submitted and return its row id.
+    ///
+    /// This is the one write the shell waits for: the id *is* the number the
+    /// line will be shown with, so it has to exist before the line runs.
+    /// `None` means the database refused the write (reported once) and the
+    /// caller should number the line itself.
+    pub(crate) fn begin(&self, seq: i64, text: &[u8], cwd: Option<Vec<u8>>) -> Option<i64> {
+        let (reply, answer) = mpsc::sync_channel(1);
+        if self.send(Request::Begin {
             seq,
             text: text.to_vec(),
             cwd,
             started_at: now_ms(),
-        });
+            reply,
+        }) {
+            answer.recv().ok().flatten()
+        } else {
+            None
+        }
     }
 
     /// Fill in the outcome of a recorded line.
-    pub(crate) fn finish(
-        &self,
-        session: i64,
-        seq: i64,
-        status: Option<i32>,
-        duration_ms: Option<i64>,
-    ) {
+    pub(crate) fn finish(&self, id: i64, status: Option<i32>, duration_ms: Option<i64>) {
         self.send(Request::Finish {
-            session,
-            seq,
+            id,
             status,
             duration_ms,
         });
@@ -187,13 +207,13 @@ impl Store {
     }
 
     /// Forget one command.
-    pub(crate) fn delete(&self, session: i64, seq: i64) {
-        self.send(Request::Delete { session, seq });
+    pub(crate) fn delete(&self, id: i64) {
+        self.send(Request::Delete { id });
     }
 
-    /// Forget everything.
-    pub(crate) fn clear(&self) {
-        self.send(Request::Clear);
+    /// Forget this session's commands, leaving the older history alone.
+    pub(crate) fn clear_session(&self, session: i64) {
+        self.send(Request::ClearSession { session });
     }
 
     /// Wait until every queued write has been applied.
@@ -240,28 +260,29 @@ impl Db {
                 text,
                 cwd,
                 started_at,
+                reply,
             } => {
                 let sql = "INSERT INTO commands (session, seq, text, cwd, started_at) \
                            VALUES (?1, ?2, ?3, ?4, ?5)";
                 let params = (self.session, seq, text, cwd, started_at);
-                crate::block_on(self.connection.execute(sql, params))
-                    .map_err(|error| report(&error))
-                    .ok();
+                let id = match crate::block_on(self.connection.execute(sql, params)) {
+                    Ok(_) => Some(self.connection.last_insert_rowid()),
+                    Err(error) => {
+                        report(&error);
+                        None
+                    }
+                };
+                let _ = reply.send(id);
             }
             Request::Finish {
-                session,
-                seq,
+                id,
                 status,
                 duration_ms,
             } => {
-                let sql = "UPDATE commands SET status = ?1, duration_ms = ?2 \
-                           WHERE session = ?3 AND seq = ?4";
-                crate::block_on(
-                    self.connection
-                        .execute(sql, (status, duration_ms, session, seq)),
-                )
-                .map_err(|error| report(&error))
-                .ok();
+                let sql = "UPDATE commands SET status = ?1, duration_ms = ?2 WHERE id = ?3";
+                crate::block_on(self.connection.execute(sql, (status, duration_ms, id)))
+                    .map_err(|error| report(&error))
+                    .ok();
             }
             Request::Recent { limit, reply } => {
                 let rows = self.recent(limit).unwrap_or_else(|error| {
@@ -270,18 +291,21 @@ impl Db {
                 });
                 let _ = reply.send(rows);
             }
-            Request::Delete { session, seq } => {
-                crate::block_on(self.connection.execute(
-                    "DELETE FROM commands WHERE session = ?1 AND seq = ?2",
-                    (session, seq),
-                ))
+            Request::Delete { id } => {
+                crate::block_on(
+                    self.connection
+                        .execute("UPDATE commands SET deleted = 1 WHERE id = ?1", (id,)),
+                )
                 .map_err(|error| report(&error))
                 .ok();
             }
-            Request::Clear => {
-                crate::block_on(self.connection.execute("DELETE FROM commands", ()))
-                    .map_err(|error| report(&error))
-                    .ok();
+            Request::ClearSession { session } => {
+                crate::block_on(self.connection.execute(
+                    "UPDATE commands SET deleted = 1 WHERE session = ?1 AND deleted = 0",
+                    (session,),
+                ))
+                .map_err(|error| report(&error))
+                .ok();
             }
             Request::Flush { reply } => {
                 let _ = reply.send(());
@@ -293,15 +317,14 @@ impl Db {
     fn recent(&self, limit: usize) -> turso::Result<Vec<Stored>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut rows = crate::block_on(self.connection.query(
-            "SELECT session, seq, text FROM commands ORDER BY id DESC LIMIT ?1",
+            "SELECT id, text FROM commands WHERE deleted = 0 ORDER BY id DESC LIMIT ?1",
             (limit,),
         ))?;
         let mut stored = Vec::new();
         while let Some(row) = crate::block_on(rows.next())? {
             stored.push(Stored {
-                session: as_integer(&row, 0).unwrap_or_default(),
-                seq: as_integer(&row, 1).unwrap_or_default(),
-                text: as_blob(&row, 2).unwrap_or_default(),
+                id: as_integer(&row, 0).unwrap_or_default(),
+                text: as_blob(&row, 1).unwrap_or_default(),
             });
         }
         stored.reverse();
@@ -350,7 +373,8 @@ async fn initialise(connection: &Connection) -> turso::Result<()> {
                  cwd BLOB,\
                  started_at INTEGER NOT NULL,\
                  duration_ms INTEGER,\
-                 status INTEGER);\
+                 status INTEGER,\
+                 deleted INTEGER NOT NULL DEFAULT 0);\
              CREATE UNIQUE INDEX IF NOT EXISTS commands_key ON commands (session, seq);",
         )
         .await?;
@@ -360,7 +384,21 @@ async fn initialise(connection: &Connection) -> turso::Result<()> {
     match rows.next().await? {
         Some(row) => {
             let found = as_version(&row, 0).unwrap_or_default();
-            if found != SCHEMA_VERSION {
+            if found == 1 {
+                // Version 1 had no `deleted` column.
+                connection
+                    .execute(
+                        "ALTER TABLE commands ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
+                        (),
+                    )
+                    .await?;
+                connection
+                    .execute(
+                        "UPDATE meta SET value = ?1 WHERE name = 'schema_version'",
+                        (SCHEMA_VERSION.to_string(),),
+                    )
+                    .await?;
+            } else if found != SCHEMA_VERSION {
                 return Err(turso::Error::Error(format!(
                     "the history database has schema version {found}, but this bsh understands \
                      version {SCHEMA_VERSION}"
@@ -376,6 +414,7 @@ async fn initialise(connection: &Connection) -> turso::Result<()> {
                 .await?;
         }
     }
+    prune(connection).await?;
     Ok(())
 }
 
@@ -415,6 +454,27 @@ fn as_blob(row: &Row, index: usize) -> Option<Vec<u8>> {
 }
 
 /// Milliseconds since the Unix epoch.
+/// Drop hidden rows that can no longer be the newest.
+///
+/// A hidden row at the maximum id must stay until a newer row exists, because
+/// deleting it would let the database hand its id to the next insert.
+async fn prune(connection: &Connection) -> turso::Result<()> {
+    let mut rows = connection.query("SELECT max(id) FROM commands", ()).await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(());
+    };
+    let Some(newest) = as_integer(&row, 0) else {
+        return Ok(());
+    };
+    connection
+        .execute(
+            "DELETE FROM commands WHERE deleted = 1 AND id < ?1",
+            (newest,),
+        )
+        .await?;
+    Ok(())
+}
+
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -440,9 +500,9 @@ mod tests {
         let path = path("reopen");
         {
             let store = Store::open(&path).unwrap();
-            store.begin(1, b"echo one", Some(b"/tmp".to_vec()));
-            store.finish(store.session(), 1, Some(0), Some(12));
-            store.begin(2, b"echo two", None);
+            let first = store.begin(1, b"echo one", Some(b"/tmp".to_vec())).unwrap();
+            store.finish(first, Some(0), Some(12));
+            store.begin(2, b"echo two", None).unwrap();
             store.flush();
         }
         let store = Store::open(&path).unwrap();
@@ -450,23 +510,20 @@ mod tests {
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].text, b"echo one");
         assert_eq!(recent[1].text, b"echo two");
-        assert_eq!(recent[1].seq, 2);
+        assert_eq!(recent[1].id, 2, "ids are the database's, not per session");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
-    fn the_sessions_of_two_shells_are_distinct() {
+    fn ids_are_global_across_sessions() {
         let path = path("sessions");
         let first = Store::open(&path).unwrap();
         let second = Store::open(&path).unwrap();
         assert_ne!(first.session(), second.session());
-        first.begin(1, b"a", None);
-        second.begin(1, b"b", None);
-        first.flush();
-        second.flush();
-        let store = Store::open(&path).unwrap();
-        let recent = store.recent(10);
-        assert_eq!(recent.len(), 2);
+        assert_eq!(first.begin(1, b"a", None), Some(1));
+        assert_eq!(second.begin(1, b"b", None), Some(2));
+        let third = Store::open(&path).unwrap();
+        assert_eq!(third.begin(1, b"c", None), Some(3));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -481,19 +538,48 @@ mod tests {
         assert_eq!(recent.len(), 3);
         assert_eq!(recent[0].text, b"cmd 8");
         assert_eq!(recent[2].text, b"cmd 10");
+        assert_eq!(recent[2].id, 10);
     }
 
     #[test]
-    fn deleting_removes_one_row_and_clearing_removes_all() {
+    fn deleting_removes_one_row() {
         let store = Store::open_in_memory().unwrap();
-        store.begin(1, b"one", None);
-        store.begin(2, b"two", None);
-        store.delete(store.session(), 1);
+        store.begin(1, b"one", None).unwrap();
+        store.begin(2, b"two", None).unwrap();
+        store.delete(1);
         store.flush();
-        assert_eq!(store.recent(10).len(), 1);
-        store.clear();
+        let recent = store.recent(10);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].text, b"two");
+    }
+
+    #[test]
+    fn ids_are_not_reused_after_a_delete() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.begin(1, b"one", None), Some(1));
+        assert_eq!(store.begin(2, b"two", None), Some(2));
+        store.delete(2);
         store.flush();
-        assert!(store.recent(10).is_empty());
+        // The next id is the table's high-water mark, not a free slot.
+        assert_eq!(store.begin(3, b"three", None), Some(3));
+        store.clear_session(store.session());
+        store.flush();
+        assert_eq!(store.begin(4, b"four", None), Some(4));
+    }
+
+    #[test]
+    fn clearing_removes_only_the_given_session() {
+        let path = path("clear-session");
+        let other = Store::open(&path).unwrap();
+        other.begin(1, b"other", None).unwrap();
+        other.flush();
+        let mine = Store::open(&path).unwrap();
+        mine.begin(1, b"mine", None).unwrap();
+        mine.clear_session(mine.session());
+        mine.flush();
+        assert_eq!(mine.recent(10).len(), 1);
+        assert_eq!(mine.recent(10)[0].text, b"other");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

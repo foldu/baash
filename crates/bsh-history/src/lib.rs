@@ -7,7 +7,8 @@
 //! database.
 //!
 //! * [`History`] is the session ring the editor and the `history` built-in
-//!   share: numbered entries, Up/Down navigation, ghost-text suggestions.
+//!   share: entries numbered by their database id, Up/Down navigation,
+//!   ghost-text suggestions.
 //! * [`Store`] is the embedded [Turso] database behind it, written from its
 //!   own thread so a slow disk never reaches the keystroke path.
 //!

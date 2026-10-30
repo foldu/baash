@@ -350,6 +350,14 @@ compio-driven shell wants, and its I/O backends include io_uring and IOCP, the
 same two runtimes the shell needs. Both Linux and the Wine run were verified with
 0.8.3.
 
+A `turso` limitation that shaped the schema: `id INTEGER PRIMARY KEY
+AUTOINCREMENT` is accepted and keeps a high-water mark in memory (a delete then
+insert gives the next id), but with a **file** database reopened in
+multiprocess-WAL mode it does not: after `history -c`, the next insert reused
+id 1. Measuring that is why `bsh-history` never deletes a row whose id it has
+shown — it tombstones it and prunes only rows below the newest id (see
+`docs/contracts.md`).
+
 Two shells share one history file, so the connection is opened with
 `experimental_multiprocess_wal(true)` plus a five-second `busy_timeout`: without
 the first, the second `Builder::build()` on the same path fails with "database

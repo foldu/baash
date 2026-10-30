@@ -7,11 +7,15 @@
 //!
 //! # Numbers
 //!
-//! A number is a *position in this session*, not a database id: the ring is
-//! seeded with the newest [`RECENT_DEPTH`] rows at startup and numbers them
-//! from 1, so `history` and `!12` agree within one session and never renumber
-//! when an entry is deleted. Numbers are deliberately not stable across
-//! sessions; the database keeps the durable identity.
+//! A number is the command's database id. `history` prints it, `!12` resolves
+//! it, and it means the same command in every shell: ids are global, assigned
+//! by the database, and never reused while the row exists. Two shells therefore
+//! see the same number for the same command, and `history -d 12` removes that
+//! row wherever it came from.
+//!
+//! Without a database (a test, a script, a piped `-i`) there is nothing to
+//! allocate ids, so the ring counts from 1 itself. That is the only case where
+//! a number is merely local.
 //!
 //! # What is recorded
 //!
@@ -33,18 +37,18 @@ pub const RECENT_DEPTH: usize = 1000;
 /// can see in one very long-lived session.
 pub const RETENTION: usize = 5000;
 
-/// One command line in the session ring.
+/// One command line in the ring.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
-    number: u32,
+    /// The database row id, which is also the number `history` prints.
+    id: i64,
     text: Vec<u8>,
-    key: Option<Key>,
 }
 
 impl Entry {
     /// The number `history` prints and `!` accepts.
     pub fn number(&self) -> u32 {
-        self.number
+        u32::try_from(self.id).unwrap_or(u32::MAX)
     }
 
     /// The command text, exactly as it was submitted (no trailing newline).
@@ -53,19 +57,16 @@ impl Entry {
     }
 }
 
-/// The database identity of an entry: which session, which command in it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Key {
-    session: i64,
-    seq: i64,
-}
-
 /// Shell history: the ring, its navigation cursor and the database behind it.
 #[derive(Clone, Debug)]
 pub struct History {
     entries: Vec<Entry>,
-    /// Number the next added entry receives.
-    next: u32,
+    /// The best guess at the next id; `\!` and `${x@P}` report it.
+    ///
+    /// With a database the real id comes back from the insert, so this is only
+    /// a prediction between the prompt and the next command. Without one it is
+    /// the counter that assigns numbers.
+    next: i64,
     /// Where Up/Down is in `entries`.
     index: Option<usize>,
     /// What the user was typing before the first Up press.
@@ -105,23 +106,21 @@ impl History {
     }
 
     /// Wrap an already-open store, seeding the ring from it.
+    ///
+    /// The seed is the newest `depth` rows of *every* session: the database is
+    /// one history, and a second shell's commands are as much part of it as
+    /// this one's. Later sessions append at the end, which a running ring only
+    /// picks up on the next start.
     pub fn with_store(store: Arc<Store>, depth: usize) -> Self {
-        let stored = store.recent(depth);
-        let mut entries = Vec::with_capacity(stored.len());
-        for (offset, row) in stored.into_iter().enumerate() {
-            let number = u32::try_from(offset).unwrap_or(u32::MAX).saturating_add(1);
-            entries.push(Entry {
-                number,
+        let entries: Vec<Entry> = store
+            .recent(depth)
+            .into_iter()
+            .map(|row| Entry {
+                id: row.id,
                 text: row.text,
-                key: Some(Key {
-                    session: row.session,
-                    seq: row.seq,
-                }),
-            });
-        }
-        let next = entries
-            .last()
-            .map_or(1, |entry| entry.number.saturating_add(1));
+            })
+            .collect();
+        let next = entries.last().map_or(1, |entry| entry.id.saturating_add(1));
         Self {
             entries,
             next,
@@ -159,28 +158,42 @@ impl History {
             self.current = false;
             return;
         }
-        let number = self.next;
-        self.next = self.next.saturating_add(1);
-        let key = match &self.store {
+        let id = match &self.store {
             Some(store) => {
                 let seq = self.next_seq;
                 self.next_seq = self.next_seq.saturating_add(1);
-                store.begin(seq, line, current_directory());
-                Some(Key {
-                    session: store.session(),
-                    seq,
-                })
+                store
+                    .begin(seq, line, current_directory())
+                    .unwrap_or(self.next)
             }
-            None => None,
+            None => self.next,
         };
         self.entries.push(Entry {
-            number,
+            id,
             text: line.to_vec(),
-            key,
         });
         self.current = true;
         self.trim();
+        self.update_hint();
         self.reset_navigation();
+    }
+
+    /// Point `next` at the id after the newest entry.
+    ///
+    /// With a database this is a prediction, not an allocation: the insert
+    /// returns the real id. It is what `\!` and `${x@P}` report before the
+    /// line has run, and it is the counter when there is no database.
+    fn update_hint(&mut self) {
+        match self.entries.last() {
+            Some(last) => self.next = last.id.saturating_add(1),
+            // An empty ring with a database continues where the table does;
+            // only a ring with no database starts over at 1.
+            None => {
+                if self.store.is_none() {
+                    self.next = 1;
+                }
+            }
+        }
     }
 
     /// Whether the last entry is the command line currently executing.
@@ -198,10 +211,8 @@ impl History {
         if !self.current {
             return;
         }
-        if let Some(store) = &self.store
-            && let Some(key) = self.entries.last().and_then(|entry| entry.key)
-        {
-            store.finish(key.session, key.seq, status, duration_ms);
+        if let (Some(store), Some(entry)) = (&self.store, self.entries.last()) {
+            store.finish(entry.id, status, duration_ms);
         }
         self.current = false;
     }
@@ -224,14 +235,11 @@ impl History {
             self.current = false;
             return;
         };
-        if let (Some(store), Some(key)) = (&self.store, entry.key) {
-            store.delete(key.session, key.seq);
+        if let Some(store) = &self.store {
+            store.delete(entry.id);
         }
-        self.next = self
-            .entries
-            .last()
-            .map_or(1, |entry| entry.number.saturating_add(1));
         self.current = false;
+        self.update_hint();
         self.reset_navigation();
     }
 
@@ -265,9 +273,12 @@ impl History {
         self.entries.iter().map(|entry| entry.text.as_slice())
     }
 
-    /// The number the next added entry will receive.
+    /// The number the next added entry will probably receive.
+    ///
+    /// A prediction between the prompt and the insert (`\!`, `${x@P}`), and
+    /// the exact answer when there is no database.
     pub fn next_number(&self) -> u32 {
-        self.next
+        u32::try_from(self.next).unwrap_or(u32::MAX)
     }
 
     /// The last `n` entries (`history n`); `None` means all of them.
@@ -290,8 +301,7 @@ impl History {
             return None;
         }
         if reference > 0 {
-            let target = u32::try_from(reference).ok()?;
-            self.entries.iter().position(|entry| entry.number == target)
+            self.entries.iter().position(|entry| entry.id == reference)
         } else {
             let offset = usize::try_from(reference.unsigned_abs()).ok()?;
             if offset > self.entries.len() {
@@ -311,29 +321,32 @@ impl History {
             return false;
         };
         let entry = self.entries.remove(index);
-        if let (Some(store), Some(key)) = (&self.store, entry.key) {
-            store.delete(key.session, key.seq);
+        if let Some(store) = &self.store {
+            store.delete(entry.id);
         }
         if index == self.entries.len() {
-            self.next = self
-                .entries
-                .last()
-                .map_or(1, |entry| entry.number.saturating_add(1));
             self.current = false;
         }
+        self.update_hint();
         self.reset_navigation();
         true
     }
 
-    /// Remove every entry and forget the database's rows (`history -c`).
+    /// Empty the ring and forget this session's rows (`history -c`).
+    ///
+    /// The table keeps every other session's commands, and they are back in
+    /// the seed the next time a shell starts: clearing is "not what I typed
+    /// here", not "erase the history".
     pub fn clear(&mut self) {
         self.entries.clear();
         if let Some(store) = &self.store {
-            store.clear();
+            // Rows go; `seq` does not restart, so a queued insert can never
+            // collide with the unique `(session, seq)` index if a clear lands
+            // out of order.
+            store.clear_session(store.session());
         }
-        self.next = 1;
-        self.next_seq = 1;
         self.current = false;
+        self.update_hint();
         self.reset_navigation();
     }
 
@@ -574,12 +587,13 @@ mod tests {
         }
         let history = History::open(&path, 2).unwrap();
         assert_eq!(texts(&history), lines(&[b"two", b"three"]));
-        assert_eq!(numbers(&history), [1, 2]);
+        // Numbers are row ids, so a window keeps the ids it was cut from.
+        assert_eq!(numbers(&history), [2, 3]);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
-    fn deletion_and_clearing_reach_the_database() {
+    fn a_deleted_row_is_gone_and_its_number_is_not_reused_in_the_ring() {
         let path = file("delete");
         {
             let mut history = History::open(&path, RECENT_DEPTH).unwrap();
@@ -590,13 +604,38 @@ mod tests {
             assert!(history.delete(2));
             history.push(b"four");
             history.finish(Some(0), Some(1));
+            assert_eq!(numbers(&history), [1, 3, 4]);
         }
         let history = History::open(&path, RECENT_DEPTH).unwrap();
         assert_eq!(texts(&history), lines(&[b"one", b"three", b"four"]));
-        let mut history = History::open(&path, RECENT_DEPTH).unwrap();
-        history.clear();
-        drop(history);
-        assert!(History::open(&path, RECENT_DEPTH).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn clearing_forgets_this_session_and_keeps_the_earlier_history() {
+        let path = file("clear");
+        {
+            let mut history = History::open(&path, RECENT_DEPTH).unwrap();
+            for line in lines(&[b"one", b"two"]) {
+                history.push(&line);
+                history.finish(Some(0), Some(1));
+            }
+        }
+        {
+            let mut history = History::open(&path, RECENT_DEPTH).unwrap();
+            assert_eq!(numbers(&history), [1, 2]);
+            history.push(b"mine");
+            history.finish(Some(0), Some(1));
+            assert_eq!(numbers(&history), [1, 2, 3]);
+            history.clear();
+            assert!(history.is_empty());
+            // The table continues where it was: the ids are not the ring's to
+            // give back.
+            assert_eq!(history.next_number(), 4);
+        }
+        let history = History::open(&path, RECENT_DEPTH).unwrap();
+        assert_eq!(texts(&history), lines(&[b"one", b"two"]));
+        assert_eq!(numbers(&history), [1, 2]);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

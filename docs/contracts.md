@@ -191,19 +191,32 @@ interactive loop swaps the ring in and out of the editor around each command
 (`bsh-repl` depends on this crate for the *type*), so the built-in and Up/Down
 navigate the same entries.
 
-Numbers are the *session's*: the ring is seeded with the newest 1000 rows and
-numbers them from 1, then keeps counting. Trimming leaves numbers alone and
-`history -d` leaves a gap rather than renumbering the tail, so `!12` always
-names what `history` printed as 12. The durable identity is `(session, seq)`,
-which is what a delete or a finish names.
+Numbers are the database's row ids: global, assigned at insert, and never
+reused. The ring is seeded with the newest 1000 rows of every session,
+`history` prints the ids, and `!12` resolves to the row with id 12 in any shell.
+Trimming leaves numbers alone, deleting leaves a gap, and nothing renumbers.
+
+Deletion is a tombstone. Turso hands out `max(id) + 1` — `AUTOINCREMENT` parses
+but did not keep its high-water mark across a reopen in the multiprocess WAL
+mode, so after `history -c` the next command was numbered 1 again while id 1
+already meant `echo one` in another session. A real `DELETE` therefore cannot
+be used if a number is to keep meaning one command. `-d` and `-c` set `deleted`,
+reads filter it, and startup prunes hidden rows *below* the newest id, which
+cannot shrink the maximum and so cannot cause reuse. The insert is the
+one write the shell waits for — the id it returns *is* the number the line will
+be shown with — and it costs 16 µs p50 / 86 µs max in release (260 µs p50 in
+the debug build), which is below the noise floor of pressing Enter. `finish` is
+fire-and-forget.
 
 There is no history file, and there is no `sync_history`: `HISTFILE`,
 `HISTSIZE`, `HISTFILESIZE`, `HISTCONTROL`, `HISTIGNORE`, `HISTTIMEFORMAT`, the
 `histappend` shopt, `history -a/-n/-r/-w/-p/-s` and `fc` are deleted rather
 than emulated. `History::push` records every non-blank line; `remove_current`
-deletes the row again when history expansion replaces the typed line. A
-database that cannot be opened is reported once and the shell keeps an
-in-memory ring, because losing recall is better than refusing to start.
+deletes the row again when history expansion replaces the typed line. `history
+-c` empties the ring and deletes only *this session's* rows: the rest of the
+table is the history, and it is back in the seed at the next start. A database
+that cannot be opened is reported once and the shell keeps an in-memory ring,
+because losing recall is better than refusing to start.
 
 **Builtin tiers are exact and load-bearing** (DESIGN §2): 15 special, 15
 intrinsic, 7 regular, 18 bash extensions. `fc` is not registered at all: it

@@ -155,7 +155,8 @@ delegates everything else: line editing to `bsh-repl`, execution to the
   * history words, and a navigable menu (Up/Down/BackTab/Ctrl-P);
 * **history as a shell feature**: one ring shared by the editor and the
   `history` built-in (`bsh-history`), backed by an embedded Turso database;
-  `history [n]`, `-c` and `-d`; `Up`/`Down` navigation and ghost text. There is
+  `history [n]`, `-c` and `-d`; `Up`/`Down` navigation and ghost text. Numbers
+  are the row ids, seeded from the newest 1000 rows of every session. There is
   no history file: `HISTFILE`, `HISTSIZE`, `HISTFILESIZE`, `HISTCONTROL`,
   `HISTIGNORE`, `HISTTIMEFORMAT`, the `histappend` shopt, `history
   -a/-n/-r/-w/-p/-s` and `fc` are gone. The database lives in
@@ -225,10 +226,13 @@ delegates everything else: line editing to `bsh-repl`, execution to the
   and in `${PS1@P}` alike. Without job control there is nothing else to count.
 
 **Known history limitations** (measured or deliberately deferred): history
-numbers are per session (`1…n` over the last 1000 rows plus this session's
-lines) rather than persistent ids, so `!12` names the same command within a
-session and possibly a different one in the next; `history -d` leaves a gap in
-the numbering instead of renumbering the tail; `shopt -s histreedit` is
+numbers are the database's row ids and are never reused, so `history -c` leaves
+gaps (and the table keeps tombstones until the startup prune); another shell's
+command can take the number `\!` would have predicted between the prompt and
+the next insert;
+`history -d` leaves a gap instead of renumbering; a running shell sees another
+shell's commands only after a restart, because the ring is seeded once;
+`shopt -s histreedit` is
 accepted but a failed expansion abandons the line rather than reloading it for
 editing (`histverify` *is* implemented); `:G` (per-word substitution) is not
 implemented and reports an unknown modifier; the conformance suite's

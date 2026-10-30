@@ -12,8 +12,10 @@
 //! history -c   →  forget everything
 //! ```
 //!
-//! Numbers are the session's, as [`bsh_history::History`] explains: they do not
-//! renumber when an entry is deleted, and they are not database ids.
+//! Numbers are the database row ids, as [`bsh_history::History`] explains: they
+//! are global, they do not renumber when an entry is deleted, and `-d` removes
+//! the row with that id. `-c` empties the ring and deletes this session's rows;
+//! the rest of the history stays in the table.
 
 use super::{codes, diagnose, display, usage};
 use crate::{HistoryEntry, ShellHost, Status};
