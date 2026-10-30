@@ -59,6 +59,12 @@ pub(crate) struct Program {
     insts: Vec<Inst>,
     progs: Vec<Prog>,
     main: usize,
+    /// Whether any `!(…)` group occurs.
+    ///
+    /// The only construct that needs the per-position `pending` sets and the
+    /// sub-program cache; allocating those for every other pattern costs an
+    /// allocation per text position and per sub-program on every run.
+    has_neg: bool,
 }
 
 /// Compile a top-level sequence.
@@ -72,6 +78,7 @@ pub(crate) fn compile(top: &[Elem]) -> Program {
     let main = c.progs.len();
     c.progs.push(Prog { start, accept });
     Program {
+        has_neg: c.insts.iter().any(|inst| matches!(inst, Inst::Neg { .. })),
         insts: c.insts,
         progs: c.progs,
         main,
@@ -216,7 +223,12 @@ pub(crate) fn run(program: &Program, text: &Text<'_>, flags: Flags) -> Ends {
         program,
         text,
         flags,
-        cache: vec![vec![None; text.len() + 1]; program.progs.len()],
+        // Both are only reachable from a `Neg` instruction.
+        cache: if program.has_neg {
+            vec![vec![None; text.len() + 1]; program.progs.len()]
+        } else {
+            Vec::new()
+        },
     };
     runner.run_from(program.main, 0)
 }
@@ -226,7 +238,8 @@ struct Runner<'a> {
     text: &'a Text<'a>,
     flags: Flags,
     /// `cache[program][start]` is the accepted end set of that sub-program run
-    /// from that position. Filled on demand; `!(…)` is the only user.
+    /// from that position. Filled on demand; `!(…)` is the only user, so it is
+    /// empty for every other pattern.
     cache: Vec<Vec<Option<Ends>>>,
 }
 
@@ -240,8 +253,10 @@ enum Epsilon {
 
 impl Runner<'_> {
     fn run_from(&mut self, prog: usize, start: usize) -> Ends {
-        if let Some(hit) = &self.cache[prog][start] {
-            return Rc::clone(hit);
+        if !self.cache.is_empty() {
+            if let Some(hit) = &self.cache[prog][start] {
+                return Rc::clone(hit);
+            }
         }
         let n = self.text.len();
         let m = self.program.insts.len();
@@ -250,7 +265,13 @@ impl Runner<'_> {
         let mut current = Bits::new(m);
         let mut next = Bits::new(m);
         let mut stack = Vec::with_capacity(m);
-        let mut pending = vec![Bits::new(m); n + 1];
+        // Only `!(…)` writes here; for every other pattern this would be one
+        // allocation per text position on every run.
+        let mut pending = if self.program.has_neg {
+            vec![Bits::new(m); n + 1]
+        } else {
+            Vec::new()
+        };
 
         current.set(p.start);
         self.close(start, &mut current, &mut pending, &mut stack);
@@ -287,14 +308,18 @@ impl Runner<'_> {
                     Inst::Split(..) | Inst::Neg { .. } | Inst::Accept => {}
                 }
             }
-            next.or(&pending[q + 1]);
+            if !pending.is_empty() {
+                next.or(&pending[q + 1]);
+            }
             self.close(q + 1, &mut next, &mut pending, &mut stack);
             accepted[q + 1] = next.get(p.accept);
             std::mem::swap(&mut current, &mut next);
         }
 
         let ends: Ends = accepted.into();
-        self.cache[prog][start] = Some(Rc::clone(&ends));
+        if !self.cache.is_empty() {
+            self.cache[prog][start] = Some(Rc::clone(&ends));
+        }
         ends
     }
 
