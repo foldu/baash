@@ -51,6 +51,7 @@ impl Session {
                     | b"HISTSIZE"
                     | b"HISTFILESIZE"
                     | b"HISTIGNORE"
+                    | b"BSH_HISTORY_DB"
                     | b"PROMPT_COMMAND"
             ) {
                 continue;
@@ -67,6 +68,7 @@ impl Session {
         use std::os::unix::ffi::OsStrExt;
         home_entry.extend_from_slice(home.as_os_str().as_bytes());
         environment.push(home_entry);
+        environment.push(b"BSH_HISTORY_DB=".to_vec());
 
         let working = home.to_path_buf();
         let child = fork_child_status(move || {

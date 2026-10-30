@@ -8,6 +8,7 @@ description = "The execution engine: the tree-walking evaluator"
 
 [dependencies]
 bsh-runtime.workspace = true
+bsh-history.workspace = true
 bsh-lang.workspace = true
 bsh-diag.workspace = true
 bsh-syntax.workspace = true

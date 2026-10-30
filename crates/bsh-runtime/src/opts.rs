@@ -389,10 +389,6 @@ option_table! {
     /// `shopt -s gnu_errfmt`: diagnostics in GNU `file:line: message` form.
     GnuErrFmt => gnu_errfmt, "gnu_errfmt", None, [Shopt], true, false, false, &[];
 
-    /// `shopt -s histappend`: append to the history file instead of rewriting
-    /// it.
-    Histappend => histappend, "histappend", None, [Shopt], true, false, false, &[];
-
     /// `shopt -s histreedit`: offer a failed history expansion for editing.
     Histreedit => histreedit, "histreedit", None, [Shopt], true, false, false, &[];
 

@@ -602,13 +602,6 @@ fn env_bytes(name: &str) -> Option<Vec<u8>> {
     std::env::var_os(name).map(|value| os_bytes(&value))
 }
 
-/// The effective user's login name.
-///
-/// bash reads it from `getpwuid`, not from `$USER`, and a login shell's
-/// environment may have neither `USER` nor `LOGNAME`; `/etc/passwd` is the
-/// same source `getpwuid` reads, keyed by the effective uid `/proc/self`
-/// reports. The environment is the fallback for a container whose uid has no
-/// passwd entry.
 // The prompt reports paths and users, and both are byte strings on Unix and
 // UTF-16 on Windows. These three helpers are the only platform-specific code in
 // this file (`bsh-lang` deliberately does not depend on `bsh-sys`).
@@ -654,6 +647,13 @@ fn own_uid() -> Option<u32> {
     None
 }
 
+/// The effective user's login name.
+///
+/// bash reads it from `getpwuid`, not from `$USER`, and a login shell's
+/// environment may have neither `USER` nor `LOGNAME`; `/etc/passwd` is the
+/// same source `getpwuid` reads, keyed by the effective uid `/proc/self`
+/// reports. The environment is the fallback for a container whose uid has no
+/// passwd entry.
 fn current_user() -> Vec<u8> {
     if let Some(uid) = own_uid()
         && let Some(name) = passwd_name(uid)

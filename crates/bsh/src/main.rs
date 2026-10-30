@@ -331,10 +331,10 @@ fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
             // `--rcfile` replaces the default rather than adding to it.
             if interactive {
                 read_startup_file(&mut shell, &flags);
-                // After the rc file, so `HISTFILE`/`HISTSIZE` set there win.
-                // Only the terminal REPL invents the default `~/.bsh_history`;
-                // a piped `-i` must not depend on (or write to) the user's
-                // home directory, which is what keeps conformance deterministic.
+                // After the rc file, so anything it changed is already in
+                // place. Only the terminal REPL opens the history database; a
+                // piped `-i` must not depend on (or write to) the user's data
+                // directory, which is what keeps conformance deterministic.
                 shell.initialize_history(repl);
             }
             if repl {
@@ -343,8 +343,8 @@ fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
                 let code = execute(&mut shell, source);
                 if interactive {
                     // `-i -c` and interactive stdin that is not a terminal:
-                    // the editor is not there to save the ring.
-                    let _ = shell.save_history();
+                    // the editor is not there to drain the write queue.
+                    shell.flush_history();
                 }
                 code
             }
@@ -641,9 +641,9 @@ fn capture_stdout(shell: &mut Interp, command: &[u8]) -> Option<Vec<u8>> {
 /// Run `PROMPT_COMMAND`, then hand the freshly rendered `PS1`/`PS2` to the
 /// editor.
 ///
-/// The ring moves to the shell first for two reasons: `PROMPT_COMMAND` may
-/// call `history -a`, and `\!` is the ring's next number, which is what the
-/// line about to be typed will get.
+/// The ring moves to the shell first so `PROMPT_COMMAND` sees the same
+/// history the user does, and because `\!` is the ring's next number, which is
+/// what the line about to be typed will get.
 fn refresh_prompt(
     shell: &mut Interp,
     editor: &mut bsh_repl::Editor<'_>,
@@ -652,11 +652,6 @@ fn refresh_prompt(
 ) {
     std::mem::swap(editor.history_mut(), &mut shell.state().history);
     run_prompt_command(shell);
-    // The prompt command may have changed `HISTSIZE`/`HISTFILE`; pick the
-    // knobs up before the editor gets the ring back, and retire the
-    // "currently executing line" marker.
-    shell.state().history.clear_current();
-    shell.state().sync_history();
     let primary = prompt_template(shell, b"PS1").unwrap_or_default();
     let secondary = prompt_template(shell, b"PS2").unwrap_or_else(|| b"> ".to_vec());
     let primary = shell.render_prompt(&primary);
@@ -800,15 +795,18 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
                 // sees a whole chunk and cannot tell a REPL line from a
                 // script).
                 shell.state().begin_command();
-                shell.run_named("<stdin>", &bytes);
+                let started = std::time::Instant::now();
+                let status = shell.run_named("<stdin>", &bytes);
+                let elapsed = started.elapsed();
                 // `cd` changes the shell's `PWD`; the completion engine and
                 // `PS1`'s `\w` must follow it (`docs/contracts.md`).
                 let after = shell.state().vars.scalar(b"PWD").map(<[u8]>::to_vec);
-                // Pick up `HISTSIZE`/`HISTFILE`/`HISTCONTROL` the command
-                // changed before the editor gets the ring back, and retire the
-                // "currently executing line" marker.
-                shell.state().history.clear_current();
-                shell.state().sync_history();
+                // Record `$?` and the wall time against the line's row, then
+                // give the ring back to the editor.
+                shell
+                    .state()
+                    .history
+                    .finish(Some(status.0), Some(duration_ms(elapsed)));
                 std::mem::swap(editor.history_mut(), &mut shell.state().history);
                 if after != before
                     && let Some(pwd) = &after
@@ -829,12 +827,12 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
             Ok(NextCommand::Eof) => break bsh_runtime::Status::SUCCESS,
             Err(error) => {
                 eprintln!("bsh: {error}");
-                let _ = editor.finish();
+                editor.finish();
                 return ExitCode::from(1);
             }
         }
     };
-    let _ = editor.finish();
+    editor.finish();
     ExitCode::from(status.exit_code() as u8)
 }
 
@@ -862,6 +860,11 @@ fn history_entries(history: &bsh_runtime::History) -> Vec<histexpand::Entry<'_>>
         .take(count - current)
         .map(|entry| histexpand::Entry::new(entry.number(), entry.text()))
         .collect()
+}
+
+/// A wall time as whole milliseconds, saturating rather than wrapping.
+fn duration_ms(elapsed: std::time::Duration) -> i64 {
+    i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
 }
 
 fn write_stderr_bytes(bytes: &[u8]) {
@@ -1052,13 +1055,14 @@ fn run_stdin(shell: &mut Interp) -> ExitCode {
         // The status of the last chunk is the shell's exit status; an `exit`
         // inside it already requested the unwind, and the request survives in
         // the shell state, so the loop stops here too.
+        let started = std::time::Instant::now();
         status = shell.run_named("<stdin>", &chunk);
+        let elapsed = started.elapsed();
         if shell.is_interactive() {
-            // Stand in for bash's assignment hooks: this is where `HISTSIZE`
-            // shrinking, `HISTFILESIZE` truncation and a changed `HISTFILE`
-            // take effect between commands.
-            shell.state().history.clear_current();
-            shell.state().sync_history();
+            shell
+                .state()
+                .history
+                .finish(Some(status.0), Some(duration_ms(elapsed)));
         }
         if shell.state().take_exit_request().is_some() {
             break;

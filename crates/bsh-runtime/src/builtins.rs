@@ -308,7 +308,6 @@ pub const BUILTINS: &[BuiltinDef] = &[
     def("bg", Tier::Intrinsic, None),
     def("cd", Tier::Intrinsic, None),
     def("command", Tier::Intrinsic, Some(meta::bi_command)),
-    def("fc", Tier::Intrinsic, Some(history::bi_fc)),
     def("fg", Tier::Intrinsic, None),
     def("getopts", Tier::Intrinsic, Some(getopts::bi_getopts)),
     def("hash", Tier::Intrinsic, None),

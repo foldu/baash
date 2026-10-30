@@ -1,10 +1,10 @@
 //! Interactive history on a real pseudo-terminal.
 //!
 //! The point of the wave is that history survives a session, so the assertions
-//! are the user-visible ones: the file the shell wrote when it exited, and what
-//! the *next* shell lists from it. `HOME` points at a fresh directory and no
-//! `HISTFILE` is in the environment, so the default `~/.bsh_history` path and
-//! the load/save round trip are both under test.
+//! are the user-visible ones: what one session recorded and what the *next*
+//! session lists. `BSH_HISTORY_DB` points at a fresh file per test, so the
+//! database round trip is what is under test and the user's real history is
+//! never touched.
 
 #![forbid(unsafe_code)]
 
@@ -52,6 +52,7 @@ impl Session {
                     | b"HISTSIZE"
                     | b"HISTFILESIZE"
                     | b"HISTIGNORE"
+                    | b"BSH_HISTORY_DB"
             ) {
                 continue;
             }
@@ -67,6 +68,10 @@ impl Session {
         use std::os::unix::ffi::OsStrExt;
         home_entry.extend_from_slice(home.as_os_str().as_bytes());
         environment.push(home_entry);
+        let mut database = b"BSH_HISTORY_DB=".to_vec();
+        database.extend_from_slice(home.as_os_str().as_bytes());
+        database.extend_from_slice(b"/history.db");
+        environment.push(database);
 
         let child = fork_child_status(move || {
             if become_session_leader(slave).is_err() {
@@ -223,10 +228,10 @@ fn a_session_persists_commands_and_the_next_session_loads_them() {
         session.send_line("exit");
         session.wait_child();
     }
-
-    let file = home.join(".bsh_history");
-    let contents = std::fs::read_to_string(&file).expect("default history file was written");
-    assert_eq!(contents, "echo first\necho second\nexit\n");
+    assert!(
+        home.join("history.db").exists(),
+        "the session wrote a database"
+    );
 
     {
         let mut session = Session::spawn(&home);
@@ -243,25 +248,27 @@ fn a_session_persists_commands_and_the_next_session_loads_them() {
 }
 
 #[test]
-fn histcontrol_ignoredups_skips_a_repeated_command() {
-    let home = temp_home("ignoredups");
+fn duplicate_commands_are_each_recorded() {
+    let home = temp_home("duplicates");
     {
         let mut session = Session::spawn(&home);
         session.prompt();
-        session.line("HISTCONTROL=ignoredups");
         session.line("echo dup");
         session.line("echo dup");
-        session.line("echo other");
         session.send_line("exit");
         session.wait_child();
     }
 
-    let contents =
-        std::fs::read_to_string(home.join(".bsh_history")).expect("history file was written");
-    assert_eq!(
-        contents,
-        "HISTCONTROL=ignoredups\necho dup\necho other\nexit\n"
-    );
+    {
+        let mut session = Session::spawn(&home);
+        session.prompt();
+        session.send_line("history");
+        session.expect(b"echo dup", Duration::from_secs(10));
+        session.expect(b"echo dup", Duration::from_secs(10));
+        session.prompt();
+        session.send_line("exit");
+        session.wait_child();
+    }
 
     let _ = std::fs::remove_dir_all(&home);
 }

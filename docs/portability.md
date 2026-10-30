@@ -347,6 +347,16 @@ compio-driven shell wants, and its I/O backends include io_uring and IOCP, the
 same two runtimes the shell needs. Both Linux and the Wine run were verified with
 0.8.3.
 
+Two shells share one history file, so the connection is opened with
+`experimental_multiprocess_wal(true)` plus a five-second `busy_timeout`: without
+the first, the second `Builder::build()` on the same path fails with "database
+is locked" even when the first is idle; without the second, a write that lands
+while the other shell is writing fails instead of waiting. Both were verified
+in one process (two stores on one file, each seeing the other's rows), and the
+mode is refused for `:memory:`, which takes the plain builder. This has only
+been verified on Linux so far — the Windows cross-build of `bsh-history` is the
+next step in W4.
+
 One Windows build detail: `turso_sdk_kit`'s build script links a version
 resource by invoking plain `windres`, which `cargo-zigbuild` does not provide.
 Put a wrapper *script* (not a symlink — nix-wrapped binutils resolve their own

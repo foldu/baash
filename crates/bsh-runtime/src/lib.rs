@@ -33,7 +33,6 @@ mod command;
 pub mod complete;
 pub mod declare;
 mod errors;
-mod history;
 mod opts;
 mod traps;
 mod vars;
@@ -42,6 +41,7 @@ mod vars;
 mod tests;
 
 pub use alias::AliasTable;
+pub use bsh_history::{Entry as HistoryEntry, History};
 pub use builtins::{
     AssignPersistence, BUILTINS, BuiltinDef, Handler, Tier, builtin_names, declaration_scope,
     declare_array_from_flag, lookup as lookup_builtin, names_in, run_builtin, set_option_table,
@@ -49,7 +49,6 @@ pub use builtins::{
 };
 pub use command::{CommandInfo, CommandKind, ResolveQuery};
 pub use errors::{Action, Error, ShellError, codes, consequence, display as display_bytes};
-pub use history::{Control as HistoryControl, Entry as HistoryEntry, History};
 pub use opts::{ALL_FLAGS, Flag, NamedOption, OptionKind, Opts};
 pub use traps::{
     SIGNALS, TrapAction, TrapKey, TrapTable, signal_number, signal_short_name, signal_table,
@@ -115,8 +114,8 @@ pub struct ShellState {
     /// inside a completion function changes the run in progress, and only the
     /// engine that finishes the completion decides what to save.
     pub completion: complete::CompletionRun,
-    /// Command history, the one ring the `history`/`fc` built-ins and the
-    /// editor share. See [`ShellState::sync_history`] for the `HIST*` knobs.
+    /// Command history, the one ring the `history` built-in and the editor
+    /// share. See `bsh_history` for the database behind it.
     pub history: History,
     /// How many lines of input the interactive loop has handed to the
     /// interpreter.
@@ -181,53 +180,6 @@ impl ShellState {
         self.command_number
     }
 
-    /// Re-read the `HIST*` knobs from the shell's variables and options.
-    ///
-    /// Called by the interactive loop between commands and by the `history`
-    /// and `fc` built-ins, so a value set by an rc file or a previous command
-    /// takes effect before the next one. `HISTFILE` is expanded (`~` only),
-    /// `HISTSIZE`/`HISTFILESIZE` default to 500, and `histappend` is the
-    /// `shopt` option of that name.
-    ///
-    /// A change to `HISTFILESIZE` also truncates the file immediately, which
-    /// is what bash does when the variable is assigned (there is no assignment
-    /// hook in this shell, so the next sync stands in for it).
-    pub fn sync_history(&mut self) {
-        let home = self.vars.scalar(b"HOME").map(<[u8]>::to_vec);
-        let file = match self.vars.scalar(b"HISTFILE") {
-            None => None,
-            Some([]) => None,
-            Some(value) => Some(expand_tilde(value, home.as_deref())),
-        };
-        let max_entries = parse_limit(self.vars.scalar(b"HISTSIZE"));
-        let file_max = parse_limit(self.vars.scalar(b"HISTFILESIZE"));
-        let control = self
-            .vars
-            .scalar(b"HISTCONTROL")
-            .map(HistoryControl::parse)
-            .unwrap_or_default();
-        let ignore = match self.vars.scalar(b"HISTIGNORE") {
-            Some(value) => value
-                .split(|byte| *byte == b':')
-                .filter(|pattern| !pattern.is_empty())
-                .map(<[u8]>::to_vec)
-                .collect(),
-            None => Vec::new(),
-        };
-        let append = self.opts.histappend;
-
-        self.history.set_file(file);
-        self.history.set_max_entries(max_entries);
-        let previous_max = self.history.file_max();
-        self.history.set_file_max(file_max);
-        self.history.set_control(control);
-        self.history.set_ignore_patterns(ignore);
-        self.history.set_append_mode(append);
-        if previous_max != file_max {
-            let _ = self.history.truncate_file();
-        }
-    }
-
     /// The `getopts` scan position: `OPTIND`, the offset inside that argument,
     /// and the `OPTIND` write counter the offset was recorded at.
     pub(crate) fn getopts_position(&self) -> (i64, usize, u64) {
@@ -283,43 +235,6 @@ impl ShellState {
     pub fn take_exit_request(&mut self) -> Option<Status> {
         self.exit_request.take()
     }
-}
-
-/// Parse a `HISTSIZE`/`HISTFILESIZE` value.
-///
-/// Unset, empty, non-numeric and negative values mean "use the default"; bash's
-/// variables are unsigned counts and a script that clears one wants the
-/// built-in limit back, not zero.
-fn parse_limit(value: Option<&[u8]>) -> usize {
-    let Some(value) = value else {
-        return history::DEFAULT_ENTRIES;
-    };
-    if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
-        return history::DEFAULT_ENTRIES;
-    }
-    std::str::from_utf8(value)
-        .ok()
-        .and_then(|text| text.parse().ok())
-        .unwrap_or(history::DEFAULT_ENTRIES)
-}
-
-/// Expand a leading `~`/`~/` in `HISTFILE`; other spellings are left alone.
-fn expand_tilde(value: &[u8], home: Option<&[u8]>) -> std::path::PathBuf {
-    use std::os::unix::ffi::OsStrExt;
-    let home = home.map(std::ffi::OsStr::from_bytes);
-    if value == b"~" {
-        if let Some(home) = home {
-            return std::path::PathBuf::from(home);
-        }
-    }
-    if let Some(rest) = value.strip_prefix(b"~/") {
-        if let Some(home) = home {
-            let mut path = std::path::PathBuf::from(home);
-            path.push(std::ffi::OsStr::from_bytes(rest));
-            return path;
-        }
-    }
-    std::path::PathBuf::from(std::ffi::OsStr::from_bytes(value))
 }
 
 /// What the runtime needs from the executor: the ability to run shell code

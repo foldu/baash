@@ -88,8 +88,10 @@
 //!   extensions the runtime does not define yet; `$PIPESTATUS` and `$FUNCNAME`
 //!   are arrays, which are deferred above.
 //! * **`set -i`/`PS1`** — the CLI marks the shell interactive when stdin is a
-//!   terminal and reads lines from it, but the prompt, editor, completion and
-//!   history are `bsh-repl`'s job and are not wired up.
+//!   terminal and reads lines from it; the prompt, editor and completion are
+//!   `bsh-repl`'s job and are not the evaluator's. History recording is split:
+//!   the interactive loop calls [`Interp::initialize_history`] and
+//!   [`Interp::flush_history`], and the ring itself lives in `bsh-history`.
 //! * **SIGPIPE** — Rust's runtime ignores it, so a built-in writing into a
 //!   closed pipe sees `EPIPE` and reports status 1 instead of dying by signal.
 //!   Children get `SIGPIPE` reset to `SIG_DFL` through `SpawnPlan`.
@@ -112,7 +114,7 @@
 use std::sync::Arc;
 
 use bsh_diag::{Diagnostic, SourceFile};
-use bsh_runtime::{Opts, ShellHost, ShellState, Status, consequence};
+use bsh_runtime::{History, Opts, ShellHost, ShellState, Status, consequence};
 use bsh_syntax::ArrayElement;
 use bsh_syntax::{Ast, NodeId, ParseOpts, ParseOutcome, parse_with};
 
@@ -541,49 +543,37 @@ impl Interp {
         self.state.vars.import_envp(&entries);
     }
 
-    /// Prepare the history ring for an interactive session.
+    /// Give an interactive shell its history database.
     ///
-    /// When `HISTFILE` is unset and `default_file` is true, this shell gives
-    /// it a default: `$HOME/.bsh_history` (a deliberate deviation from bash's
-    /// `~/.bash_history`, so two shells never rewrite each other's file). The
-    /// `HIST*` knobs are read from the variables the rc file may have set, and
-    /// the file is loaded.
+    /// A terminal REPL passes `persist = true` and gets the user's database
+    /// (`bsh_history::default_path`). A piped or `-c` interactive shell gets
+    /// none: an interactive conformance run must not depend on, or write to,
+    /// the user's data directory.
     ///
-    /// Called after the startup file, only for an interactive shell. The
-    /// caller passes `default_file = true` for the terminal REPL and false for
-    /// a non-terminal `-i` (piped stdin, `-c`): inventing a file there would
-    /// make an interactive conformance run depend on, and write to, the user's
-    /// home directory. An explicit `HISTFILE` from the environment or the rc
-    /// file is always honoured and loaded.
-    pub fn initialize_history(&mut self, default_file: bool) {
-        if !self.interactive {
+    /// A database that cannot be opened is reported once and the shell keeps
+    /// its in-memory ring, because losing recall is better than refusing to
+    /// start.
+    pub fn initialize_history(&mut self, persist: bool) {
+        if !self.interactive || !persist {
             return;
         }
-        if default_file && self.state.vars.scalar(b"HISTFILE").is_none() {
-            if let Some(home) = self.state.vars.scalar(b"HOME") {
-                use std::os::unix::ffi::OsStrExt;
-                let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(home))
-                    .join(".bsh_history");
-                let _ = self
-                    .state
-                    .vars
-                    .assign_scalar(b"HISTFILE", path.as_os_str().as_bytes());
+        let Some(path) = bsh_history::default_path() else {
+            return;
+        };
+        match History::open(&path, bsh_history::RECENT_DEPTH) {
+            Ok(history) => self.state.history = history,
+            Err(error) => {
+                eprintln!("bsh: history: cannot open {}: {error}", path.display());
             }
-        }
-        self.state.sync_history();
-        if self.state.history.file().is_some() {
-            let _ = self.state.history.read_file();
         }
     }
 
-    /// Save the history ring on exit (`histappend` chooses append or rewrite).
+    /// Wait for every queued history write to reach the database.
     ///
-    /// The interactive editor saves its own copy in `finish`, because it holds
-    /// the ring while reading a line; this is the path for `-i -c` and for
-    /// interactive stdin that is not a terminal.
-    pub fn save_history(&mut self) -> std::io::Result<()> {
-        self.state.sync_history();
-        self.state.history.save()
+    /// The editor calls this on exit; the `-i -c` and piped-interactive paths
+    /// call it here, because no editor exists to hold the ring.
+    pub fn flush_history(&mut self) {
+        self.state.history.flush();
     }
 
     /// Set `$0`.

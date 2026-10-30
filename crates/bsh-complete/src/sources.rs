@@ -376,7 +376,6 @@ pub const BUILTINS: &[&[u8]] = &[
     b"exit",
     b"export",
     b"false",
-    b"fc",
     b"fg",
     b"getopts",
     b"hash",

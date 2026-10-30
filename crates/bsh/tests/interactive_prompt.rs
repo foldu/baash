@@ -43,6 +43,7 @@ const SCRUBBED: &[&[u8]] = &[
     b"HISTSIZE",
     b"HISTFILESIZE",
     b"HISTIGNORE",
+    b"BSH_HISTORY_DB",
     b"LC_ALL",
     b"NO_COLOR",
     // A stale inherited `PWD` would win over the directory the test chdirs to,
@@ -76,6 +77,8 @@ impl Session {
         use std::os::unix::ffi::OsStrExt;
         home_entry.extend_from_slice(home.as_os_str().as_bytes());
         entries.push(home_entry);
+        // No history database: a test run must not touch the user's.
+        entries.push(b"BSH_HISTORY_DB=".to_vec());
         for (key, value) in environment {
             let mut entry = key.as_bytes().to_vec();
             entry.push(b'=');

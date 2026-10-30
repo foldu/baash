@@ -182,30 +182,33 @@ whose `${PS1@P}` says `3`). The evaluator does not touch it: it sees whole
 chunks and cannot tell a REPL line from a script, so a non-interactive run
 never advances the counter.
 
-**History is one ring, owned here.** `ShellState::history` is a
-`crate::History`; `shell.sync_history()` re-reads `HISTFILE`, `HISTSIZE`,
-`HISTFILESIZE`, `HISTCONTROL`, `HISTIGNORE` and the `histappend` shopt from the
-variables and options, and truncates the file when `HISTFILESIZE` changes. The
+**History is one ring, and the database is behind it.** `ShellState::history`
+is a `bsh_history::History`: numbered entries, Up/Down navigation, ghost-text
+suggestions. `bsh_history::Store` is the Turso database on its own thread; the
+ring queues a write when a line is submitted and an update when it finishes
+(`$?` and wall time), so nothing on the keystroke path waits for a disk. The
 interactive loop swaps the ring in and out of the editor around each command
-(`bsh-repl` depends on this crate for the *type*), so the built-ins and Up/Down
-navigate the same entries. Numbers are stored per entry: trimming leaves them
-alone (`501…` after a 500-entry window) and `history -d` renumbers the tail.
-The file operations are `read_file` (`-r`), `read_new` (`-n`), `append_file`
-(`-a`), `write_file` (`-w`), `truncate_file` (`HISTFILESIZE`) and `save` (exit;
-`histappend` selects append or rewrite, then truncation). Measured bash quirk
-honoured: `-w` does not apply `HISTFILESIZE`; the exit save does.
+(`bsh-repl` depends on this crate for the *type*), so the built-in and Up/Down
+navigate the same entries.
 
-`History::remove_current()` removes the entry the editor just recorded **and
-its pending `-a` copy**, which is what history expansion needs when it replaces
-the typed line with the expanded one. It does nothing when the typed line was
-filtered by `HISTCONTROL` (the last entry is then an older command), so it
-cannot delete someone else's line. `History::push` records the expanded line
-and applies the same filters; a failed event removes the typed entry and
-records nothing.
+Numbers are the *session's*: the ring is seeded with the newest 1000 rows and
+numbers them from 1, then keeps counting. Trimming leaves numbers alone and
+`history -d` leaves a gap rather than renumbering the tail, so `!12` always
+names what `history` printed as 12. The durable identity is `(session, seq)`,
+which is what a delete or a finish names.
 
-**Builtin tiers are exact and load-bearing** (DESIGN §2): 15 special, 16
-intrinsic, 7 regular, 18 bash extensions. `printf`, `test`, `[`, `echo`, `pwd`,
-`true` and `false` are regular, deliberately *not* intrinsic, because the
+There is no history file, and there is no `sync_history`: `HISTFILE`,
+`HISTSIZE`, `HISTFILESIZE`, `HISTCONTROL`, `HISTIGNORE`, `HISTTIMEFORMAT`, the
+`histappend` shopt, `history -a/-n/-r/-w/-p/-s` and `fc` are deleted rather
+than emulated. `History::push` records every non-blank line; `remove_current`
+deletes the row again when history expansion replaces the typed line. A
+database that cannot be opened is reported once and the shell keeps an
+in-memory ring, because losing recall is better than refusing to start.
+
+**Builtin tiers are exact and load-bearing** (DESIGN §2): 15 special, 15
+intrinsic, 7 regular, 18 bash extensions. `fc` is not registered at all: it
+edited a history file that no longer exists. `printf`, `test`, `[`, `echo`,
+`pwd`, `true` and `false` are regular, deliberately *not* intrinsic, because the
 standard requires them to remain exec-able. Search order comes from
 `Tier::search_priority`.
 

@@ -175,7 +175,9 @@ fn option_tables_are_separate_but_share_members() {
     let shopt: Vec<&str> = opts.names(OptionKind::Shopt).collect();
 
     assert_eq!(set_o.len(), 27);
-    assert_eq!(shopt.len(), 45);
+    // 45 bash `shopt` options minus `histappend`, which configured a history
+    // file the shell no longer has.
+    assert_eq!(shopt.len(), 44);
     assert!(set_o.contains(&"errexit"));
     assert!(set_o.contains(&"pipefail"));
     assert!(!set_o.contains(&"extglob"));
@@ -316,7 +318,7 @@ fn tier_table_has_exact_posix_membership() {
     assert_eq!(
         sorted_names(Tier::Intrinsic),
         [
-            "alias", "bg", "cd", "command", "fc", "fg", "getopts", "hash", "jobs", "kill", "read",
+            "alias", "bg", "cd", "command", "fg", "getopts", "hash", "jobs", "kill", "read",
             "type", "ulimit", "umask", "unalias", "wait",
         ]
     );
@@ -349,10 +351,11 @@ fn tier_table_has_exact_posix_membership() {
     );
 
     assert_eq!(names_in(Tier::Special).count(), 15);
-    assert_eq!(names_in(Tier::Intrinsic).count(), 16);
+    // 16 POSIX intrinsics minus `fc`; editing a history file has no meaning.
+    assert_eq!(names_in(Tier::Intrinsic).count(), 15);
     assert_eq!(names_in(Tier::Regular).count(), 7);
     assert_eq!(names_in(Tier::Extension).count(), 18);
-    assert_eq!(BUILTINS.len(), 56);
+    assert_eq!(BUILTINS.len(), 55);
 }
 
 #[test]
@@ -398,15 +401,16 @@ fn builtin_names_are_unique_and_implemented_set_is_explicit() {
         implemented,
         [
             ":", "alias", "builtin", "command", "compgen", "complete", "compopt", "exit", "export",
-            "false", "fc", "getopts", "history", "readonly", "set", "shift", "shopt", "trap",
-            "true", "type", "unalias", "unset",
+            "false", "getopts", "history", "readonly", "set", "shift", "shopt", "trap", "true",
+            "type", "unalias", "unset",
         ]
     );
     assert_eq!(stubs_in(Tier::Special), 15 - 8);
-    // `alias`, `command`, `fc`, `getopts`, `type` and `unalias` are written;
-    // the rest (`bg`, `fg`, `jobs`, `kill`, `read`, `ulimit`, `umask`,
-    // `wait`, `cd`) are the executor's or still stubs.
-    assert_eq!(stubs_in(Tier::Intrinsic), 16 - 6);
+    // `alias`, `command`, `getopts`, `type` and `unalias` are written; the
+    // rest (`bg`, `fg`, `jobs`, `kill`, `read`, `ulimit`, `umask`, `wait`,
+    // `cd`) are the executor's or still stubs. `fc` is not registered at all:
+    // it edited a history file that no longer exists.
+    assert_eq!(stubs_in(Tier::Intrinsic), 15 - 5);
     // `hash` and `mapfile`/`readarray` are executor-side bodies, so the
     // registry still reports them as stubs: the executor's body runs only
     // while the entry has none.

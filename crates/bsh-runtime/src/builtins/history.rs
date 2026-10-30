@@ -1,40 +1,24 @@
-//! The `history` and `fc` built-ins.
+//! The `history` built-in.
 //!
-//! Both are thin front ends over [`crate::History`]. The formats are bash
-//! 5.3.20's, measured under `bash --norc`:
+//! The file-era syntax is gone with the file: `-a`/`-n`/`-r`/`-w` (which only
+//! moved lines between a ring and `$HISTFILE`), `-p`/`-s` (which only existed
+//! to drive history expansion's tests) and `fc` (an editor launcher built on
+//! the same text file). What is left is what a shell user actually types:
 //!
 //! ```text
 //! history      →  "    1  echo a"     (five-wide number, two spaces)
 //! history 2    →  the last two entries
-//! fc -l        →  "1\t echo a"        (number, TAB, space)
-//! fc -ln       →  "\t echo a"         (no number)
-//! fc -l 1 2    →  entries 1 through 2; 2 1 lists them descending
+//! history -d 3 →  forget entry 3
+//! history -c   →  forget everything
 //! ```
 //!
-//! `fc` deliberately excludes the command that invoked it: bash adds a typed
-//! line to history before dispatch, so `fc -l` hides the last entry in an
-//! interactive shell. `fc -s` goes further and *replaces* that entry with the
-//! command it re-executes (measured even non-interactively, where it removes
-//! the last entry regardless).
-//!
-//! # Scope
-//!
-//! `fc` without `-l`/`-s` opens `$FCEDIT`/`$EDITOR` on a temporary file. That
-//! is not implemented here: it reports status 2 with a clear message instead of
-//! pretending. History expansion (`!$`, `!!`) is a separate missing feature,
-//! so `history -p` prints its arguments as they are, which is what bash prints
-//! when the expansion produces nothing.
+//! Numbers are the session's, as [`bsh_history::History`] explains: they do not
+//! renumber when an entry is deleted, and they are not database ids.
 
 use super::{codes, diagnose, display, usage};
 use crate::{HistoryEntry, ShellHost, Status};
 
-const HISTORY_USAGE: &str =
-    "usage: history [-c] [-d offset] [n] or history -anrw [filename] or history -ps arg [arg...]";
-
-const FC_USAGE: &str = "usage: fc [-e ename] [-lnr] [first] [last] or fc -s [pat=rep] [command]";
-
-/// How many entries `fc -l` shows when no range is given (bash's default).
-const FC_DEFAULT_PAGE: usize = 16;
+const HISTORY_USAGE: &str = "usage: history [-c] [-d offset] [n]";
 
 /// Write one `history` line: a five-wide number, two spaces, the command.
 fn write_history_line(out: &mut Vec<u8>, entry: &HistoryEntry) {
@@ -44,29 +28,10 @@ fn write_history_line(out: &mut Vec<u8>, entry: &HistoryEntry) {
     out.push(b'\n');
 }
 
-/// Write one `fc -l` line: number, TAB, space, command; `suppress` drops the
-/// number but keeps the TAB and space.
-fn write_fc_line(out: &mut Vec<u8>, entry: &HistoryEntry, suppress: bool) {
-    if !suppress {
-        out.extend_from_slice(entry.number().to_string().as_bytes());
-    }
-    out.extend_from_slice(b"\t ");
-    out.extend_from_slice(entry.text());
-    out.push(b'\n');
-}
-
-/// `history [-c] [-d offset] [n]`, `-a`, `-n`, `-r`, `-w`, `-p`, `-s`.
+/// `history [-c] [-d offset] [n]`.
 pub(super) fn bi_history(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
-    host.state().sync_history();
-
     let mut clear = false;
     let mut delete: Option<Vec<u8>> = None;
-    let mut append = false;
-    let mut read_new = false;
-    let mut read = false;
-    let mut write = false;
-    let mut print = false;
-    let mut store = false;
     let mut operands: Vec<&[u8]> = Vec::new();
     let mut options_done = false;
 
@@ -74,7 +39,15 @@ pub(super) fn bi_history(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
     while index < argv.len() {
         let argument = argv[index];
         index += 1;
-        if options_done || argument == b"-" || !argument.starts_with(b"-") || argument.len() == 1 {
+        // A bare `-` and a lone `-3` are operands, not options: the first is
+        // the conventional end-of-options spelling, the second a negative
+        // history offset.
+        if options_done
+            || argument == b"-"
+            || !argument.starts_with(b"-")
+            || argument.len() == 1
+            || argument[1..].iter().all(u8::is_ascii_digit)
+        {
             operands.push(argument);
             continue;
         }
@@ -87,12 +60,6 @@ pub(super) fn bi_history(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
         while position < letters.len() {
             match letters[position] {
                 b'c' => clear = true,
-                b'a' => append = true,
-                b'n' => read_new = true,
-                b'r' => read = true,
-                b'w' => write = true,
-                b'p' => print = true,
-                b's' => store = true,
                 b'd' => {
                     let attached = &letters[position + 1..];
                     if attached.is_empty() {
@@ -157,64 +124,11 @@ pub(super) fn bi_history(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
         }
     }
 
-    let mut status = Status::SUCCESS;
-    if append || read_new || read || write {
-        // `-anrw` accept an optional filename in bash; this wave always uses
-        // `HISTFILE`, and a filename operand would be silently meaningless,
-        // so reject it rather than lie about having used it.
-        if !operands.is_empty() && !print && !store {
-            return usage(host, argv, "too many arguments");
-        }
-        let result = if append {
-            host.state().history.append_file()
-        } else if read_new {
-            host.state().history.read_new().map(|_| ())
-        } else if read {
-            host.state().history.read_file().map(|_| ())
-        } else {
-            host.state().history.write_file()
-        };
-        if let Err(error) = result {
-            diagnose(host, codes::NOT_FOUND, format!("history: {error}"));
-            status = Status::FAILURE;
-        }
-    }
-
-    if print && !store {
-        if !operands.is_empty() {
-            let mut out = Vec::new();
-            for operand in &operands {
-                out.extend_from_slice(operand);
-                out.push(b'\n');
-            }
-            let _ = host.write_out(&out);
-        }
-        return status;
-    }
-
-    if store {
-        // bash records the typed line before dispatch, then `history -s`
-        // removes it and stores its arguments instead. A command line that was
-        // never recorded (`-c`, a non-interactive shell) is left alone.
-        if host.state().history.is_current() {
-            host.state().history.remove_last();
-        }
-        let mut line = Vec::new();
-        for (position, operand) in operands.iter().enumerate() {
-            if position > 0 {
-                line.push(b' ');
-            }
-            line.extend_from_slice(operand);
-        }
-        if !line.is_empty() {
-            host.state().history.add(&line);
-        }
-        return status;
-    }
-
-    let any_action = clear || delete.is_some() || append || read_new || read || write;
+    // `history -c` and `history -d` without a count do not also print the
+    // list; bash agrees.
+    let any_action = clear || delete.is_some();
     if any_action && operands.is_empty() {
-        return status;
+        return Status::SUCCESS;
     }
 
     let limit = match operands.as_slice() {
@@ -238,262 +152,7 @@ pub(super) fn bi_history(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
         write_history_line(&mut out, entry);
     }
     let _ = host.write_out(&out);
-    status
-}
-
-/// `fc [-e ename] [-lnr] [first [last]]` and `fc -s [pat=rep] [command]`.
-pub(super) fn bi_fc(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
-    host.state().sync_history();
-
-    let mut list = false;
-    let mut suppress = false;
-    let mut reverse = false;
-    let mut substitute = false;
-    let mut operands: Vec<&[u8]> = Vec::new();
-    let mut options_done = false;
-
-    let mut index = 1;
-    while index < argv.len() {
-        let argument = argv[index];
-        index += 1;
-        if options_done || !argument.starts_with(b"-") || argument.len() == 1 {
-            operands.push(argument);
-            continue;
-        }
-        if argument == b"--" {
-            options_done = true;
-            continue;
-        }
-        // `-3` is a negative history offset, not an option.
-        if argument[1..].iter().all(u8::is_ascii_digit) {
-            operands.push(argument);
-            continue;
-        }
-        let letters = &argument[1..];
-        let mut position = 0;
-        while position < letters.len() {
-            match letters[position] {
-                b'l' => list = true,
-                b'n' => suppress = true,
-                b'r' => reverse = true,
-                b's' => substitute = true,
-                b'e' => {
-                    let attached = &letters[position + 1..];
-                    let editor = if attached.is_empty() {
-                        argv.get(index).copied().inspect(|_| index += 1)
-                    } else {
-                        Some(attached)
-                    };
-                    let Some(editor) = editor else {
-                        diagnose(host, codes::USAGE, "fc: -e: option requires an argument");
-                        diagnose(host, codes::USAGE, format!("fc: {FC_USAGE}"));
-                        return Status::USAGE;
-                    };
-                    // bash's `fc -e -` is `fc -s`.
-                    if editor == b"-" {
-                        substitute = true;
-                    }
-                    position = letters.len();
-                    continue;
-                }
-                other => {
-                    diagnose(
-                        host,
-                        codes::USAGE,
-                        format!("fc: -{}: invalid option", char::from(other)),
-                    );
-                    diagnose(host, codes::USAGE, format!("fc: {FC_USAGE}"));
-                    return Status::USAGE;
-                }
-            }
-            position += 1;
-        }
-    }
-
-    if list && substitute {
-        return usage(host, argv, "-l and -s are mutually exclusive");
-    }
-
-    if !list && !substitute {
-        diagnose(
-            host,
-            codes::USAGE,
-            "fc: editing history is not implemented yet; use `fc -l` or `fc -s`",
-        );
-        return Status::USAGE;
-    }
-
-    // A typed command is in the ring, but `fc` never lists or selects itself.
-    let eligible = eligible_len(host);
-    if eligible == 0 {
-        return if substitute {
-            diagnose(host, codes::NOT_FOUND, "fc: no command found");
-            Status::FAILURE
-        } else {
-            Status::SUCCESS
-        };
-    }
-
-    if list {
-        let (first, last) = match operands.as_slice() {
-            [] => (eligible.saturating_sub(FC_DEFAULT_PAGE), eligible - 1),
-            [first] => match resolve(host, first, eligible, Role::First) {
-                Ok(index) => (index, eligible - 1),
-                Err(status) => return status,
-            },
-            [first, last] => {
-                let first = match resolve(host, first, eligible, Role::First) {
-                    Ok(index) => index,
-                    Err(status) => return status,
-                };
-                let last = match resolve(host, last, eligible, Role::Last) {
-                    Ok(index) => index,
-                    Err(status) => return status,
-                };
-                (first, last)
-            }
-            // bash ignores extra arguments here (`fc -l 0 1 2` is status 0).
-            [..] => {
-                let first = match resolve(host, operands[0], eligible, Role::First) {
-                    Ok(index) => index,
-                    Err(status) => return status,
-                };
-                let last = match resolve(host, operands[1], eligible, Role::Last) {
-                    Ok(index) => index,
-                    Err(status) => return status,
-                };
-                (first, last)
-            }
-        };
-
-        let mut indices: Vec<usize> = if first <= last {
-            (first..=last).collect()
-        } else {
-            (last..=first).rev().collect()
-        };
-        // `-r` reverses a normal ascending page; bash leaves an explicitly
-        // reversed range alone (`fc -lr 3 2` is still 3 2).
-        if reverse && first <= last {
-            indices.reverse();
-        }
-        let entries = host.state().history.entries();
-        let mut out = Vec::new();
-        for index in indices {
-            if let Some(entry) = entries.get(index) {
-                write_fc_line(&mut out, entry, suppress);
-            }
-        }
-        let _ = host.write_out(&out);
-        return Status::SUCCESS;
-    }
-
-    // `fc -s [old=new] [first]`
-    let mut replacement: Option<(&[u8], &[u8])> = None;
-    let mut command_reference: Option<&[u8]> = None;
-    for operand in &operands {
-        if command_reference.is_none() && replacement.is_none() {
-            if let Some(equals) = operand.iter().position(|byte| *byte == b'=') {
-                replacement = Some((&operand[..equals], &operand[equals + 1..]));
-                continue;
-            }
-        }
-        if command_reference.is_none() {
-            command_reference = Some(operand);
-        }
-    }
-
-    let selected = match command_reference {
-        Some(reference) => match resolve(host, reference, eligible, Role::First) {
-            Ok(index) => index,
-            Err(status) => return status,
-        },
-        None => eligible - 1,
-    };
-    let mut command = host
-        .state()
-        .history
-        .entries()
-        .get(selected)
-        .map(|entry| entry.text().to_vec())
-        .unwrap_or_default();
-    if let Some((old, new)) = replacement {
-        command = substitute_word(&command, old, new);
-    }
-
-    let mut out = command.clone();
-    out.push(b'\n');
-    let _ = host.write_out(&out);
-
-    // Measured: bash removes the last entry and stores the re-executed
-    // command in its place, in an interactive shell (where the last entry is
-    // the `fc` line itself) and non-interactively alike.
-    host.state().history.remove_last();
-    host.state().history.add(&command);
-
-    host.run_source(&command)
-}
-
-/// The entries `fc` may select: everything except the command line currently
-/// running, when that line was recorded.
-fn eligible_len(host: &mut dyn ShellHost) -> usize {
-    let length = host.state().history.len();
-    if host.state().history.is_current() && length > 0 {
-        length - 1
-    } else {
-        length
-    }
-}
-
-/// Which end an out-of-range reference clamps to.
-#[derive(Clone, Copy)]
-enum Role {
-    /// bash clamps a first reference above the list to the oldest entry.
-    First,
-    /// A last reference above the list clamps to the newest entry.
-    Last,
-}
-
-/// Resolve an `fc` event reference against the first `eligible` entries.
-fn resolve(
-    host: &mut dyn ShellHost,
-    reference: &[u8],
-    eligible: usize,
-    role: Role,
-) -> Result<usize, Status> {
-    let entries = &host.state().history.entries()[..eligible];
-    let not_found = |host: &mut dyn ShellHost| {
-        diagnose(host, codes::NOT_FOUND, "fc: no command found");
-        Status::FAILURE
-    };
-    if let Some(number) = parse_reference(reference) {
-        if number == 0 {
-            return Ok(eligible.saturating_sub(1));
-        }
-        if number > 0 {
-            let target = u32::try_from(number).unwrap_or(u32::MAX);
-            if let Some(index) = entries.iter().position(|entry| entry.number() == target) {
-                return Ok(index);
-            }
-            // Out of range: bash clamps a high first to the oldest entry (so
-            // `fc -l 100` prints everything) and a high last to the newest.
-            return Ok(match role {
-                Role::First => 0,
-                Role::Last => eligible - 1,
-            });
-        }
-        let offset = usize::try_from(number.unsigned_abs()).unwrap_or(usize::MAX);
-        if offset >= eligible {
-            return Ok(0);
-        }
-        return Ok(eligible - offset);
-    }
-    match entries
-        .iter()
-        .rposition(|entry| entry.text().starts_with(reference))
-    {
-        Some(index) => Ok(index),
-        None => Err(not_found(host)),
-    }
+    Status::SUCCESS
 }
 
 /// Parse an integer history reference, accepting a leading `-`.
@@ -517,19 +176,155 @@ fn parse_count(value: &[u8]) -> Option<usize> {
     std::str::from_utf8(value).ok()?.parse().ok()
 }
 
-/// Replace the first occurrence of `old` with `new`; an empty `old` prepends.
-fn substitute_word(command: &[u8], old: &[u8], new: &[u8]) -> Vec<u8> {
-    if old.is_empty() {
-        let mut out = new.to_vec();
-        out.extend_from_slice(command);
-        return out;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Opts, ShellHost, ShellState};
+
+    /// A host with no parser: `history` only needs state and two byte sinks.
+    struct Host {
+        state: ShellState,
+        out: Vec<u8>,
+        err: Vec<u8>,
     }
-    if let Some(position) = command.windows(old.len()).position(|window| window == old) {
-        let mut out = Vec::with_capacity(command.len() + new.len());
-        out.extend_from_slice(&command[..position]);
-        out.extend_from_slice(new);
-        out.extend_from_slice(&command[position + old.len()..]);
-        return out;
+
+    impl Host {
+        fn new() -> Self {
+            Self {
+                state: ShellState::new(Opts::default()),
+                out: Vec::new(),
+                err: Vec::new(),
+            }
+        }
+
+        fn seed(&mut self, lines: &[&str]) {
+            for line in lines {
+                self.state.history.push(line.as_bytes());
+            }
+        }
+
+        fn out(&self) -> String {
+            String::from_utf8_lossy(&self.out).into_owned()
+        }
+
+        fn err(&self) -> String {
+            String::from_utf8_lossy(&self.err).into_owned()
+        }
+
+        fn run(&mut self, argv: &[&str]) -> Status {
+            let argv: Vec<Vec<u8>> = argv.iter().map(|arg| arg.as_bytes().to_vec()).collect();
+            let refs: Vec<&[u8]> = argv.iter().map(Vec::as_slice).collect();
+            bi_history(self, &refs)
+        }
     }
-    command.to_vec()
+
+    impl ShellHost for Host {
+        fn state(&mut self) -> &mut ShellState {
+            &mut self.state
+        }
+
+        fn run_source(&mut self, _src: &[u8]) -> Status {
+            Status::SUCCESS
+        }
+
+        fn write_out(&mut self, bytes: &[u8]) -> Status {
+            self.out.extend_from_slice(bytes);
+            Status::SUCCESS
+        }
+
+        fn write_err(&mut self, bytes: &[u8]) -> Status {
+            self.err.extend_from_slice(bytes);
+            Status::SUCCESS
+        }
+    }
+
+    #[test]
+    fn prints_a_five_wide_number_and_two_spaces() {
+        let mut host = Host::new();
+        host.seed(&["echo a", "echo b", "echo c"]);
+        assert_eq!(host.run(&["history"]), Status(0));
+        assert_eq!(host.out(), "    1  echo a\n    2  echo b\n    3  echo c\n");
+    }
+
+    #[test]
+    fn a_count_shows_the_newest_entries() {
+        let mut host = Host::new();
+        host.seed(&["echo a", "echo b", "echo c"]);
+        assert_eq!(host.run(&["history", "2"]), Status(0));
+        assert_eq!(host.out(), "    2  echo b\n    3  echo c\n");
+        host.out.clear();
+        assert_eq!(host.run(&["history", "99"]), Status(0));
+        assert_eq!(host.out().lines().count(), 3);
+    }
+
+    #[test]
+    fn an_empty_ring_prints_nothing() {
+        let mut host = Host::new();
+        assert_eq!(host.run(&["history"]), Status(0));
+        assert!(host.out().is_empty());
+    }
+
+    #[test]
+    fn clearing_empties_the_ring_and_starts_numbering_over() {
+        let mut host = Host::new();
+        host.seed(&["a", "b"]);
+        assert_eq!(host.run(&["history", "-c"]), Status(0));
+        assert_eq!(host.state.history.len(), 0);
+        assert_eq!(host.state.history.next_number(), 1);
+        assert!(host.out().is_empty(), "`-c` does not print the list");
+    }
+
+    #[test]
+    fn deleting_leaves_the_remaining_numbers_alone() {
+        let mut host = Host::new();
+        host.seed(&["a", "b", "c"]);
+        assert_eq!(host.run(&["history", "-d", "2"]), Status(0));
+        assert_eq!(host.state.history.len(), 2);
+        let numbers: Vec<u32> = host
+            .state
+            .history
+            .entries()
+            .iter()
+            .map(HistoryEntry::number)
+            .collect();
+        assert_eq!(numbers, [1, 3]);
+        assert!(host.out().is_empty(), "`-d` does not print the list");
+    }
+
+    #[test]
+    fn a_bad_reference_is_a_failure() {
+        let mut host = Host::new();
+        host.seed(&["a"]);
+        assert_eq!(host.run(&["history", "-d", "zz"]), Status(1));
+        assert!(host.err().contains("invalid number"));
+        assert_eq!(host.run(&["history", "-d", "7"]), Status(1));
+        assert!(host.err().contains("out of range"));
+        assert_eq!(host.run(&["history", "-d", "0"]), Status(1));
+    }
+
+    #[test]
+    fn an_unknown_option_is_a_usage_error() {
+        let mut host = Host::new();
+        assert_eq!(host.run(&["history", "-z"]), Status(2));
+        assert!(host.err().contains("invalid option"));
+        assert_eq!(host.run(&["history", "-d"]), Status(2));
+        assert_eq!(host.run(&["history", "1", "2"]), Status(2));
+        assert_eq!(host.run(&["history", "x"]), Status(2));
+    }
+
+    #[test]
+    fn the_file_options_are_gone() {
+        // `-a`, `-n`, `-r`, `-w`, `-p` and `-s` moved lines between the ring
+        // and `$HISTFILE`. There is no file, so the option is not accepted.
+        for option in ["-a", "-n", "-r", "-w", "-p", "-s"] {
+            let mut host = Host::new();
+            host.seed(&["echo a"]);
+            assert_eq!(
+                host.run(&["history", option]),
+                Status(2),
+                "`history {option}` must not be accepted"
+            );
+            assert_eq!(host.state.history.len(), 1);
+        }
+    }
 }

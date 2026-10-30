@@ -43,6 +43,7 @@ impl Session {
             use std::os::unix::ffi::OsStrExt;
             let key = key.as_os_str().as_bytes();
             if key == b"PS1" || key == b"PS2" || key == b"TERM" || key == b"HISTFILE" {
+                // No history database: a test run must not touch the user's.
                 continue;
             }
             let mut entry = key.to_vec();
@@ -53,6 +54,7 @@ impl Session {
         environment.push(b"PS1=@@ ".to_vec());
         environment.push(b"PS2=>> ".to_vec());
         environment.push(b"TERM=dumb".to_vec());
+        environment.push(b"BSH_HISTORY_DB=".to_vec());
 
         let child = fork_child_status(move || {
             if become_session_leader(slave).is_err() {

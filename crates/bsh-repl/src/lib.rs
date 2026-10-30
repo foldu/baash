@@ -70,9 +70,9 @@
 //!   incremental highlighting; the whole buffer is re-lexed per keystroke.
 //! * **Ghost text without colour.** Suggestions are painted, and accepted with
 //!   `→`/`End` at the end of the line, only when ANSI dim is available.
-//! * **Timestamped history** and persisting multi-line entries (`HISTFILE`
-//!   is line-oriented; those are skipped). `HISTCONTROL`, `HISTSIZE` and
-//!   `HISTFILESIZE` live in the runtime ring and are wired.
+//! * **A history search UI.** `Ctrl-R` walks the session ring with the same
+//!   incremental matcher as completion; the database is a source for the ring,
+//!   not something the editor queries.
 //! * **`PS1` change detection inside a line.** The shell re-renders the
 //!   prompt before each line; a `PS1` changed by the line being typed (a
 //!   `$(…)` in `PS1` with a side effect, say) is visible at the next prompt,
@@ -95,7 +95,7 @@ mod term;
 
 pub use bsh_highlight::Theme;
 
-pub use bsh_runtime::{History, HistoryControl};
+pub use bsh_runtime::History;
 pub use editor::{Config, Editor, Flow, NeverNeedsMore, ReadResult, Syntax};
 pub use key::{Decoder, Key};
 pub use line::Line;

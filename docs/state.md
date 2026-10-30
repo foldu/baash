@@ -66,24 +66,32 @@ a meaningful target: bash itself scores 92.4 %, and 55 of our passes come from
 `## OK <shell>` alternatives rather than the primary expectation — which is
 exactly the 71.1 % vs 69.1 % split, and why both numbers are ratcheted.
 
-Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 1982`,
-`strict = 1927`). `--ratchet` exits 1 below either, 2 if it cannot measure.
+Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 1962`,
+`strict = 1908`). `--ratchet` exits 1 below either, 2 if it cannot measure.
 
 **The W1 drop is expected.** Removing job control failed seven Oils cases that
 exercise `%` specifications, `jobs -p` and `kill %job` (one trap case improved
 as a side effect); the pivot accepts a lower number as the price of deleting
 the machinery. Future waves re-baseline the same way.
 
+**The history drop is expected too.** Replacing the history *file* with a
+database cost seven cases and gained one (1968/1914 → 1962/1908): `history
+-w`/`-r`/`-n`, `HISTSIZE` shrinking, `fc -l` on an empty ring, and the two
+`HISTFILE=my-history` interactive cases. A case that expected `fc` to reject
+too many arguments now passes because `fc` does not exist (status 127). The
+count was diffed case by case against the previous commit; nothing else moved.
+
 ## 3. Layers
 
-62 833 lines of `src` across 14 crates.
+62 833 lines of `src` across 15 crates.
 
 | crate | lines | responsibility |
 |---|---|---|
 | `bsh-sys` | 3332 | the only `unsafe`. fork/exec (`posix_spawn` by default), descriptors, pipes/pty, signals, libc regex, global `fork_gate()`; descriptors, termios and `wait` go through `rustix`, and the 77 remaining blocks are leaf syscalls or `posix_spawn` plumbing |
 | `bsh-syntax` | 6607 | lexer + recursive-descent parser producing `Word`/`Command`; the superset grammar |
 | `bsh-lang` | 9862 | shell *text* semantics: word expansion, patterns (`bsh-pattern`), parameter operators, prompt escapes, arithmetic; no I/O |
-| `bsh-runtime` | 11736 | shell *state*: variables/arrays/namerefs, options, builtin registry and state-only bodies, the history ring and `HIST*` policies, traps bookkeeping, completion registry, `declare -p` rendering |
+| `bsh-runtime` | 11736 | shell *state*: variables/arrays/namerefs, options, builtin registry and state-only bodies, traps bookkeeping, completion registry, `declare -p` rendering; re-exports the history ring |
+| `bsh-history` | 1230 | command history: the session ring (navigation, numbering) and the Turso database behind it, written from its own thread |
 | `bsh-vm` | 13242 | the evaluator (tree-walking) and everything that needs both state and syscalls: command execution, redirection, child processes, traps |
 | `bsh-pattern` | 3947 | Thompson-NFA glob: `O(n·m)`, never exponential; `extglob`/`nocasematch`/`utf8` flags |
 | `bsh-diag` | 1946 | diagnostic model and miette rendering; error-code space |
@@ -145,13 +153,15 @@ delegates everything else: line editing to `bsh-repl`, execution to the
     `-o nospace|default|bashdefault|dirnames|plusdirs`; `cd`-like commands
     complete directories;
   * history words, and a navigable menu (Up/Down/BackTab/Ctrl-P);
-* **history as a shell feature**: one ring owned by `bsh-runtime` and shared by
-  the editor and the `history`/`fc` built-ins; `history [n]`, `-c`, `-d`,
-  `-a`, `-n`, `-r`, `-w`, `-p`, `-s`; `fc -l` (`-n`/`-r`/ranges) and `fc -s`;
-  `HISTFILE`, `HISTSIZE`, `HISTFILESIZE`, `HISTCONTROL` (`ignorespace`,
-  `ignoredups`, `ignoreboth`, `erasedups`), `HISTIGNORE` (including `&`), and
-  the `histappend` shopt; default `~/.bsh_history`; the file is loaded at
-  startup and saved on exit; `Up`/`Down` navigation and ghost text;
+* **history as a shell feature**: one ring shared by the editor and the
+  `history` built-in (`bsh-history`), backed by an embedded Turso database;
+  `history [n]`, `-c` and `-d`; `Up`/`Down` navigation and ghost text. There is
+  no history file: `HISTFILE`, `HISTSIZE`, `HISTFILESIZE`, `HISTCONTROL`,
+  `HISTIGNORE`, `HISTTIMEFORMAT`, the `histappend` shopt, `history
+  -a/-n/-r/-w/-p/-s` and `fc` are gone. The database lives in
+  `$XDG_DATA_HOME/bsh/history.db` (`%LOCALAPPDATA%\bsh\history.db` on
+  Windows), `BSH_HISTORY_DB` overrides it, and an empty value disables
+  persistence;
 * **history expansion**: `!` events are rewritten before parsing by the pure
   `bsh_lang::histexpand` module and only in an interactive reader whose
   `histexpand` *and* `history` options are on (`-H` is part of `$-` for every
@@ -214,16 +224,14 @@ delegates everything else: line editing to `bsh-repl`, execution to the
   `&` child is tracked, 1 while it is, and 0 again after `wait`, in the prompt
   and in `${PS1@P}` alike. Without job control there is nothing else to count.
 
-**Known history limitations** (measured or deliberately deferred): `fc` with
-neither `-l` nor `-s` reports "editing history is not implemented yet" instead
-of opening `$FCEDIT`/`$EDITOR`; `history -p` still prints its arguments
-unchanged instead of expanding them (bash expands them even non-interactively,
-so a script that relies on it is the gap); `shopt -s histreedit` is accepted
-but a failed expansion abandons the line rather than reloading it for editing
-(`histverify` *is* implemented); `:G` (per-word substitution) is not
-implemented and reports an unknown modifier; a multi-line command is kept in memory
-but skipped when the line-oriented file is written (bash's `cmdhist` joins it
-with `;`); `HISTTIMEFORMAT` is not implemented; the conformance suite's
+**Known history limitations** (measured or deliberately deferred): history
+numbers are per session (`1…n` over the last 1000 rows plus this session's
+lines) rather than persistent ids, so `!12` names the same command within a
+session and possibly a different one in the next; `history -d` leaves a gap in
+the numbering instead of renumbering the tail; `shopt -s histreedit` is
+accepted but a failed expansion abandons the line rather than reloading it for
+editing (`histverify` *is* implemented); `:G` (per-word substitution) is not
+implemented and reports an unknown modifier; the conformance suite's
 interactive history cases mostly still fail on the bash-only `^D` marker, not
 on history behaviour.
 
@@ -300,7 +308,8 @@ more are the executor's. Eight are missing outright: `times`, `ulimit`,
 `pwd`, `test`) are intentionally exec-able.
 
 * special (15): all but `times` are implemented.
-* intrinsic (16): only `ulimit` and `umask` are missing; `fc` landed here.
+* intrinsic (15): only `ulimit` and `umask` are missing; `fc` is not registered
+  at all (it edited a file that no longer exists).
 * regular (7): `false` and `true` in-process; `echo` is the VM's body; `[`,
   `printf`, `pwd`, `test` fall through to `PATH` by design.
 * extension (18): missing `dirs`, `enable`, `let`, `popd`, `pushd`; `history`
@@ -447,18 +456,20 @@ Where the waves stand:
   `~/.bashrc`; `--rcfile` and `--norc` still win. A bashrc full of
   `bind`/`complete -D`/`PROMPT_COMMAND` half-applies, so a user who wants a
   bsh-specific file gets one without renaming the bash file.
-* **Default history file — deliberate deviation.** `HISTFILE` defaults to
-  `~/.bsh_history`, not bash's `~/.bash_history`. Sharing bash's file means two
-  shells rewriting each other's history (and bash's `histappend` default is
-  off), so the history would be lost or interleaved. The default is applied
-  only to the terminal REPL, after the startup file, and only when neither the
-  environment nor the startup file set `HISTFILE`; an explicitly empty
-  `HISTFILE` disables persistence. A non-terminal `-i` (piped stdin, `-c`)
-  does not invent a file: it would otherwise make an interactive conformance
-  run read and write the user's home directory. Verified: the ratchet reports
-  the same 1986/1931 with a `~/.bsh_history` full of unrelated entries, and
-  the file is left untouched. `/bin/sh` compatibility is unaffected because
-  non-interactive shells neither load nor save.
+* **History is a database, not a file — decided.** A line-oriented `HISTFILE`
+  cannot record when a command ran, where, or with what status, and two shells
+  sharing one rewrite each other's content. `bsh-history` keeps
+  `commands(id, session, seq, text, cwd, started_at, duration_ms, status)` in
+  an embedded Turso database (`$XDG_DATA_HOME/bsh/history.db`,
+  `%LOCALAPPDATA%\bsh\history.db`), opens it only for the terminal REPL, and
+  treats an empty `BSH_HISTORY_DB` as "no persistence". WAL plus a busy timeout
+  is what lets two shells share the file: the second connection gets
+  `experimental_multiprocess_wal(true)`, and a write that lands while another
+  shell is writing waits instead of failing. A database that cannot be opened
+  is reported once and the shell runs with an in-memory ring. Verified: two
+  `Store`s on one file see each other's rows, and a non-terminal `-i` (piped
+  stdin, `-c`) opens nothing, so the conformance run never touches the user's
+  data directory.
 * **The prompt is rendered by the shell, not the editor — decided.** Only the
   shell has the variable table (`PS1` must come from there; the environment is
   a startup snapshot) and only the shell can run `$(…)` for `promptvars`. So

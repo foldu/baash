@@ -100,7 +100,7 @@ pub struct Config {
     pub color: bool,
     /// `PS1`/`PS2` templates and the state their escapes read.
     pub prompt: Prompt,
-    /// History, including the optional file to append to on exit.
+    /// History: the session ring, with the database behind it.
     pub history: History,
     /// Maximum number of rows the completion menu may use.
     pub max_menu_rows: usize,
@@ -260,9 +260,9 @@ impl<'a> Editor<'a> {
         self.dirty = true;
     }
 
-    /// Append this session's history to `HISTFILE`, if there is one.
-    pub fn finish(&mut self) -> io::Result<()> {
-        self.history.save()
+    /// Wait for the history writes this session queued to reach the database.
+    pub fn finish(&mut self) {
+        self.history.flush();
     }
 
     /// Read one complete logical command.

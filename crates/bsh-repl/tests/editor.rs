@@ -2,12 +2,8 @@
 
 mod common;
 
-use std::io::Write;
-
 use bsh_complete::Candidate;
-use bsh_repl::{
-    Config, Editor, Flow, History, HistoryControl, Key, Prompt, ReadResult, Size, Theme,
-};
+use bsh_repl::{Config, Editor, Flow, History, Key, Prompt, ReadResult, Size, Theme};
 
 use common::{
     FakeTerminal, Session, StubCompleter, StubSyntax, apply_keys, chars, clear_output,
@@ -451,9 +447,7 @@ fn history_navigation_restores_the_draft() {
 }
 
 #[test]
-fn duplicates_follow_histcontrol() {
-    // bash keeps duplicates unless HISTCONTROL says otherwise; the old ring
-    // dropped them unconditionally.
+fn every_submitted_line_is_kept_including_duplicates() {
     let driven = session(
         FakeTerminal::new(b"ls\rls\r"),
         &StubCompleter::empty(),
@@ -464,50 +458,38 @@ fn duplicates_follow_histcontrol() {
     assert_eq!(
         driven.history,
         vec![b"ls".to_vec(), b"ls".to_vec()],
-        "no HISTCONTROL means duplicates are kept"
+        "there is no HISTCONTROL to filter a line any more"
     );
-
-    let mut history = History::new();
-    history.set_control(HistoryControl::parse(b"ignoredups"));
-    let driven = session(
-        FakeTerminal::new(b"ls\rls\r"),
-        &StubCompleter::empty(),
-        &bsh_repl::NeverNeedsMore,
-        Config {
-            history,
-            ..plain_config()
-        },
-        3,
-    );
-    assert_eq!(driven.history, vec![b"ls".to_vec()]);
 }
 
 #[test]
-fn history_persists_to_histfile_on_finish() {
-    let path = std::env::temp_dir().join(format!("bsh-repl-editor-hist-{}", std::process::id()));
-    let _ = std::fs::remove_file(&path);
+fn history_reaches_the_database_on_finish() {
+    let path = std::env::temp_dir().join(format!(
+        "bsh-repl-editor-history-{}/history.db",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
     {
-        let mut file = std::fs::File::create(&path).unwrap();
-        file.write_all(b"from-another-shell").unwrap();
-    }
-    let mut term = FakeTerminal::new(b"echo new\r");
-    let completer = StubCompleter::empty();
-    let config = Config {
-        history: History::load(&path),
-        ..plain_config()
-    };
-    {
+        let mut term = FakeTerminal::new(b"echo new\r");
+        let completer = StubCompleter::empty();
+        let config = Config {
+            history: History::open(&path, 100).unwrap(),
+            ..plain_config()
+        };
         let mut editor =
             Editor::with_config(&mut term, &completer, &bsh_repl::NeverNeedsMore, config);
         assert_eq!(
             editor.read_line().unwrap(),
             ReadResult::Line(b"echo new\n".to_vec())
         );
-        editor.finish().unwrap();
+        editor.finish();
     }
-    let contents = std::fs::read(&path).unwrap();
-    assert_eq!(contents, b"from-another-shell\necho new\n");
-    let _ = std::fs::remove_file(&path);
+    let history = History::open(&path, 100).unwrap();
+    assert_eq!(
+        history.commands().collect::<Vec<_>>(),
+        vec![b"echo new".as_slice()]
+    );
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
 #[test]

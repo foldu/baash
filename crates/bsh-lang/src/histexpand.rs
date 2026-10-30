@@ -1620,7 +1620,8 @@ mod tests {
 
     #[test]
     fn numbers_survive_a_trimmed_ring_with_gaps() {
-        // What HISTSIZE=3 leaves after five commands: numbers 5, 6, 7.
+        // Numbers may start above 1 and have gaps: the ring trims and
+        // `history -d` leaves holes, and an event names a number, not a slot.
         let history = entries(&[(5, "echo four"), (6, "echo five"), (7, "history")]);
         assert_eq!(expand("!6", &history), "echo five");
         assert_eq!(expand("!-2", &history), "echo five");

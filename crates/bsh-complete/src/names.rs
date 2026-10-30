@@ -2,10 +2,10 @@
 //!
 //! Two of the six provider sources are defined here as traits rather than as
 //! concrete data, because their data lives above this crate: the variable store
-//! and the history file belong to `bsh-runtime`, and `bsh-complete` must not
-//! depend on it (`DESIGN.md` §4.1). `bsh-runtime` (or `bsh-repl`, whichever
-//! owns the store) implements [`VarNames`], [`History`] and [`ShellNames`] and
-//! hands them in as `Arc`s.
+//! belongs to `bsh-runtime` and the history ring to `bsh-history`, and
+//! `bsh-complete` must not depend on either (`DESIGN.md` §4.1). The binary
+//! implements [`VarNames`], [`History`] and [`ShellNames`] over those and hands
+//! them in as `Arc`s.
 
 use std::sync::Arc;
 
