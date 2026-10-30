@@ -20,6 +20,13 @@ use crate::sources::{self, Provider, ProviderId};
 /// How many names a single `PATH` directory may contribute.
 pub const DEFAULT_ENTRY_CAP: usize = 10_000;
 
+/// A command index built away from the completion thread.
+///
+/// Opaque on purpose: nothing outside this module should be able to construct
+/// one that does not match what [`CommandProvider::names`] would have built.
+#[derive(Clone, Debug)]
+pub struct CommandIndex(Index);
+
 /// A snapshot of one `PATH` value.
 #[derive(Clone, Debug)]
 struct Index {
@@ -86,6 +93,28 @@ impl CommandProvider {
             return Some(path);
         }
         env_bytes("PATH")
+    }
+
+    /// Build the index for the current `PATH` on this thread.
+    ///
+    /// The first command completion otherwise walks every `PATH` directory on
+    /// the thread that also reads keystrokes. A caller with a worker (the REPL
+    /// does) builds the index there and installs it with
+    /// [`CommandProvider::install_index`], so the first TAB is a lookup.
+    pub fn build_index(&self) -> CommandIndex {
+        CommandIndex(self.build(self.current_path()))
+    }
+
+    /// Install an index built by [`CommandProvider::build_index`].
+    ///
+    /// Ignored when `PATH` has changed since it was built: the index carries
+    /// the path it describes, and a stale one would complete names that are no
+    /// longer on `PATH`.
+    pub fn install_index(&self, index: CommandIndex) {
+        if index.0.path != self.current_path() {
+            return;
+        }
+        *lock(&self.state) = Some(index.0);
     }
 
     /// The command names, building or refreshing the index as needed.
@@ -245,4 +274,52 @@ fn path_from_bytes(bytes: &[u8]) -> PathBuf {
 #[cfg(not(unix))]
 fn path_from_bytes(bytes: &[u8]) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+#[cfg(test)]
+mod background_tests {
+    use super::CommandProvider;
+    use std::io::Write;
+
+    /// A directory with one executable in it, on a `PATH` of its own.
+    fn fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("bsh-index-{tag}-{}", std::process::id()));
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let program = bin.join("bsh-background-probe");
+        let mut file = std::fs::File::create(&program).unwrap();
+        file.write_all(b"#!/bin/sh\n").unwrap();
+        drop(file);
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&program, permissions).unwrap();
+        (root, bin)
+    }
+
+    #[test]
+    fn an_index_built_on_a_worker_is_used_by_names() {
+        let (root, bin) = fixture("worker");
+        let provider = std::sync::Arc::new(CommandProvider::with_path_var(
+            bin.as_os_str().as_encoded_bytes().to_vec(),
+        ));
+        // Building here stands in for the worker thread; the point is that
+        // `names()` then *uses* what was installed rather than walking again.
+        let index = provider.build_index();
+        provider.install_index(index);
+        let names = provider.names();
+        assert!(names.iter().any(|name| name == b"bsh-background-probe"));
+
+        // A stale index (same names, but describing a different PATH) is
+        // refused, so a late worker cannot complete names that left `PATH`.
+        let other = CommandProvider::with_path_var(b"/definitely/not/here".to_vec());
+        let stale = other.build_index();
+        provider.install_index(stale);
+        assert!(
+            provider
+                .names()
+                .iter()
+                .any(|name| name == b"bsh-background-probe")
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
 }

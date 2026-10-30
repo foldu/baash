@@ -728,6 +728,21 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
     };
     let mut terminal = bsh_repl::RealTerminal::new();
     let mut editor = bsh_repl::Editor::with_config(&mut terminal, &engine, &syntax, config);
+    // The first command completion would otherwise walk every `PATH` directory
+    // on the thread that reads keystrokes. Build the index on a worker and
+    // install it when it lands (checked once per prompt), so TAB is a lookup
+    // and typing stays responsive while the scan runs.
+    let commands = engine.commands();
+    let (index_tx, index_rx) = std::sync::mpsc::channel();
+    {
+        let commands = std::sync::Arc::clone(&commands);
+        std::thread::Builder::new()
+            .name("bsh-completion-index".to_owned())
+            .spawn(move || {
+                let _ = index_tx.send(commands.build_index());
+            })
+            .ok();
+    }
     // One session per REPL: `:&` and `!%` remember facts across lines, and the
     // quote/here-document state must survive `PS2` continuation lines.
     let mut expansion = histexpand::Session::new();
@@ -737,6 +752,11 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
         // startup: the command just executed may have changed `PS1`, the
         // working directory or `promptvars`, and `\!` must name the line
         // about to be typed.
+        // A finished background scan is installed before the prompt, never
+        // while a key is being read.
+        if let Ok(index) = index_rx.try_recv() {
+            commands.install_index(index);
+        }
         refresh_prompt(shell, &mut editor, &engine);
         // `PROMPT_COMMAND='exit'` leaves the shell before the prompt is drawn.
         if let Some(requested) = shell.state().take_exit_request() {

@@ -67,7 +67,7 @@ mod text;
 pub use bsh_lang::QuoteCtx;
 
 pub use candidate::{CandKind, Candidate, Insertion, Span};
-pub use commands::CommandProvider;
+pub use commands::{CommandIndex, CommandProvider};
 pub use context::{Ctx, context};
 pub use engine::{Completer, CompletionEngine, Config};
 pub use menu::Menu;

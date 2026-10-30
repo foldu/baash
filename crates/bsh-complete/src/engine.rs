@@ -78,6 +78,15 @@ pub struct CompletionEngine {
 }
 
 impl CompletionEngine {
+    /// The `PATH` command source, so a caller can build its index on a worker.
+    ///
+    /// The engine holds it behind an `Arc`; handing it out is what lets the
+    /// REPL warm the index without borrowing the engine from the thread that
+    /// reads keystrokes.
+    pub fn commands(&self) -> Arc<CommandProvider> {
+        Arc::clone(&self.commands)
+    }
+
     /// An engine with the built-in providers and no variable, history or
     /// `complete` source.
     ///
