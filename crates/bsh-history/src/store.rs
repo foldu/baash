@@ -583,6 +583,46 @@ mod tests {
     }
 
     #[test]
+    fn a_version_1_database_is_migrated_in_place() {
+        let path = path("migrate");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        {
+            // The schema exactly as version 1 wrote it: no `deleted` column.
+            let database =
+                crate::block_on(Builder::new_local(path.to_str().unwrap()).build()).unwrap();
+            let connection = database.connect().unwrap();
+            crate::block_on(connection.execute_batch(
+                "CREATE TABLE meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);\
+                 CREATE TABLE sessions (id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, \
+                                        pid INTEGER NOT NULL);\
+                 CREATE TABLE commands (id INTEGER PRIMARY KEY, session INTEGER NOT NULL, \
+                                        seq INTEGER NOT NULL, text BLOB NOT NULL, cwd BLOB, \
+                                        started_at INTEGER NOT NULL, duration_ms INTEGER, \
+                                        status INTEGER);\
+                 CREATE UNIQUE INDEX commands_key ON commands (session, seq);\
+                 INSERT INTO meta (name, value) VALUES ('schema_version', '1');\
+                 INSERT INTO sessions (started_at, pid) VALUES (0, 0);",
+            ))
+            .unwrap();
+            crate::block_on(connection.execute(
+                "INSERT INTO commands (session, seq, text, started_at) VALUES (1, 1, ?1, 0)",
+                (b"old".to_vec(),),
+            ))
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let recent = store.recent(10);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].text, b"old");
+        // The migrated table accepts the new bookkeeping.
+        let id = store.begin(1, b"new", None).unwrap();
+        store.delete(id);
+        store.flush();
+        assert_eq!(store.recent(10).len(), 1);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
     fn a_binary_command_is_stored_byte_for_byte() {
         let store = Store::open_in_memory().unwrap();
         let text = b"printf '\xff\xfe'".to_vec();
