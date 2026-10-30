@@ -83,23 +83,23 @@ count was diffed case by case against the previous commit; nothing else moved.
 
 ## 3. Layers
 
-62 833 lines of `src` across 15 crates.
+64 582 lines of `src` across 15 crates.
 
 | crate | lines | responsibility |
 |---|---|---|
-| `bsh-sys` | 3332 | the only `unsafe`. fork/exec (`posix_spawn` by default), descriptors, pipes/pty, signals, libc regex, global `fork_gate()`; descriptors, termios and `wait` go through `rustix`, and the 77 remaining blocks are leaf syscalls or `posix_spawn` plumbing |
+| `bsh-sys` | 3898 | the only `unsafe`. fork/exec (`posix_spawn` by default), descriptors, pipes/pty, signals, libc regex, global `fork_gate()`; descriptors, termios and `wait` go through `rustix`, and the 77 remaining blocks are leaf syscalls or `posix_spawn` plumbing |
 | `bsh-syntax` | 6607 | lexer + recursive-descent parser producing `Word`/`Command`; the superset grammar |
-| `bsh-lang` | 9862 | shell *text* semantics: word expansion, patterns (`bsh-pattern`), parameter operators, prompt escapes, arithmetic; no I/O |
-| `bsh-runtime` | 11736 | shell *state*: variables/arrays/namerefs, options, builtin registry and state-only bodies, traps bookkeeping, completion registry, `declare -p` rendering; re-exports the history ring |
-| `bsh-history` | 1230 | command history: the session ring (navigation, numbering) and the Turso database behind it, written from its own thread |
-| `bsh-vm` | 13242 | the evaluator (tree-walking) and everything that needs both state and syscalls: command execution, redirection, child processes, traps |
-| `bsh-pattern` | 3947 | Thompson-NFA glob: `O(n·m)`, never exponential; `extglob`/`nocasematch`/`utf8` flags |
+| `bsh-lang` | 11842 | shell *text* semantics: word expansion, patterns (`bsh-pattern`), parameter operators, prompt escapes, arithmetic; no I/O |
+| `bsh-runtime` | 10392 | shell *state*: variables/arrays/namerefs, options, builtin registry and state-only bodies, traps bookkeeping, completion registry, `declare -p` rendering; re-exports the history ring |
+| `bsh-history` | 1244 | command history: the session ring (navigation, numbering) and the Turso database behind it, written from its own thread |
+| `bsh-vm` | 12024 | the evaluator (tree-walking) and everything that needs both state and syscalls: command execution, redirection, child processes, traps |
+| `bsh-pattern` | 4197 | Thompson-NFA glob: `O(n·m)`, never exponential; `extglob`/`nocasematch`/`utf8` flags |
 | `bsh-diag` | 1946 | diagnostic model and miette rendering; error-code space |
-| `bsh-complete` | 3843 | completion engine: providers, contexts, nucleo ranking, menu layout |
-| `bsh-repl` | 3041 | line editor, key decoding, history navigation, prompt adapter, renderer, terminal abstraction |
+| `bsh-complete` | 3928 | completion engine: providers, contexts, nucleo ranking, menu layout |
+| `bsh-repl` | 3079 | line editor, key decoding, history navigation, prompt adapter, renderer, terminal abstraction |
 | `bsh-highlight` | 386 | syntax highlighting (token → style), shared with the editor |
 | `bsh-spec` | 3242 | the Oils-suite runner, comparator, ratchet |
-| `bsh` | 1298 | the binary: argument parsing, startup files, REPL loop, history ownership swap |
+| `bsh` | 1781 | the binary: argument parsing, startup files, REPL loop, history ownership swap |
 | `bsh-tools` | 16 | dev helpers |
 
 The evaluator is the runtime, and for now the only one: the bytecode backend is
@@ -449,6 +449,19 @@ Where the waves stand:
      `spawn_forked` (dead once nothing forks), and the completion-time external
      capture becomes spawn-and-read. Then re-measure and re-record the baseline.
   Job control is no longer in its way.
+
+* **W4 (Windows) — in progress.** `bsh-sys` has a CRT-backed backend
+  (`Fd(c_int)`, `CreateProcess` through `std::process::Command`,
+  `TerminateProcess` for signals, explicit refusals for what Windows lacks),
+  `bsh-lang`'s prompt helpers are portable, and deleting the history file took
+  the last unix-only code out of `bsh-runtime`. `bsh-sys`, `bsh-lang`,
+  `bsh-history` (turso 0.8.3 included, with the `windres` wrapper in
+  `portability.md` §10) and `bsh-runtime` now cross-compile to
+  `x86_64-pc-windows-gnu`. `bsh-vm` is the remaining wall: the `OsStrExt` byte
+  conversions, the `std::os::fd` imports, `bsh_sys::Fd` conversions
+  (`as_raw_fd`, `From<Fd> for File`), `bsh_sys::Regex`, `SpawnPlan::new_with_env`,
+  the `SignalSet`/`NoEcho` helpers and two `PermissionsExt::mode` calls. Then
+  `bsh-repl`, then `bsh`, then `bsh -c 'echo hi'` under Wine.
 
 ## 9. Open questions
 

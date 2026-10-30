@@ -38,7 +38,9 @@ use crate::c_int;
 /// File creation mode.
 ///
 /// Windows has no `mode_t`; the CRT's `_open` takes an integer permission set
-/// and ignores it for a non-`O_CREAT` open.
+/// and ignores it for a non-`O_CREAT` open. The libc name is kept so the
+/// unix-facing signatures read the same on both sides.
+#[allow(non_camel_case_types)]
 pub type mode_t = u32;
 use crate::WaitOutcome;
 

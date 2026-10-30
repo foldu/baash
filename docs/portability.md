@@ -311,10 +311,13 @@ in this order:
 | `bsh-repl` | 3 |
 | `bsh` | 4 |
 
-`bsh-sys` is the wall: it is fd-shaped (`RawFd`, `dup2`, `OwnedFd`) and the
-redirection model is built on `dup2`. The other four crates are small enough to
-fix in one pass — `OsStrExt` for bytes, `MetadataExt` for modes, and
-`std::os::fd` for the tty.
+`bsh-sys` was the wall: it is fd-shaped (`RawFd`, `dup2`, `OwnedFd`) and the
+redirection model is built on `dup2`; it now has a CRT backend and
+cross-compiles, as do `bsh-lang`, `bsh-runtime` and `bsh-history`. `bsh-vm` is
+next and its failures are the same three shapes: `OsStrExt` byte conversions,
+`std::os::fd` imports, and `bsh_sys::Fd` (no `as_raw_fd`/`From<Fd> for File` on
+the Windows side yet), plus `bsh_sys::Regex`, `SpawnPlan::new_with_env`, the
+`SignalSet`/`NoEcho` helpers and two `PermissionsExt::mode` calls.
 
 ### Order of work
 
@@ -353,9 +356,14 @@ the first, the second `Builder::build()` on the same path fails with "database
 is locked" even when the first is idle; without the second, a write that lands
 while the other shell is writing fails instead of waiting. Both were verified
 in one process (two stores on one file, each seeing the other's rows), and the
-mode is refused for `:memory:`, which takes the plain builder. This has only
-been verified on Linux so far — the Windows cross-build of `bsh-history` is the
-next step in W4.
+mode is refused for `:memory:`, which takes the plain builder.
+
+The runtime behaviour is verified on Linux; for Windows, `bsh-history` (and
+therefore turso with both of those options) cross-compiles for
+`x86_64-pc-windows-gnu`, but the database has not been executed under Wine yet
+— `bsh` itself does not cross-build until `bsh-vm` does. `bsh-runtime` also
+cross-compiles now, because deleting the history file removed its last
+unix-only code.
 
 One Windows build detail: `turso_sdk_kit`'s build script links a version
 resource by invoking plain `windres`, which `cargo-zigbuild` does not provide.
@@ -363,10 +371,15 @@ Put a wrapper *script* (not a symlink — nix-wrapped binutils resolve their own
 directory from `argv[0]`, so a symlink breaks them) on `PATH`:
 
 ```sh
-printf '#!/bin/sh\nexec %s "$@"\n' \
-    "$(nix shell nixpkgs#pkgsCross.mingwW64.stdenv.cc \
-        --command sh -c 'command -v x86_64-w64-mingw32-windres')" \
-    > "$HOME/.cache/bsh-wbin/windres"
+MINGW_BIN=$(dirname "$(nix shell nixpkgs#pkgsCross.mingwW64.stdenv.cc \
+    --command sh -c 'command -v x86_64-w64-mingw32-windres')")
+printf '#!/bin/sh\nexec env PATH=%s:$PATH %s/x86_64-w64-mingw32-windres "$@"\n' \
+    "$MINGW_BIN" "$MINGW_BIN" > "$HOME/.cache/bsh-wbin/windres"
 chmod +x "$HOME/.cache/bsh-wbin/windres"
 # then PATH=$HOME/.cache/bsh-wbin:$TC:$PATH cargo zigbuild --target x86_64-pc-windows-gnu
 ```
+
+The wrapper has to prepend the MinGW `bin` to `PATH`, not just `exec` the one
+binary: `windres` shells out to `x86_64-w64-mingw32-gcc` as its preprocessor,
+and `cargo-zigbuild`'s own toolchain does not contain one, so a bare wrapper
+fails with `x86_64-w64-mingw32-gcc: command not found`.
