@@ -11,7 +11,6 @@ bsh-diag.workspace = true
 bsh-syntax.workspace = true
 bsh-highlight.workspace = true
 bsh-lang.workspace = true
-bsh-compile.workspace = true
 bsh-runtime.workspace = true
 bsh-vm.workspace = true
 bsh-sys.workspace = true

@@ -1,11 +1,9 @@
-//! The tree-walking evaluator: ßhell's reference execution backend.
+//! The tree-walking evaluator: ßhell's execution engine.
 //!
-//! DESIGN.md §5.7 sequences the work this way on purpose: build an AST
-//! interpreter first, ship the interactive shell on it, and only then add the
-//! bytecode compiler and VM behind `--interp=vm`. The evaluator stays forever
-//! as the **reference backend** and the whole spec suite runs through both, so
-//! that a disagreement between them is a compiler bug rather than a second
-//! opinion about the language.
+//! There is no second engine. A bytecode compiler and VM were sequenced to
+//! follow this one (`--interp=vm`, differential-tested against it); that plan
+//! is dropped, because a shell statement ends in a word expansion or a syscall
+//! and dispatch is a small term next to either. See `docs/direction.md` §2.
 //!
 //! # What is here
 //!

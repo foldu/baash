@@ -4,10 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The execution engine: AST evaluator (reference backend) and the bytecode interpreter loop"
+description = "The execution engine: the tree-walking evaluator"
 
 [dependencies]
-bsh-compile.workspace = true
 bsh-runtime.workspace = true
 bsh-lang.workspace = true
 bsh-diag.workspace = true

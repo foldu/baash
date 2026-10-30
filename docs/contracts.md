@@ -10,8 +10,7 @@ and treat every item here as a fact about the API you are calling.
 
 Status: everything except the tooling has landed: `bsh-diag`, `bsh-sys`,
 `bsh-runtime`, `bsh-lang`, `bsh-syntax`, `bsh-complete`, the `bsh-vm`
-tree-walking executor and the `bsh-repl` editor. `bsh-compile` still holds
-types only.
+tree-walking executor and the `bsh-repl` editor.
 
 ---
 

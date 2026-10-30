@@ -12,7 +12,6 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 name = "bsh"
 version = "0.0.0"
 dependencies = [
- "bsh-compile",
  "bsh-complete",
  "bsh-diag",
  "bsh-highlight",
@@ -23,14 +22,6 @@ dependencies = [
  "bsh-sys",
  "bsh-tools",
  "bsh-vm",
-]
-
-[[package]]
-name = "bsh-compile"
-version = "0.0.0"
-dependencies = [
- "bsh-diag",
- "bsh-syntax",
 ]
 
 [[package]]
@@ -128,7 +119,6 @@ dependencies = [
 name = "bsh-vm"
 version = "0.0.0"
 dependencies = [
- "bsh-compile",
  "bsh-diag",
  "bsh-lang",
  "bsh-pattern",

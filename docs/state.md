@@ -92,13 +92,13 @@ the machinery. Future waves re-baseline the same way.
 | `bsh-highlight` | 386 | syntax highlighting (token → style), shared with the editor |
 | `bsh-spec` | 3242 | the Oils-suite runner, comparator, ratchet |
 | `bsh` | 1298 | the binary: argument parsing, startup files, REPL loop, history ownership swap |
-| `bsh-compile` | 120 | bytecode types only (`Chunk`, `Op`, `Vm{chunk,pc}`) — wave 5, unwired |
 | `bsh-tools` | 16 | dev helpers |
 
-The evaluator is the runtime; `bsh-compile` is a placeholder. This is
-deliberate (see `DESIGN.md` §5 and the note in `bsh-vm/src/tree/mod.rs`): ship
-an evaluator, keep it as the oracle, and only then add the bytecode VM behind
-the same semantics tests.
+The evaluator is the runtime, and it is the only one: the bytecode backend was
+dropped before it was written (`docs/direction.md` §2). Dispatch is not where a
+shell spends its time — a statement ends in a word expansion or a syscall — so
+a second engine would have bought a few percent and cost a permanent agreement
+between two implementations.
 
 ## 4. The interactive shell today
 
@@ -376,8 +376,8 @@ Do not re-litigate these without a reason; several were expensive.
 * **Arrays slice by subscript boundary** (negative offsets from
   `max_index + 1`); positional parameters are one-based with offset 0 = `$0`.
 * **Completion ranking is nucleo** (as specified); menu rendering is ours.
-* **`bsh-vm` keeps the evaluator** even after the bytecode VM lands; it is the
-  oracle for the VM's semantics tests.
+* **One execution engine.** The tree-walking evaluator is not a reference
+  implementation for a faster one to displace; it is the shell.
 
 ## 8. Next steps
 

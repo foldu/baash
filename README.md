@@ -87,8 +87,9 @@ answer status 2 with `BSH-E0508`; missing special variables expand to nothing.
 editor's deferred list (vi mode, undo, search highlighting, `SIGWINCH` reflow)
 is at the top of `crates/bsh-repl/src/lib.rs`.
 
-The bytecode backend is not written yet either: `bsh-vm` runs a tree-walking
-evaluator, which is kept afterwards as the reference backend for the compiler.
+`bsh-vm` is a tree-walking evaluator, and it is the only engine: the bytecode
+backend was dropped rather than half-built, because dispatch is not where a
+shell spends its time.
 
 ## Layout
 
@@ -98,9 +99,8 @@ crates/
   bsh-syntax     lexer, spans, parse outcomes, expectations
   bsh-highlight  token + theme -> styled spans, ANSI rendering
   bsh-lang       words, quoting, expansion
-  bsh-compile    bytecode types (unwired; DESIGN §5)
   bsh-runtime    options, variables, the ShellHost interface
-  bsh-vm         the interpreter loop
+  bsh-vm         the evaluator
   bsh-sys        syscalls, tty detection, fork gate   <- the only `unsafe` crate
   bsh-complete   completion candidates and ranking
   bsh-repl       line editor and terminal rendering

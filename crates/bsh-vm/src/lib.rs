@@ -1,18 +1,17 @@
 //! The execution engine.
 //!
-//! This crate has two backends, deliberately, and the order matters
-//! (DESIGN.md §5.7):
+//! One engine, deliberately: [`tree`] is a tree-walking evaluator over the
+//! `bsh-syntax` AST, and it is the whole implementation — word expansion
+//! wiring, the command search order, redirections, pipelines, compound
+//! commands, unwinding (`break`/`continue`/`return`/`exit`/`errexit`) and the
+//! POSIX §2.8.1 consequence table.
 //!
-//! * [`tree`] — the **reference backend**. A tree-walking evaluator over the
-//!   `bsh-syntax` AST that owns the semantics: word expansion wiring, the
-//!   command search order, redirections, pipelines, compound commands,
-//!   unwinding (`break`/`continue`/`return`/`exit`/`errexit`) and the POSIX
-//!   §2.8.1 consequence table. It ships first and stays forever: the bytecode
-//!   backend is differential-tested against it, so a disagreement between the
-//!   two is a bug in the compiler, not a second opinion about the language.
-//! * [`Vm`] — the bytecode interpreter loop. Not written yet; the settled
-//!   shapes live in `bsh-compile` and the loop lands next (DESIGN.md §5.9).
-//!   The evaluator is the oracle that makes that safe to do.
+//! A bytecode backend was planned as a second engine to differential-test
+//! against this one. That plan is dropped (`docs/direction.md` §2): dispatch
+//! was never the cost — a shell statement ends in a syscall or a word
+//! expansion — and a second engine is a permanent agreement to maintain. If a
+//! profile ever disagrees, the fix is inside this crate (cache the command
+//! lookup, expand words once), not a second implementation.
 //!
 //! # The per-command sequence is fixed
 //!
@@ -35,8 +34,6 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
-
-use bsh_compile::Chunk;
 
 pub mod arith;
 pub mod glob;
@@ -72,19 +69,4 @@ pub mod codes {
     pub const CONTROL_FLOW: ErrCode = ErrCode::new(208);
     /// An internal invariant was violated; always a bug in this crate.
     pub const INTERNAL: ErrCode = ErrCode::new(299);
-}
-
-/// Interpreter state for the bytecode backend.
-///
-/// Not implemented: the plan (DESIGN.md §5.9) is a plain
-/// `loop { match code[pc] { … } }` on stable Rust — no threaded dispatch, no
-/// `musttail`, no unsafe, because in a shell almost every statement ends in a
-/// syscall and dispatch is a small term. The escape hatch, if it ever shows up
-/// in a profile, is one closure per op. Use [`tree::Interp`] until then.
-#[derive(Debug, Default)]
-pub struct Vm {
-    /// The chunk being executed.
-    pub chunk: Chunk,
-    /// Program counter.
-    pub pc: usize,
 }
