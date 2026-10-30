@@ -30,6 +30,7 @@ rustix = { version = "1.1", default-features = false, features = [
     "termios",
     "event",
     "process",
+    "pty",
 ] }
 memchr = "2"
 smallvec = "1"
