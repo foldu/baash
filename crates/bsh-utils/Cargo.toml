@@ -1,0 +1,14 @@
+[package]
+name = "bsh-utils"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Embedded coreutils, so a script without a POSIX userland still runs"
+
+[dependencies]
+bsh-sys.workspace = true
+# Individual uutils binaries, not the umbrella crate: each is a small library
+# with a `uumain(args) -> UResult<()>` entry point, and only the ones that are
+# listed here are linked.
+uu_printf = "0.8"

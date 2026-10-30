@@ -184,10 +184,7 @@ pub fn refresh(shell: &mut Interp, engine: &bsh_complete::CompletionEngine) {
         });
 
         engine.set_path_var(Some(path));
-        engine.set_home(
-            home.as_deref()
-                .map(bsh_sys::os::path_from_bytes),
-        );
+        engine.set_home(home.as_deref().map(bsh_sys::os::path_from_bytes));
         if let Some(pwd) = pwd.as_deref() {
             engine.set_root(bsh_sys::os::path_from_bytes(pwd));
         }

@@ -21,6 +21,7 @@ bsh-sys = { path = "crates/bsh-sys" }
 bsh-complete = { path = "crates/bsh-complete" }
 bsh-repl = { path = "crates/bsh-repl" }
 bsh-tools = { path = "crates/bsh-tools" }
+bsh-utils = { path = "crates/bsh-utils" }
 
 libc = "0.2"
 # The event loop: completion-based I/O, io_uring on Linux and IOCP on Windows.
