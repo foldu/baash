@@ -6,12 +6,13 @@
 //! commands, unwinding (`break`/`continue`/`return`/`exit`/`errexit`) and the
 //! POSIX §2.8.1 consequence table.
 //!
-//! A bytecode backend was planned as a second engine to differential-test
-//! against this one. That plan is dropped (`docs/direction.md` §2): dispatch
-//! was never the cost — a shell statement ends in a syscall or a word
-//! expansion — and a second engine is a permanent agreement to maintain. If a
-//! profile ever disagrees, the fix is inside this crate (cache the command
-//! lookup, expand words once), not a second implementation.
+//! A bytecode backend is deferred, not abandoned — the crate is named for one,
+//! and `DESIGN.md` §5 keeps the design (`docs/direction.md` §2). Dispatch is not
+//! where a shell spends its time: a statement ends in a word expansion or a
+//! syscall, and measured interpretation is already 1.0–2.1× bash. A second
+//! engine built now would be a permanent agreement to keep two implementations
+//! identical. Until it exists, a profile that disagrees with bash is fixed here
+//! (cache the command lookup, expand words once).
 //!
 //! # The per-command sequence is fixed
 //!

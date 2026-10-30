@@ -94,11 +94,11 @@ the machinery. Future waves re-baseline the same way.
 | `bsh` | 1298 | the binary: argument parsing, startup files, REPL loop, history ownership swap |
 | `bsh-tools` | 16 | dev helpers |
 
-The evaluator is the runtime, and it is the only one: the bytecode backend was
-dropped before it was written (`docs/direction.md` §2). Dispatch is not where a
-shell spends its time — a statement ends in a word expansion or a syscall — so
-a second engine would have bought a few percent and cost a permanent agreement
-between two implementations.
+The evaluator is the runtime, and for now the only one: the bytecode backend is
+deferred until the bash surface is smaller (`docs/direction.md` §2), with the
+design kept in `DESIGN.md` §5. Dispatch is not where a shell spends its time — a
+statement ends in a word expansion or a syscall — so a second engine today would
+buy a few percent and cost a permanent agreement between two implementations.
 
 ## 4. The interactive shell today
 
@@ -376,8 +376,9 @@ Do not re-litigate these without a reason; several were expensive.
 * **Arrays slice by subscript boundary** (negative offsets from
   `max_index + 1`); positional parameters are one-based with offset 0 = `$0`.
 * **Completion ranking is nucleo** (as specified); menu rendering is ours.
-* **One execution engine.** The tree-walking evaluator is not a reference
-  implementation for a faster one to displace; it is the shell.
+* **One execution engine, for now.** The tree-walking evaluator is the shell.
+  A bytecode VM stays on the table for later — the crate is named for it — but
+  it is not being built alongside.
 
 ## 8. Next steps
 
@@ -502,10 +503,10 @@ Where the waves stand:
   spans `PS2` lines (a `!` inside a continuing single-quoted string stays
   literal). `fc`'s editor form is still deferred.
 * **`set -o vi`** exists in the option table but has no editor behind it.
-* **Bytecode VM.** Types exist; `DESIGN.md` §5 disagrees with the code on
-  `Vec<u32>` vs `Vec<Op>` and on static vs push/pop handler tables. The
-  recommendation is `Vec<Op>` + a static handler table, but that decision is
-  not recorded in `DESIGN.md` yet.
+* **Bytecode VM.** Deferred, not scheduled (`docs/direction.md` §2). The type
+  sketch that used to sit in `bsh-compile` is deleted, and the two contradictions
+  `DESIGN.md` §5 carried are resolved in it: chunks are `Vec<Op>`, and handlers
+  are a static table rather than push/pop opcodes.
 * **GitLab remote** does not exist; CI is written but has never run.
 
 ## 10. Conventions

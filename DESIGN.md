@@ -8,6 +8,13 @@ read out of the Oils tree (`oils-for-unix/oils`, Apache-2.0); `[nucleo]` checked
 against `nucleo-matcher` 0.3.1 docs; `[zsh]`/`[bash]` checked empirically;
 `[rec]` my recommendation.
 
+**Superseded in places (2026-10-30).** The project pivoted after this was
+written: there are no profiles (§3.1–3.2), shell code no longer forks and the
+fork gate is deleted (§4.3, and `docs/direction.md` §2/§3), job control is
+removed (§4.5), and the bytecode VM is deferred (§5). `docs/direction.md`
+records the current decisions and wins wherever the two disagree; the rest of
+this file is still the reasoning behind the code.
+
 ---
 
 ## 1. Thesis
@@ -291,6 +298,12 @@ This is the one irreversible decision in the document.
 
 ### 4.3 Threads and the fork gate
 
+**Superseded in part (2026-10-30):** shell code no longer forks — subshells and
+`$( … )` become scopes — so `ThreadGate` is deleted and threads are legal
+everywhere. What survives is the child-side rule (no allocation, no locking, no
+dropping, no panicking between `fork` and `exec`, for the few places that must
+still fork) and `posix_spawn` as the default for external commands.
+
 Earlier drafts said "the interpreter is single-threaded". That was too strong,
 and it matters here because a fuzzy matcher tempts you into threads.
 
@@ -359,7 +372,7 @@ it. So: self-pipe or `signalfd`; the handler sets a byte; the main loop drains
 at defined safe points. No handler ever touches interpreter state.
 
 Interactive Ctrl-C has three distinct meanings that must be three code paths:
-cancel the line edit, interrupt the running foreground job, or interrupt a
+cancel the line edit, interrupt the running foreground command, or interrupt a
 completion. Conflating them is why some shells eat Ctrl-C.
 
 `SIGCHLD` is a wakeup hint only — never trust it to be delivered once per child
@@ -611,10 +624,18 @@ support and the handler actually used. Leave `syntect`, `backtrace` and
 
 ## 5. Execution: the bytecode VM
 
+**Deferred (2026-10-30).** The tree-walking evaluator is the engine and a second
+engine is not being built alongside (`docs/direction.md` §2). This section is
+the design to start from once the bash-compat surface is smaller — the crate is
+still named `bsh-vm` for it — not a plan of work.
+
 ### 5.1 What gets compiled
 
 A **chunk** is one compilable unit: a function body, a `-c` string, a sourced
-file, or an interactive line. Chunks are `Vec<u32>` code plus side tables.
+file, or an interactive line. Chunks are `Vec<Op>` code plus side tables.
+(`Vec<u32>` packing was an earlier sketch: it buys a narrower cache line on a
+dispatch loop nobody has profiled, and costs every reader the ability to see the
+instruction. Pack after measuring.)
 
 There are **no variable registers**. Shell variables are dynamically scoped and
 name-addressed; the VM stack holds only expansion temporaries and loop
@@ -644,8 +665,6 @@ enum Op {
     Case     { word: WordId, arms: ArmTableId },
     CallFunc { name: NameId, words: WordListId },
     Subshell (ChunkId) | BgJob (ChunkId),
-    PushHandler { kind: HandlerKind, target: u32, depth: u16 },
-    PopHandler,
     Return | Break(u8) | Continue(u8) | Exit,
     Noop(Span),
 }
@@ -653,6 +672,11 @@ enum Op {
 
 Roughly 25 opcodes. If a proposed opcode mentions a word-expansion detail, it
 belongs in `bsh-lang`, not the ISA.
+
+There are no `PushHandler`/`PopHandler` opcodes. Which handler covers an address
+is a compile-time property of the region, so it lives in the static table of
+§5.3; pushing and popping at run time would cost an instruction per region
+entered and give the table and the stack a way to disagree.
 
 ### 5.3 Control flow as unwinding — the actual argument for a VM
 

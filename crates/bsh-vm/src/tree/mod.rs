@@ -1,9 +1,10 @@
 //! The tree-walking evaluator: ßhell's execution engine.
 //!
-//! There is no second engine. A bytecode compiler and VM were sequenced to
-//! follow this one (`--interp=vm`, differential-tested against it); that plan
-//! is dropped, because a shell statement ends in a word expansion or a syscall
-//! and dispatch is a small term next to either. See `docs/direction.md` §2.
+//! There is no second engine yet. A bytecode compiler and VM were sequenced to
+//! follow this one (`--interp=vm`, differential-tested against it); that plan is
+//! deferred until the bash surface is smaller, because a shell statement ends in
+//! a word expansion or a syscall and dispatch is a small term next to either.
+//! `DESIGN.md` §5 keeps the design; `docs/direction.md` §2 records the deferral.
 //!
 //! # What is here
 //!

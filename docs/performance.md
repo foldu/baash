@@ -28,8 +28,8 @@ the release column is `cargo build --release`.
 * **The tree-walking evaluator costs 1–2× bash per interpreted statement in
   release**, and is *faster* where a process is spawned (posix_spawn instead of
   fork). That is the shape this design expects: interpretation is not the
-  bottleneck, which is why there is no bytecode backend to compare against
-  (`docs/direction.md` §2).
+  bottleneck, which is why the bytecode VM (`DESIGN.md` §5) is deferred
+  (`docs/direction.md` §2) rather than built alongside.
 * **Debug is 14–25× slower than bash on interpreted work.** Nothing about the
   architecture changed between the two columns; it is entirely optimiser
   absence (no inlining, bounds checks, overflow checks, unoptimised

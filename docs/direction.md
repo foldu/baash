@@ -31,7 +31,7 @@ an architecture that is not poisoned by `fork`. This document supersedes the
 | conformance | a **curated subset** later; for now measure what works. The Oils number stops being a goal and becomes a regression signal we re-baseline. |
 | Windows CI | none; cross-compile. |
 | uutils | embedded, curated (not all 100+), feature-gated so Linux builds can skip them if desired. |
-| bytecode backend | **dropped.** The tree-walking evaluator is the engine. Measured interpretation is already 1.0–2.1× bash, and dispatch is a small term when every statement ends in a syscall or a word expansion. Two engines would be a permanent agreement to maintain, which is the thing this pivot is deleting. |
+| bytecode backend | **deferred, not dropped.** The tree-walking evaluator is the engine for now; the crate keeps its name because a real VM is the intent once the bash surface is cut down (DESIGN.md §5 records the design). Two engines today would be a permanent agreement to maintain, and dispatch is a small term when every statement ends in a syscall or a word expansion. |
 | feature ceiling | "up to and including `coproc`" — see the open question in §7, because `coproc` conflicts with the other commitments. |
 
 ## 3. What this deletes

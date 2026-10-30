@@ -1,7 +1,8 @@
 # ßhell
 
 A POSIX- and bash-compatible interactive shell in Rust. The design rationale
-lives in [DESIGN.md](DESIGN.md); this file is the operator's manual.
+lives in [DESIGN.md](DESIGN.md); the current direction is
+[docs/direction.md](docs/direction.md); this file is the operator's manual.
 
 **Status: it runs, and conformance is now measured.** `bsh` executes scripts,
 and `bsh` with no arguments gives you an interactive editor with syntax
@@ -87,9 +88,10 @@ answer status 2 with `BSH-E0508`; missing special variables expand to nothing.
 editor's deferred list (vi mode, undo, search highlighting, `SIGWINCH` reflow)
 is at the top of `crates/bsh-repl/src/lib.rs`.
 
-`bsh-vm` is a tree-walking evaluator, and it is the only engine: the bytecode
-backend was dropped rather than half-built, because dispatch is not where a
-shell spends its time.
+`bsh-vm` is a tree-walking evaluator, and for now it is the only engine: the
+bytecode VM is deferred until the bash surface is smaller, and the crate keeps
+its name for it (`DESIGN.md` §5, `docs/direction.md` §2). Dispatch is not where
+a shell spends its time.
 
 ## Layout
 
