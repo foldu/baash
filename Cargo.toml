@@ -14,6 +14,7 @@ bsh-syntax = { path = "crates/bsh-syntax" }
 bsh-highlight = { path = "crates/bsh-highlight" }
 bsh-lang = { path = "crates/bsh-lang" }
 bsh-pattern = { path = "crates/bsh-pattern" }
+bsh-history = { path = "crates/bsh-history" }
 bsh-runtime = { path = "crates/bsh-runtime" }
 bsh-vm = { path = "crates/bsh-vm" }
 bsh-sys = { path = "crates/bsh-sys" }
