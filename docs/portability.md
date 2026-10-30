@@ -337,12 +337,15 @@ which is why step 1 is a platform module rather than a `cfg` sprinkled through
 
 ### Turso on Windows: verified (2026-10-30)
 
-`turso = "0.9.0-pre.2"` builds for `x86_64-pc-windows-gnu` with the recipe above
+`turso = "0.8"` (0.8.3, the latest stable — `cargo add` picks it over the
+`0.9.0-pre.2` pre-release) builds for `x86_64-pc-windows-gnu` with the recipe
+above
 and **runs under Wine**: `CREATE TABLE`, `INSERT`, `SELECT` and a row read back
 all succeed. Its API is async (`Builder::new_local(path).build().await`,
 `db.connect()`, `conn.execute(..).await`, `rows.next().await`), which is what a
-compio-driven shell wants. The crate is a pre-release, which is a real risk for
-a storage format the user keeps forever.
+compio-driven shell wants, and its I/O backends include io_uring and IOCP, the
+same two runtimes the shell needs. Both Linux and the Wine run were verified with
+0.8.3.
 
 One Windows build detail: `turso_sdk_kit`'s build script links a version
 resource by invoking plain `windres`, which `cargo-zigbuild` does not provide.
