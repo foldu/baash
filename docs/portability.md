@@ -153,6 +153,40 @@ globbing, drive letters and UNC paths in the parser's "is this a path" logic,
 and `\` remaining an escape — so Windows paths are written `C:/Users/...` or
 quoted, as msys does.
 
+### 5a. `rustix` stops at the Windows boundary
+
+On Unix, descriptors, termios, ptys and child waiting go through `rustix` rather
+than hand-written `libc` bindings, because it already owns the `io-safety` shape,
+the `Errno` type and the per-architecture layouts. That is a Unix answer and it
+does not generalise:
+
+* `rustix::fs` is `#[cfg(not(windows))]`. File handling — open, dup, seek,
+  `O_TMPFILE`, memfd, unlink — has no Windows implementation there.
+* `termios` and `pty` are Unix concepts; the Windows analogues are
+  `SetConsoleMode` and ConPTY, which `rustix` does not wrap.
+* `rustix::process` is Unix-shaped: signals, `waitpid`, process groups. Windows
+  has console control events and waitable process handles, neither of which maps
+  onto those.
+
+So `rustix` is **not** the portable layer. The Windows implementations are
+separate `#[cfg(windows)]` modules that use `std` where it is enough
+(`std::io::pipe`, `std::process::Command`) and `windows-sys` where it is not
+(`CreateProcessW` with `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, ConPTY,
+`ReadConsoleInputW`). The dependency itself is `cfg(unix)`-gated so that a
+Windows build does not carry a crate whose relevant modules vanish.
+
+Two consequences worth deciding early, because they reach into `bsh-vm`:
+
+* **Handles are not descriptors.** `OwnedFd`, `borrowed()`, `dup2` and the
+  numbered fd table above 2 are Unix affordances; Windows has inheritable
+  handles and `STARTUPINFO`/`SetStdHandle`. Either `bsh-sys` grows a portable
+  `Redirect`/`SpawnPlan` vocabulary that both backends implement, or the fd
+  table is abstracted behind a handle type. Doing this in W2/W3 while the shapes
+  are still small is cheaper than discovering it during W4.
+* **`FdAction` has no Windows spelling.** `Dup2`/`Close`/`Open` become
+  "which handles go in the handle list, and what are their std handles" —
+  a different data structure, not a translation of the same one.
+
 ## 6. uutils as built-ins
 
 The point is not "coreutils exist on Windows" (uutils already ships binaries).
@@ -194,12 +228,14 @@ uutils binary. If it is ~5 ms saved and +1 MB, expand; if clap costs 8 MB and
    `--check --profile=…`; add the rejection table for the constructs above;
    measure "no silent wrongness" over the Oils corpus.
 2. **Before Windows:** replace the four `fork` sites with in-process scopes for
-   the constructs marked "in-process" above; keep fork as the default profile
-   until the suite is green in both modes. This is the same change that makes
-   helper threads legal, so it doubles as the answer to the completion-worker
-   question.
-3. **Windows shell:** `bsh-sys` platform layer behind traits (spawn, terminal,
-   jobs, paths), then a `windows` profile that rejects the rest.
+   the constructs marked "in-process" above. Hard cut, no profile switch: fork
+   goes away entirely for shell code, and external commands keep using
+   `posix_spawn`. This is the same change that makes helper threads legal, so it
+   doubles as the answer to the completion-worker question.
+3. **Windows shell:** `bsh-sys` platform layer behind the portable spawn and
+   redirect vocabulary described in §5a, then a `windows` profile that rejects
+   the rest. Settle that vocabulary while the shapes are small, not during the
+   port.
 4. **uutils:** the two-utility spike, then expand by measurement.
 
 The live prompt ([`prompt-watch.md`](prompt-watch.md)) is the first feature that

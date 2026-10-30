@@ -8,6 +8,11 @@ description = "Syscall boundary: fds, tty, process creation"
 
 [dependencies]
 libc.workspace = true
+
 # Leaf syscalls the shell would otherwise hand-bind: `rustix` owns the
-# `io-safety` shape, the `Errno` type and the per-architecture layouts.
-rustix = { workspace = true }
+# `io-safety` shape, the `Errno` type and the per-architecture layouts. Unix
+# only, deliberately — `rustix::fs`, `termios` and `pty` have no Windows
+# implementation, so the Windows lane is std plus `windows-sys` (portability.md
+# §5a) and this dependency would be dead weight there.
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
