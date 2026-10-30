@@ -468,6 +468,15 @@ Where the waves stand:
   report "not implemented" there — the embedded-uutils wave), ConPTY for the
   interactive editor, and PATHEXT-based command resolution.
 
+  The utility fallback has landed: `crates/bsh-utils` embeds `printf`,
+  `test`/`[`, `cat`, `mkdir`, `rm`, `ls`, `wc`, `head`, `tail`, `tr`, `seq` and
+  `sleep`, the `builtin-utils` feature is opt-in on Linux and forced on for
+  Windows, and the executor consults it only after `PATH` resolution fails
+  (external utilities still win). Verified under Wine end to end. Cost:
+  +3.7 MiB and 151 crates in that crate's tree; Linux release is thin LTO with
+  16 codegen units (44 s), while `profile.windows` (fat LTO, one unit,
+  stripped, 16.4 MiB) is built by CI so the local loop stays fast.
+
 ## 9. Open questions
 
 * **Startup file — decided.** `~/.bshrc` is sourced when it exists, otherwise

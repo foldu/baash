@@ -70,3 +70,28 @@ package:
   artifacts:
     paths:
       - dist/
+
+# The Windows build is the slow one on purpose: `profile.windows` is fat LTO
+# with one codegen unit, which nobody should pay in a local loop. It needs a
+# Rust toolchain that carries the target's std (nixpkgs' rustc does not), so
+# rustup installs it into the project cache, and cargo-zigbuild supplies the
+# mingw linker through zig.
+package:windows:
+  stage: package
+  tags: [nix]
+  variables:
+    RUSTUP_HOME: "$CI_PROJECT_DIR/.rustup"
+    CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  cache:
+    key: "windows-$CI_COMMIT_REF_SLUG"
+    paths:
+      - target/
+      - .rustup/
+      - .cargo/
+  script:
+    - nix shell nixpkgs#rustup nixpkgs#cargo-zigbuild nixpkgs#zig --command bash -c '
+      rustup toolchain install stable --profile minimal --target x86_64-pc-windows-gnu &&
+      PATH="$RUSTUP_HOME/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PATH" cargo zigbuild --profile windows --target x86_64-pc-windows-gnu -p bsh'
+  artifacts:
+    paths:
+      - target/x86_64-pc-windows-gnu/windows/bsh.exe

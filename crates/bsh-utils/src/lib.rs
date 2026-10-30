@@ -9,9 +9,17 @@
 //!
 //! Only the utilities that are actually embedded are linked: each `uu_*` crate
 //! is a library with one entry point, and the table below is the whole
-//! surface. `true`, `false`, `echo` and `pwd` stay the VM's own bodies — they
-//! are cheaper in-process and bash-shaped, and a script must not notice the
-//! difference between them and a utility.
+//! surface. The set is chosen, not accreted: `printf`, `test`/`[`, `cat`,
+//! `mkdir`, `rm`, `ls`, `wc`, `head`, `tail`, `tr`, `seq`, `sleep`.
+//!
+//! `true`, `false`, `echo` and `pwd` stay the VM's own bodies — they are
+//! cheaper in-process and bash-shaped, and a script must not notice the
+//! difference between them and a utility. `grep`, `sed`, `awk` and the rest of
+//! the non-coreutils toolbox are deliberately absent.
+//!
+//! Error text is uutils' translated message for the current locale; the
+//! catalogs are loaded from a `locales/` directory that an embedded call does
+//! not have, so a failure prints the key until that is wired up.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -29,6 +37,16 @@ const UTILITIES: &[(&str, Entry)] = &[
     ("printf", run_printf),
     ("test", run_test),
     ("[", run_bracket),
+    ("cat", run_cat),
+    ("mkdir", run_mkdir),
+    ("rm", run_rm),
+    ("ls", run_ls),
+    ("wc", run_wc),
+    ("head", run_head),
+    ("tail", run_tail),
+    ("tr", run_tr),
+    ("seq", run_seq),
+    ("sleep", run_sleep),
 ];
 
 /// Run `argv` if `argv[0]` names an embedded utility.
@@ -65,6 +83,46 @@ fn run_printf(args: Vec<OsString>) -> i32 {
 
 fn run_test(args: Vec<OsString>) -> i32 {
     uu_test::uumain(args.into_iter())
+}
+
+fn run_cat(args: Vec<OsString>) -> i32 {
+    uu_cat::uumain(args.into_iter())
+}
+
+fn run_mkdir(args: Vec<OsString>) -> i32 {
+    uu_mkdir::uumain(args.into_iter())
+}
+
+fn run_rm(args: Vec<OsString>) -> i32 {
+    uu_rm::uumain(args.into_iter())
+}
+
+fn run_ls(args: Vec<OsString>) -> i32 {
+    uu_ls::uumain(args.into_iter())
+}
+
+fn run_wc(args: Vec<OsString>) -> i32 {
+    uu_wc::uumain(args.into_iter())
+}
+
+fn run_head(args: Vec<OsString>) -> i32 {
+    uu_head::uumain(args.into_iter())
+}
+
+fn run_tail(args: Vec<OsString>) -> i32 {
+    uu_tail::uumain(args.into_iter())
+}
+
+fn run_tr(args: Vec<OsString>) -> i32 {
+    uu_tr::uumain(args.into_iter())
+}
+
+fn run_seq(args: Vec<OsString>) -> i32 {
+    uu_seq::uumain(args.into_iter())
+}
+
+fn run_sleep(args: Vec<OsString>) -> i32 {
+    uu_sleep::uumain(args.into_iter())
 }
 
 /// `[ … ]` is `test …` with a closing bracket.
@@ -109,8 +167,9 @@ mod tests {
 
     #[test]
     fn an_unknown_name_is_not_embedded() {
-        assert_eq!(run(&argv(&["cat", "x"])), None);
-        assert!(!contains(b"cat"));
+        assert_eq!(run(&argv(&["grep", "x"])), None);
+        assert!(!contains(b"grep"));
+        assert!(contains(b"cat"));
     }
 
     #[test]

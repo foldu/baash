@@ -54,7 +54,19 @@ nucleo-matcher = "0.3.1"
 
 [profile.release]
 # Interactive shell: startup latency matters more than peak throughput.
+# Thin LTO with many codegen units: the local Linux loop is the one that pays
+# for compiles, so it gets parallelism rather than the last few percent.
 opt-level = 3
 lto = "thin"
-codegen-units = 1
+codegen-units = 16
 panic = "abort"
+
+# The Windows binary is built by CI (`package:windows`), where a serial compile
+# is acceptable and a small executable is not optional: fat LTO, one codegen
+# unit, symbols stripped. `cargo build --profile windows --target
+# x86_64-pc-windows-gnu -p bsh` reproduces it.
+[profile.windows]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

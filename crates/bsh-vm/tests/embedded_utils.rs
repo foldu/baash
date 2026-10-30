@@ -122,3 +122,36 @@ fn a_prefix_assignment_does_not_persist() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_utility_that_is_not_a_builtin_runs_too() {
+    let dir = temp_dir("cat");
+    let file = dir.join("data");
+    std::fs::write(&file, "one\ntwo\n").unwrap();
+    let out = dir.join("out");
+    let mut interp = shell();
+    assert!(run(&mut interp, "PATH=''").is_success());
+    let status = run(
+        &mut interp,
+        &format!("cat '{}' > '{}'", file.display(), out.display()),
+    );
+    assert!(status.is_success(), "cat failed: {status:?}");
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "one\ntwo\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn embedded_utilities_work_in_a_pipeline() {
+    let dir = temp_dir("pipeline");
+    let out = dir.join("out");
+    let mut interp = shell();
+    assert!(run(&mut interp, "PATH=''").is_success());
+    let status = run(
+        &mut interp,
+        &format!("printf 'a\\nb\\nc\\n' | wc -l > '{}'", out.display()),
+    );
+    assert!(status.is_success(), "pipeline failed: {status:?}");
+    let counted = std::fs::read_to_string(&out).unwrap();
+    assert_eq!(counted.trim(), "3");
+    let _ = std::fs::remove_dir_all(&dir);
+}
