@@ -357,8 +357,7 @@ impl Parser<'_> {
     }
 
     fn unary_test(&mut self, operator: &[u8], operand: &Field) -> Result<bool, String> {
-        use std::os::unix::ffi::OsStrExt;
-        let path = || std::path::Path::new(std::ffi::OsStr::from_bytes(&operand.bytes));
+        let path = || bsh_sys::os::path_from_bytes(&operand.bytes);
         let metadata = || std::fs::metadata(path());
         let link = || std::fs::symlink_metadata(path());
         Ok(match operator {
@@ -387,17 +386,27 @@ impl Parser<'_> {
                 }
             }
             b"-r" | b"-w" | b"-x" => {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = metadata().map(|meta| meta.permissions().mode());
-                let Ok(mode) = mode else {
-                    return Ok(false);
-                };
-                let bit = match operator {
-                    b"-r" => 0o444,
-                    b"-w" => 0o222,
-                    _ => 0o111,
-                };
-                mode & bit != 0
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = metadata().map(|meta| meta.permissions().mode());
+                    let Ok(mode) = mode else {
+                        return Ok(false);
+                    };
+                    let bit = match operator {
+                        b"-r" => 0o444,
+                        b"-w" => 0o222,
+                        _ => 0o111,
+                    };
+                    mode & bit != 0
+                }
+                #[cfg(not(unix))]
+                {
+                    // Windows has no permission bits; an existing file is as
+                    // close as the test can get (recorded in
+                    // `docs/portability.md` §9).
+                    metadata().is_ok()
+                }
             }
             b"-v" => {
                 // `-v name[subscript]` asks whether one element is set; a bare

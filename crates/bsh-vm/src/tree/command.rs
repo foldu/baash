@@ -1546,10 +1546,18 @@ enum BuiltinBody<'a> {
 
 /// Whether `path` names a regular file with an execute bit set.
 pub(crate) fn executable(path: &[u8]) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::PermissionsExt;
-    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
-    path.metadata()
-        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+    let path = bsh_sys::os::path_from_bytes(path);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        // There is no execute bit; a regular file is the test. PATHEXT-based
+        // resolution is the gap `docs/portability.md` §9 records.
+        path.metadata().map(|meta| meta.is_file()).unwrap_or(false)
+    }
 }

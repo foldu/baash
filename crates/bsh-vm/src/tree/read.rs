@@ -17,7 +17,7 @@
 //!   is a status, not a `ShellError` class. Even a read error from a directory
 //!   descriptor is status 1 with a diagnostic.
 
-use std::os::fd::RawFd;
+use bsh_sys::RawFd;
 use std::time::{Duration, Instant};
 
 use bsh_runtime::{ShellHost, Status, Vars};
@@ -321,7 +321,7 @@ impl Interp {
         // A seekable descriptor can be read in a chunk and rewound; a pipe
         // cannot give bytes back, so it is read one byte at a time. That is
         // why a pipe never loses data to a later reader (DESIGN.md §4.4).
-        let seekable = bsh_sys::lseek(fd, 0, bsh_sys::fd::seek::CUR).is_ok();
+        let seekable = bsh_sys::lseek(fd, 0, bsh_sys::seek::CUR).is_ok();
         let chunk = if seekable { 4096 } else { 1 };
         // bash disables `-t` for a regular file: the read cannot block.
         let deadline = match options.timeout {
@@ -429,7 +429,7 @@ impl Interp {
         if leftover > 0 {
             let surplus = buffer[consumed..].to_vec();
             let rewound =
-                seekable && bsh_sys::lseek(fd, -(leftover as i64), bsh_sys::fd::seek::CUR).is_ok();
+                seekable && bsh_sys::lseek(fd, -(leftover as i64), bsh_sys::seek::CUR).is_ok();
             if !rewound {
                 self.read_buffers.insert(fd, surplus);
             }
@@ -457,7 +457,7 @@ pub(crate) fn read_record(
     fd: RawFd,
     delim: u8,
 ) -> Result<Option<Record>, std::io::Error> {
-    let seekable = bsh_sys::lseek(fd, 0, bsh_sys::fd::seek::CUR).is_ok();
+    let seekable = bsh_sys::lseek(fd, 0, bsh_sys::seek::CUR).is_ok();
     let want = if seekable { 4096 } else { 1 };
     let mut buffer = interp.read_buffers.remove(&fd).unwrap_or_default();
     let mut consumed = 0usize;
@@ -493,7 +493,7 @@ pub(crate) fn read_record(
     if leftover > 0 {
         let surplus = buffer[consumed..].to_vec();
         let rewound =
-            seekable && bsh_sys::lseek(fd, -(leftover as i64), bsh_sys::fd::seek::CUR).is_ok();
+            seekable && bsh_sys::lseek(fd, -(leftover as i64), bsh_sys::seek::CUR).is_ok();
         if !rewound {
             interp.read_buffers.insert(fd, surplus);
         }

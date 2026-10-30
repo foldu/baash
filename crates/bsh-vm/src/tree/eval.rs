@@ -7,7 +7,7 @@
 //! context (DESIGN.md §4.7). Keeping that in one function is the whole point
 //! of modelling control flow as unwinding instead of `Result` at every node.
 
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use bsh_sys::{AsRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 
 use bsh_diag::Diagnostic;
@@ -436,7 +436,7 @@ impl Interp {
                 input = match buffered {
                     Some(file) => {
                         let _ = bsh_sys::lseek(
-                            std::os::fd::AsRawFd::as_raw_fd(&file),
+                            bsh_sys::AsRawFd::as_raw_fd(&file),
                             0,
                             bsh_sys::seek::SET,
                         );
@@ -732,15 +732,11 @@ impl Interp {
         // command boundary; the exit request (if any) is recorded in the state.
         let _ = self.after_foreground_wait();
 
-        let mut bytes = Vec::new();
-        {
-            use std::io::{Read, Seek};
-            let mut file = std::fs::File::from(capture);
-            file.seek(std::io::SeekFrom::Start(0))
-                .map_err(|error| format!("cannot rewind a command substitution: {error}"))?;
-            file.read_to_end(&mut bytes)
-                .map_err(|error| format!("cannot read a command substitution: {error}"))?;
-        }
+        let capture_fd = capture.as_raw_fd();
+        bsh_sys::lseek(capture_fd, 0, bsh_sys::seek::SET)
+            .map_err(|error| format!("cannot rewind a command substitution: {error}"))?;
+        let mut bytes = bsh_sys::read_all(capture_fd)
+            .map_err(|error| format!("cannot read a command substitution: {error}"))?;
         while bytes.last() == Some(&b'\n') {
             bytes.pop();
         }

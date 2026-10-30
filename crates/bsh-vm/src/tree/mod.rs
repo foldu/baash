@@ -259,7 +259,7 @@ pub struct Interp {
     /// Only a descriptor that is not seekable can end up here; on a regular
     /// file the surplus is rewound with `lseek` instead, so no second reader
     /// ever sees a stale buffer.
-    read_buffers: std::collections::BTreeMap<std::os::fd::RawFd, Vec<u8>>,
+    read_buffers: std::collections::BTreeMap<bsh_sys::RawFd, Vec<u8>>,
     /// The signal dispositions the trap table implies (see `traps.rs`).
     signals: traps::SignalState,
     /// `run_named` nesting. The EXIT trap runs when this returns to zero, so
@@ -532,12 +532,11 @@ impl Interp {
     /// Import the process environment as exported shell variables, the way
     /// every shell starts. Bytes are preserved exactly.
     pub fn import_environment(&mut self) {
-        use std::os::unix::ffi::OsStrExt;
         let mut entries: Vec<Vec<u8>> = Vec::new();
         for (name, value) in std::env::vars_os() {
-            let mut entry = name.as_os_str().as_bytes().to_vec();
+            let mut entry = bsh_sys::os::bytes_from_os(&name);
             entry.push(b'=');
-            entry.extend_from_slice(value.as_os_str().as_bytes());
+            entry.extend_from_slice(&bsh_sys::os::bytes_from_os(&value));
             entries.push(entry);
         }
         self.state.vars.import_envp(&entries);
@@ -895,18 +894,17 @@ impl bsh_lang::Vars for Interp {
 /// standard input is not a terminal. `/proc/self/fd/0` is the std-only way to
 /// ask which device it is.
 fn current_tty() -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
     if !bsh_sys::is_tty(0) {
         return b"tty".to_vec();
     }
-    std::fs::read_link("/proc/self/fd/0")
+    #[cfg(unix)]
+    if let Some(name) = std::fs::read_link("/proc/self/fd/0")
         .ok()
-        .and_then(|path| {
-            path.file_name()
-                .map(|name| name.as_bytes().to_vec())
-                .or_else(|| Some(path.as_os_str().as_bytes().to_vec()))
-        })
-        .unwrap_or_else(|| b"tty".to_vec())
+        .and_then(|path| path.file_name().map(bsh_sys::os::bytes_from_os))
+    {
+        return name;
+    }
+    b"tty".to_vec()
 }
 
 impl bsh_lang::Shell for Interp {

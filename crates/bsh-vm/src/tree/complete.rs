@@ -358,7 +358,7 @@ impl Interp {
     /// rather than printed because `-X`/`-P`/`-S` and the "was anything
     /// generated?" status all need to see it first.
     pub(crate) fn completion_capture(&mut self, argv: &[Vec<u8>]) -> Option<(Vec<u8>, Status)> {
-        use std::os::fd::AsRawFd;
+        use bsh_sys::AsRawFd;
 
         let name = argv.first()?.clone();
         let mut resolution = None;
@@ -379,13 +379,9 @@ impl Interp {
         if let Some(saved) = saved {
             let _ = bsh_sys::dup2(saved.as_raw_fd(), 1);
         }
-        let mut bytes = Vec::new();
-        {
-            use std::io::{Read, Seek};
-            let mut file = std::fs::File::from(capture);
-            file.seek(std::io::SeekFrom::Start(0)).ok()?;
-            file.read_to_end(&mut bytes).ok()?;
-        }
+        let capture_fd = capture.as_raw_fd();
+        bsh_sys::lseek(capture_fd, 0, bsh_sys::seek::SET).ok()?;
+        let bytes = bsh_sys::read_all(capture_fd).ok()?;
         let _ = self.after_foreground_wait();
         Some((bytes, status))
     }
@@ -456,14 +452,12 @@ fn files(prefix: &[u8], directories_only: bool) -> Vec<Vec<u8>> {
 
 /// A path as the filesystem API takes it.
 fn path_from_bytes(bytes: &[u8]) -> std::path::PathBuf {
-    use std::os::unix::ffi::OsStrExt;
-    std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+    bsh_sys::os::path_from_bytes(bytes)
 }
 
 /// A filename as the shell sees it: bytes, never a lossy string.
 fn os_bytes(name: &std::ffi::OsStr) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-    name.as_bytes().to_vec()
+    bsh_sys::os::bytes_from_os(name)
 }
 
 /// One open construct inside a `-W` word list.

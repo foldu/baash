@@ -33,9 +33,6 @@
 //! them, the `PATH` position serves them, which is exactly where POSIX puts a
 //! regular built-in.
 
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
-
 use bsh_diag::Diagnostic;
 use bsh_runtime::{CreateScope, ShellError, ShellHost, Status};
 
@@ -256,7 +253,7 @@ fn bi_source(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
     } else {
         interp.search_path(&file).unwrap_or_else(|| file.clone())
     };
-    let bytes = match std::fs::read(std::path::Path::new(OsStr::from_bytes(&path))) {
+    let bytes = match std::fs::read(bsh_sys::os::path_from_bytes(&path)) {
         Ok(bytes) => bytes,
         Err(error) => {
             diagnose(
@@ -462,7 +459,7 @@ fn bi_cd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
     }
     let previous = interp.state.vars.scalar(b"PWD").map(<[u8]>::to_vec);
     let current = std::env::current_dir()
-        .map(|dir| dir.as_os_str().as_bytes().to_vec())
+        .map(bsh_sys::os::bytes_from_os)
         .unwrap_or_else(|_| target.clone());
     if let Some(previous) = previous {
         let _ = interp.state.vars.assign_scalar(b"OLDPWD", &previous);

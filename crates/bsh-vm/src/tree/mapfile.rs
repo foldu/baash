@@ -10,7 +10,7 @@
 //! `-C`/`-c` (the callback and its quantum) are deliberately out of scope: they
 //! execute shell code per record, which is a different feature.
 
-use std::os::fd::RawFd;
+use bsh_sys::RawFd;
 
 use bsh_runtime::{ArrayShape, Status, Vars};
 

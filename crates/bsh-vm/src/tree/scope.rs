@@ -42,8 +42,8 @@
 //! `$BASHPID`), signals are delivered once rather than twice, and a trap set
 //! inside the body is undone by the restore instead of dying with a process.
 
+use bsh_sys::RawFd;
 use std::collections::BTreeMap;
-use std::os::fd::RawFd;
 
 use bsh_runtime::ShellState;
 
@@ -142,9 +142,5 @@ impl Interp {
 
 /// The working directory as shell bytes, so it can be restored exactly.
 fn current_dir_bytes() -> Option<Vec<u8>> {
-    use std::os::unix::ffi::OsStrExt;
-
-    std::env::current_dir()
-        .ok()
-        .map(|path| path.as_os_str().as_bytes().to_vec())
+    std::env::current_dir().ok().map(bsh_sys::os::bytes_from_os)
 }

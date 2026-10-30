@@ -18,9 +18,7 @@
 //! (`bsh_sys::create_unlinked_temp`, DESIGN.md §4.4): a pipe would deadlock
 //! when the reader never drains a large body.
 
-use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
-use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
+use bsh_sys::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 
 use bsh_lang::{Mode, expand_word_with};
@@ -41,7 +39,7 @@ enum Step {
     /// Close `to` (`n>&-`).
     Close { to: RawFd },
     /// A here-document or here-string, already written and rewound.
-    Temp { file: File, to: RawFd },
+    Temp { fd: OwnedFd, to: RawFd },
 }
 
 /// Descriptors saved so a built-in's redirections can be undone, in the order
@@ -167,9 +165,9 @@ impl Interp {
                 }
                 Step::Dup { from, to } => actions.push(bsh_sys::FdAction::dup2(from, to)),
                 Step::Close { to } => actions.push(bsh_sys::FdAction::close(to)),
-                Step::Temp { file, to } => {
-                    actions.push(bsh_sys::FdAction::dup2(file.as_raw_fd(), to));
-                    keep.push(OwnedFd::from(file));
+                Step::Temp { fd, to } => {
+                    actions.push(bsh_sys::FdAction::dup2(fd.as_raw_fd(), to));
+                    keep.push(fd);
                 }
             }
         }
@@ -205,7 +203,7 @@ impl Interp {
                     };
                     let body = self.heredoc_body(chunk, heredoc)?;
                     steps.push(Step::Temp {
-                        file: self.temp_file(&body, &redirect.span)?,
+                        fd: self.temp_file(&body, &redirect.span)?,
                         to: target,
                     });
                 }
@@ -221,7 +219,7 @@ impl Interp {
                     let mut body = self.scalar_word(word)?;
                     body.push(b'\n');
                     steps.push(Step::Temp {
-                        file: self.temp_file(&body, &redirect.span)?,
+                        fd: self.temp_file(&body, &redirect.span)?,
                         to: target,
                     });
                 }
@@ -339,9 +337,9 @@ impl Interp {
         }
     }
 
-    fn temp_file(&mut self, body: &[u8], span: &bsh_diag::Span) -> Result<File, ()> {
-        let file = match bsh_sys::create_unlinked_temp(body.len()) {
-            Ok(file) => file,
+    fn temp_file(&mut self, body: &[u8], span: &bsh_diag::Span) -> Result<OwnedFd, ()> {
+        let fd = match bsh_sys::create_unlinked_temp(body.len()) {
+            Ok(fd) => fd,
             Err(error) => {
                 self.report(
                     crate::codes::REDIRECTION,
@@ -351,10 +349,9 @@ impl Interp {
                 return Err(());
             }
         };
-        let mut file = File::from(file);
-        if let Err(error) = file
-            .write_all(body)
-            .and_then(|()| file.seek(SeekFrom::Start(0)))
+        let raw = fd.as_raw_fd();
+        if let Err(error) = bsh_sys::write_all(raw, body)
+            .and_then(|_| bsh_sys::lseek(raw, 0, bsh_sys::seek::SET).map(|_| ()))
         {
             self.report(
                 crate::codes::REDIRECTION,
@@ -363,7 +360,7 @@ impl Interp {
             );
             return Err(());
         }
-        Ok(file)
+        Ok(fd)
     }
 }
 
@@ -421,7 +418,7 @@ fn apply_step(step: Step) -> std::io::Result<()> {
             }
             Ok(())
         }
-        Step::Temp { file, to } => adopt(OwnedFd::from(file), to),
+        Step::Temp { fd, to } => adopt(fd, to),
     }
 }
 
@@ -460,7 +457,7 @@ fn save_descriptor(target: RawFd, reserved: &[RawFd]) -> Option<RawFd> {
     let mut min = 20;
     for _ in 0..64 {
         let saved = bsh_sys::dup_above(target, min).ok()?;
-        let fd = std::os::fd::IntoRawFd::into_raw_fd(saved);
+        let fd = bsh_sys::IntoRawFd::into_raw_fd(saved);
         if !reserved.contains(&fd) {
             return Some(fd);
         }

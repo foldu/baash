@@ -120,11 +120,6 @@ impl Fd {
         }
         Ok(Self(fd))
     }
-
-    /// The descriptor number.
-    pub fn as_raw_fd(&self) -> c_int {
-        self.0
-    }
 }
 
 impl Drop for Fd {
@@ -614,8 +609,11 @@ impl SignalSet {
     }
 
     /// The process's current blocked-signal set.
-    pub fn current() -> Self {
-        Self::default()
+    ///
+    /// Returns `Ok` for the same shape as Unix; a Windows process has no
+    /// blocked-signal set to read.
+    pub fn current() -> io::Result<Self> {
+        Ok(Self::default())
     }
 
     /// Add a signal. Returns whether it was absent, as on Unix.
@@ -719,8 +717,12 @@ pub fn set_disposition(_signal: c_int, _disposition: Disposition) -> io::Result<
 }
 
 /// Ignore `signals`.
-pub fn ignore_signals(_signals: &[c_int]) -> io::Result<()> {
-    Ok(())
+///
+/// A stub guard: Windows has no dispositions to save or restore, but the type
+/// keeps `trap '' INT` shaped like Unix and a future console handler has one
+/// place to plug in.
+pub fn ignore_signals(_signals: &[c_int]) -> io::Result<SignalGuard> {
+    Ok(SignalGuard { _private: () })
 }
 
 /// Send `signal` to `pid`.
@@ -903,7 +905,7 @@ impl SpawnPlan {
 }
 
 /// A started child.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Child {
     /// The process id, which is the handle the shell uses.
     pub pid: i32,
@@ -1050,21 +1052,23 @@ pub fn wait_pid(pid: i32) -> io::Result<WaitOutcome> {
     Ok(WaitOutcome::Exited(status.code().unwrap_or(0) as u8 as i32))
 }
 
-/// Reap any finished child.
-pub fn wait_any_nohang() -> io::Result<Option<i32>> {
-    let mut map = children()
-        .lock()
-        .map_err(|_| io::Error::other("child table"))?;
+/// Reap any finished child, reporting its status like Unix's version.
+pub fn wait_any_nohang() -> Option<(i32, WaitOutcome)> {
+    let mut map = children().lock().ok()?;
     let pids: Vec<i32> = map.keys().copied().collect();
+    let mut finished = None;
     for pid in pids {
-        if let Some(child) = map.get_mut(&pid) {
-            if let Ok(Some(_)) = child.try_wait() {
-                map.remove(&pid);
-                return Ok(Some(pid));
-            }
+        if let Some(child) = map.get_mut(&pid)
+            && let Ok(Some(status)) = child.try_wait()
+        {
+            finished = Some((pid, WaitOutcome::Exited(status.code().unwrap_or(0))));
+            break;
         }
     }
-    Ok(None)
+    if let Some((pid, _)) = finished {
+        map.remove(&pid);
+    }
+    finished
 }
 
 // ---------------------------------------------------------------------------

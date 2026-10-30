@@ -378,14 +378,14 @@ pub(crate) type Background = BTreeMap<i32, Option<Status>>;
 #[derive(Debug)]
 pub(crate) struct PipelineBuffer {
     /// The capture file, once the swap happened.
-    pub(crate) file: Option<std::os::fd::OwnedFd>,
+    pub(crate) file: Option<bsh_sys::OwnedFd>,
 }
 
 impl PipelineBuffer {
     /// Bytes buffered so far, if the swap happened.
     pub(crate) fn size(&self) -> Option<u64> {
         let file = self.file.as_ref()?;
-        use std::os::fd::AsRawFd;
+        use bsh_sys::AsRawFd;
         let len = bsh_sys::lseek(file.as_raw_fd(), 0, bsh_sys::seek::END).ok()?;
         u64::try_from(len).ok()
     }

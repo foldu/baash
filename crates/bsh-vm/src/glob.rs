@@ -21,10 +21,6 @@
 //! Quoting has no mask in `bsh-pattern`: [`crate::pattern::escaped`] turns
 //! quoted bytes into backslash escapes before anything is compiled.
 
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
-
 use bsh_pattern::{Flags, compiled as compiled_pattern};
 
 /// What the shell options say about pathname expansion.
@@ -176,7 +172,7 @@ fn step(base: &[u8], component: &Component<'_>, options: &Options) -> Vec<Vec<u8
     let mut out = Vec::new();
     if !has_meta(component.bytes, component.quoted, options.flags.extglob) {
         // No metacharacter: the component is a literal path segment.
-        out.extend(join(base, component.bytes).filter(|path| Path::new(os(path)).exists()));
+        out.extend(join(base, component.bytes).filter(|path| os(path).exists()));
         return out;
     }
     let compiled = compiled_pattern(
@@ -203,18 +199,18 @@ fn step(base: &[u8], component: &Component<'_>, options: &Options) -> Vec<Vec<u8
 /// The names in `base`, or nothing when it is not a readable directory.
 fn entries(base: &[u8]) -> Vec<Vec<u8>> {
     let dir: &[u8] = if base.is_empty() { b"." } else { base };
-    let Ok(entries) = std::fs::read_dir(Path::new(os(dir))) else {
+    let Ok(entries) = std::fs::read_dir(os(dir)) else {
         return Vec::new();
     };
     entries
         .flatten()
-        .map(|entry| entry.file_name().as_bytes().to_vec())
+        .map(|entry| bsh_sys::os::bytes_from_os(entry.file_name()))
         .collect()
 }
 
 /// Whether `path` is a directory itself, not a symlink to one.
 fn is_directory(path: &[u8]) -> bool {
-    std::fs::symlink_metadata(Path::new(os(path))).is_ok_and(|meta| meta.is_dir())
+    std::fs::symlink_metadata(os(path)).is_ok_and(|meta| meta.is_dir())
 }
 
 /// Join a prefix and a name, keeping `./` and the root slash as written so
@@ -231,6 +227,6 @@ fn join(base: &[u8], name: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn os(bytes: &[u8]) -> &OsStr {
-    OsStr::from_bytes(bytes)
+fn os(bytes: &[u8]) -> std::path::PathBuf {
+    bsh_sys::os::path_from_bytes(bytes)
 }
