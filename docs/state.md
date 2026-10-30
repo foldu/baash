@@ -394,9 +394,24 @@ Where the waves stand:
 * **W1 (delete job control) — this change.** No job table, no `%` specs, no
   process groups/terminal handover, no `WUNTRACED`; the job built-ins report
   `BSH-E0302`; `set -m` is inert; the baseline is re-recorded at 1982/1927.
-* **W2 (no-fork subshells)** is next: replace the four `fork_child` call sites
-  with in-process subinterpreters and delete `fork_gate`. Job control is no
-  longer in its way.
+* **W2 (no-fork subshells)** is in progress. `( … )` and `$( … )` now run in
+  a scope (`crates/bsh-vm/src/tree/scope.rs`) instead of a child; conformance is
+  unchanged to the case. What is left, in order:
+  1. **Pipelines.** Externals keep `posix_spawn` and still run concurrently;
+     the last stage runs in the parent (lastpipe, always on); a non-last stage
+     that turns out to be shell code is buffered to an unlinked temp file with
+     a 64 MiB cap and a diagnostic, because a pipe would deadlock against our
+     own writer. The stage's kind cannot be decided by expanding the command
+     word twice — that would run `$( … )`-bearing words twice — so the swap
+     happens at the one dispatch site, after resolution: if the stage is not an
+     external, descriptor 1 is moved from the pipe to the temp file there.
+  2. **Rejections:** shell-code `&` reports `BSH-E0302` (`cmd &` for externals
+     keeps working); `( exec cmd )` needs no rejection — the exit request is
+     caught by the scope, so it already ends the subshell and not the shell.
+  3. **Deletion:** `fork_shell`, `enter_child`, `fork_gate`/`threadgate.rs`,
+     `spawn_forked` (dead once nothing forks), and the completion-time external
+     capture becomes spawn-and-read. Then re-measure and re-record the baseline.
+  Job control is no longer in its way.
 
 ## 9. Open questions
 
