@@ -11,7 +11,7 @@
 //! this module.
 
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::os::fd::{AsRawFd, RawFd};
 
 /// Terminal dimensions, in character cells.
@@ -105,6 +105,12 @@ pub struct RealTerminal {
     /// The descriptor raw mode and `TIOCGWINSZ` apply to.
     fd: RawFd,
     raw: Option<bsh_sys::RawMode>,
+    /// The runtime handle used to read, opened lazily on `/dev/tty`.
+    ///
+    /// Writes stay on the synchronous handle: a frame is a few kilobytes to a
+    /// terminal, and keeping them ordered with `flush` is simpler than a second
+    /// async writer.
+    read_source: Option<compio::runtime::fd::PollFd<std::os::fd::OwnedFd>>,
 }
 
 impl RealTerminal {
@@ -116,11 +122,13 @@ impl RealTerminal {
                 fd: tty.as_raw_fd(),
                 tty: Some(tty),
                 raw: None,
+                read_source: None,
             },
             Err(_) => Self {
                 tty: None,
                 fd: 0,
                 raw: None,
+                read_source: None,
             },
         }
     }
@@ -128,18 +136,31 @@ impl RealTerminal {
 
 impl Terminal for RealTerminal {
     fn read_byte(&mut self) -> io::Result<Option<u8>> {
-        let mut byte = [0u8; 1];
-        loop {
-            let read = match self.tty.as_mut() {
-                Some(tty) => tty.read(&mut byte),
-                None => io::stdin().lock().read(&mut byte),
+        use std::os::fd::AsFd;
+
+        // Readiness comes from the runtime; the read itself is one byte from a
+        // descriptor already known to be ready. A keystroke must not park the
+        // thread that also has to answer a scan or reap a child
+        // (`docs/direction.md` §2), and `Runtime::current()` is set by `bsh`
+        // around the loop, so this needs no runtime of its own.
+        let runtime = compio::runtime::Runtime::current();
+        if self.read_source.is_none() {
+            // A private handle, so the poll registration cannot disturb the
+            // descriptor the editor writes through.
+            let owned = match self.tty.as_ref() {
+                Some(tty) => tty.try_clone()?.into(),
+                None => std::io::stdin().as_fd().try_clone_to_owned()?,
             };
-            match read {
-                Ok(0) => return Ok(None),
-                Ok(_) => return Ok(Some(byte[0])),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error),
-            }
+            self.read_source = Some(compio::runtime::fd::PollFd::new(owned)?);
+        }
+        let source = self.read_source.as_ref().expect("prepared just above");
+        runtime.block_on(async { source.read_ready().await })?;
+
+        let mut byte = [0u8; 1];
+        match bsh_sys::read_fd(self.fd, &mut byte) {
+            Ok(0) => Ok(None),
+            Ok(_) => Ok(Some(byte[0])),
+            Err(error) => Err(error),
         }
     }
 

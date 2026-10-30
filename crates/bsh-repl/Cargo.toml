@@ -13,4 +13,5 @@ bsh-runtime.workspace = true
 bsh-lang.workspace = true
 bsh-diag.workspace = true
 bsh-sys.workspace = true
+compio.workspace = true
 unicode-width.workspace = true

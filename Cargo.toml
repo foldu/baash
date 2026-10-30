@@ -26,6 +26,9 @@ libc = "0.2"
 # One thread owns the shell; the runtime supplies the wakeups (`direction.md` §2).
 compio = { version = "0.19", default-features = false, features = [
     "runtime",
+    # The driver. `default-features = false` above drops it, and without it
+    # compio links its stub driver, which panics on the first operation.
+    "io-uring",
     "io",
     "fs",
     "macros",

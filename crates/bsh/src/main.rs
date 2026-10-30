@@ -689,7 +689,11 @@ fn run_repl_on_runtime(shell: &mut Interp) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    runtime.block_on(async { run_repl(shell) })
+    // `enter` rather than `block_on`: the loop itself is synchronous and calls
+    // `block_on` for individual operations (a keystroke read, a prompt's `git
+    // status`). Nesting a `block_on` inside another would run the executor
+    // re-entrantly for no gain.
+    runtime.enter(|| run_repl(shell))
 }
 
 fn run_repl(shell: &mut Interp) -> ExitCode {
