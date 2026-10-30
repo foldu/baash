@@ -209,6 +209,19 @@ pub fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
     retrying(|| rustix::io::read(borrowed(fd), &mut *buf))
 }
 
+/// Read `fd` to end of file.
+pub fn read_all(fd: RawFd) -> io::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let count = read_fd(fd, &mut buffer)?;
+        if count == 0 {
+            return Ok(out);
+        }
+        out.extend_from_slice(&buffer[..count]);
+    }
+}
+
 /// Write `buf` to `fd` in one call, returning the number of bytes accepted.
 ///
 /// Short writes are the caller's problem; use [`write_all`] unless you are

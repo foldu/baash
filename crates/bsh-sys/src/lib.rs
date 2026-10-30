@@ -77,7 +77,7 @@ pub use bytes::{NulByte, cstring, cstrings};
 #[cfg(unix)]
 pub use fd::{
     Pipe, chdir, close, create_unlinked_temp, dup, dup_above, dup2, fd_is_cloexec, fd_is_open,
-    lseek, open_cloexec, poll_readable, read_fd, seek, set_cloexec, write_all, write_fd,
+    lseek, open_cloexec, poll_readable, read_all, read_fd, seek, set_cloexec, write_all, write_fd,
 };
 pub use outcome::WaitOutcome;
 #[cfg(unix)]
@@ -91,6 +91,12 @@ pub use signal::{
 };
 #[cfg(unix)]
 pub use spawn::{Child, FdAction, SpawnPlan, exec, fork_child_status, spawn};
+/// The descriptor vocabulary, under one set of names on both platforms.
+///
+/// Unix gets `std`'s types and traits unchanged, so nothing about the Linux
+/// build is a wrapper; Windows gets this crate's (see `windows.rs`).
+#[cfg(unix)]
+pub use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 #[cfg(unix)]
 pub use term::{NoEcho, RawMode, parent_pid, pid, window_size, window_size_fd};
 #[cfg(unix)]
@@ -98,10 +104,11 @@ pub use wait::{wait_any_nohang, wait_pid};
 
 #[cfg(windows)]
 pub use windows::{
-    Child, Disposition, FdAction, MaskGuard, NoEcho, Pipe, Pty, RawMode, SignalEvent, SignalFd,
-    SignalGuard, SignalSet, SpawnPlan, become_session_leader, chdir, close, create_unlinked_temp,
-    dup, dup_above, dup2, exec, fd_is_cloexec, fd_is_open, fork_child_status, ignore_signals,
-    lseek, open_cloexec, open_pty, parent_pid, pid, poll_readable, read_fd, replace_signal_mask,
+    AsRawFd, CaptureRanges, Child, Disposition, FdAction, FromRawFd, IntoRawFd, MaskGuard, NoEcho,
+    OwnedFd, Pipe, Pty, RawFd, RawMode, Regex, RegexError, SignalEvent, SignalFd, SignalGuard,
+    SignalSet, SpawnPlan, become_session_leader, chdir, close, create_unlinked_temp, dup,
+    dup_above, dup2, exec, fd_is_cloexec, fd_is_open, fork_child_status, ignore_signals, lseek,
+    open_cloexec, open_pty, parent_pid, pid, poll_readable, read_all, read_fd, replace_signal_mask,
     seek, send_signal, set_cloexec, set_disposition, spawn, wait_any_nohang, wait_pid, window_size,
     window_size_fd, write_all, write_fd,
 };

@@ -136,6 +136,54 @@ impl Drop for Fd {
     }
 }
 
+/// An owned descriptor, under the name the Unix side gets from `std`.
+pub type OwnedFd = Fd;
+
+/// The descriptor number behind a value that owns one.
+///
+/// Unix spells this `std::os::fd::AsRawFd`; Windows has no such trait, so it
+/// is defined here and exported under the same name from the crate root.
+pub trait AsRawFd {
+    /// The CRT descriptor number.
+    fn as_raw_fd(&self) -> c_int;
+}
+
+/// Give up ownership and yield the bare descriptor.
+pub trait IntoRawFd {
+    /// The descriptor, no longer closed on drop.
+    fn into_raw_fd(self) -> c_int;
+}
+
+/// Take ownership of a descriptor.
+///
+/// Unix's version is `unsafe` because the descriptor could be a `File`'s; a
+/// bare CRT number carries no such invariant here, but the signature matches
+/// so call sites do not need a `cfg`.
+pub trait FromRawFd {
+    /// Wrap `fd`.
+    fn from_raw_fd(fd: c_int) -> Self;
+}
+
+impl AsRawFd for Fd {
+    fn as_raw_fd(&self) -> c_int {
+        self.0
+    }
+}
+
+impl IntoRawFd for Fd {
+    fn into_raw_fd(self) -> c_int {
+        let fd = self.0;
+        std::mem::forget(self);
+        fd
+    }
+}
+
+impl FromRawFd for Fd {
+    fn from_raw_fd(fd: c_int) -> Self {
+        Self(fd)
+    }
+}
+
 /// A pipe: the read end and the write end.
 pub struct Pipe {
     /// The end a reader opens.
@@ -180,24 +228,31 @@ pub fn close(fd: c_int) -> io::Result<()> {
 }
 
 /// Duplicate `fd` onto the lowest free descriptor.
-pub fn dup(fd: c_int) -> io::Result<c_int> {
+pub fn dup(fd: c_int) -> io::Result<OwnedFd> {
     // SAFETY: `_dup` only takes an integer.
-    let duplicate = unsafe { _dup(fd) };
-    if duplicate < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(duplicate)
+    Fd::from_raw(unsafe { _dup(fd) })
 }
 
-/// Duplicate `fd` onto a descriptor at or above `minimum`.
-pub fn dup_above(fd: c_int, minimum: c_int) -> io::Result<c_int> {
+/// Duplicate `fd` onto the lowest free descriptor at or above `minimum`.
+///
+/// The Unix version uses `fcntl(F_DUPFD_CLOEXEC)`, which finds the slot; the
+/// CRT has no equivalent, so the slots are scanned. The scan is safe because
+/// the shell has one thread and no other code opens a descriptor inside it.
+pub fn dup_above(fd: c_int, minimum: c_int) -> io::Result<OwnedFd> {
     let duplicate = dup(fd)?;
-    if duplicate >= minimum {
+    let from = duplicate.as_raw_fd();
+    if from >= minimum {
         return Ok(duplicate);
     }
-    let elevated = dup2(duplicate, minimum).map(|()| minimum);
-    let _ = close(duplicate);
-    elevated
+    let mut candidate = minimum.max(3);
+    while candidate < 2048 {
+        if !fd_is_open(candidate) && dup2(from, candidate).is_ok() {
+            // The extra slot now owns its own handle; the duplicate goes away.
+            return Ok(Fd::from_raw(candidate)?);
+        }
+        candidate += 1;
+    }
+    Err(io::Error::other("no free descriptor above the minimum"))
 }
 
 /// Point `to` at `from`.
@@ -245,6 +300,19 @@ pub fn read_fd(fd: c_int, buffer: &mut [u8]) -> io::Result<usize> {
     Ok(usize::try_from(read).unwrap_or(0))
 }
 
+/// Read `fd` to end of file.
+pub fn read_all(fd: c_int) -> io::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let count = read_fd(fd, &mut buffer)?;
+        if count == 0 {
+            return Ok(out);
+        }
+        out.extend_from_slice(&buffer[..count]);
+    }
+}
+
 /// Write one chunk to `fd`.
 pub fn write_fd(fd: c_int, bytes: &[u8]) -> io::Result<usize> {
     let count = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
@@ -286,26 +354,16 @@ pub fn chdir(path: &[u8]) -> io::Result<()> {
     std::env::set_current_dir(path)
 }
 
-/// Open `path`, failing when the descriptor would not be at or above `minimum`.
+/// Open `path` and return the owned descriptor.
 ///
-/// The Unix version uses `O_CLOEXEC` and a `dup_above` dance; here the flag is
-/// meaningless and the descriptor number is the CRT's business, so the minimum
-/// is honoured by duplicating when needed.
-pub fn open_cloexec(path: &[u8], flags: c_int, mode: u32, minimum: c_int) -> io::Result<c_int> {
+/// The Unix version opens with `O_CLOEXEC`; Windows hands descriptors to a
+/// child explicitly, so the flag has no meaning here.
+pub fn open_cloexec(path: &[u8], flags: c_int, mode: u32) -> io::Result<OwnedFd> {
     let c_path = wide_path(path);
     let translated = translate_flags(flags) | O_BINARY;
     // SAFETY: `c_path` is a NUL-terminated string and the variadic argument is
     // only read when `O_CREAT` is set.
-    let fd = unsafe { _open(c_path.as_ptr(), translated, mode) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if fd < minimum {
-        let elevated = dup_above(fd, minimum)?;
-        let _ = close(fd);
-        return Ok(elevated);
-    }
-    Ok(fd)
+    Fd::from_raw(unsafe { _open(c_path.as_ptr(), translated, mode) })
 }
 
 /// Translate this crate's `O_*` flags to the CRT's.
@@ -332,7 +390,7 @@ fn translate_flags(flags: c_int) -> c_int {
 /// Windows has no `O_TMPFILE`; the file is created, unlinked-on-open semantics
 /// are faked by deleting it on close through [`TempFile`]'s `Drop`, which is
 /// what `create_unlinked_temp` returns. The caller only ever needs its bytes.
-pub fn create_unlinked_temp(fd_floor: c_int) -> io::Result<Fd> {
+pub fn create_unlinked_temp(_size_hint: usize) -> io::Result<OwnedFd> {
     let mut file = tempfile_path();
     if file.is_empty() {
         file = b"bsh-temp".to_vec();
@@ -354,14 +412,13 @@ pub fn create_unlinked_temp(fd_floor: c_int) -> io::Result<Fd> {
             &bytes,
             crate::flags::RDWR | crate::flags::CREAT | crate::flags::TRUNC,
             0o600,
-            fd_floor,
         );
         match created {
             Ok(fd) => {
                 // The name goes away immediately; the handle keeps the bytes
                 // alive, which is what an unlinked temporary file means here.
                 let _ = std::fs::remove_file(&candidate);
-                return Fd::from_raw(fd);
+                return Ok(fd);
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
@@ -473,6 +530,11 @@ impl RawMode {
         ))
     }
 
+    /// Enter raw mode on `fd` (`std::os::fd`-shaped name on Unix).
+    pub fn enable(_fd: c_int) -> io::Result<Self> {
+        Self::enter()
+    }
+
     /// Put the console back the way it was.
     pub fn restore(self) {}
 }
@@ -490,6 +552,11 @@ impl NoEcho {
             io::ErrorKind::Unsupported,
             "no-echo mode needs a console host",
         ))
+    }
+
+    /// Turn echo off on `fd` (`std::os::fd`-shaped name on Unix).
+    pub fn enable(_fd: c_int) -> io::Result<Self> {
+        Self::enter()
     }
 
     /// Restore echo.
@@ -540,11 +607,31 @@ impl SignalSet {
         Self::default()
     }
 
-    /// Add a signal.
-    pub fn insert(&mut self, _signal: c_int) {}
+    /// A set with `signals` in it. Windows has no signal mask; the set is
+    /// always empty.
+    pub fn of(_signals: &[c_int]) -> Self {
+        Self::default()
+    }
 
-    /// Remove a signal.
-    pub fn remove(&mut self, _signal: c_int) {}
+    /// The process's current blocked-signal set.
+    pub fn current() -> Self {
+        Self::default()
+    }
+
+    /// Add a signal. Returns whether it was absent, as on Unix.
+    pub fn insert(&mut self, _signal: c_int) -> bool {
+        false
+    }
+
+    /// Remove a signal. Returns whether it was present, as on Unix.
+    pub fn remove(&mut self, _signal: c_int) -> bool {
+        false
+    }
+
+    /// Whether `signal` is in the set.
+    pub fn contains(&self, _signal: c_int) -> bool {
+        false
+    }
 
     /// Whether the set is empty.
     pub fn is_empty(&self) -> bool {
@@ -688,7 +775,7 @@ pub enum FdAction {
     /// Open `path` on `fd` in the child.
     Open {
         /// The descriptor to open onto.
-        fd: c_int,
+        to: c_int,
         /// The path.
         path: Vec<u8>,
         /// `flags::*` access flags.
@@ -721,11 +808,11 @@ impl FdAction {
         Self::Close { fd }
     }
 
-    /// Describe one open.
-    pub fn open(fd: c_int, path: Vec<u8>, flags: c_int, mode: u32) -> Self {
+    /// Describe one open onto `to`.
+    pub fn open(path: impl AsRef<[u8]>, flags: c_int, mode: u32, to: c_int) -> Self {
         Self::Open {
-            fd,
-            path,
+            to,
+            path: path.as_ref().to_vec(),
             flags,
             mode,
         }
@@ -750,22 +837,68 @@ pub struct SpawnPlan {
 }
 
 impl SpawnPlan {
-    /// A plan for `program` with `argv`.
+    /// A plan for `program` with `argv` and an empty environment.
     pub fn new(
-        program: &[u8],
-        argv: impl IntoIterator<Item = impl Into<Vec<u8>>>,
-    ) -> io::Result<Self>
-    where
-        Self: Sized,
-    {
+        program: impl AsRef<[u8]>,
+        argv: impl IntoIterator<Item = impl AsRef<[u8]>>,
+    ) -> io::Result<Self> {
+        Self::new_with_env(program, argv, std::iter::empty::<&[u8]>())
+    }
+
+    /// A plan for `program` with `argv` and `envp` (`NAME=value` entries).
+    pub fn new_with_env(
+        program: impl AsRef<[u8]>,
+        argv: impl IntoIterator<Item = impl AsRef<[u8]>>,
+        envp: impl IntoIterator<Item = impl AsRef<[u8]>>,
+    ) -> io::Result<Self> {
         Ok(Self {
-            program: program.to_vec(),
-            argv: argv.into_iter().map(Into::into).collect(),
-            env: Vec::new(),
+            program: program.as_ref().to_vec(),
+            argv: argv.into_iter().map(|arg| arg.as_ref().to_vec()).collect(),
+            env: envp
+                .into_iter()
+                .map(|entry| entry.as_ref().to_vec())
+                .collect(),
             actions: Vec::new(),
             reset_signals: SignalSet::default(),
             sigmask: None,
         })
+    }
+
+    /// Append one ordered descriptor action.
+    pub fn push_action(&mut self, action: FdAction) {
+        self.actions.push(action);
+    }
+
+    /// Append `dup2(from, to)`.
+    pub fn dup2(&mut self, from: c_int, to: c_int) {
+        self.actions.push(FdAction::dup2(from, to));
+    }
+
+    /// Append a close of `fd`.
+    pub fn close(&mut self, fd: c_int) {
+        self.actions.push(FdAction::close(fd));
+    }
+
+    /// Append an open of `path` onto `to`.
+    pub fn open(
+        &mut self,
+        path: impl AsRef<[u8]>,
+        flags: c_int,
+        mode: u32,
+        to: c_int,
+    ) -> io::Result<()> {
+        self.actions.push(FdAction::open(path, flags, mode, to));
+        Ok(())
+    }
+
+    /// Append one exported `NAME=value` environment entry.
+    pub fn push_env(&mut self, name: &[u8], value: &[u8]) -> io::Result<()> {
+        let mut entry = Vec::with_capacity(name.len() + 1 + value.len());
+        entry.extend_from_slice(name);
+        entry.push(b'=');
+        entry.extend_from_slice(value);
+        self.env.push(entry);
+        Ok(())
     }
 }
 
@@ -829,10 +962,10 @@ pub fn spawn(plan: SpawnPlan) -> io::Result<Child> {
                     ));
                 }
             },
-            FdAction::Open { fd, .. } => {
+            FdAction::Open { to, .. } => {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
-                    format!("opening descriptor {fd} for a child is not implemented on Windows"),
+                    format!("opening descriptor {to} for a child is not implemented on Windows"),
                 ));
             }
             FdAction::Close { .. } => {}
@@ -979,3 +1112,71 @@ pub fn become_session_leader() -> io::Result<()> {
 
 /// Keep `AsRawHandle` in the import list for the console work ahead.
 const _: fn(&std::io::Stdin) -> RawHandle = |stdin| stdin.as_raw_handle();
+
+// ---------------------------------------------------------------------------
+// Regular expressions
+// ---------------------------------------------------------------------------
+
+/// A bare descriptor number.
+pub type RawFd = c_int;
+
+/// Capture ranges, as byte offsets into the searched text.
+pub type CaptureRanges = Vec<Option<(usize, usize)>>;
+
+/// A compiled POSIX extended regular expression.
+///
+/// Windows has no `regcomp`. The Unix backend deliberately keeps libc's engine
+/// so `[[ x =~ y ]]` and `${x/pat/rep}` keep bash's leftmost-longest semantics;
+/// swapping in a different engine would silently change matches. Until an
+/// engine with the same rules exists, compilation fails and the caller reports
+/// it (`docs/portability.md` §9).
+#[derive(Debug)]
+pub struct Regex {
+    _private: (),
+}
+
+impl Regex {
+    /// Always fails on Windows.
+    pub fn new(_pattern: &[u8]) -> Result<Self, RegexError> {
+        Err(RegexError::Unsupported)
+    }
+
+    /// Always fails on Windows.
+    pub fn new_icase(_pattern: &[u8]) -> Result<Self, RegexError> {
+        Err(RegexError::Unsupported)
+    }
+
+    /// The number of parenthesised subexpressions; unreachable in practice.
+    pub fn group_count(&self) -> usize {
+        0
+    }
+
+    /// Run the pattern; unreachable because construction fails.
+    pub fn captures(&self, _text: &[u8]) -> Option<CaptureRanges> {
+        None
+    }
+
+    /// Run the pattern; unreachable because construction fails.
+    pub fn try_captures(&self, _text: &[u8]) -> Result<Option<CaptureRanges>, RegexError> {
+        Err(RegexError::Unsupported)
+    }
+}
+
+/// Why a pattern could not be compiled or run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegexError {
+    /// This platform has no regular-expression engine.
+    Unsupported,
+}
+
+impl RegexError {
+    /// The engine's raw code, which does not exist here.
+    pub fn code(&self) -> Option<c_int> {
+        None
+    }
+
+    /// A human-readable message, never empty.
+    pub fn message(&self) -> &'static str {
+        "regular expressions are not implemented on Windows"
+    }
+}
