@@ -162,9 +162,11 @@ was needed. The one place this does not carry over is Windows console input
 * **Scope leaks.** Every field of shell state that a subshell may mutate must be
   in the scope. Missing one is a silent bug that only the conformance suite (or
   a user) will find; this is the main correctness risk of W2.
-* **Clone cost.** If a scope is a deep clone, `$( … )` in a loop is O(state)
-  per iteration where fork was O(1) copy-on-write. Needs a benchmark before
-  W2 ships; a copy-on-write overlay is the fallback.
+* **Clone cost — measured, and real.** A scope is a deep clone, so `$( … )` in
+  a loop is O(state) per iteration where fork was copy-on-write. The release
+  bench puts `$(echo hi)` at 170 ms per 1000 against bash's 7.5 ms, and
+  `( : )` at 145 ms against 4.3 ms. A copy-on-write overlay is the fallback,
+  and this is now the largest performance gap the shell has.
 * **Conformance drop.** W1 and W2 will both lower the Oils number. The baseline
   is re-recorded each time, and the *quality* metric (silent divergence) is what
   matters.
@@ -173,11 +175,17 @@ was needed. The one place this does not carry over is Windows console input
 * **uutils size.** Curated set only; measure binary size and build time before
   adding a utility.
 * **Runtime immaturity.** compio is pre-1.0 and its API moves. Accepted, because
-  the interaction surface is small (fs, process, time, `PollFd`).
+  the interaction surface is small (fs, process, time, `PollFd`). One concrete
+  consequence found the hard way: `default-features = false` drops `io-uring`,
+  and compio then links its **stub** driver, which panics on the first
+  operation ("Stub driver does not support any operations") rather than failing
+  at startup. The feature is listed explicitly in the workspace manifest with a
+  comment saying why.
 * **`io_uring` availability.** No polling fallback by decision: this is an
   interactive shell and the owner does not care about seccomp-restricted
   sandboxes. If the driver cannot be created, startup must fail with a clear
-  message rather than degrade silently.
+  message rather than degrade silently — and the stub-driver panic above is
+  exactly the degraded mode to avoid, so the feature list is load-bearing.
 * **Windows console input.** compio documents that on Windows a console stdin
   read is a blocking read on a separate thread and cannot be cancelled. So the
   "no threads" property holds on Unix (verified) but not for Windows console
