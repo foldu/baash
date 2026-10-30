@@ -66,29 +66,23 @@ a `trap '' INT` leaks a Ctrl-C-proof child unless the plan says otherwise.
 inspecting the child's exit status. The report pipe makes this reliable: EOF on
 the read end means `exec` succeeded.
 
-**`WaitOutcome::exit_status()` folds `Stopped` into 128+signal.** For `$?` the
-VM must match on the enum (`Exited`/`Signaled`/`Stopped`), not on this helper,
-or a stopped job will look like a failure.
-
 **`SIGCHLD` is a wakeup hint, not an event.** Until `wait_any_nohang` returns
 `None`, there may be more children to reap.
 
-**`set_foreground_pgrp` assumes the caller is the only thread that could receive
-`SIGTTOU`** — true for the single-threaded event loop or a fork-gated mode,
-which is why the gate exists.
+**There is no terminal handover.** The job-control wave's `tcsetpgrp` wrappers,
+per-job process groups and `WUNTRACED` wait forms are gone. The shell and its
+children share one process group, which is why `Ctrl-Z` stops the shell too.
 
-**Job control is `tcsetpgrp` plus process-group placement, nothing more.**
+**Process-group placement remains a spawn capability, unused by the shell.**
 `ProcessGroup::SetPgid { pgroup: 0 }` creates a group led by the child;
-`pgroup: leader` joins an existing one. Both the parent (immediately after
-spawn, to close the window in which the child is still in the shell's group)
-and the child call it, and either winning is correct. `set_foreground_pgrp`
-blocks `SIGTTOU` across `tcsetpgrp`, so an interactive shell that lost the
-terminal gets an error instead of being stopped. `SIGTTOU`, `SIGTTIN`, `SIGTSTP`,
-`SIGCONT`, `SIGSTOP`, `SIGCHLD` are re-exported next to `SIGINT`/`SIGQUIT`.
+`pgroup: leader` joins an existing one. `spawn` implements it, but `bsh-vm`
+never sets it: there is no job control to maintain groups for. `SIGTTOU`,
+`SIGTTIN`, `SIGTSTP`, `SIGCONT`, `SIGSTOP` and `SIGCHLD` are still re-exported
+next to `SIGINT`/`SIGQUIT`.
 
 **`become_session_leader(fd)` is the pty-test helper**: `setsid` + `TIOCSCTTY`
-in a forked child, so a test can exercise `tcsetpgrp` on a terminal that really
-is the session's controlling terminal. It is not used by the shell itself (an
+in a forked child, so a test can give its shell a real controlling terminal and
+`Ctrl-C` reaches the foreground group. It is not used by the shell itself (an
 interactive shell already has one).
 
 Linux-only: `SignalFd` (elsewhere `new`/`read` return `Unsupported` and
@@ -103,7 +97,7 @@ POSIX.
 `set_disposition` / `ignore_signals` are the two places the shell changes a
 signal *action* rather than blocking it (`trap '' SIG` is `SIG_IGN`, which
 children inherit across `exec`, and `SIGINT`/`SIGQUIT` are ignored while the
-shell waits for a foreground job); `replace_signal_mask` is the permanent form
+shell waits for a foreground child); `replace_signal_mask` is the permanent form
 of `SignalSet::set`, for a forked child that must not inherit the shell's
 blocked traps. `SIGALRM`, `SIGTERM`, `SIGINT`, `SIGQUIT` and `ECHILD` are
 re-exported so `bsh-vm` needs no `libc`.
@@ -120,10 +114,7 @@ signal dispositions itself. Also: keep the owned fds referenced by
 Terminal code is now tested on a real pty. `open_pty` opens the slave
 `O_NOCTTY` so a test can never steal the harness's controlling terminal; the
 tests install a known canonical `termios` state first, assert every flag raw
-mode clears, and assert full restoration on `Drop`; the foreground-pgrp test
-restores the terminal *from the background* with `SIGTTOU` at `SIG_DFL`, which
-is what proves `set_foreground_pgrp`'s block is load-bearing rather than
-incidental.
+mode clears, and assert full restoration on `Drop`.
 
 ---
 
@@ -406,7 +397,8 @@ honest unsupported error. `Shell::prompt_context() -> PromptContext` has a
 default built from the process environment (user from `/etc/passwd` by
 effective uid, host from `/proc`, cwd from `current_dir`, local time from
 TZif). `bsh-vm` overrides it with what only it knows: the logical
-`$PWD`/`$OLDPWD`/`$HOME`/`$USER`/`$HOSTNAME`, the job count (`\j`),
+`$PWD`/`$OLDPWD`/`$HOME`/`$USER`/`$HOSTNAME`, the background-child count
+(`\j`; there is no job table),
 `prompt_vars` from `shopt`, last-failed, root, `\l` (the tty basename from
 `/proc/self/fd/0`, `tty` when stdin is not a terminal) and the two numbers
 below. An interactive shell also starts with bash's `PS1='\s-\v\$ '` and
@@ -488,7 +480,7 @@ single ASCII alphabetic bytes. A range that does not parse (overflow, quoted
 endpoint, `0x1`, `1...3`) leaves the group literal rather than erroring.
 
 **Errors** are `bsh_lang::Error { kind, span }` with `Display`, `code()` and
-`diagnostic() -> bsh_diag::Diagnostic`. Codes 301–306 are provisional.
+`diagnostic() -> bsh_diag::Diagnostic`. Codes 301–308 are provisional; 302 is the shell-wide `CAPABILITY` code.
 
 Documented deviation: for unquoted `$@` inside a `${…}` replacement word we
 apply the ordinary unquoted rules, where bash space-joins and suppresses
@@ -717,11 +709,11 @@ the completion menu is not "fixed" to match the wrong spelling.
 ## bsh-vm (tree evaluator)
 
 **Which built-ins the executor owns.** `break`, `continue`, `return`, `exit`,
-`exec`, `eval`, `.`/`source`, `cd`, `echo`, `read`, `wait`, `kill`, `jobs`,
-`fg`, `bg` and `disown` are implemented in `bsh_vm`. They unwind control flow,
-re-enter the interpreter, or need the descriptor table, `lseek`, termios, signal
-delivery and process groups, which a `fn(host, argv) -> Status` signature cannot
-express. The executor consults them only when `BuiltinDef::is_implemented()` is
+`exec`, `eval`, `.`/`source`, `cd`, `echo`, `read`, `wait` and `kill` are
+implemented in `bsh_vm`; `jobs`, `fg`, `bg` and `disown` are registered there
+only to reject job control. They unwind control flow, re-enter the interpreter,
+or need the descriptor table, `lseek`, termios and signal delivery, which a
+`fn(host, argv) -> Status` signature cannot express. The executor consults them only when `BuiltinDef::is_implemented()` is
 false, so a runtime implementation takes over silently — deliberate, but it
 means whoever implements one of those in `bsh-runtime` must delete the
 executor's body in the same change. `trap`, by contrast, *is* implemented in
@@ -741,7 +733,7 @@ the process status — and from `Drop` for an interactive shell, whose editor lo
 is outside the VM. `$?` inside `EXIT` is the pending status, every other handler
 preserves `$?`, a bare `exit` in `EXIT` reuses the saved status, and a trap never
 re-enters itself. `SIGINT`/`SIGQUIT` are ignored while waiting for a foreground
-job, and *discarded* if they were trapped (bash's rule: `kill -INT` during
+child, and *discarded* if they were trapped (bash's rule: `kill -INT` during
 `sleep` runs no `INT` trap, while `USR1` runs afterwards).
 
 **`read` never over-reads.** A seekable descriptor is read in one chunk and
@@ -749,32 +741,31 @@ rewound by the surplus with `lseek`; a pipe is read one byte at a time because
 bytes cannot be given back to it. `Interp::read_buffers` only holds a surplus
 whose rewind failed, and a forked child starts with it empty.
 
-**Jobs are the table, not the pid list.** `Interp::job_table` holds a `Job` per
-job (number, pgid, member pids, per-member display parts, original command text,
-state `Running`/`Stopped`/`Done`, `notified`, `hup`); `%N`, `%%`/`%+`, `%-`,
-`%prefix` and `%?substring` resolve against it, numbers are the lowest free
-positive integer (bash reuses them), and the `+`/`-` markers are "most recently
-stopped, else highest number" — measured, not guessed. `background` remains the
-raw pid→status cache so `wait PID` can report a child reaped several commands
-ago and a waited status is consumed (a second `wait PID` is 127).
+**There is no job control, and that is a contract.** `bg` children are real
+children remembered only by pid in `Interp::background` (pid → status, so `$!`
+names the last one and `wait PID` can report a child reaped several commands
+ago; a waited status is consumed, so a second `wait PID` is 127). There is no
+job table, no `%N`/`%%`/`%prefix` resolution, no process-group handover and no
+stopped state. `jobs`, `fg`, `bg` and `disown` stay registered so `type` and
+command completion still find them, and running one reports `BSH-E0302`
+(`CAPABILITY`) naming the construct: `jobs: job control is not implemented in
+this shell`, status 1. A `%` operand to `wait`/`kill` gets the same diagnostic
+and status 1 (`wait: %1: job control is not implemented in this shell`), not
+"no such job". The diagnostic code is `302` (`CAPABILITY`), allocated next to
+`UNSUPPORTED = 301` in `bsh-lang`; `PARAMETER_NULL`, which held 302, moved to
+308 so the pivot's `BSH-E0302` is unambiguous. `set -m`/`set -o monitor` is
+accepted and inert — the option parses and reads back, and nothing consumes
+it, so an rc file that sets it does not break. Because the
+shell does not put children in their own group, `Ctrl-Z` stops the child *and*
+the shell, which is bash's behaviour with `set +m`.
 
-**One foreground wait path.** `run_external`, `run_pipeline`, `eval_subshell`
-and `fg` all call `wait_foreground_children`: it hands the terminal to the
-group (when job control is on), waits with `WUNTRACED`, restores the terminal on
-every path (a `TerminalGuard`), and records a stopped job plus bash's
-`[1]+  Stopped  …` notice. With `monitor` off the helper degrades to the old
-blocking wait, so scripts are unchanged. `reap_background` uses
-`wait_any_nohang_wuntraced` only when job control is on, and does nothing at
-all when this shell has no tracked background child: `waitpid(-1)` is
-process-wide, and the integration tests run several interpreters in one process.
-
-**`wait` on a stopped job does not block.** `wait %job` warns
-(`wait_for_job: job N is stopped`) and returns `128 + signal` (148 for
-`SIGTSTP`); a bare `wait` warns once per stopped job, skips it, and returns 0.
-`wait -n` answers 127 when the only remaining jobs are stopped. `jobs` removes
-a `Done` job after listing it, and `emit_job_notices` (called by the REPL before
-each prompt) reports `Done`/`Stopped` jobs to stderr and removes the finished
-ones.
+**One foreground wait path.** `run_external`, `run_pipeline`, `eval_subshell`,
+command substitution and completion capture all call
+`wait_foreground_children`: it holds the `SIGINT`/`SIGQUIT` ignore across the
+waits, and there is no terminal to hand over or restore. `reap_background` is
+the non-blocking drain and does nothing at all when this shell has no tracked
+child: `waitpid(-1)` is process-wide, and the integration tests run several
+interpreters in one process.
 
 **`exec` is a real `execve`.** `bsh_sys::exec(plan)` replaces the process; the
 VM maps its `io::Error` to 127/126 and exits. See the `bsh-sys` section for why
@@ -866,7 +857,8 @@ status (`Complete | Incomplete | Invalid`) would fix that; it is a seam, not a
 wall.
 
 **Raw mode is held only while `read_line` runs**, so a child command runs with
-the terminal cooked. That is a job-control prerequisite, not an accident.
+the terminal cooked. Without job control that also means `Ctrl-Z` reaches the
+whole foreground process group, shell included.
 
 **Key semantics**: TAB and Enter accept a menu selection; Up/Down, Shift-Tab and
 Ctrl-P/Ctrl-N navigate; Esc cancels. One candidate is inserted through
@@ -912,7 +904,7 @@ at end of input), `SIGWINCH` reflow, mouse, incremental/semantic highlighting.
 History expansion itself is the binary's (`bsh_lang::histexpand`); the editor
 only supplies the `set_initial_line` prefill used by `histverify`. The ring's
 `HISTCONTROL`/`HISTSIZE` policies are wired in `bsh-runtime`; the pty tests are
-`crates/bsh/tests/interactive_jobs.rs`, `interactive_history.rs`,
+`crates/bsh/tests/interactive_signals.rs`, `interactive_history.rs`,
 `interactive_history_expansion.rs` and `interactive_prompt.rs`.
 
 ---
@@ -1037,8 +1029,8 @@ fall back to the default completion because the completer cannot run shell code
 (`docs/state.md` §4).
 
 Sources that would be lies are stubs returning nothing rather than plausible
-lists: `binding` (no line editor), `service`, `stopped` jobs, `disabled`
-built-ins (`enable -n` absent).
+lists: `binding` (no line editor), `service`, `job`/`running`/`stopped` (no
+job table), `disabled` built-ins (`enable -n` absent).
 
 Two status codes are deliberately not bash's, both annotated as bugs in the
 suite: `complete -p NAME` for an unknown NAME is 0 (bash 1), and `complete NAME`
@@ -1117,8 +1109,8 @@ a diagnostic mode, not the baseline.
 
 ### The binary's REPL loop (`crates/bsh/src/main.rs`)
 
-Before each `editor.read_line()` the loop, in order: restores the terminal and
-emits job notices; swaps the history ring into `ShellState`; runs
+Before each `editor.read_line()` the loop, in order: swaps the history ring into
+`ShellState`; runs
 `PROMPT_COMMAND` (a scalar command or an indexed array, each element run in
 turn) with its stdout captured through a seekable temporary file and re-emitted
 above the prompt, appending a newline when the output did not end in one;

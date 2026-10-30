@@ -31,16 +31,24 @@ substitution, arithmetic, `[[ ]]` including `=~`, globbing with
 `extglob`/`failglob`, indexed and associative arrays, namerefs, `declare`/
 `typeset`/`readonly`/`export` with bash's own `-p` layout, the pattern
 operators (`${x#pat}`, `${x%pat}`, `${x//a/b}`, `${x@Q}`), traps, `set -e` and
-`set -u`, `break`/`continue`/`return`/`exit`, `exec`, job control, history
-(`history`, `fc`, the `HIST*` knobs; persisted to `~/.bsh_history` by default),
+`set -u`, `break`/`continue`/`return`/`exit`, `exec`, background `&` with
+`$!`/`wait`/`kill` by pid, history (`history`, `fc`, the `HIST*` knobs;
+persisted to `~/.bsh_history` by default),
 history expansion (`!!`, `!n`, `!-n`, `!string`, `!?string?`, `!#`, the word
 designators and modifiers, `^old^new^`), and the built-ins listed in
 `docs/contracts.md`.
 
+There is **no job control** (see `docs/direction.md`): no `jobs`/`fg`/`bg`/
+`disown`, no `%` specifications, no per-job process groups and no terminal
+handover, so `Ctrl-Z` stops the child and the shell together, as bash does
+with `set +m`. Those four names are still known and report `BSH-E0302`;
+`set -m` is accepted and does nothing.
+
 The interactive prompt is built from the shell's own variables before every
 line: `PS1`/`PS2` from an rc file, the environment or a command all take
-effect at the next prompt, the escapes read the shell's logical `PWD`, job
-table and history ring, `shopt promptvars` runs a second expansion (so
+effect at the next prompt, the escapes read the shell's logical `PWD`,
+background children and history ring, `shopt promptvars` runs a second
+expansion (so
 `PS1='$(date +%H:%M) $ '` works), and `PROMPT_COMMAND` (string or array) runs
 before each prompt with its output above it. `Ctrl-R` is
 readline-compatible reverse incremental search.

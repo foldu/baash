@@ -47,12 +47,12 @@ the dependency is narrow in code and deep in semantics):
 |---|---|---|
 | `( … )` subshell | `bsh-vm/src/tree/eval.rs`, `fork_shell` | run shell code on a copy of the state, discard changes |
 | `$( … )` command substitution | same helper | run shell code, capture its stdout |
-| `&` on a builtin/function, and pipeline stages that contain shell code | same helper | a process to be the job / a stage |
+| `&` on a builtin/function, and pipeline stages that contain shell code | same helper | a process to be a background child / a stage |
 | completion capture (`complete -F`-style, and `PROMPT_COMMAND`) | `bsh-vm/src/tree/complete.rs`, `capture_stdout` | run shell code with stdout redirected |
 
 Everything else about spawning already avoids `fork`: external commands go
-through `posix_spawn`, and `bsh-sys` already has the pieces job control needed
-(`ProcessGroup::SetPgid`, `wait_pid(wuntraced)`, `set_foreground_pgrp`).
+through `posix_spawn`. Job control is gone (W1), so there is no terminal
+handover, `WUNTRACED` wait or per-job process group to port.
 
 **The key observation:** `capture_stdout` in `bsh/src/main.rs` already runs
 shell code *in this process* with fd 1 temporarily `dup2`'d to a seekable temp

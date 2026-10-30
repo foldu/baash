@@ -22,7 +22,7 @@ cargo build -p bsh -p bsh-spec
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- --deny warnings
 cargo test --workspace --all-features
-cargo test --workspace --all-features -- --list | grep -c ': test$'   # 1180
+cargo test --workspace --all-features -- --list | grep -c ': test$'   # 1161
 
 # conformance
 target/debug/bsh-spec --shell target/debug/bsh --ratchet   # must be >= baseline
@@ -47,18 +47,18 @@ a stale brief has already cost two wrong scopes (arrays: 54 vs real; namerefs:
 
 | measure | value |
 |---|---|
-| comparable cases | **1989 / 2787 = 71.4 %** |
-| strict (primary expectation only) | 1934 / 2787 = 69.4 % |
-| failing | 798 |
+| comparable cases | **1982 / 2787 = 71.1 %** |
+| strict (primary expectation only) | 1927 / 2787 = 69.1 % |
+| failing | 805 |
 | timeouts | 0 |
-| of the whole suite (3971 cases) | 50.1 % |
-| as a fraction of bash's score | 1989 / 2574 = 77.3 % |
-| share of the bash gap closed since 1013 | 976 / 1561 = 62.5 % |
-| our test count | 1180 |
+| of the whole suite (3971 cases) | 49.9 % |
+| as a fraction of bash's score | 1982 / 2574 = 77.0 % |
+| share of the bash gap closed since 1013 | 969 / 1561 = 62.1 % |
+| our test count | 1161 |
 
 Measured with `bash 5.3.20` as the comparison shell, harness forced to
 `LC_ALL=C` (bash scores *worse* under `C.UTF-8`: 2574 → 2435, so the C locale
-is the fair denominator). We pass 46 cases bash fails; bash passes 631 we fail.
+is the fair denominator). We pass 46 cases bash fails; bash passes 638 we fail.
 
 **1184 skipped** cases: 745 from the ysh-only suite files, 417 marked
 `our_shell: ysh`, 22 needing a `python2` helper we do not provide. 100 % is not
@@ -66,8 +66,13 @@ a meaningful target: bash itself scores 92.4 %, and 55 of our passes come from
 `## OK <shell>` alternatives rather than the primary expectation — which is
 exactly the 71.1 % vs 69.1 % split, and why both numbers are ratcheted.
 
-Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 1989`,
-`strict = 1934`). `--ratchet` exits 1 below either, 2 if it cannot measure.
+Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 1982`,
+`strict = 1927`). `--ratchet` exits 1 below either, 2 if it cannot measure.
+
+**The W1 drop is expected.** Removing job control failed seven Oils cases that
+exercise `%` specifications, `jobs -p` and `kill %job` (one trap case improved
+as a side effect); the pivot accepts a lower number as the price of deleting
+the machinery. Future waves re-baseline the same way.
 
 ## 3. Layers
 
@@ -75,11 +80,11 @@ Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 1989`,
 
 | crate | lines | responsibility |
 |---|---|---|
-| `bsh-sys` | 3547 | the only `unsafe`. fork/exec (`posix_spawn` by default), descriptors, pipes/pty, termios, signals, `wait_any`, process groups and `tcsetpgrp`, libc regex, global `fork_gate()` |
+| `bsh-sys` | 3547 | the only `unsafe`. fork/exec (`posix_spawn` by default), descriptors, pipes/pty, termios, signals, `wait_any`, process-group spawn placement, libc regex, global `fork_gate()` |
 | `bsh-syntax` | 6607 | lexer + recursive-descent parser producing `Word`/`Command`; the superset grammar |
 | `bsh-lang` | 9862 | shell *text* semantics: word expansion, patterns (`bsh-pattern`), parameter operators, prompt escapes, arithmetic; no I/O |
 | `bsh-runtime` | 11736 | shell *state*: variables/arrays/namerefs, options, builtin registry and state-only bodies, the history ring and `HIST*` policies, traps bookkeeping, completion registry, `declare -p` rendering |
-| `bsh-vm` | 13242 | the evaluator (tree-walking) and everything that needs both state and syscalls: command execution, redirection, jobs, traps |
+| `bsh-vm` | 13242 | the evaluator (tree-walking) and everything that needs both state and syscalls: command execution, redirection, child processes, traps |
 | `bsh-pattern` | 3947 | Thompson-NFA glob: `O(n·m)`, never exponential; `extglob`/`nocasematch`/`utf8` flags |
 | `bsh-diag` | 1946 | diagnostic model and miette rendering; error-code space |
 | `bsh-complete` | 3843 | completion engine: providers, contexts, nucleo ranking, menu layout |
@@ -108,8 +113,8 @@ delegates everything else: line editing to `bsh-repl`, execution to the
   variable table before every line, so an rc file, an exported `PS1` and a
   `PS1=` typed at the prompt all take effect at the next prompt; the escapes
   (`\u \h \w \W \$ \! \# \j \l \d \t …`) read the shell's logical
-  `PWD`, its job table and its history ring; `\!` is the number the line will
-  get and `\#` bash's command number;
+  `PWD`, its background children (`\j`) and its history ring; `\!` is the
+  number the line will get and `\#` bash's command number;
 * **`promptvars`** (`shopt`, on by default): the decoded prompt is expanded a
   second time as if double-quoted, so `PS1='$PWD $ '` and
   `PS1='$(date +%H:%M) $ '` work and `$(…)` runs at prompt time; with the
@@ -162,15 +167,16 @@ delegates everything else: line editing to `bsh-repl`, execution to the
   `set_initial_line` seam) instead of running it;
 * `Ctrl-C` on a line → discards it, `$?` = 130; `Ctrl-D` on an empty line →
   exit 0;
-* **job control**: every foreground command (and pipeline) gets its own
-  process group, `tcsetpgrp` handover, `WUNTRACED` waits and terminal restore.
-  `Ctrl-Z` stops the foreground job, returns the prompt and `$?` 148; `jobs`
-  (with `-l`, `-p`, `-r`, `-s`), `fg`, `bg`, `disown` match bash's output;
-  completion/stop notices print before the next prompt; `%N`, `%%`, `%+`, `%-`,
-  `%prefix` and `%?substring` resolve; `wait` on a stopped job returns 148
-  instead of hanging. Verified by `crates/bsh/tests/interactive_jobs.rs`, which
-  runs `bsh -i` on a real pty;
-* `$!`, `wait`, `kill` for children *this* shell started;
+* **no job control** (W1, `docs/direction.md`): the shell and its children
+  share one process group, so `Ctrl-Z` stops the child and the shell together,
+  as bash does with `set +m`. There is no job table, no `%` specifications and
+  no terminal handover. `jobs`, `fg`, `bg` and `disown` remain known names but
+  report `BSH-E0302` (`CAPABILITY`) with status 1; `%1` operands to `wait`/`kill`
+  do the same. `set -m`/`set -o monitor` is accepted and inert. The `Ctrl-C`
+  path is unchanged: the child dies, the shell survives and `$?` is 130
+  (`crates/bsh/tests/interactive_signals.rs`);
+* `$!`, `wait` (pids, and bare `wait` for all live children) and `kill` (pids
+  and signals) for children *this* shell started;
 * `--rcfile FILE` / `--norc`; the default startup file is `~/.bshrc` when it
   exists, otherwise `~/.bashrc` (see §9).
 
@@ -204,9 +210,9 @@ delegates everything else: line editing to `bsh-repl`, execution to the
 * `$?` is restored after the prompt is rendered, so a prompt substitution does
   not change the status the next command sees; a *later* `$(…)` inside the
   same `PS1` can see the status the earlier one left.
-* `\j` in a non-interactive `${PS1@P}` still counts no jobs for a `sleep &`
-  under `set -m` — that is the job table's business, not the prompt's. The
-  interactive count is real (measured 0 → 1 → 0).
+* `\j` now counts live background children rather than jobs: it is 0 before a
+  `&` child is tracked, 1 while it is, and 0 again after `wait`, in the prompt
+  and in `${PS1@P}` alike. Without job control there is nothing else to count.
 
 **Known history limitations** (measured or deliberately deferred): `fc` with
 neither `-l` nor `-s` reports "editing history is not implemented yet" instead
@@ -221,14 +227,12 @@ with `;`); `HISTTIMEFORMAT` is not implemented; the conformance suite's
 interactive history cases mostly still fail on the bash-only `^D` marker, not
 on history behaviour.
 
-**Known job-control limitations** (measured, not defects to rediscover): a
-foreground stop inside a function or brace group resumes the *child*, not the
-containing compound command; `$!` for a background pipeline is the one subshell
-this shell forks, not bash's last-stage pid; `jobs -l` prints one line for a
-background pipeline (the shell runs it as one child); the command text is the
-source text, so bash's normalisation of `>/dev/null` to `> /dev/null` and of
-runs of spaces is not reproduced; `disown -h` marks the job but the shell still
-does not send `SIGHUP` on exit.
+**Known job-control gaps** (deliberate, not defects to rediscover): there is no
+job control, so `%` specifications and `jobs`/`fg`/`bg`/`disown` are capability
+errors, `Ctrl-Z` stops the shell with its child, `disown -h` no longer exists
+and the shell does not send `SIGHUP` to background children on exit. `$!` for a
+background pipeline is the one subshell this shell forks, not bash's last-stage
+pid.
 
 **Known completion limitations** (measured against bash 5.3.20; not defects to
 rediscover):
@@ -270,14 +274,14 @@ rediscover):
 **Known-untested:** terminal resize (there is a `TIOCGWINSZ` read; no `SIGWINCH`
 handling seen); whether the line editor is restored correctly when a child
 leaves the tty in raw/cbreak mode; and an interactive shell started in the
-background (`bsh -i &`), where the shell is not the terminal's foreground group
-— bash stops itself with a job notice, and `enable_job_control` merely tolerates
-the failed `tcsetpgrp` (`let _ =`). `Ctrl-C`/`Ctrl-Z` on a foreground command are
-now covered by the pty test.
+background (`bsh -i &`), which now shares its foreground group with no terminal
+handover at all. `Ctrl-C` on a foreground command is covered by
+`interactive_signals.rs`; `Ctrl-Z` is deliberately unhandled (it stops the shell
+too) and is not tested.
 
 Harnesses: `crates/bsh-sys/tests/pty.rs` (real pty, termios, window size,
-foreground pgroup, `become_session_leader`), `crates/bsh/tests/interactive_jobs.rs`
-(interactive job control end to end), `crates/bsh/tests/interactive_history.rs`
+`become_session_leader`), `crates/bsh/tests/interactive_signals.rs`
+(`Ctrl-C` end to end), `crates/bsh/tests/interactive_history.rs`
 (history persistence), `crates/bsh/tests/interactive_history_expansion.rs`
 (`!!`, designators, quick substitution, `:p`, `histverify`, `set +H`, failed
 events, and the expanded ring contents at a real prompt), `crates/bsh/tests/interactive_prompt.rs` (the rendered
@@ -301,6 +305,11 @@ more are the executor's. Eight are missing outright: `times`, `ulimit`,
   `printf`, `pwd`, `test` fall through to `PATH` by design.
 * extension (18): missing `dirs`, `enable`, `let`, `popd`, `pushd`; `history`
   landed here.
+
+`jobs`, `fg`, `bg` and `disown` are still registered and still VM-backed, but
+their only behaviour is the `BSH-E0302` capability rejection. They are counted
+as "implemented" above because the name resolves and the diagnostic is
+deliberate, not because job control exists.
 
 Note the ownership rule that keeps this honest: the VM's table is consulted
 only when the registry entry has no body, so filling in a runtime body silently
@@ -363,52 +372,23 @@ Do not re-litigate these without a reason; several were expensive.
 * **`bsh-vm` keeps the evaluator** even after the bytecode VM lands; it is the
   oracle for the VM's semantics tests.
 
-## 8. Next steps, in order
+## 8. Next steps
 
-Interactive first. Each item is sized to be one wave with a brief and a
-measured finish line.
+**The ordering in this section is superseded by [`docs/direction.md`](direction.md).**
+The 2026-10-30 pivot replaced "conformance first, then interactive polish" with
+five commitments (no `fork`, Windows, interactive-first, shell code on the main
+thread, embedded uutils) and a six-wave plan. Read that file, not this list, to
+decide what to do next; `docs/roadmap.md` is historical context for the
+conformance queue.
 
-1. ~~**Job control.**~~ Landed (see §4): process groups, `tcsetpgrp`, `WUNTRACED`
-   waits, `jobs`/`fg`/`bg`/`disown`, completion notices, `monitor` on by
-   default for a terminal shell, and a pty integration test. Remaining edge
-   cases are listed under §4's known limitations (`$!` for pipelines, stops
-   inside compound commands, `SIGHUP` on exit).
-2. ~~**History.**~~ Landed: one ring in `bsh-runtime`, `history`/`fc`,
-   `HISTFILE`/`HISTSIZE`/`HISTFILESIZE`/`HISTCONTROL`/`HISTIGNORE`,
-   `histappend`, default `~/.bsh_history`, save/load across sessions, and the
-   `.bshrc`/`.bashrc` startup-file rule. **`Ctrl-R` incremental search** landed
-   with the prompt wave (item 3); the ring, the editor and the built-ins share
-   one ring, and the search is a prompt swap in the existing renderer.
-   ~~**History expansion**~~ landed in a later wave: `bsh_lang::histexpand`
-   (events, designators, modifiers, quick substitution), wired in `run_repl`
-   and the interactive `-i` stdin reader, with `histverify` and the measured
-   ring-record rule. Remaining gaps are `history -p` and `histreedit` (§4).
-3. ~~**Prompt parity.**~~ Landed: the prompt is rendered from the shell's
-   variable table before every line, `promptvars` (with `$(…)` and `$((…))`),
-   `PROMPT_COMMAND` (string and array), bash's default `PS1`/`PS2`, and
-   `\!`/`\#`/`\j` from real state. A stale inherited `PWD` is now replaced by
-   the real directory, which is what makes `\w` truthful. Remaining gaps are
-   listed under §4's known prompt limitations (`\s`, `set -e` with a failing
-   `PROMPT_COMMAND`, `${x@P}`'s history number without a recorded line).
-4. ~~**Completion.**~~ Landed: the engine is refreshed from shell state before
-   every prompt, command position is the deduplicated union (keywords included),
-   `$VAR`/`${VAR}` and quoted filenames work, and `complete -W`/`-A`/`-P`/`-S`/
-   `-o` drive Tab from the runtime's registry. `complete -F` remains deferred
-   for the reasons under §4's known completion limitations. **This moved ahead
-   of the small built-ins deliberately:** autocomplete was the owner's stated
-   product goal — the shell is judged at the prompt — whereas `ulimit` and
-   `times` are not typed interactively, so they can wait without costing a
-   user anything.
-5. **Common builtins.** `pushd`/`popd`/`dirs`, `umask`, `let`, `times`,
-   `ulimit`, `enable`, and `printf`/`pwd` bodies so `printf -v` and `pwd -P`
-   exist.
-6. **Editor depth.** `vi` mode, undo, `Ctrl-L`, word motions, bracketed paste
-   (verify first), search-match highlighting and `Ctrl-S`.
-7. **Completion depth (next).** `complete -F`/`-C`/`-G` (needs the per-line
-   completer and `COMP_*` lifecycle described in §4), the remaining `-A`
-   actions that need shell state, and `case` tags.
-8. **Back to conformance**, resuming with the clusters in §6 — interactive
-   semantics first (`sh-options`, `errexit-osh`), then builtins, then patterns.
+Where the waves stand:
+
+* **W1 (delete job control) — this change.** No job table, no `%` specs, no
+  process groups/terminal handover, no `WUNTRACED`; the job built-ins report
+  `BSH-E0302`; `set -m` is inert; the baseline is re-recorded at 1982/1927.
+* **W2 (no-fork subshells)** is next: replace the four `fork_child` call sites
+  with in-process subinterpreters and delete `fork_gate`. Job control is no
+  longer in its way.
 
 ## 9. Open questions
 
