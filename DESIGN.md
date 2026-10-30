@@ -332,9 +332,11 @@ Which gives three rules:
    creation happens.** The full-screen picker (§6.8) may own a worker thread;
    the debugger may own one. While any thread exists, `fork()` is a bug.
 
-Enforce rule 3 mechanically with a `ThreadGate` counter that panics in debug
-builds if `fork()` is called while threads are live, plus a `--threadless` test
-mode for CI. That turns a subtle rule into an assertion.
+`ThreadGate` enforced rule 3 mechanically until the 2026-10-30 pivot deleted
+the shell's last `fork`; the ordering problem below is now historical, and
+threads are unconstrained. The one place that still forks is the pty test
+harness (`bsh_sys::fork_child_status`, test scaffolding), which is
+single-threaded at the point it does.
 
 Two corollaries that are easy to miss:
 

@@ -38,10 +38,13 @@ becomes a second ratchet, alongside the conformance one.
 The Windows port then becomes "same shell, different `bsh-sys`, narrower
 profile", instead of a fork of the codebase.
 
-## 2. What actually depends on `fork` today
+## 2. What used to depend on `fork` (historical)
 
-Four call sites, all through `bsh_sys::fork_child`/`fork_shell` (which is why
-the dependency is narrow in code and deep in semantics):
+Nothing does any more: `( … )`, `$( … )` and pipeline stages run in process
+(`docs/direction.md` §2, W2), and `&` accepts only external commands. The table
+below is kept because it is still the map of what a Windows port has to answer
+for — each row is now an in-process mechanism rather than a child process, and
+the "what it needs" column is what that mechanism has to reproduce:
 
 | construct | site | what it needs from the child |
 |---|---|---|

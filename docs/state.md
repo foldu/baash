@@ -339,7 +339,8 @@ Do not re-litigate these without a reason; several were expensive.
 
 * **Bytes, never `String`**, for anything the shell can hold or print.
 * **`bsh-sys` is the only crate with `unsafe`**; everything else is
-  `#![forbid(unsafe_code)]`. `fork_gate()` is global. Inside it, every block
+  `#![forbid(unsafe_code)]`. There is no fork gate: the shell does not fork.
+  Inside it, every block
   carries a `// SAFETY:` comment and `clippy::undocumented_unsafe_blocks` is
   denied, so the invariant is enforced rather than remembered. Leaf syscalls
   prefer `rustix` over hand-written `libc` bindings: it already owns the
@@ -419,7 +420,7 @@ Where the waves stand:
      `a && b &`), which the baseline now records. One of them is recoverable
      later: a pipeline whose stages are *all* external could be backgrounded as
      a unit, since nothing needs a second interpreter.
-  3. **Deletion:** `fork_shell`, `enter_child`, `fork_gate`/`threadgate.rs`,
+  3. **Deletion — landed.** `fork_shell`, `enter_child`, `fork_gate`/`threadgate.rs`,
      `spawn_forked` (dead once nothing forks), and the completion-time external
      capture becomes spawn-and-read. Then re-measure and re-record the baseline.
   Job control is no longer in its way.

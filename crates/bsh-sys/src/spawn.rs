@@ -7,7 +7,6 @@
 //!   child, and can express process groups, signal defaults/masks and
 //!   dup2/close/open file actions. It is therefore safe even while the shell
 //!   has helper threads (DESIGN.md §4.3).
-//! * **`fork` + `execve`** is the fallback ([`spawn_forked`]) for plans that
 //!   `posix_spawn` cannot express, and is the mechanism behind [`fork_child`],
 //!   which runs *shell code* rather than an external program and so cannot be
 //!   spawned at all.
@@ -32,16 +31,13 @@
 //! no redirect can close or overwrite it. In-place [`exec`] needs no pipe: it
 //! returns the error to its own caller.
 
-use std::convert::Infallible;
 use std::ffi::CString;
 use std::io;
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::RawFd;
 
 use crate::bytes::{cstring, cstrings};
-use crate::fd::Pipe;
 use crate::signal::SignalSet;
-use crate::threadgate::fork_gate;
 use crate::wait::{WaitOutcome, wait_pid};
 
 /// One step in the ordered list of descriptor changes applied in the child.
@@ -109,52 +105,6 @@ impl FdAction {
             to,
         })
     }
-
-    /// Every descriptor number this action names.
-    fn descriptors(&self) -> [RawFd; 2] {
-        match self {
-            Self::Dup2 { from, to } => [*from, *to],
-            Self::Close(fd) | Self::Open { to: fd, .. } => [*fd, *fd],
-        }
-    }
-}
-
-/// What process group the child should join.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ProcessGroup {
-    /// Leave the child in the parent's process group.
-    #[default]
-    Inherit,
-    /// `setpgid(0, pgroup)` in the child. `pgroup == 0` creates a new group
-    /// led by the child. The shell does not use this today (it has no job
-    /// control); it remains a general spawn capability.
-    SetPgid {
-        /// The process group to join, or 0 for a new group.
-        pgroup: libc::pid_t,
-    },
-}
-
-/// A close-on-exec pipe that carries an exec failure from child to parent.
-///
-/// The child writes the raw errno (four bytes, native endianness) to
-/// [`ReportPipe::write`] and exits; the parent reads [`ReportPipe::read`].
-/// Both ends are `O_CLOEXEC`, so a successful `exec` closes the writer and the
-/// parent's read returns EOF. Only the fork fallback needs this channel:
-/// `posix_spawn` returns the child's exec error synchronously.
-#[derive(Debug)]
-pub struct ReportPipe {
-    /// Parent's read end.
-    pub read: OwnedFd,
-    /// Child's write end.
-    pub write: OwnedFd,
-}
-
-impl ReportPipe {
-    /// Create a fresh close-on-exec pipe.
-    pub fn new() -> io::Result<Self> {
-        let Pipe { read, write } = Pipe::new()?;
-        Ok(Self { read, write })
-    }
 }
 
 /// Everything needed to execute one child, computed in the parent.
@@ -179,8 +129,6 @@ pub struct SpawnPlan {
     /// Descriptor changes applied in order, after the process-group and signal
     /// setup and before `exec`.
     pub actions: Vec<FdAction>,
-    /// Process-group placement.
-    pub pgroup: ProcessGroup,
     /// Signals whose disposition is reset to `SIG_DFL` in the child.
     ///
     /// `exec` resets *caught* signals but preserves `SIG_IGN`, so a shell that
@@ -192,11 +140,6 @@ pub struct SpawnPlan {
     /// The shell normally passes `Some(empty)` so that signals it blocks
     /// internally (`SIGCHLD`, `SIGTTOU`) do not leak into the command.
     pub sigmask: Option<SignalSet>,
-    /// Exec-failure report channel; see [`ReportPipe`].
-    ///
-    /// `posix_spawn` reports exec failures through its return value and closes
-    /// this unused; the fork fallback uses it.
-    pub report: ReportPipe,
 }
 
 impl SpawnPlan {
@@ -219,10 +162,8 @@ impl SpawnPlan {
             argv: cstrings(argv)?,
             envp: cstrings(envp)?,
             actions: Vec::new(),
-            pgroup: ProcessGroup::Inherit,
             reset_signals: SignalSet::empty(),
             sigmask: None,
-            report: ReportPipe::new()?,
         })
     }
 
@@ -264,38 +205,6 @@ impl SpawnPlan {
         self.envp.push(cstring(&entry)?);
         Ok(())
     }
-
-    /// The largest descriptor number any action mentions.
-    fn max_action_fd(&self) -> Option<RawFd> {
-        self.actions.iter().flat_map(FdAction::descriptors).max()
-    }
-
-    /// Move the report writer above every descriptor an action mentions.
-    ///
-    /// A redirect such as `3>file` would otherwise dup2 over the report pipe's
-    /// writer, and a failed exec would then be reported as a bogus success.
-    /// `open(2)` in the child cannot pick the raised number either, because the
-    /// descriptor is already open. The duplicate is done in the parent so a
-    /// failure can be returned cleanly.
-    fn raise_report_fd(&mut self) -> io::Result<()> {
-        let floor = self
-            .max_action_fd()
-            .map_or(10, |fd| fd.saturating_add(1).max(10));
-        let current = self.report.write.as_raw_fd();
-        if current >= floor {
-            return Ok(());
-        }
-        // SAFETY: `F_DUPFD_CLOEXEC` duplicates a live descriptor; `floor` is a
-        // valid non-negative minimum and the call touches no pointers.
-        let duplicate = unsafe { libc::fcntl(current, libc::F_DUPFD_CLOEXEC, floor) };
-        if duplicate < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `duplicate` is a fresh descriptor; taking ownership closes
-        // the previous writer when it is replaced.
-        self.report.write = unsafe { OwnedFd::from_raw_fd(duplicate) };
-        Ok(())
-    }
 }
 
 /// A running (or at least created) child.
@@ -305,6 +214,13 @@ pub struct Child {
 }
 
 impl Child {
+    /// Take ownership of a child this module did not spawn.
+    ///
+    /// Used by [`fork_child_status`] (test scaffolding) and by nothing else.
+    fn from_pid(pid: libc::pid_t) -> Self {
+        Self { pid }
+    }
+
     /// The child's process id (`$!` for a background command).
     pub fn pid(&self) -> libc::pid_t {
         self.pid
@@ -327,85 +243,7 @@ impl Child {
 /// predicate explicit means a future action type automatically selects the
 /// fallback.
 pub fn spawn(plan: SpawnPlan) -> io::Result<Child> {
-    if posix_spawn_can_express(&plan) {
-        spawn_posix_spawn(plan)
-    } else {
-        spawn_forked(plan)
-    }
-}
-
-fn posix_spawn_can_express(plan: &SpawnPlan) -> bool {
-    plan.actions.iter().all(|action| {
-        matches!(
-            action,
-            FdAction::Dup2 { .. } | FdAction::Close(_) | FdAction::Open { .. }
-        )
-    })
-}
-
-/// Execute `plan` with `fork(2)` + `execve(2)`.
-///
-/// This is the fallback for plans `posix_spawn` cannot express. It is public
-/// because it is also the path exercised when testing exec-failure reporting,
-/// and because a caller on a platform without a needed spawn attribute may
-/// need it directly. It consults [`fork_gate`] and panics while helper threads
-/// are live.
-///
-/// # Panics
-///
-/// Panics if [`fork_gate`] has live guards (DESIGN.md §4.3).
-pub fn spawn_forked(mut plan: SpawnPlan) -> io::Result<Child> {
-    fork_gate().assert_forkable();
-    plan.raise_report_fd()?;
-
-    let argv = cstr_ptrs(&plan.argv);
-    let envp = cstr_ptrs(&plan.envp);
-    let report_write = plan.report.write.as_raw_fd();
-
-    // SAFETY: `fork` takes no arguments. The gate above guarantees there are
-    // no helper threads whose locks the child could inherit held.
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if pid == 0 {
-        // Child. From here until `execve` succeeds or fails: raw syscalls
-        // only. `child_exec` returns solely on failure, with an errno.
-        let errno = child_exec(&plan, &argv, &envp);
-        // SAFETY: `report_write` is the report pipe's writer, still open in
-        // this child; a four-byte pipe write is atomic. `errno` is a valid
-        // `c_int`.
-        unsafe {
-            libc::write(
-                report_write,
-                (&raw const errno).cast(),
-                std::mem::size_of::<libc::c_int>(),
-            );
-        }
-        // No destructors, allocator or atexit handlers: we are still in the
-        // post-fork window.
-        exit_child(127)
-    }
-
-    // Parent: close the writer so EOF on the read end means exec succeeded.
-    drop(plan.report.write);
-    let reported = match read_exec_report(&plan.report.read) {
-        Ok(reported) => reported,
-        Err(error) => {
-            // The child cannot be reaped deterministically here; do not block
-            // on it, just make sure a finished child does not stay a zombie.
-            try_reap(pid);
-            return Err(error);
-        }
-    };
-    match reported {
-        None => Ok(Child { pid }),
-        Some(errno) => {
-            // The child reported a failed exec and is exiting with status 127.
-            reap(pid);
-            Err(io::Error::from_raw_os_error(errno))
-        }
-    }
+    spawn_posix_spawn(plan)
 }
 
 /// Replace the current process image with the program in `plan`.
@@ -443,18 +281,14 @@ pub fn exec(plan: SpawnPlan) -> io::Error {
         argv,
         envp,
         actions,
-        pgroup,
         reset_signals,
         sigmask,
-        report,
     } = plan;
-    // No parent is waiting on a report pipe: this call reports synchronously.
-    drop(report);
 
     let argv = cstr_ptrs(&argv);
     let envp = cstr_ptrs(&envp);
 
-    let errno = apply_process_attributes(pgroup, &reset_signals, sigmask.as_ref());
+    let errno = apply_process_attributes(&reset_signals, sigmask.as_ref());
     if errno != 0 {
         return io::Error::from_raw_os_error(errno);
     }
@@ -484,125 +318,18 @@ pub fn exec(plan: SpawnPlan) -> io::Error {
     }
 }
 
-/// Fork, then run `f` in the child, which is expected to finish with
-/// [`exit_child`].
-///
-/// This is the only way to run *shell code* in a child: subshells, pipeline
-/// segments that are functions or compound commands, `$( … )` around shell
-/// code, and `&` all need the interpreter in the child, so they cannot be
-/// spawned (DESIGN.md §4.3).
-///
-/// The gate is what makes `f` allowed to do real work: because no helper
-/// threads existed at the instant of `fork`, the child inherits a
-/// single-threaded, consistent heap and may allocate, lock and unwind like any
-/// single-threaded process. That is exactly the case the design reserves `fork`
-/// for; external commands use [`spawn`] or [`spawn_forked`], whose own
-/// post-fork window stays raw-syscall-only.
-///
-/// `f` never returns `Ok`: its success type is uninhabited. Returning `Err` is
-/// the "this should not happen" path; the child makes no attempt to print a
-/// diagnostic (the caller owns diagnostics and should exit inside `f`) and
-/// exits with status 127. The returned [`Child`] must be reaped by the caller.
-/// A closure that wants a specific exit status should use
-/// [`fork_child_status`] instead; either way, the child must leave through
-/// [`exit_child`] (or the equivalent raw `_exit`), never
-/// [`std::process::exit`].
-///
-/// # Panics
-///
-/// Panics if [`fork_gate`] has live guards (DESIGN.md §4.3).
-pub fn fork_child(f: impl FnOnce() -> io::Result<Infallible>) -> io::Result<Child> {
-    fork_gate().assert_forkable();
-
-    // SAFETY: `fork` takes no arguments; the gate above guarantees no helper
-    // threads are live.
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if pid == 0 {
-        exit_child(match f() {
-            // The closure's contract says it never returns successfully.
-            Ok(never) => match never {},
-            Err(_) => 127,
-        })
-    }
-    Ok(Child { pid })
-}
-
-/// Fork, run `f` in the child, and exit with the status it returns.
-///
-/// This is [`fork_child`] for callers that need to set the child's exit status
-/// without reaching for [`std::process::exit`]. That matters: `exit(3)` runs
-/// libc `atexit` handlers inside a forked child, which is a hazard even when
-/// it happens to be harmless today (handlers may lock, flush shared buffers or
-/// free memory the child inherited mid-update). Here the closure simply
-/// returns an `i32` and bsh-sys calls raw `_exit`, so no handler runs.
-///
-/// The child may allocate, lock and unwind like any single-threaded process —
-/// see [`fork_child`] for why the gate makes that sound. What it must not do
-/// is rely on destructors or buffered I/O after `f` returns: `_exit` runs
-/// neither, so anything the parent must observe has to be flushed or written
-/// by `f` itself.
-///
-/// The returned [`Child`] must be reaped by the caller.
-///
-/// # Panics
-///
-/// Panics if [`fork_gate`] has live guards (DESIGN.md §4.3).
-pub fn fork_child_status(f: impl FnOnce() -> i32) -> io::Result<Child> {
-    fork_gate().assert_forkable();
-
-    // SAFETY: `fork` takes no arguments; the gate above guarantees no helper
-    // threads are live.
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if pid == 0 {
-        exit_child(f())
-    }
-    Ok(Child { pid })
-}
-
-/// Leave a forked child immediately with `status`.
-///
-/// This is the only correct way to exit a child created by [`fork_child`],
-/// [`fork_child_status`] or [`spawn_forked`]: it calls raw `_exit(2)`, which
-/// terminates the process without running libc `atexit` handlers, Rust
-/// destructors, or flushing user-space buffers. All of those operate on state
-/// the child may have inherited in a half-updated condition.
-///
-/// The status is the low eight bits after the kernel's transformation, exactly
-/// as `waitpid(2)` reports it. This function never returns.
-pub fn exit_child(status: i32) -> ! {
-    // SAFETY: `_exit` is async-signal-safe and terminates the calling process
-    // without running atexit handlers, destructors or buffered I/O. No Rust
-    // value is used or dropped after this point.
-    unsafe { libc::_exit(status) }
-}
-
 fn spawn_posix_spawn(plan: SpawnPlan) -> io::Result<Child> {
     let SpawnPlan {
         program,
         argv,
         envp,
         actions,
-        pgroup,
         reset_signals,
         sigmask,
-        report,
     } = plan;
-    // `posix_spawn` returns the child's exec error synchronously, so the
-    // report pipe is only needed by the fork fallback.
-    drop(report);
 
     let mut attr = SpawnAttr::new()?;
     let mut flags: libc::c_short = 0;
-    if let ProcessGroup::SetPgid { pgroup } = pgroup {
-        attr.set_pgroup(pgroup)?;
-        flags |= libc::POSIX_SPAWN_SETPGROUP as libc::c_short;
-    }
     if !reset_signals.is_empty() {
         attr.set_sigdefault(&reset_signals)?;
         flags |= libc::POSIX_SPAWN_SETSIGDEF as libc::c_short;
@@ -664,12 +391,6 @@ impl SpawnAttr {
     fn set_flags(&mut self, flags: libc::c_short) -> io::Result<()> {
         // SAFETY: `self.0` is initialised and `flags` is a valid flag set.
         let rc = unsafe { libc::posix_spawnattr_setflags(&mut self.0, flags) };
-        spawn_result(rc)
-    }
-
-    fn set_pgroup(&mut self, pgroup: libc::pid_t) -> io::Result<()> {
-        // SAFETY: `self.0` is initialised.
-        let rc = unsafe { libc::posix_spawnattr_setpgroup(&mut self.0, pgroup) };
         spawn_result(rc)
     }
 
@@ -763,18 +484,7 @@ fn spawn_result(rc: libc::c_int) -> io::Result<()> {
 ///
 /// Returns the errno that stopped it, or `0` on success. Only raw syscalls:
 /// this runs in the post-`fork` window of [`spawn_forked`].
-fn apply_process_attributes(
-    pgroup: ProcessGroup,
-    reset_signals: &SignalSet,
-    sigmask: Option<&SignalSet>,
-) -> libc::c_int {
-    if let ProcessGroup::SetPgid { pgroup } = pgroup {
-        // SAFETY: `setpgid` takes only integers.
-        if unsafe { libc::setpgid(0, pgroup) } != 0 {
-            return last_errno();
-        }
-    }
-
+fn apply_process_attributes(reset_signals: &SignalSet, sigmask: Option<&SignalSet>) -> libc::c_int {
     for signal in reset_signals.iter() {
         // SAFETY: `signal(2)` with `SIG_DFL` for a signal number; no pointers.
         if unsafe { libc::signal(signal, libc::SIG_DFL) } == libc::SIG_ERR {
@@ -792,39 +502,6 @@ fn apply_process_attributes(
     }
 
     0
-}
-
-/// Apply the process attributes, descriptor actions and `execve`.
-///
-/// Returns the errno that stopped it. It never returns on success.
-fn child_exec(
-    plan: &SpawnPlan,
-    argv: &[*mut libc::c_char],
-    envp: &[*mut libc::c_char],
-) -> libc::c_int {
-    let errno = apply_process_attributes(plan.pgroup, &plan.reset_signals, plan.sigmask.as_ref());
-    if errno != 0 {
-        return errno;
-    }
-
-    for action in &plan.actions {
-        let errno = apply_fd_action(action);
-        if errno != 0 {
-            return errno;
-        }
-    }
-
-    // SAFETY: `program` is NUL-terminated, the argument vectors are
-    // NULL-terminated and point at live buffers inherited from the parent, and
-    // `execve` does not retain them.
-    unsafe {
-        libc::execve(
-            plan.program.as_ptr(),
-            argv.as_ptr().cast::<*const libc::c_char>(),
-            envp.as_ptr().cast::<*const libc::c_char>(),
-        );
-    }
-    last_errno()
 }
 
 fn apply_fd_action(action: &FdAction) -> libc::c_int {
@@ -886,79 +563,28 @@ fn last_errno() -> libc::c_int {
         .unwrap_or(libc::EIO)
 }
 
-fn read_exec_report(read: &OwnedFd) -> io::Result<Option<libc::c_int>> {
-    let mut errno: libc::c_int = 0;
-    loop {
-        // SAFETY: the destination points at a `c_int` and the length is its
-        // size; `read` does not retain the pointer.
-        let count = unsafe {
-            libc::read(
-                read.as_raw_fd(),
-                (&raw mut errno).cast(),
-                std::mem::size_of::<libc::c_int>(),
-            )
-        };
-        if count < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error);
-        }
-        if count == 0 {
-            // EOF: the child exec'd and the close-on-exec flag closed the
-            // writer.
-            return Ok(None);
-        }
-        if (count as usize) >= std::mem::size_of::<libc::c_int>() {
-            return Ok(Some(errno));
-        }
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "short exec-failure report",
-        ));
+/// Fork, then run `f` in the child and use its return value as the exit status.
+///
+/// **Test scaffolding.** The shell no longer forks; this exists for the pty
+/// harness, which has to start a shell in a child that sets up a session and
+/// then `exec`s. `fork` is safe there because the harness is single-threaded at
+/// that point, which is why the tests could always do it.
+pub fn fork_child_status(f: impl FnOnce() -> i32) -> io::Result<Child> {
+    // SAFETY: `fork` takes no arguments. The caller promises the usual fork
+    // contract: no other thread in the process is holding a lock or allocating
+    // while this runs, and the child only calls `_exit`.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(io::Error::last_os_error());
     }
-}
-
-/// Block until `pid` is reaped, retrying interruptions.
-fn reap(pid: libc::pid_t) {
-    let mut status: libc::c_int = 0;
-    loop {
-        // SAFETY: `status` is valid for writes; `waitpid` does not retain it.
-        let rc = unsafe { libc::waitpid(pid, &mut status, 0) };
-        if rc >= 0 {
-            return;
-        }
-        if last_errno() != libc::EINTR {
-            return;
-        }
+    if pid == 0 {
+        let status = f();
+        // SAFETY: `_exit` is the only correct way out of a fork with live Rust
+        // state in the parent; it cannot return.
+        unsafe { libc::_exit(status) }
     }
-}
-
-/// Reap `pid` only if it has already exited.
-fn try_reap(pid: libc::pid_t) {
-    let mut status: libc::c_int = 0;
-    // SAFETY: `status` is valid for writes; `waitpid` does not retain it.
-    unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    Ok(Child::from_pid(pid))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn report_fd_is_raised_above_every_action() {
-        let mut plan = SpawnPlan::new(b"/bin/true", [b"true".as_slice()]).unwrap();
-        plan.actions.push(FdAction::dup2(1, 3));
-        plan.actions.push(FdAction::close(7));
-        plan.raise_report_fd().unwrap();
-        assert!(plan.report.write.as_raw_fd() > 7);
-    }
-
-    #[test]
-    fn raised_report_fd_is_cloexec() {
-        let mut plan = SpawnPlan::new(b"/bin/true", [b"true".as_slice()]).unwrap();
-        plan.raise_report_fd().unwrap();
-        assert!(crate::fd::fd_is_cloexec(plan.report.write.as_raw_fd()));
-    }
-}
+mod tests {}

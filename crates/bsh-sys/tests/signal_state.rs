@@ -8,8 +8,8 @@
 //! test cannot leave the harness ignoring a signal it cares about.
 
 use bsh_sys::{
-    Disposition, SignalSet, WaitOutcome, fork_child_status, ignore_signals, pid,
-    replace_signal_mask, send_signal, set_disposition, wait_pid,
+    Disposition, SignalSet, WaitOutcome, ignore_signals, pid, replace_signal_mask, send_signal,
+    set_disposition, wait_pid,
 };
 use std::sync::Mutex;
 
@@ -35,8 +35,15 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
 /// child, a stray delivery kills only the child, and the parent asserts on the
 /// status — which is a stronger assertion than "we survived".
 fn in_child(body: impl FnOnce() -> i32) -> i32 {
-    let child = fork_child_status(body).expect("fork a child");
-    match wait_pid(child.pid()).expect("wait for the child") {
+    // SAFETY: the child only runs `body` and `_exit`s; the parent waits for it.
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0, "fork failed");
+    if child == 0 {
+        let status = body();
+        // SAFETY: `_exit` is the only correct way out of a fork.
+        unsafe { libc::_exit(status) }
+    }
+    match wait_pid(child).expect("wait for the child") {
         WaitOutcome::Exited(status) => status,
         other => panic!("child did not exit normally: {other:?}"),
     }

@@ -42,12 +42,12 @@ a diagnostic can be rendered long after the chunk that produced it is gone.
 
 ## bsh-sys
 
-**The fork gate is global and singular.** `bsh_sys::fork_gate()` returns the one
-process-wide `ThreadGate`. Threaded modes — the completion picker, the debugger
-— must hold `fork_gate().enter()` guards for as long as their threads live, and
-no other crate may construct its own gate for fork checks. `posix_spawn`
-deliberately does not consult the gate, because it shares the address space and
-is safe while threaded; only `fork` is gated.
+**Forking is gone, so threads are unconstrained.** There is no `fork_gate()`:
+the server-side runs subshells, `$( … )` and pipeline stages in process
+(`docs/direction.md` §2), and `posix_spawn` never needed a gate because it shares
+the address space. The only remaining `fork` in the workspace is
+`bsh_sys::fork_child_status`, test scaffolding the pty harness uses to start a
+shell in a child; it is documented as such and nothing in the shell calls it.
 
 **Spawn plans carry no environment and no search.** `SpawnPlan::new` takes an
 already-resolved program path and the full argv *including* `argv[0]`, and

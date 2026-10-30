@@ -15,11 +15,12 @@ same behaviour on one thread, with no async runtime and no new dependency.
 
 ## 1. Why the obvious design is wrong here
 
-A watcher thread would be registered with `bsh_sys::fork_gate()`, and the next
-`$( … )`, `( … )` or `builtin | builtin` would panic (`fork() with 1 helper
-thread(s) live`). Making the gate smarter — a stop-the-world barrier before each
-fork — means a watcher blocked in `epoll_wait`/`read` cannot reach a safepoint,
-so a fork would have to wait for a timeout, i.e. add latency to *every command*.
+This was written when a watcher thread had to be registered with
+`bsh_sys::fork_gate()`, or the next `$( … )`, `( … )` or `builtin | builtin`
+would panic (`fork() with 1 helper thread(s) live`). The 2026-10-30 pivot
+deleted the shell's last `fork`, so the gate and that whole problem are gone;
+the design below is kept because it is still the shape the watcher should take,
+not because threads are forbidden.
 That is the wrong trade for a cosmetic prompt.
 
 The editor already blocks waiting for exactly one thing: a keystroke. Waiting on

@@ -9,7 +9,27 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use bsh_sys::{SpawnPlan, WaitOutcome, exec, fork_child, pid, wait_pid};
+use bsh_sys::{SpawnPlan, WaitOutcome, exec, pid, wait_pid};
+
+/// Run `f` in a child process and return its pid.
+///
+/// `exec` replaces the process image, so the only way to test a successful one
+/// without destroying the test harness is to do it in a child. This is test
+/// scaffolding, not part of `bsh-sys`: the shell itself no longer forks.
+fn forked(f: impl FnOnce()) -> i32 {
+    // SAFETY: the child only runs `f` and `_exit`s; the parent waits for it and
+    // the test binary has no other threads at this point.
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0, "fork failed");
+    if pid == 0 {
+        f();
+        // SAFETY: `_exit` is the only correct way out of a fork with live
+        // Rust state in the parent.
+        unsafe { libc::_exit(0) }
+    }
+    assert!(pid > 0);
+    pid
+}
 
 /// Resolve an executable the portable way: `/bin`, then `/usr/bin`, then
 /// `$PATH`, matching the other spawn tests.
@@ -70,31 +90,28 @@ fn exec_replaces_the_process_and_keeps_the_pid() {
         )
         .unwrap();
 
-    let child = fork_child(move || {
-        // If exec succeeds this never returns; a failure becomes 127.
-        Err(exec(spawn_plan))
-    })
-    .unwrap();
+    // If exec succeeds it never returns; a failure becomes 127.
+    let child = forked(move || {
+        let _ = exec(spawn_plan);
+    });
 
     assert_eq!(
-        wait_pid(child.pid()).unwrap(),
+        wait_pid(child).unwrap(),
         WaitOutcome::Exited(0),
         "the exec'd command should exit 0"
     );
     // `$$` is the exec'd program's own pid. If `exec` forked, it would not be
     // the pid the parent forked — exactly the old approximation's defect.
     let reported = std::fs::read_to_string(output.as_path()).unwrap();
-    assert_eq!(
-        reported,
-        child.pid().to_string(),
-        "exec must not change the pid"
-    );
+    assert_eq!(reported, child.to_string(), "exec must not change the pid");
 }
 
 #[test]
 fn exec_of_true_succeeds() {
-    let child = fork_child(|| Err(exec(plan(&program("true"), &[])))).unwrap();
-    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(0));
+    let child = forked(|| {
+        let _ = exec(plan(&program("true"), &[]));
+    });
+    assert_eq!(wait_pid(child).unwrap(), WaitOutcome::Exited(0));
 }
 
 #[test]
@@ -121,8 +138,10 @@ fn exec_passes_argv_and_environment() {
         )
         .unwrap();
 
-    let child = fork_child(move || Err(exec(spawn_plan))).unwrap();
-    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(0));
+    let child = forked(move || {
+        let _ = exec(spawn_plan);
+    });
+    assert_eq!(wait_pid(child).unwrap(), WaitOutcome::Exited(0));
     assert_eq!(
         std::fs::read(output.as_path()).unwrap(),
         b"positional:present"

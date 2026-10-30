@@ -6,10 +6,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use bsh_sys::{
-    NulByte, ProcessGroup, SpawnPlan, WaitOutcome, exit_child, fork_child, fork_child_status,
-    spawn, spawn_forked, wait_pid,
-};
+use bsh_sys::{NulByte, SpawnPlan, WaitOutcome, spawn, wait_pid};
 
 /// Resolve an executable the portable way: `/bin`, then `/usr/bin`, then
 /// `$PATH`. The task's tests name `/bin/true`, but not every host has it (NixOS
@@ -73,17 +70,12 @@ fn spawn_reports_exit_statuses() {
 #[test]
 fn a_missing_program_is_an_error_in_the_parent_on_both_paths() {
     let missing = PathBuf::from("/nonexistent-bsh/definitely-not-here");
-    for result in [
-        spawn(plan(&missing, &[])),
-        spawn_forked(plan(&missing, &[])),
-    ] {
-        let error = result.expect_err("the exec failure must reach the parent");
-        assert_eq!(
-            error.kind(),
-            io::ErrorKind::NotFound,
-            "unexpected error: {error}"
-        );
-    }
+    let error = spawn(plan(&missing, &[])).expect_err("the exec failure must reach the parent");
+    assert_eq!(
+        error.kind(),
+        io::ErrorKind::NotFound,
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -117,7 +109,7 @@ fn stdout_redirect_to_a_file_matches_the_written_bytes() {
 
 #[test]
 fn a_failing_redirect_open_is_reported_before_any_exit_status() {
-    for fork_path in [false, true] {
+    {
         let mut spawn_plan = plan(&program("true"), &[]);
         spawn_plan
             .open(
@@ -127,12 +119,7 @@ fn a_failing_redirect_open_is_reported_before_any_exit_status() {
                 1,
             )
             .unwrap();
-        let result = if fork_path {
-            spawn_forked(spawn_plan)
-        } else {
-            spawn(spawn_plan)
-        };
-        let error = result.expect_err("the redirect must fail");
+        let error = spawn(spawn_plan).expect_err("the redirect must fail");
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 }
@@ -166,59 +153,13 @@ fn a_signalled_child_is_reported_as_signalled() {
 }
 
 #[test]
-fn a_plan_with_its_own_process_group_still_executes() {
-    let mut spawn_plan = plan(&program("sh"), &["-c", "exit 0"]);
-    spawn_plan.pgroup = ProcessGroup::SetPgid { pgroup: 0 };
-    let child = spawn(spawn_plan).unwrap();
-    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(0));
-}
-
-#[test]
 fn exec_failure_survives_actions_that_mention_low_fds() {
     let missing = PathBuf::from("/nonexistent-bsh/low-fd-collision");
-    for fork_path in [false, true] {
+    {
         let mut spawn_plan = plan(&missing, &[]);
         spawn_plan.close(3);
         spawn_plan.dup2(1, 4);
-        let result = if fork_path {
-            spawn_forked(spawn_plan)
-        } else {
-            spawn(spawn_plan)
-        };
-        let error = result.expect_err("the exec failure must survive the actions");
-        assert_eq!(
-            error.kind(),
-            io::ErrorKind::NotFound,
-            "fork_path={fork_path}"
-        );
+        let error = spawn(spawn_plan).expect_err("the exec failure must survive the actions");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
-}
-
-#[test]
-fn fork_child_runs_the_closure_in_a_real_child() {
-    let child = fork_child(|| {
-        // SAFETY: this is the forked child. `_exit` terminates immediately
-        // without running destructors, and the closure does nothing else, so
-        // the child touches neither the allocator nor any lock.
-        unsafe { libc::_exit(0) }
-    })
-    .unwrap();
-    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(0));
-}
-
-#[test]
-fn fork_child_status_sets_the_child_exit_status() {
-    let child = fork_child_status(|| 42).unwrap();
-    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(42));
-
-    // Status 0 is a real value, not "no status"; the child still exits through
-    // the raw path.
-    let child = fork_child_status(|| 0).unwrap();
-    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(0));
-}
-
-#[test]
-fn exit_child_is_usable_from_fork_child() {
-    let child = fork_child(|| exit_child(9)).unwrap();
-    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(9));
 }

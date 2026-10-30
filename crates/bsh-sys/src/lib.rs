@@ -1,18 +1,20 @@
 //! The syscall boundary.
 //!
 //! This is the **only** crate in the workspace that may contain `unsafe`
-//! (DESIGN.md §4.1, §4.3). Everything reachable from `fork()` must be safe
-//! Rust, so that the code which runs between `fork()` and `exec()` can be
-//! audited by reading one crate. Every `unsafe` block carries a `// SAFETY:`
-//! comment stating what makes it sound.
+//! (DESIGN.md §4.1). Every `unsafe` block carries a `// SAFETY:` comment stating
+//! what makes it sound, and `clippy::undocumented_unsafe_blocks` is denied so a
+//! new block cannot land without one.
+//!
+//! Nothing here forks any more: the shell runs subshells, command
+//! substitutions and pipeline stages in process (`docs/direction.md` §2), so
+//! the only child creation left is `posix_spawn` and the only `exec` is the
+//! in-place one the built-in needs.
 //!
 //! # What is here
 //!
-//! * [`spawn()`], [`spawn_forked`], [`fork_child`], [`fork_child_status`],
-//!   [`exit_child`], [`exec`] and [`SpawnPlan`] — creating children and
+//! * [`spawn()`], [`exec`] and [`SpawnPlan`] — creating children and
 //!   replacing this process. External commands go through `posix_spawn` and
-//!   are safe in a threaded parent; shell code in a child uses `fork` and is
-//!   gated by [`fork_gate`]. `exec` is the in-place `execve` the `exec`
+//!   are safe in a threaded parent. `exec` is the in-place `execve` the `exec`
 //!   built-in needs: it keeps the pid and carries the plan's redirections.
 //! * [`wait_pid`], [`wait_any_nohang`], [`WaitOutcome`] — reaping, with
 //!   `EINTR` retried and `SIGCHLD` treated as a wakeup hint, never as a
@@ -60,7 +62,6 @@ pub mod regex;
 pub mod signal;
 pub mod spawn;
 pub mod term;
-pub mod threadgate;
 pub mod wait;
 
 pub use bytes::{NulByte, cstring, cstrings};
@@ -75,12 +76,8 @@ pub use signal::{
     Disposition, MaskGuard, SignalEvent, SignalFd, SignalGuard, SignalSet, ignore_signals,
     replace_signal_mask, send_signal, set_disposition,
 };
-pub use spawn::{
-    Child, FdAction, ProcessGroup, ReportPipe, SpawnPlan, exec, exit_child, fork_child,
-    fork_child_status, spawn, spawn_forked,
-};
+pub use spawn::{Child, FdAction, SpawnPlan, exec, fork_child_status, spawn};
 pub use term::{NoEcho, RawMode, parent_pid, pid, window_size, window_size_fd};
-pub use threadgate::{ThreadGate, ThreadGuard, fork_gate};
 pub use wait::{WaitOutcome, wait_any_nohang, wait_pid};
 
 // `FdAction::Open` and the signal APIs name C types in their signatures, so a
