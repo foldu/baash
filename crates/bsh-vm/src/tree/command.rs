@@ -376,6 +376,20 @@ impl Interp {
         // external command gets to keep the pipe, so everything else diverts
         // its output to a temporary file before it writes a byte.
         if !matches!(resolution, Resolution::External(_)) {
+            if self.background_spawn {
+                // `echo hi &` would have to run the built-in concurrently with
+                // the shell; refuse rather than pretend it is asynchronous.
+                self.background_spawn = false;
+                self.report(
+                    bsh_lang::codes::CAPABILITY,
+                    0..0,
+                    format!(
+                        "&: {} is not an external command, and shell code cannot run in the background",
+                        String::from_utf8_lossy(invocation.argv.first().map_or(b"?", Vec::as_slice))
+                    ),
+                );
+                return Unwind::Status(Status::FAILURE);
+            }
             self.buffer_pipeline_output();
         }
         match resolution {
@@ -1042,6 +1056,15 @@ impl Interp {
 
         match result {
             Ok(child) => {
+                if self.background_spawn {
+                    self.background_spawn = false;
+                    let pid = child.pid();
+                    // No job table: the pid alone is the handle `$!`, `wait`
+                    // and `kill` use.
+                    self.background.insert(pid, None);
+                    self.state.vars.set_last_bg_pid(Some(pid));
+                    return Unwind::Status(Status::SUCCESS);
+                }
                 if self.defer_next_spawn {
                     // This stage *is* the command: the next stage starts before
                     // it is waited for, so the stages overlap. `run_pipeline`

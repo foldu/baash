@@ -280,6 +280,14 @@ pub struct Interp {
     pipeline_buffer: Option<traps::PipelineBuffer>,
     /// Children spawned by pipeline stages that have not been waited for.
     pending_children: Vec<bsh_sys::Child>,
+    /// Set while the command being run is a `&` list item.
+    ///
+    /// Only an external command may go to the background: it is a process of
+    /// its own, so the shell can keep going. Shell code would have to run
+    /// concurrently with the shell in the same process, which is what `fork`
+    /// was for, so it is rejected instead of being run in the foreground and
+    /// called asynchronous.
+    background_spawn: bool,
     /// Non-zero while a pipeline stage is being evaluated.
     ///
     /// A stage is a subshell, and bash does not fire the `ERR` trap inside one:
@@ -431,6 +439,7 @@ impl Interp {
             background: traps::Background::new(),
             pipeline_buffer: None,
             pending_children: Vec::new(),
+            background_spawn: false,
             err_trap_suppressed: 0,
             defer_next_spawn: false,
             scope_depth: 0,

@@ -411,9 +411,14 @@ Where the waves stand:
      with one known loss: nested backticks. The `ERR` fix was a suppression
      counter: bash fires `ERR` once per *pipeline*, so a stage must not fire it
      at all — `{ false; } | { false; }` used to print twice.
-  2. **Rejections:** shell-code `&` reports `BSH-E0302` (`cmd &` for externals
-     keeps working); `( exec cmd )` needs no rejection — the exit request is
-     caught by the scope, so it already ends the subshell and not the shell.
+  2. **Rejections — landed.** Shell-code `&` reports `BSH-E0302`; an external
+     command still backgrounds, so `$!`, `wait $!` and `kill` work. `( exec cmd )`
+     needed no rejection: the exit request is caught by the scope, so it already
+     ends the subshell and not the shell. Cost: 16 Oils background cases
+     (built-ins and compound commands in the background, `for … &`, and
+     `a && b &`), which the baseline now records. One of them is recoverable
+     later: a pipeline whose stages are *all* external could be backgrounded as
+     a unit, since nothing needs a second interpreter.
   3. **Deletion:** `fork_shell`, `enter_child`, `fork_gate`/`threadgate.rs`,
      `spawn_forked` (dead once nothing forks), and the completion-time external
      capture becomes spawn-and-read. Then re-measure and re-record the baseline.

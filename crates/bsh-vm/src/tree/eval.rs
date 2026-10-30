@@ -177,23 +177,24 @@ impl Interp {
         let mut last = Status::SUCCESS;
         for item in items {
             if item.sep == Some(Separator::Amp) {
-                match self.fork_shell(chunk, item.node, Ctx::default()) {
-                    Ok(child) => {
-                        let pid = child.pid();
-                        // No job table: the pid alone is the handle `$!`,
-                        // `wait` and `kill` use.
-                        self.background.insert(pid, None);
-                        self.state.vars.set_last_bg_pid(Some(pid));
-                        last = Status::SUCCESS;
-                    }
-                    Err(error) => {
-                        self.report(
-                            crate::codes::INTERNAL,
-                            0..0,
-                            format!("cannot start a background job: {error}"),
-                        );
-                        last = Status::FAILURE;
-                    }
+                // `cmd &` starts a process and returns; running shell code
+                // "in the background" would need a second interpreter on this
+                // same state, which is the fork this wave deletes.
+                if !backgroundable(chunk, item.node) {
+                    self.report(
+                        bsh_lang::codes::CAPABILITY,
+                        0..0,
+                        "&: only an external command can run in the background; a compound command would need a subshell process".to_owned(),
+                    );
+                    last = Status::FAILURE;
+                    continue;
+                }
+                self.background_spawn = true;
+                let unwind = self.eval_node(chunk, item.node, Ctx::default());
+                self.background_spawn = false;
+                match unwind {
+                    Unwind::Status(status) => last = status,
+                    other => return other,
                 }
                 continue;
             }
@@ -860,6 +861,24 @@ fn restore_saved(target: RawFd, saved: Option<OwnedFd>) {
         None => {
             let _ = bsh_sys::close(target);
         }
+    }
+}
+
+/// Whether a list item can go to the background without a subshell process.
+///
+/// A single external command can: it is its own process. Everything else — a
+/// compound command, a multi-stage pipeline, a built-in — would have to run
+/// concurrently with the shell on the same state.
+fn backgroundable(chunk: &ParsedChunk, node: NodeId) -> bool {
+    match node_kind(chunk, node) {
+        NodeKind::Simple(_) => true,
+        // A list item is an and-or list; `cmd &` is the degenerate one-operand
+        // case, and `a && b &` has to stay rejected.
+        NodeKind::AndOr { first, rest } if rest.is_empty() => backgroundable(chunk, first),
+        NodeKind::Pipeline { stages, .. } => {
+            stages.len() == 1 && matches!(node_kind(chunk, stages[0]), NodeKind::Simple(_))
+        }
+        _ => false,
     }
 }
 
