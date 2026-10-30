@@ -24,6 +24,7 @@ use bsh_syntax::{ParseOpts, ParseOutcome};
 use bsh_vm::Interp;
 
 mod complete;
+mod git_prompt;
 
 const USAGE: &str = "\
 ßhell — a POSIX- and bash-compatible shell
@@ -647,6 +648,7 @@ fn refresh_prompt(
     shell: &mut Interp,
     editor: &mut bsh_repl::Editor<'_>,
     engine: &bsh_complete::CompletionEngine,
+    segment: Option<&[u8]>,
 ) {
     std::mem::swap(editor.history_mut(), &mut shell.state().history);
     run_prompt_command(shell);
@@ -659,6 +661,18 @@ fn refresh_prompt(
     let secondary = prompt_template(shell, b"PS2").unwrap_or_else(|| b"> ".to_vec());
     let primary = shell.render_prompt(&primary);
     let secondary = shell.render_prompt(&secondary);
+    // The REPL owns the live segment: `PS1` and `PROMPT_COMMAND` see the prompt
+    // they always did, and a slow `git status` can never hold the line up
+    // because the bytes come from a cache (`docs/prompt-watch.md` §3). The
+    // segment is plain text, so it adds no `\[`/`\]` non-printing range yet.
+    let primary = match segment {
+        Some(segment) => {
+            let mut bytes = primary.into_bytes();
+            bytes.extend_from_slice(segment);
+            bsh_repl::ExpandedPrompt::from_bytes(bytes)
+        }
+        None => primary,
+    };
     // The completion engine reads the same state the prompt does, so it is
     // refreshed here: `PROMPT_COMMAND` may have defined a function or a
     // `complete` rule, `cd` may have moved the working directory, and the
@@ -746,6 +760,7 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
     // One session per REPL: `:&` and `!%` remember facts across lines, and the
     // quote/here-document state must survive `PS2` continuation lines.
     let mut expansion = histexpand::Session::new();
+    let mut git = git_prompt::GitSegment::new();
 
     let status = loop {
         // `PROMPT_COMMAND` runs and the prompt is rendered here, not at
@@ -757,7 +772,19 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
         if let Ok(index) = index_rx.try_recv() {
             commands.install_index(index);
         }
-        refresh_prompt(shell, &mut editor, &engine);
+        // The segment is refreshed from a cache: the branch is one small file
+        // read, and the dirty count comes from a worker's `git status`.
+        let cwd = shell
+            .state()
+            .vars
+            .scalar(b"PWD")
+            .map(|bytes| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+            .or_else(|| std::env::current_dir().ok());
+        if let Some(cwd) = cwd {
+            git.tick(&cwd);
+        }
+        let segment = git.render().map(<[u8]>::to_vec);
+        refresh_prompt(shell, &mut editor, &engine, segment.as_deref());
         // `PROMPT_COMMAND='exit'` leaves the shell before the prompt is drawn.
         if let Some(requested) = shell.state().take_exit_request() {
             break requested;
