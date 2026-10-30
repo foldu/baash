@@ -140,7 +140,7 @@ simplifies it). No job control means no `tcsetpgrp`, no process groups, and
 * **Where the completion `-F` shell function runs**: main thread, so a slow
   user completion still blocks the prompt. Acceptable, or reject `-F`?
 
-## 9. Spike results (2026-10-30)
+## 8. Spike results (2026-10-30)
 
 compio 0.19.2, a throwaway crate, real pty:
 
@@ -156,7 +156,7 @@ Both were driven through compio's own runtime; no poll loop and no extra crate
 was needed. The one place this does not carry over is Windows console input
 (see §8).
 
-## 8. Risks
+## 9. Risks
 
 * **Scope leaks.** Every field of shell state that a subshell may mutate must be
   in the scope. Missing one is a silent bug that only the conformance suite (or
