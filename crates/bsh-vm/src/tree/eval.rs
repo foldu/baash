@@ -7,6 +7,7 @@
 //! context (DESIGN.md §4.7). Keeping that in one function is the whole point
 //! of modelling control flow as unwinding instead of `Result` at every node.
 
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
 use bsh_diag::Diagnostic;
@@ -629,8 +630,13 @@ impl Interp {
         }
     }
 
-    /// Run a `$(…)` body in a child, capture its stdout and strip trailing
+    /// Run a `$(…)` body in a scope, capture its stdout and strip trailing
     /// newlines (POSIX XCU 2.6.3).
+    ///
+    /// The capture target is an unlinked temporary file, not a pipe. The writer
+    /// is now this process, so a pipe would deadlock once the body produced
+    /// more than its capacity; the same reasoning as `tree/redir.rs` gives for
+    /// here-documents.
     pub(crate) fn capture_substitution(&mut self, src: &[u8]) -> Result<(Vec<u8>, Status), String> {
         let source = Arc::new(bsh_diag::SourceFile::new("<command substitution>", src));
         let opts = self.parse_opts();
@@ -659,45 +665,47 @@ impl Interp {
             }
         };
 
-        let pipe =
-            bsh_sys::Pipe::new().map_err(|error| format!("cannot create a pipe: {error}"))?;
-        let read = pipe.read_fd();
-        let write = pipe.write_fd();
-        let child = bsh_sys::fork_child(|| {
-            self.enter_child();
-            bsh_sys::dup2(write, 1)?;
-            let _ = bsh_sys::close(write);
-            let _ = bsh_sys::close(read);
-            let unwind = self.eval_node(&chunk, chunk.ast.root, Ctx::default());
-            bsh_sys::exit_child(unwind.status().exit_code());
-        })
-        .map_err(|error| format!("cannot start a command substitution: {error}"))?;
-
-        drop(pipe.write);
-        // Reading the child's output is a foreground wait as far as signals
-        // are concerned: `SIGINT`/`SIGQUIT` must not kill the shell here. A
-        // command substitution is part of the current command, not a job, so
-        // it never takes the terminal.
-        let mut bytes = Vec::new();
-        {
-            use std::io::Read;
-            let mut file = std::fs::File::from(pipe.read);
-            file.read_to_end(&mut bytes)
-                .map_err(|error| format!("cannot read a command substitution: {error}"))?;
+        let capture = bsh_sys::create_unlinked_temp(0)
+            .map_err(|error| format!("cannot create a capture file: {error}"))?;
+        let scope = self.open_scope();
+        // The body writes to the file through descriptor 1, exactly as it would
+        // through a pipe: built-ins write with `write_fd`, and an external
+        // command inherits the descriptor through its spawn plan.
+        let saved_stdout = bsh_sys::dup(1).ok();
+        if let Err(error) = bsh_sys::dup2(capture.as_raw_fd(), 1) {
+            self.close_scope(scope);
+            return Err(format!("cannot redirect a command substitution: {error}"));
         }
-        let outcome = self
-            .wait_foreground_children(&[child.pid()])
-            .map_err(|error| format!("cannot wait for a command substitution: {error}"))?
-            .into_iter()
-            .next()
-            .ok_or_else(|| "cannot wait for a command substitution".to_owned())?;
+        let unwind = self.eval_node(&chunk, chunk.ast.root, Ctx::default());
+        let status = unwind.status();
+        match saved_stdout {
+            Some(saved) => {
+                let _ = bsh_sys::dup2(saved.as_raw_fd(), 1);
+            }
+            // No descriptor 1 on entry (a script with it closed): leave it
+            // closed rather than inventing one.
+            None => {
+                let _ = bsh_sys::close(1);
+            }
+        }
+        self.close_scope(scope);
         // A trap that arrived while the substitution ran runs at the next
         // command boundary; the exit request (if any) is recorded in the state.
         let _ = self.after_foreground_wait();
+
+        let mut bytes = Vec::new();
+        {
+            use std::io::{Read, Seek};
+            let mut file = std::fs::File::from(capture);
+            file.seek(std::io::SeekFrom::Start(0))
+                .map_err(|error| format!("cannot rewind a command substitution: {error}"))?;
+            file.read_to_end(&mut bytes)
+                .map_err(|error| format!("cannot read a command substitution: {error}"))?;
+        }
         while bytes.last() == Some(&b'\n') {
             bytes.pop();
         }
-        Ok((bytes, Status(outcome.exit_status())))
+        Ok((bytes, status))
     }
 }
 
