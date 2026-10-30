@@ -264,6 +264,13 @@ pub struct Pattern {
     flags: Flags,
     /// The parsed top-level sequence, kept so `suffix_start` can reverse it.
     alts: Vec<ast::Elem>,
+    /// The pattern's bytes when it has no metacharacter at all.
+    ///
+    /// A literal is by far the most common shape in a real script (`case $x in
+    /// start)`), and matching one needs no automaton: for an anchored match it
+    /// is a comparison, which is what a regex crate's literal prefilter buys in
+    /// the general case.
+    literal: Option<Vec<u8>>,
     forward: nfa::Program,
     /// Lazily compiled `reverse(alts)`.
     reverse: std::sync::OnceLock<nfa::Program>,
@@ -277,10 +284,12 @@ impl Pattern {
     pub fn new(pattern: &[u8], flags: Flags) -> Self {
         COMPILATIONS.with(|count| count.set(count.get() + 1));
         let alts = ast::parse(pattern, flags.extglob, flags.utf8);
+        let literal = literal_bytes(&alts);
         let forward = nfa::compile(&alts);
         Self {
             flags,
             alts,
+            literal,
             forward,
             reverse: std::sync::OnceLock::new(),
         }
@@ -293,6 +302,13 @@ impl Pattern {
 
     /// Match the whole of `text`, anchored at both ends.
     pub fn matches(&self, text: &[u8]) -> bool {
+        if let Some(literal) = &self.literal {
+            return if self.flags.nocasematch {
+                literal.eq_ignore_ascii_case(text)
+            } else {
+                literal == text
+            };
+        }
         let text = units::Text::forward(text, self.flags.utf8);
         let n = text.len();
         nfa::run(&self.forward, &text, self.flags)[n]
@@ -304,6 +320,11 @@ impl Pattern {
     /// `Some(0)` means the pattern matched the empty prefix. `None` means no
     /// prefix matched.
     pub fn prefix_end(&self, text: &[u8], longest: bool) -> Option<usize> {
+        if let Some(literal) = &self.literal {
+            return self
+                .prefix_of_literal(literal, text)
+                .then_some(literal.len());
+        }
         let text = units::Text::forward(text, self.flags.utf8);
         let ends = nfa::run(&self.forward, &text, self.flags);
         pick(&ends[..], text.len(), longest).map(|q| text.offset(q))
@@ -315,6 +336,11 @@ impl Pattern {
     /// `Some(text.len())` means the pattern matched the empty suffix. `None`
     /// means no suffix matched.
     pub fn suffix_start(&self, text: &[u8], longest: bool) -> Option<usize> {
+        if let Some(literal) = &self.literal {
+            return self
+                .prefix_of_literal(literal, &text[text.len().saturating_sub(literal.len())..])
+                .then(|| text.len() - literal.len());
+        }
         let program = self
             .reverse
             .get_or_init(|| nfa::compile(&ast::reverse(&self.alts)));
@@ -322,6 +348,31 @@ impl Pattern {
         let ends = nfa::run(program, &text, self.flags);
         pick(&ends[..], text.len(), longest).map(|q| text.offset(q))
     }
+
+    /// Whether `text` starts with `literal`, honouring `nocasematch`.
+    fn prefix_of_literal(&self, literal: &[u8], text: &[u8]) -> bool {
+        if text.len() < literal.len() {
+            return false;
+        }
+        let head = &text[..literal.len()];
+        if self.flags.nocasematch {
+            head.eq_ignore_ascii_case(literal)
+        } else {
+            head == literal
+        }
+    }
+}
+
+/// The pattern's bytes when every element is literal text.
+fn literal_bytes(alts: &[ast::Elem]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    for elem in alts {
+        match elem {
+            ast::Elem::Lit(bytes) => out.extend_from_slice(bytes),
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 /// Whether `pattern` matches all of `text`.
@@ -454,5 +505,76 @@ mod cache_tests {
             2,
             "the same text under different flags is two patterns"
         );
+    }
+}
+
+#[cfg(test)]
+mod literal_tests {
+    use super::{Flags, Pattern};
+
+    const NO_CASE: Flags = Flags {
+        extglob: false,
+        nocasematch: false,
+        pathname: false,
+        utf8: false,
+    };
+
+    #[test]
+    fn a_literal_matches_only_itself() {
+        let pattern = Pattern::new(b"start", NO_CASE);
+        assert!(pattern.matches(b"start"));
+        assert!(!pattern.matches(b"starter"));
+        assert!(!pattern.matches(b"star"));
+        assert!(!pattern.matches(b"START"));
+    }
+
+    #[test]
+    fn a_literal_with_a_quoted_metacharacter_is_still_literal() {
+        // `\*` parses to a literal `*`, so the pattern needs no automaton and
+        // must not match `abc`.
+        let pattern = Pattern::new(b"a\\*c", NO_CASE);
+        assert!(pattern.matches(b"a*c"));
+        assert!(!pattern.matches(b"abc"));
+    }
+
+    #[test]
+    fn a_literal_honours_nocasematch() {
+        let pattern = Pattern::new(
+            b"abc",
+            Flags {
+                nocasematch: true,
+                ..NO_CASE
+            },
+        );
+        assert!(pattern.matches(b"ABC"));
+        assert!(!pattern.matches(b"abd"));
+    }
+
+    #[test]
+    fn literal_prefix_and_suffix_offsets_match_the_automaton() {
+        let pattern = Pattern::new(b"ab", NO_CASE);
+        assert_eq!(pattern.prefix_end(b"abcd", false), Some(2));
+        assert_eq!(pattern.prefix_end(b"xabcd", false), None);
+        assert_eq!(pattern.suffix_start(b"xxab", false), Some(2));
+        assert_eq!(pattern.suffix_start(b"abxx", false), None);
+
+        // The empty pattern matches the empty prefix and the empty suffix,
+        // which is what the automaton reports for it too.
+        let empty = Pattern::new(b"", NO_CASE);
+        assert_eq!(empty.prefix_end(b"abc", false), Some(0));
+        assert_eq!(empty.suffix_start(b"abc", false), Some(3));
+    }
+
+    #[test]
+    fn metacharacters_do_not_take_the_literal_path() {
+        // A guard on the fast path itself: if `*` were treated as literal,
+        // this would have to match the two-byte string `a*`.
+        let pattern = Pattern::new(b"a*c", NO_CASE);
+        assert!(pattern.matches(b"abbbc"));
+        assert!(pattern.matches(b"a*c"));
+        // `*` also matches nothing, so this must still be true through the
+        // automaton rather than the literal path.
+        assert!(pattern.matches(b"ac"));
+        assert!(!pattern.matches(b"ab"));
     }
 }
