@@ -1,0 +1,8 @@
+# `$( … )` captures output by redirecting descriptor 1, which is a property of
+# the process rather than of a test thread. With libtest's default thread pool,
+# two tests that capture at the same time take each other's bytes apart — and
+# libtest's own progress lines land inside a capture. One test at a time is the
+# only way to make that unambiguous; set `RUST_TEST_THREADS` in the environment
+# to override it and accept the flakes.
+[env]
+RUST_TEST_THREADS = "1"
