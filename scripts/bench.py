@@ -75,6 +75,13 @@ CASES: list[tuple[str, str, int]] = [
         5,
     ),
     ("subshell 1000 ( : )", "i=0; while (( i < 1000 )); do ( : ); (( i++ )); done", 5),
+    # A scope clones the shell state, so a large array in scope is the one case
+    # where the clone is visible (`docs/direction.md` §9).
+    (
+        "subshell 200, 20k-element array",
+        "arr=( $(seq 20000) ); i=0; while (( i < 200 )); do ( : ); (( i++ )); done",
+        3,
+    ),
 ]
 
 ENV = dict(os.environ, LC_ALL="C", LANG="C")

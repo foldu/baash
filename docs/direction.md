@@ -162,11 +162,18 @@ was needed. The one place this does not carry over is Windows console input
 * **Scope leaks.** Every field of shell state that a subshell may mutate must be
   in the scope. Missing one is a silent bug that only the conformance suite (or
   a user) will find; this is the main correctness risk of W2.
-* **Clone cost — measured, and real.** A scope is a deep clone, so `$( … )` in
-  a loop is O(state) per iteration where fork was copy-on-write. The release
-  bench puts `$(echo hi)` at 170 ms per 1000 against bash's 7.5 ms, and
-  `( : )` at 145 ms against 4.3 ms. A copy-on-write overlay is the fallback,
-  and this is now the largest performance gap the shell has.
+* **Clone cost — measured, and bounded by state size.** A scope deep-clones
+  `ShellState`, so the per-iteration cost is O(state) where fork was
+  copy-on-write. In the common case that is cheap and *faster* than bash: the
+  release bench has `$(echo hi)` at 7.5 ms per 1000 against bash's 170 ms, and
+  `( : )` at 4.3 ms against 145 ms; a scope costs about 2.3 µs on top of the
+  command. The cost is real only when the state is large — 200 subshells take
+  66.6 ms with a 20 000-element array in scope against bash's 52.2 ms (and
+  1.1 ms with no array). Measured 2026-10-30, and copy-on-write was considered
+  and deferred: `Var.value` as an `Arc<VarValue>` would make the snapshot a
+  pointer bump per variable, at the price of `Arc::make_mut` on every write.
+  The trigger to revisit is a workload where large arrays and subshells mix;
+  scalar-heavy scripts are already ahead of bash.
 * **Conformance drop.** W1 and W2 will both lower the Oils number. The baseline
   is re-recorded each time, and the *quality* metric (silent divergence) is what
   matters.

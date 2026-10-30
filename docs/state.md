@@ -403,11 +403,14 @@ Where the waves stand:
   `.git/HEAD` synchronously and gets its dirty count from a worker's
   `git status` (500 ms minimum interval, coalesced, discarded if the directory
   changed). `read -t` keeps `poll(2)` on purpose: no runtime on the `-c` path.
-  Measured with `scripts/bench.py` (release): startup 0.56 ms per spawn. The
-  bench also shows the W2 cost clearly — `$( … )` 170 ms per 1000 against
-  bash's 7.5 ms, `( : )` 145 ms against 4.3 ms — because a scope clones
-  `ShellState`; that is the next thing worth attacking, and it is not a W3
-  regression.
+  Measured with `scripts/bench.py` (release): startup 0.47 ms per spawn,
+  `$(echo hi)` 7.5 ms per 1000 against bash's 170 ms, `( : )` 4.5 ms against
+  149 ms — a scope costs ~2.3 µs and the snapshot model is *ahead* of bash.
+  The clone only bites when the state is large: 200 subshells with a
+  20 000-element array in scope are 69 ms against bash's 52 ms, which the
+  bench now records as its own case. Copy-on-write (`Var.value` as
+  `Arc<VarValue>`) was considered and deferred by decision on 2026-10-30;
+  `direction.md` §9 records the trigger to revisit.
 * **W2 (no-fork subshells)** is in progress. `( … )` and `$( … )` now run in
   a scope (`crates/bsh-vm/src/tree/scope.rs`) instead of a child; conformance is
   unchanged to the case. What is left, in order:
