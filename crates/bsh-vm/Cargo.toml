@@ -6,9 +6,18 @@ rust-version.workspace = true
 license.workspace = true
 description = "The execution engine: the tree-walking evaluator"
 
+[features]
+# Run `printf` (and, as the wave grows, the rest of the standard utilities)
+# in-process when `PATH` resolution finds nothing. On by default on Windows in
+# the binary crate; opt-in elsewhere.
+builtin-utils = ["dep:bsh-utils"]
+
 [dependencies]
 bsh-runtime.workspace = true
 bsh-history.workspace = true
+# The embedded-utility fallback. Optional so a Linux build keeps its old
+# resolution behaviour (and its binary size) unless asked for it.
+bsh-utils = { workspace = true, optional = true }
 bsh-lang.workspace = true
 bsh-diag.workspace = true
 bsh-syntax.workspace = true

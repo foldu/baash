@@ -396,6 +396,7 @@ dependencies = [
  "bsh-runtime",
  "bsh-syntax",
  "bsh-sys",
+ "bsh-utils",
 ]
 
 [[package]]
