@@ -17,3 +17,4 @@ bsh-sys.workspace = true
 bsh-complete.workspace = true
 bsh-repl.workspace = true
 bsh-tools.workspace = true
+compio.workspace = true

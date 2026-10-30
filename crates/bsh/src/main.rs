@@ -337,7 +337,7 @@ fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
                 shell.initialize_history(repl);
             }
             if repl {
-                run_repl(&mut shell)
+                run_repl_on_runtime(&mut shell)
             } else {
                 let code = execute(&mut shell, source);
                 if interactive {
@@ -674,6 +674,24 @@ fn refresh_prompt(
 /// only decides which bytes are one command. A failed command stays silent
 /// because the command itself already reported its error, `exit N` leaves with
 /// `N`, and `Ctrl-D` on an empty line leaves with 0.
+/// Drive the interactive loop from the I/O runtime.
+///
+/// One thread owns the shell (`docs/direction.md` §2): the runtime exists to
+/// give that thread completion-based wakeups — stdin, child processes, file
+/// scans — instead of a hand-rolled `poll`. The loop itself is still
+/// synchronous, so this wrapper changes nothing yet; it is the seam the rest of
+/// W3 moves onto.
+fn run_repl_on_runtime(shell: &mut Interp) -> ExitCode {
+    let runtime = match compio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("bsh: cannot start the I/O runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(async { run_repl(shell) })
+}
+
 fn run_repl(shell: &mut Interp) -> ExitCode {
     let syntax = ShellSyntax;
     let cwd = shell
