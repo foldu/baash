@@ -55,30 +55,54 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod bytes;
+#[cfg(unix)]
 pub mod fd;
+#[cfg(unix)]
 pub mod pty;
 #[cfg(unix)]
 pub mod regex;
+#[cfg(unix)]
 pub mod signal;
+#[cfg(unix)]
 pub mod spawn;
+#[cfg(unix)]
 pub mod term;
+#[cfg(unix)]
 pub mod wait;
+#[cfg(windows)]
+pub mod windows;
 
 pub use bytes::{NulByte, cstring, cstrings};
+#[cfg(unix)]
 pub use fd::{
     Pipe, chdir, close, create_unlinked_temp, dup, dup_above, dup2, fd_is_cloexec, fd_is_open,
     lseek, open_cloexec, poll_readable, read_fd, seek, set_cloexec, write_all, write_fd,
 };
+#[cfg(unix)]
 pub use pty::{Pty, become_session_leader, open_pty};
 #[cfg(unix)]
 pub use regex::{CaptureRanges, Regex, RegexError};
+#[cfg(unix)]
 pub use signal::{
     Disposition, MaskGuard, SignalEvent, SignalFd, SignalGuard, SignalSet, ignore_signals,
     replace_signal_mask, send_signal, set_disposition,
 };
+#[cfg(unix)]
 pub use spawn::{Child, FdAction, SpawnPlan, exec, fork_child_status, spawn};
+#[cfg(unix)]
 pub use term::{NoEcho, RawMode, parent_pid, pid, window_size, window_size_fd};
+#[cfg(unix)]
 pub use wait::{WaitOutcome, wait_any_nohang, wait_pid};
+
+#[cfg(windows)]
+pub use windows::{
+    Child, Disposition, FdAction, MaskGuard, NoEcho, Pipe, Pty, RawMode, SignalEvent, SignalFd,
+    SignalGuard, SignalSet, SpawnPlan, WaitOutcome, become_session_leader, chdir, close,
+    create_unlinked_temp, dup, dup_above, dup2, exec, fd_is_cloexec, fd_is_open, fork_child_status,
+    ignore_signals, lseek, open_cloexec, open_pty, parent_pid, pid, poll_readable, read_fd,
+    replace_signal_mask, seek, send_signal, set_cloexec, set_disposition, spawn, wait_any_nohang,
+    wait_pid, window_size, window_size_fd, write_all, write_fd,
+};
 
 // `FdAction::Open` and the signal APIs name C types in their signatures, so a
 // consumer would otherwise need its own `libc` dependency just to call us.
