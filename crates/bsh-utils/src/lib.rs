@@ -43,7 +43,13 @@ pub fn run(argv: &[Vec<u8>]) -> Option<i32> {
         .iter()
         .map(|arg| bsh_sys::os::os_from_bytes(arg))
         .collect();
-    Some(entry(args))
+    let status = entry(args);
+    // A utility's own binary flushes these when the process exits; in-process
+    // the shell has to, or `printf x > file` leaves the bytes in the buffer
+    // and the file empty.
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    Some(status)
 }
 
 /// Whether `name` is embedded.

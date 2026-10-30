@@ -361,8 +361,64 @@ impl Interp {
                 },
                 resolution,
             ),
-            None => self.command_not_found(&name),
+            None => {
+                #[cfg(feature = "builtin-utils")]
+                if let Some(unwind) =
+                    self.run_embedded(chunk, &command.redirects, &assign_views, &argv)
+                {
+                    return unwind;
+                }
+                self.command_not_found(&name)
+            }
         }
+    }
+
+    /// Run an embedded coreutils implementation because resolution found
+    /// nothing.
+    ///
+    /// This is deliberately the last resort: `PATH` is searched first, so an
+    /// external utility always wins and the feature only changes what happens
+    /// when the search fails. A name with a slash in it is a path, not a
+    /// utility, and is left to the ordinary "command not found" path.
+    ///
+    /// The utility runs in this process and writes to descriptor 1 (or 2), so
+    /// the redirections are applied shell-side exactly like a built-in's, and
+    /// a prefix assignment is scoped to the call.
+    #[cfg(feature = "builtin-utils")]
+    fn run_embedded(
+        &mut self,
+        chunk: &Arc<ParsedChunk>,
+        redirects: &[Redirect],
+        assigns: &[(&[u8], &[u8])],
+        argv: &[Vec<u8>],
+    ) -> Option<Unwind> {
+        let name = argv.first()?;
+        if name.contains(&b'/') || !bsh_utils::contains(name) {
+            return None;
+        }
+        let saved = match self.apply_redirects(chunk, redirects) {
+            Ok(saved) => saved,
+            Err(()) => return Some(Unwind::Status(Status::FAILURE)),
+        };
+        let applied = match self
+            .state
+            .vars
+            .apply_prefix_assignments(assigns, Tier::Regular)
+        {
+            Ok(applied) => applied,
+            Err(error) => {
+                self.restore_fds(saved);
+                self.report(crate::codes::ASSIGNMENT, 0..0, error.message());
+                self.state.record_error(ShellError::VariableAssignment);
+                return Some(
+                    self.apply_consequence(ShellError::VariableAssignment, Status::FAILURE),
+                );
+            }
+        };
+        let status = Status(bsh_utils::run(argv).unwrap_or(Status::NOT_FOUND.0));
+        let _ = self.state.vars.finish_prefix_assignments(applied);
+        self.restore_fds(saved);
+        Some(Unwind::Status(status))
     }
 
     /// Run one resolved command.
@@ -857,6 +913,18 @@ impl Interp {
             let slices: Vec<&[u8]> = argv.iter().map(Vec::as_slice).collect();
             match body {
                 BuiltinBody::Vm(builtin) => (builtin.run)(self, argv),
+                // A regular built-in with no body sits where `PATH` would, and
+                // the stub diagnostic is what a *missing* utility gets. The
+                // embedded implementation is the last resort: `PATH` was
+                // already searched (the body is only reached when it found
+                // nothing), and the redirections and prefix assignments are
+                // applied around this call like any built-in's.
+                #[cfg(feature = "builtin-utils")]
+                BuiltinBody::Runtime(def)
+                    if !def.is_implemented() && bsh_utils::contains(def.name.as_bytes()) =>
+                {
+                    Status(bsh_utils::run(argv).unwrap_or(Status::NOT_FOUND.0))
+                }
                 BuiltinBody::Runtime(def) => def.run(self, &slices),
             }
         };
