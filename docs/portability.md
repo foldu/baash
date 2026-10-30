@@ -334,3 +334,26 @@ fix in one pass — `OsStrExt` for bytes, `MetadataExt` for modes, and
 The `Fs` column of §5a still applies: `rustix` stops at the Windows boundary,
 which is why step 1 is a platform module rather than a `cfg` sprinkled through
 `fd.rs`.
+
+### Turso on Windows: verified (2026-10-30)
+
+`turso = "0.9.0-pre.2"` builds for `x86_64-pc-windows-gnu` with the recipe above
+and **runs under Wine**: `CREATE TABLE`, `INSERT`, `SELECT` and a row read back
+all succeed. Its API is async (`Builder::new_local(path).build().await`,
+`db.connect()`, `conn.execute(..).await`, `rows.next().await`), which is what a
+compio-driven shell wants. The crate is a pre-release, which is a real risk for
+a storage format the user keeps forever.
+
+One Windows build detail: `turso_sdk_kit`'s build script links a version
+resource by invoking plain `windres`, which `cargo-zigbuild` does not provide.
+Put a wrapper *script* (not a symlink — nix-wrapped binutils resolve their own
+directory from `argv[0]`, so a symlink breaks them) on `PATH`:
+
+```sh
+printf '#!/bin/sh\nexec %s "$@"\n' \
+    "$(nix shell nixpkgs#pkgsCross.mingwW64.stdenv.cc \
+        --command sh -c 'command -v x86_64-w64-mingw32-windres')" \
+    > "$HOME/.cache/bsh-wbin/windres"
+chmod +x "$HOME/.cache/bsh-wbin/windres"
+# then PATH=$HOME/.cache/bsh-wbin:$TC:$PATH cargo zigbuild --target x86_64-pc-windows-gnu
+```
