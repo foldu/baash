@@ -1,13 +1,11 @@
 //! Pseudo-terminals: an owned master/slave pair for terminal code.
 //!
 //! Terminal handling ([`RawMode`](crate::RawMode),
-//! [`window_size_fd`](crate::window_size_fd),
-//! [`set_foreground_pgrp`](crate::set_foreground_pgrp)) cannot be exercised
-//! without a terminal, and the sandbox that produced this crate has no
-//! controlling terminal. A pseudo-terminal supplies one anyway: the slave is a
-//! real tty with real termios state, window size and foreground process group,
-//! and the master is the other end of the line discipline that a test (or the
-//! line editor) can read and write.
+//! [`window_size_fd`](crate::window_size_fd)) cannot be exercised without a
+//! terminal, and the sandbox that produced this crate has no controlling
+//! terminal. A pseudo-terminal supplies one anyway: the slave is a real tty
+//! with real termios state and window size, and the master is the other end of
+//! the line discipline that a test (or the line editor) can read and write.
 //!
 //! # Ownership and flags
 //!
@@ -18,9 +16,9 @@
 //! `EAGAIN` instead of wedging the event loop.
 //!
 //! The slave is opened with `O_NOCTTY`, so opening a pty never silently makes
-//! it the caller's controlling terminal. A caller that wants job-control
-//! semantics must acquire it deliberately in its own session (`setsid(2)`,
-//! then `TIOCSCTTY`), as the pty tests do.
+//! it the caller's controlling terminal. A caller that wants a real
+//! interactive terminal must acquire it deliberately in its own session
+//! (`setsid(2)`, then `TIOCSCTTY`), as the pty tests do.
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -37,8 +35,8 @@ pub struct Pty {
     pub master: OwnedFd,
     /// The slave side, close-on-exec, opened with `O_NOCTTY`.
     ///
-    /// This is a real terminal: `tcgetattr`/`tcsetattr`, `TIOCGWINSZ` and
-    /// `tcsetpgrp` all apply to it.
+    /// This is a real terminal: `tcgetattr`/`tcsetattr` and `TIOCGWINSZ`
+    /// apply to it.
     pub slave: OwnedFd,
 }
 
@@ -140,9 +138,8 @@ fn slave_name(master: RawFd) -> io::Result<Vec<u8>> {
 /// Make the calling process a session leader and acquire `fd` as its
 /// controlling terminal.
 ///
-/// This is the `setsid(2)` + `TIOCSCTTY` pair a pty test needs before it can
-/// exercise `tcsetpgrp`: a terminal that is not the session's controlling
-/// terminal has no foreground process group to set. `fd` must be the slave
+/// This is the `setsid(2)` + `TIOCSCTTY` pair a pty test needs before the
+/// terminal can deliver `Ctrl-C` to the test's shell. `fd` must be the slave
 /// side of a pty. The caller normally does this in the child of a `fork`
 /// immediately before `exec`.
 pub fn become_session_leader(fd: RawFd) -> io::Result<()> {

@@ -24,10 +24,9 @@
 //! * [`SignalSet`], [`MaskGuard`], [`SignalFd`] — masks and a pollable signal
 //!   source. `SignalFd` is Linux-only (`signalfd`); elsewhere its constructor
 //!   fails with [`std::io::ErrorKind::Unsupported`] rather than pretending.
-//! * [`RawMode`], [`Pty`], [`open_pty`], [`window_size`],
-//!   [`set_foreground_pgrp`] — terminal state for the line editor and job
-//!   control, with an owned pty pair so that state can be tested without a
-//!   controlling terminal.
+//! * [`RawMode`], [`Pty`], [`open_pty`], [`window_size`] — terminal state for
+//!   the line editor, with an owned pty pair so that state can be tested
+//!   without a controlling terminal.
 //! * [`cstring`] — converting shell bytes for `exec`, failing with
 //!   [`NulByte`] instead of truncating.
 //! * [`Regex`], [`Error`] — compiled POSIX extended regular expressions for
@@ -80,12 +79,9 @@ pub use spawn::{
     Child, FdAction, ProcessGroup, ReportPipe, SpawnPlan, exec, exit_child, fork_child,
     fork_child_status, spawn, spawn_forked,
 };
-pub use term::{
-    NoEcho, RawMode, get_foreground_pgrp, parent_pid, pid, process_group, set_foreground_pgrp,
-    set_foreground_pgrp_fd, set_process_group, window_size, window_size_fd,
-};
+pub use term::{NoEcho, RawMode, parent_pid, pid, window_size, window_size_fd};
 pub use threadgate::{ThreadGate, ThreadGuard, fork_gate};
-pub use wait::{WaitOutcome, wait_any_nohang, wait_any_nohang_wuntraced, wait_pid};
+pub use wait::{WaitOutcome, wait_any_nohang, wait_pid};
 
 // `FdAction::Open` and the signal APIs name C types in their signatures, so a
 // consumer would otherwise need its own `libc` dependency just to call us.
@@ -118,16 +114,16 @@ pub const SIGPIPE: c_int = libc::SIGPIPE;
 /// `SIGALRM`: the status of a `read -t` timeout is `128 + SIGALRM`.
 pub const SIGALRM: c_int = libc::SIGALRM;
 
-/// `SIGINT`: ignored by the shell while it waits for a foreground job.
+/// `SIGINT`: ignored by the shell while it waits for a foreground child.
 pub const SIGINT: c_int = libc::SIGINT;
 
-/// `SIGQUIT`: ignored by the shell while it waits for a foreground job.
+/// `SIGQUIT`: ignored by the shell while it waits for a foreground child.
 pub const SIGQUIT: c_int = libc::SIGQUIT;
 
 /// `SIGTERM`, the default signal for `kill`.
 pub const SIGTERM: c_int = libc::SIGTERM;
 
-/// `SIGSTOP`: cannot be caught, blocked or ignored; a stopped job's signal.
+/// `SIGSTOP`: cannot be caught, blocked or ignored.
 pub const SIGSTOP: c_int = libc::SIGSTOP;
 
 /// `SIGTSTP`: the terminal's stop key (`Ctrl-Z`).
@@ -151,8 +147,8 @@ pub const ECHILD: c_int = libc::ECHILD;
 
 /// Whether `fd` refers to a terminal.
 ///
-/// Interactive behaviour (colour, the line editor, job control) hangs off this
-/// one question, so it lives next to the other syscalls.
+/// Interactive behaviour (colour, the line editor, the terminal REPL) hangs
+/// off this one question, so it lives next to the other syscalls.
 pub fn is_tty(fd: i32) -> bool {
     // SAFETY: `isatty` only inspects the descriptor and cannot retain it.
     unsafe { libc::isatty(fd) == 1 }

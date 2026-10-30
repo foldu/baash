@@ -77,7 +77,7 @@ fn exec_replaces_the_process_and_keeps_the_pid() {
     .unwrap();
 
     assert_eq!(
-        wait_pid(child.pid(), false).unwrap(),
+        wait_pid(child.pid()).unwrap(),
         WaitOutcome::Exited(0),
         "the exec'd command should exit 0"
     );
@@ -94,10 +94,7 @@ fn exec_replaces_the_process_and_keeps_the_pid() {
 #[test]
 fn exec_of_true_succeeds() {
     let child = fork_child(|| Err(exec(plan(&program("true"), &[])))).unwrap();
-    assert_eq!(
-        wait_pid(child.pid(), false).unwrap(),
-        WaitOutcome::Exited(0)
-    );
+    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(0));
 }
 
 #[test]
@@ -125,10 +122,7 @@ fn exec_passes_argv_and_environment() {
         .unwrap();
 
     let child = fork_child(move || Err(exec(spawn_plan))).unwrap();
-    assert_eq!(
-        wait_pid(child.pid(), false).unwrap(),
-        WaitOutcome::Exited(0)
-    );
+    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(0));
     assert_eq!(
         std::fs::read(output.as_path()).unwrap(),
         b"positional:present"

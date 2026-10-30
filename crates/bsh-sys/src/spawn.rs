@@ -126,7 +126,8 @@ pub enum ProcessGroup {
     #[default]
     Inherit,
     /// `setpgid(0, pgroup)` in the child. `pgroup == 0` creates a new group
-    /// led by the child, which is what job control wants for a pipeline.
+    /// led by the child. The shell does not use this today (it has no job
+    /// control); it remains a general spawn capability.
     SetPgid {
         /// The process group to join, or 0 for a new group.
         pgroup: libc::pid_t,
@@ -304,7 +305,7 @@ pub struct Child {
 }
 
 impl Child {
-    /// The child's process id (`$!` for background jobs).
+    /// The child's process id (`$!` for a background command).
     pub fn pid(&self) -> libc::pid_t {
         self.pid
     }
@@ -313,8 +314,8 @@ impl Child {
     ///
     /// Convenience wrapper around [`wait_pid`]; the event loop uses the
     /// non-blocking [`crate::wait_any_nohang`] instead.
-    pub fn wait(&self, wuntraced: bool) -> io::Result<WaitOutcome> {
-        wait_pid(self.pid, wuntraced)
+    pub fn wait(&self) -> io::Result<WaitOutcome> {
+        wait_pid(self.pid)
     }
 }
 

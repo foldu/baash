@@ -12,9 +12,6 @@ use std::io;
 pub enum WaitOutcome {
     /// The child exited normally with this status.
     Exited(i32),
-    /// The child stopped with this signal (only reported when `wuntraced` is
-    /// set).
-    Stopped(i32),
     /// The child was killed by this signal.
     Signaled(i32),
 }
@@ -23,31 +20,26 @@ impl WaitOutcome {
     /// The status a shell stores in `$?`.
     ///
     /// A signalled process yields `128 + signal`, which is what POSIX shells
-    /// report; a stopped job uses the same convention as a stop notification,
-    /// although it has not completed and must still be resumed or killed. An
-    /// ordinary exit keeps its status (the VM masks it to 8 bits when expanding
-    /// `$?`).
+    /// report. An ordinary exit keeps its status (the VM masks it to 8 bits
+    /// when expanding `$?`).
     pub fn exit_status(self) -> i32 {
         match self {
             Self::Exited(status) => status,
-            Self::Stopped(signal) | Self::Signaled(signal) => 128 + signal,
+            Self::Signaled(signal) => 128 + signal,
         }
     }
 }
 
 /// Wait for one child, retrying when the wait is interrupted.
 ///
-/// When `wuntraced` is true, stopped children are reported as
-/// [`WaitOutcome::Stopped`] instead of being left stopped but unreported; job
-/// control needs that. The shell must then decide whether to resume or kill
-/// the child.
-pub fn wait_pid(pid: libc::pid_t, wuntraced: bool) -> io::Result<WaitOutcome> {
-    let options = if wuntraced { libc::WUNTRACED } else { 0 };
+/// There is no `WUNTRACED`: the shell has no job control, so a stopped child
+/// is not a state it knows how to resume.
+pub fn wait_pid(pid: libc::pid_t) -> io::Result<WaitOutcome> {
     let mut status: libc::c_int = 0;
     loop {
         // SAFETY: `status` is valid for writes and `waitpid` does not retain
         // the pointer. `pid` is a child of this process by contract.
-        let rc = unsafe { libc::waitpid(pid, &mut status, options) };
+        let rc = unsafe { libc::waitpid(pid, &mut status, 0) };
         if rc < 0 {
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::Interrupted {
@@ -70,27 +62,11 @@ pub fn wait_pid(pid: libc::pid_t, wuntraced: bool) -> io::Result<WaitOutcome> {
 /// children at all". Interrupted waits are retried; `ECHILD` is reported as
 /// `None` because it is the steady state of a shell between commands.
 pub fn wait_any_nohang() -> Option<(libc::pid_t, WaitOutcome)> {
-    wait_any_nohang_impl(false)
-}
-
-/// Like [`wait_any_nohang`], but also reports children that have stopped.
-///
-/// Job control needs this: a stopped foreground job has not exited, so the
-/// shell must learn about it without blocking.
-pub fn wait_any_nohang_wuntraced() -> Option<(libc::pid_t, WaitOutcome)> {
-    wait_any_nohang_impl(true)
-}
-
-fn wait_any_nohang_impl(wuntraced: bool) -> Option<(libc::pid_t, WaitOutcome)> {
-    let mut options = libc::WNOHANG;
-    if wuntraced {
-        options |= libc::WUNTRACED;
-    }
     let mut status: libc::c_int = 0;
     loop {
         // SAFETY: `status` is valid for writes and `waitpid` does not retain
         // the pointer.
-        let rc = unsafe { libc::waitpid(-1, &mut status, options) };
+        let rc = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
         if rc > 0 {
             return decode(status).ok().map(|outcome| (rc, outcome));
         }
@@ -112,10 +88,9 @@ fn decode(status: libc::c_int) -> io::Result<WaitOutcome> {
         Ok(WaitOutcome::Exited(libc::WEXITSTATUS(status)))
     } else if libc::WIFSIGNALED(status) {
         Ok(WaitOutcome::Signaled(libc::WTERMSIG(status)))
-    } else if libc::WIFSTOPPED(status) {
-        Ok(WaitOutcome::Stopped(libc::WSTOPSIG(status)))
     } else {
-        // `WIFCONTINUED` cannot appear because WCONTINUED is never passed.
+        // Neither `WIFSTOPPED` nor `WIFCONTINUED` can appear: the wait never
+        // passes `WUNTRACED` or `WCONTINUED`.
         Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "unrecognised wait status",
@@ -131,9 +106,5 @@ mod tests {
     fn exit_status_matches_shell_convention() {
         assert_eq!(WaitOutcome::Exited(42).exit_status(), 42);
         assert_eq!(WaitOutcome::Signaled(libc::SIGTERM).exit_status(), 143);
-        assert_eq!(
-            WaitOutcome::Stopped(libc::SIGSTOP).exit_status(),
-            128 + libc::SIGSTOP
-        );
     }
 }

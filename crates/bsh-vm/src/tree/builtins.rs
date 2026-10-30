@@ -111,22 +111,6 @@ static VM_BUILTINS: &[VmBuiltin] = &[
         run: super::Interp::bi_kill,
     },
     VmBuiltin {
-        name: b"jobs",
-        run: super::Interp::bi_jobs,
-    },
-    VmBuiltin {
-        name: b"fg",
-        run: super::Interp::bi_fg,
-    },
-    VmBuiltin {
-        name: b"bg",
-        run: super::Interp::bi_bg,
-    },
-    VmBuiltin {
-        name: b"disown",
-        run: super::Interp::bi_disown,
-    },
-    VmBuiltin {
         name: b"hash",
         run: bi_hash,
     },

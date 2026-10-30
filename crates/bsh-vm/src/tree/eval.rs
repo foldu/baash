@@ -113,7 +113,7 @@ impl Interp {
                 self.eval_case(chunk, word, arms, ctx)
             }
             NodeKind::BraceGroup { body } => self.eval_node(chunk, *body, ctx),
-            NodeKind::Subshell { body } => self.eval_subshell(chunk, *body, &node.span, ctx),
+            NodeKind::Subshell { body } => self.eval_subshell(chunk, *body, ctx),
             NodeKind::Function { name, body, .. } => {
                 let Some(name) = literal_name(chunk, name) else {
                     self.report(
@@ -176,14 +176,12 @@ impl Interp {
         let mut last = Status::SUCCESS;
         for item in items {
             if item.sep == Some(Separator::Amp) {
-                let pgroup = self.background_job_control().then_some(0);
-                match self.fork_shell(chunk, item.node, Ctx::default(), pgroup) {
+                match self.fork_shell(chunk, item.node, Ctx::default()) {
                     Ok(child) => {
                         let pid = child.pid();
-                        let command = chunk.source.bytes()[chunk.ast.node(item.node).span.clone()]
-                            .trim_ascii()
-                            .to_vec();
-                        self.track_background(pid, pid, command.clone(), vec![command]);
+                        // No job table: the pid alone is the handle `$!`,
+                        // `wait` and `kill` use.
+                        self.background.insert(pid, None);
                         self.state.vars.set_last_bg_pid(Some(pid));
                         last = Status::SUCCESS;
                     }
@@ -337,8 +335,6 @@ impl Interp {
             .collect();
 
         let mut children = Vec::with_capacity(stages.len());
-        let job_control = self.foreground_job_control();
-        let mut leader: Option<i32> = None;
         for (index, stage) in stages.iter().enumerate() {
             let stdin = if index == 0 {
                 None
@@ -350,13 +346,8 @@ impl Interp {
                 .get(index)
                 .is_some_and(|link| *link == PipeOp::PipeStderr);
             let ends = ends.clone();
-            // The first stage creates the group; the rest join the leader's.
-            let pgroup = job_control.then_some(leader.unwrap_or(0));
             let result = bsh_sys::fork_child(|| {
                 self.enter_child();
-                if let Some(pgroup) = pgroup {
-                    let _ = bsh_sys::set_process_group(0, pgroup);
-                }
                 if let Some(fd) = stdin {
                     bsh_sys::dup2(fd, 0)?;
                 }
@@ -377,19 +368,11 @@ impl Interp {
             });
             match result {
                 Ok(child) => {
-                    let pid = child.pid();
-                    if let Some(pgroup) = pgroup {
-                        let target = if pgroup == 0 { pid } else { pgroup };
-                        // Parent-side race fix: the child may not have run
-                        // its own `setpgid` yet.
-                        let _ = bsh_sys::set_process_group(pid, target);
-                        leader.get_or_insert(target);
-                    }
                     children.push(child);
                 }
                 Err(error) => {
                     for child in &children {
-                        let _ = bsh_sys::wait_pid(child.pid(), false);
+                        let _ = bsh_sys::wait_pid(child.pid());
                     }
                     drop(pipes);
                     return Err(format!("cannot start a pipeline stage: {error}"));
@@ -399,29 +382,8 @@ impl Interp {
         drop(pipes);
 
         let pids: Vec<i32> = children.iter().map(bsh_sys::Child::pid).collect();
-        let pgid = if job_control {
-            leader.or_else(|| pids.first().copied())
-        } else {
-            None
-        };
-        // The command text and each stage's text, exactly as written.
-        let first = chunk.ast.node(stages[0]).span.start;
-        let last = chunk
-            .ast
-            .node(*stages.last().unwrap_or(&stages[0]))
-            .span
-            .end;
-        let command = chunk.source.bytes()[first..last].trim_ascii().to_vec();
-        let parts: Vec<Vec<u8>> = stages
-            .iter()
-            .map(|stage| {
-                chunk.source.bytes()[chunk.ast.node(*stage).span.clone()]
-                    .trim_ascii()
-                    .to_vec()
-            })
-            .collect();
         let outcomes = self
-            .wait_foreground_children(&pids, pgid, &command, parts, None)
+            .wait_foreground_children(&pids)
             .map_err(|error| format!("cannot wait for a pipeline stage: {error}"))?;
         Ok(outcomes
             .into_iter()
@@ -615,26 +577,11 @@ impl Interp {
         Unwind::Status(status)
     }
 
-    fn eval_subshell(
-        &mut self,
-        chunk: &Arc<ParsedChunk>,
-        body: NodeId,
-        span: &bsh_diag::Span,
-        ctx: Ctx,
-    ) -> Unwind {
-        let job_control = self.foreground_job_control();
-        match self.fork_shell(chunk, body, ctx, job_control.then_some(0)) {
+    fn eval_subshell(&mut self, chunk: &Arc<ParsedChunk>, body: NodeId, ctx: Ctx) -> Unwind {
+        match self.fork_shell(chunk, body, ctx) {
             Ok(child) => {
                 let pid = child.pid();
-                let command = chunk.source.bytes()[span.clone()].trim_ascii().to_vec();
-                let part = command.clone();
-                let outcomes = self.wait_foreground_children(
-                    &[pid],
-                    job_control.then_some(pid),
-                    &command,
-                    vec![part],
-                    None,
-                );
+                let outcomes = self.wait_foreground_children(&[pid]);
                 match outcomes {
                     Ok(outcomes) => {
                         let status = outcomes
@@ -726,7 +673,7 @@ impl Interp {
                 .map_err(|error| format!("cannot read a command substitution: {error}"))?;
         }
         let outcome = self
-            .wait_foreground_children(&[child.pid()], None, b"", Vec::new(), None)
+            .wait_foreground_children(&[child.pid()])
             .map_err(|error| format!("cannot wait for a command substitution: {error}"))?
             .into_iter()
             .next()

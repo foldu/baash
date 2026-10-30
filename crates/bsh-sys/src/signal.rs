@@ -196,8 +196,8 @@ pub fn send_signal(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
 /// Send `signal` to every process in process group `pgroup`.
 ///
 /// `pgroup` must be a positive process-group id; zero ("this process's group")
-/// and negative values ("every process") are rejected because a shell job
-/// controls exactly the groups it created.
+/// and negative values ("every process") are rejected, so the caller can only
+/// name a group it created.
 pub fn send_group_signal(pgroup: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
     if pgroup <= 0 {
         return Err(io::Error::new(
@@ -250,9 +250,9 @@ pub fn set_disposition(signal: libc::c_int, disposition: Disposition) -> io::Res
 /// Restores a set of signal dispositions when dropped.
 ///
 /// Used around a foreground `wait`: bash ignores `SIGINT`/`SIGQUIT` delivered
-/// to the *shell* while it waits for a job (the job has its own copy of the
-/// signal), so a stray `kill -INT <shell>` does not kill the shell in the
-/// middle of `trap … EXIT; sleep 1`. The previous actions — possibly `SIG_IGN`
+/// to the *shell* while it waits for a child (the child receives its own copy
+/// through the shared process group), so a stray `kill -INT <shell>` does not
+/// kill the shell in the middle of `trap … EXIT; sleep 1`. The previous actions — possibly `SIG_IGN`
 /// from `trap ''` — are put back on drop, so a panic cannot leak an ignore.
 pub struct SignalGuard {
     saved: Vec<(libc::c_int, libc::sigaction)>,
@@ -555,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn group_signal_rejects_non_job_ids() {
+    fn group_signal_rejects_non_positive_ids() {
         assert!(send_group_signal(0, libc::SIGTERM).is_err());
         assert!(send_group_signal(-1, libc::SIGTERM).is_err());
     }

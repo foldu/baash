@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bsh_sys::{
     NulByte, ProcessGroup, SpawnPlan, WaitOutcome, exit_child, fork_child, fork_child_status,
-    send_signal, spawn, spawn_forked, wait_pid,
+    spawn, spawn_forked, wait_pid,
 };
 
 /// Resolve an executable the portable way: `/bin`, then `/usr/bin`, then
@@ -58,40 +58,16 @@ impl Drop for TempPath {
     }
 }
 
-/// Kills and reaps a child if a test fails before doing so itself.
-struct ChildGuard {
-    pid: libc::pid_t,
-    armed: bool,
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = send_signal(self.pid, libc::SIGKILL);
-            let _ = wait_pid(self.pid, false);
-        }
-    }
-}
-
 #[test]
 fn spawn_reports_exit_statuses() {
     let child = spawn(plan(&program("true"), &[])).unwrap();
-    assert_eq!(
-        wait_pid(child.pid(), false).unwrap(),
-        WaitOutcome::Exited(0)
-    );
+    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(0));
 
     let child = spawn(plan(&program("false"), &[])).unwrap();
-    assert_eq!(
-        wait_pid(child.pid(), false).unwrap(),
-        WaitOutcome::Exited(1)
-    );
+    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(1));
 
     let child = spawn(plan(&program("sh"), &["-c", "exit 42"])).unwrap();
-    assert_eq!(
-        wait_pid(child.pid(), false).unwrap(),
-        WaitOutcome::Exited(42)
-    );
+    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(42));
 }
 
 #[test]
@@ -135,10 +111,7 @@ fn stdout_redirect_to_a_file_matches_the_written_bytes() {
         .unwrap();
 
     let child = spawn(spawn_plan).unwrap();
-    assert_eq!(
-        wait_pid(child.pid(), false).unwrap(),
-        WaitOutcome::Exited(0)
-    );
+    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(0));
     assert_eq!(std::fs::read(output.as_path()).unwrap(), b"hello\n");
 }
 
@@ -179,10 +152,7 @@ fn environment_entries_reach_the_child() {
         .unwrap();
 
     let child = spawn(spawn_plan).unwrap();
-    assert_eq!(
-        wait_pid(child.pid(), false).unwrap(),
-        WaitOutcome::Exited(0)
-    );
+    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(0));
     assert_eq!(std::fs::read(output.as_path()).unwrap(), b"present");
 }
 
@@ -190,29 +160,9 @@ fn environment_entries_reach_the_child() {
 fn a_signalled_child_is_reported_as_signalled() {
     let child = spawn(plan(&program("sh"), &["-c", "kill -TERM $$"])).unwrap();
     assert_eq!(
-        wait_pid(child.pid(), false).unwrap(),
+        wait_pid(child.pid()).unwrap(),
         WaitOutcome::Signaled(libc::SIGTERM)
     );
-}
-
-#[test]
-fn a_stopped_child_is_visible_with_wuntraced() {
-    let child = spawn(plan(&program("sh"), &["-c", "kill -STOP $$"])).unwrap();
-    let mut guard = ChildGuard {
-        pid: child.pid(),
-        armed: true,
-    };
-
-    assert_eq!(
-        wait_pid(child.pid(), true).unwrap(),
-        WaitOutcome::Stopped(libc::SIGSTOP)
-    );
-    send_signal(child.pid(), libc::SIGKILL).unwrap();
-    assert_eq!(
-        wait_pid(child.pid(), false).unwrap(),
-        WaitOutcome::Signaled(libc::SIGKILL)
-    );
-    guard.armed = false;
 }
 
 #[test]
@@ -220,10 +170,7 @@ fn a_plan_with_its_own_process_group_still_executes() {
     let mut spawn_plan = plan(&program("sh"), &["-c", "exit 0"]);
     spawn_plan.pgroup = ProcessGroup::SetPgid { pgroup: 0 };
     let child = spawn(spawn_plan).unwrap();
-    assert_eq!(
-        wait_pid(child.pid(), false).unwrap(),
-        WaitOutcome::Exited(0)
-    );
+    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(0));
 }
 
 #[test]
@@ -256,34 +203,22 @@ fn fork_child_runs_the_closure_in_a_real_child() {
         unsafe { libc::_exit(0) }
     })
     .unwrap();
-    assert_eq!(
-        wait_pid(child.pid(), false).unwrap(),
-        WaitOutcome::Exited(0)
-    );
+    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(0));
 }
 
 #[test]
 fn fork_child_status_sets_the_child_exit_status() {
     let child = fork_child_status(|| 42).unwrap();
-    assert_eq!(
-        wait_pid(child.pid(), false).unwrap(),
-        WaitOutcome::Exited(42)
-    );
+    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(42));
 
     // Status 0 is a real value, not "no status"; the child still exits through
     // the raw path.
     let child = fork_child_status(|| 0).unwrap();
-    assert_eq!(
-        wait_pid(child.pid(), false).unwrap(),
-        WaitOutcome::Exited(0)
-    );
+    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(0));
 }
 
 #[test]
 fn exit_child_is_usable_from_fork_child() {
     let child = fork_child(|| exit_child(9)).unwrap();
-    assert_eq!(
-        wait_pid(child.pid(), false).unwrap(),
-        WaitOutcome::Exited(9)
-    );
+    assert_eq!(wait_pid(child.pid()).unwrap(), WaitOutcome::Exited(9));
 }

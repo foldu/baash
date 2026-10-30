@@ -1,15 +1,8 @@
-//! Terminal state: raw mode, window size, and the foreground process group.
-//!
-//! Job control (DESIGN.md §7) needs `tcsetpgrp` to be safe while the shell
-//! itself may be in the background. A background process group that calls
-//! `tcsetpgrp` receives `SIGTTOU`, whose default action stops the shell, so
-//! [`set_foreground_pgrp`] blocks that signal across the call.
+//! Terminal state: raw mode and window size.
 
 use std::io;
 use std::mem::MaybeUninit;
 use std::os::fd::RawFd;
-
-use crate::signal::SignalSet;
 
 /// A saved `termios`, restored when the guard is dropped.
 ///
@@ -180,45 +173,6 @@ pub fn window_size_fd(fd: RawFd) -> Option<(u16, u16)> {
     (size.ws_col > 0 && size.ws_row > 0).then_some((size.ws_col, size.ws_row))
 }
 
-/// Give the terminal on standard input to process group `pgroup`.
-///
-/// See [`set_foreground_pgrp_fd`]. Interactive shells call this with the
-/// input's controlling terminal; use the `_fd` variant when standard input is
-/// redirected.
-pub fn set_foreground_pgrp(pgroup: libc::pid_t) -> io::Result<()> {
-    set_foreground_pgrp_fd(libc::STDIN_FILENO, pgroup)
-}
-
-/// Give the terminal on `fd` to process group `pgroup`.
-///
-/// `SIGTTOU` is blocked for the duration so that a background shell gets an
-/// error from the kernel instead of being stopped by the default signal
-/// action. The previous mask is restored on return, including on error. Like
-/// the rest of the fork-gated shell, this assumes no helper thread will receive
-/// the signal on the caller's behalf.
-pub fn set_foreground_pgrp_fd(fd: RawFd, pgroup: libc::pid_t) -> io::Result<()> {
-    let ttou = SignalSet::of(&[libc::SIGTTOU]);
-    let _blocked = ttou.block()?;
-    // SAFETY: `tcsetpgrp` takes a descriptor and a process-group id and
-    // dereferences no user pointer.
-    if unsafe { libc::tcsetpgrp(fd, pgroup) } != 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-/// The process group that currently owns the terminal on `fd`.
-pub fn get_foreground_pgrp(fd: RawFd) -> io::Result<libc::pid_t> {
-    // SAFETY: `tcgetpgrp` only reads terminal state for the descriptor.
-    let pgroup = unsafe { libc::tcgetpgrp(fd) };
-    if pgroup < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(pgroup)
-    }
-}
-
 /// This process's id (`$$`).
 pub fn pid() -> libc::pid_t {
     // SAFETY: `getpid` cannot fail and touches no pointers.
@@ -229,26 +183,6 @@ pub fn pid() -> libc::pid_t {
 pub fn parent_pid() -> libc::pid_t {
     // SAFETY: `getppid` cannot fail and touches no pointers.
     unsafe { libc::getppid() }
-}
-
-/// This process's process-group id.
-pub fn process_group() -> libc::pid_t {
-    // SAFETY: `getpgrp` cannot fail and touches no pointers.
-    unsafe { libc::getpgrp() }
-}
-
-/// Put process `pid` into process group `pgroup`.
-///
-/// `pid == 0` means the calling process; `pgroup == 0` means "create a new
-/// group led by `pid`". Both the parent and the child call this after `fork`
-/// in the classic job-control dance, because either may get there first.
-pub fn set_process_group(pid: libc::pid_t, pgroup: libc::pid_t) -> io::Result<()> {
-    // SAFETY: `setpgid` takes only integers.
-    if unsafe { libc::setpgid(pid, pgroup) } != 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -265,9 +199,8 @@ mod tests {
     #[test]
     fn ids_are_plausible() {
         assert!(pid() > 0);
-        // `getppid` and `getpgrp` can report 0 in an isolated PID namespace
-        // (some CI sandboxes do this), so only the sign is asserted.
+        // `getppid` can report 0 in an isolated PID namespace (some CI
+        // sandboxes do this), so only the sign is asserted.
         assert!(parent_pid() >= 0);
-        assert!(process_group() >= 0);
     }
 }

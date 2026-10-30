@@ -1,27 +1,19 @@
 //! Terminal code against a real terminal: a pseudo-terminal pair.
 //!
 //! These are the integration tests the contract said were owed: the sandbox
-//! that built `bsh-sys` had no controlling terminal, so `RawMode`,
-//! `window_size_fd` and `set_foreground_pgrp` had never touched a tty. A pty
-//! slave is a real terminal, so the same kernel paths run here.
+//! that built `bsh-sys` had no controlling terminal, so `RawMode` and
+//! `window_size_fd` had never touched a tty. A pty slave is a real terminal,
+//! so the same kernel paths run here.
 //!
 //! Where a platform property cannot be assumed, the test sets it explicitly
 //! first (termios flags, window size) rather than relying on defaults; where
 //! it genuinely cannot be made reliable, the weaker true assertion is used and
 //! the comment says so.
 //!
-//! The foreground-group test creates its own session and acquires its own
-//! controlling terminal, so it passes both when the harness has a terminal and
-//! when it has none (verified under `setsid`).
-
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
 
-use bsh_sys::{
-    NoEcho, RawMode, WaitOutcome, dup2, fork_child_status, get_foreground_pgrp, is_tty, open_pty,
-    process_group, send_signal, set_foreground_pgrp, set_foreground_pgrp_fd, wait_pid,
-    window_size_fd,
-};
+use bsh_sys::{NoEcho, RawMode, is_tty, open_pty, window_size_fd};
 
 /// Read the terminal settings of `fd`, failing the test if it is not a tty.
 fn termios(fd: RawFd) -> libc::termios {
@@ -166,120 +158,6 @@ fn window_size_reports_the_size_that_was_set() {
     }
 }
 
-/// The exit statuses the child below uses to name its failing step.
-const STEP_SETSID: i32 = 11;
-const STEP_ACQUIRE: i32 = 12;
-const STEP_STDIN: i32 = 13;
-const STEP_FORK: i32 = 14;
-const STEP_GRANDCHILD_GROUP: i32 = 15;
-const STEP_SET_FOREIGN: i32 = 16;
-const STEP_GET_FOREIGN: i32 = 17;
-const STEP_SET_OWN_BACKGROUND: i32 = 19;
-const STEP_GET_OWN: i32 = 20;
-
-#[test]
-fn foreground_pgrp_round_trips_in_a_child_that_owns_the_pty() {
-    let pty = open_pty().unwrap();
-    let slave = pty.slave.as_raw_fd();
-
-    let child = fork_child_status(move || {
-        // The child must become a session leader and then explicitly acquire
-        // the pty: the slave was opened with O_NOCTTY, so it is not anybody's
-        // controlling terminal yet. Only raw syscalls and `bsh-sys` wrappers
-        // that allocate nothing.
-        // SAFETY: `setsid` takes no arguments and only affects this process.
-        if unsafe { libc::setsid() } < 0 {
-            return STEP_SETSID;
-        }
-        // SAFETY: `TIOCSCTTY` takes an integer argument and acts on the pty.
-        // The cast keeps the variadic third argument the width the kernel
-        // expects.
-        if unsafe { libc::ioctl(slave, libc::TIOCSCTTY, 0 as libc::c_ulong) } != 0 {
-            return STEP_ACQUIRE;
-        }
-        // Exercise the stdin wrapper as well: point fd 0 at the pty.
-        if dup2(slave, libc::STDIN_FILENO).is_err() {
-            return STEP_STDIN;
-        }
-
-        let own = process_group();
-
-        // A grandchild in its own process group gives the terminal a different
-        // owner to switch to, so this is a real round trip rather than setting
-        // the group that already owns it.
-        // SAFETY: `fork` takes no arguments. This child is single-threaded
-        // after the outer fork; the grandchild performs raw syscalls only and
-        // then blocks in `pause`, never touching the allocator.
-        let grandchild = unsafe { libc::fork() };
-        if grandchild < 0 {
-            return STEP_FORK;
-        }
-        if grandchild == 0 {
-            // SAFETY: `setpgid` takes integers; the child's failure is
-            // tolerated because the parent also sets the group.
-            unsafe { libc::setpgid(0, 0) };
-            loop {
-                // SAFETY: `pause` blocks until a signal and touches no memory.
-                unsafe { libc::pause() };
-            }
-        }
-        // SAFETY: `setpgid` takes integers. It is legal for both the parent
-        // and the child to name the same target group.
-        if unsafe { libc::setpgid(grandchild, grandchild) } != 0 {
-            return STEP_GRANDCHILD_GROUP;
-        }
-
-        if set_foreground_pgrp_fd(slave, grandchild).is_err() {
-            return STEP_SET_FOREIGN;
-        }
-        match get_foreground_pgrp(slave) {
-            Ok(observed) if observed == grandchild => {}
-            _ => return STEP_GET_FOREIGN,
-        }
-
-        // Restoring from the *background* is the case that would stop this
-        // process with SIGTTOU if `set_foreground_pgrp` did not block it. That
-        // blocking is exactly what this step proves. Force the default action
-        // first: the test harness may have inherited SIGTTOU ignored, which
-        // would make the restore pass for the wrong reason.
-        // SAFETY: `signal(2)` with `SIG_DFL` for a signal number; no pointers.
-        unsafe { libc::signal(libc::SIGTTOU, libc::SIG_DFL) };
-        if set_foreground_pgrp(own).is_err() {
-            return STEP_SET_OWN_BACKGROUND;
-        }
-        match get_foreground_pgrp(libc::STDIN_FILENO) {
-            Ok(observed) if observed == own => {}
-            _ => return STEP_GET_OWN,
-        }
-
-        // Reap the grandchild so the test leaves no process behind.
-        // SAFETY: the grandchild is ours and paused; SIGKILL cannot be caught.
-        // `status` is valid for writes and `waitpid` retains no pointer.
-        unsafe {
-            libc::kill(grandchild, libc::SIGKILL);
-            let mut status: libc::c_int = 0;
-            libc::waitpid(grandchild, &mut status, 0);
-        }
-        0
-    })
-    .unwrap();
-
-    // WUNTRACED so that a regression which lets SIGTTOU stop the child fails
-    // the test instead of blocking the reaper forever.
-    let outcome = wait_pid(child.pid(), true).unwrap();
-    if outcome != WaitOutcome::Exited(0) {
-        // Leave nothing behind: a stopped child would otherwise outlive the
-        // test binary. SIGKILL reaches a stopped process as well.
-        let _ = send_signal(child.pid(), libc::SIGKILL);
-        let _ = wait_pid(child.pid(), false);
-    }
-    assert_eq!(
-        outcome,
-        WaitOutcome::Exited(0),
-        "the pty child failed at step {outcome:?}; see the STEP_* constants"
-    );
-}
-
 #[test]
 fn no_echo_clears_echo_only_and_restores_it() {
     // `read -s` turns echo off but must leave canonical mode alone: disabling
@@ -305,36 +183,4 @@ fn no_echo_clears_echo_only_and_restores_it() {
         let _guard = NoEcho::enable(slave).expect("disable echo");
     }
     assert_same_termios(&termios(slave), &before);
-}
-
-#[test]
-fn become_session_leader_acquires_the_controlling_terminal() {
-    // The pty helper a job-control integration test needs: `setsid` plus
-    // `TIOCSCTTY` in a child, then `tcsetpgrp` must name the new session's
-    // group. Run it in a child because `setsid` cannot succeed for a process
-    // group leader such as this test binary.
-    use bsh_sys::become_session_leader;
-    let pty = open_pty().unwrap();
-    let slave = pty.slave.as_raw_fd();
-    let child = fork_child_status(|| {
-        if become_session_leader(slave).is_err() {
-            return 40;
-        }
-        let pg = process_group();
-        if pg != bsh_sys::pid() {
-            return 41;
-        }
-        if set_foreground_pgrp_fd(slave, pg).is_err() {
-            return 42;
-        }
-        if get_foreground_pgrp(slave).ok() != Some(pg) {
-            return 43;
-        }
-        0
-    })
-    .unwrap();
-    assert_eq!(
-        wait_pid(child.pid(), false).unwrap(),
-        WaitOutcome::Exited(0)
-    );
 }

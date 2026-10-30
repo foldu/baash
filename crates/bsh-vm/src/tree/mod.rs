@@ -22,12 +22,10 @@
 //!   per-command sequence; `redir` — redirections, left to right; `builtins` —
 //!   executor-side built-ins; `cond` — `[[ … ]]`; `words` — the seams back
 //!   into `bsh-lang` and `bsh-syntax`.
-//! * `jobs` — the job table, process-group handover, the single foreground
-//!   wait path, `wait`/`kill` and the job built-ins (`jobs`, `fg`, `bg`,
-//!   `disown`). Job control is active only after
-//!   [`Interp::enable_job_control`] (the interactive startup path) and while
-//!   `monitor` is on; without it the table still tracks `&` children but no
-//!   process groups or terminal handover are used.
+//! * `process` — the single foreground-wait path and the process built-ins
+//!   `wait` and `kill`. There is no job control: background children are
+//!   tracked by pid so `$!`, `wait` and `kill` work, and the job built-ins
+//!   report `BSH-E0302` instead of pretending.
 //!
 //! # `errexit`
 //!
@@ -125,8 +123,8 @@ mod command;
 mod complete;
 mod cond;
 mod eval;
-mod jobs;
 mod mapfile;
+mod process;
 mod read;
 mod redir;
 mod traps;
@@ -268,16 +266,6 @@ pub struct Interp {
     /// Children started with `&`, and the status of the ones already reaped
     /// (so `wait PID` can report a status after the fact).
     background: traps::Background,
-    /// Every job this shell owns, with bash's numbering and `+`/`-` strategy.
-    job_table: jobs::JobTable,
-    /// True once the interactive startup path has put the shell in its own
-    /// process group and ignored `SIGTTOU`/`SIGTTIN`/`SIGTSTP`.
-    job_control: bool,
-    /// The shell's process group (the terminal's owner between commands).
-    shell_pgid: i32,
-    /// The signals [`Interp::enable_job_control`] ignored in the shell, so a
-    /// forked child can have the default actions put back.
-    ignored_job_signals: Vec<i32>,
     /// The pending exit status while the `EXIT` trap runs, so a bare `exit`
     /// inside it keeps that status (bash's rule).
     exit_trap_status: Option<Status>,
@@ -397,10 +385,6 @@ impl Interp {
             in_trap: false,
             exiting: false,
             background: traps::Background::new(),
-            job_table: jobs::JobTable::default(),
-            job_control: false,
-            shell_pgid: 0,
-            ignored_job_signals: Vec::new(),
             exit_trap_status: None,
             path_cache: std::collections::BTreeMap::new(),
             empty_chunk,
@@ -446,8 +430,9 @@ impl Interp {
     /// * `\l` and the terminal width come from the terminal on standard
     ///   input, which is the one the editor paints on.
     ///
-    /// The job count, `$PWD`, `$HOME` and the user/host names come from the
-    /// shell's own state, not the process environment.
+    /// The background-child count behind `\j`, `$PWD`, `$HOME` and the
+    /// user/host names come from the shell's own state, not the process
+    /// environment.
     pub fn repl_prompt_context(&self) -> bsh_lang::prompt::PromptContext {
         let mut context = <Self as bsh_lang::Shell>::prompt_context(self);
         context.history_number = self.state.history.next_number();
@@ -802,13 +787,9 @@ impl Interp {
         chunk: &Arc<ParsedChunk>,
         body: NodeId,
         ctx: Ctx,
-        pgroup: Option<i32>,
     ) -> std::io::Result<bsh_sys::Child> {
         let child = bsh_sys::fork_child(|| {
             self.enter_child();
-            if let Some(pgroup) = pgroup {
-                let _ = bsh_sys::set_process_group(0, pgroup);
-            }
             let unwind = self.eval_node(chunk, body, ctx);
             let status = match unwind {
                 Unwind::Status(status) | Unwind::Return(status) | Unwind::Exit(status) => status,
@@ -816,12 +797,6 @@ impl Interp {
             };
             bsh_sys::exit_child(status.exit_code());
         })?;
-        if let Some(pgroup) = pgroup {
-            // Parent-side half of the race fix: whichever of parent and child
-            // runs `setpgid` first wins.
-            let target = if pgroup == 0 { child.pid() } else { pgroup };
-            let _ = bsh_sys::set_process_group(child.pid(), target);
-        }
         Ok(child)
     }
 }
@@ -922,7 +897,8 @@ impl bsh_lang::Shell for Interp {
     /// The default resolves user, host, cwd and time from the environment; a
     /// shell adds what only it knows — the *logical* `PWD` (which can differ
     /// from `std::env::current_dir()` after `cd` through a symlink), the
-    /// command counter behind `\#`, and the job count behind `\j`.
+    /// command counter behind `\#`, and the background-child count behind
+    /// `\j` (there is no job table).
     fn prompt_context(&self) -> bsh_lang::prompt::PromptContext {
         let mut context = bsh_lang::prompt::PromptContext::from_env();
         let vars = &self.state.vars;
@@ -941,7 +917,8 @@ impl bsh_lang::Shell for Interp {
         if let Some(value) = vars.scalar(b"HOSTNAME") {
             context.host = value.to_vec();
         }
-        context.job_count = self.job_table.len() as u32;
+        // No job table: `\j` counts the children this shell still owns.
+        context.job_count = self.background.len() as u32;
         // `\!`: bash's `${x@P}` reports the number of the line already in the
         // ring, not the next one the prompt will show (`docs/contracts.md`).
         context.history_number = self.state.history.next_number().saturating_sub(1);

@@ -43,5 +43,5 @@ fn wait_any_nohang_reaps_children_and_reports_none_when_idle() {
     assert_eq!(wait_any_nohang(), None);
 
     // The child was reaped above, so this must fail rather than block.
-    assert!(wait_pid(child.pid(), false).is_err());
+    assert!(wait_pid(child.pid()).is_err());
 }

@@ -36,7 +36,7 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
 /// status — which is a stronger assertion than "we survived".
 fn in_child(body: impl FnOnce() -> i32) -> i32 {
     let child = fork_child_status(body).expect("fork a child");
-    match wait_pid(child.pid(), false).expect("wait for the child") {
+    match wait_pid(child.pid()).expect("wait for the child") {
         WaitOutcome::Exited(status) => status,
         other => panic!("child did not exit normally: {other:?}"),
     }

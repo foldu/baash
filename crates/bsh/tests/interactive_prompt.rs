@@ -190,7 +190,7 @@ impl Session {
         if self.reaped {
             return;
         }
-        let status = bsh_sys::wait_pid(self.child, false).expect("reap the shell");
+        let status = bsh_sys::wait_pid(self.child).expect("reap the shell");
         self.reaped = true;
         assert_eq!(
             status,
@@ -204,7 +204,7 @@ impl Drop for Session {
     fn drop(&mut self) {
         if !self.reaped {
             let _ = send_signal(self.child, bsh_sys::SIGTERM);
-            let _ = bsh_sys::wait_pid(self.child, false);
+            let _ = bsh_sys::wait_pid(self.child);
         }
     }
 }
