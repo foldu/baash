@@ -1664,7 +1664,7 @@ fn strip_value(value: &mut Vec<u8>, pattern: &[u8], longest: bool, prefix: bool,
     if pattern.is_empty() {
         return;
     }
-    let pattern = bsh_pattern::Pattern::new(pattern, flags);
+    let pattern = bsh_pattern::compiled(pattern, flags);
     if prefix {
         if let Some(end) = pattern.prefix_end(value, longest) {
             value.drain(..end);
@@ -1740,7 +1740,7 @@ fn replace_value(
     }
     // Compile once per value: the scanning loop asks for a prefix match at
     // every byte, and recompiling there would cost a parse per position.
-    let pattern = bsh_pattern::Pattern::new(pattern, flags);
+    let pattern = bsh_pattern::compiled(pattern, flags);
     match mode {
         ReplaceMode::Prefix => match pattern.prefix_end(text, true) {
             // An empty match is not a replacement, as in the unanchored loop.
@@ -1790,7 +1790,7 @@ fn replace_value(
 /// and no byte above 0x7f has an ASCII case mapping, so non-ASCII text is
 /// never changed — `μ` stays `μ` exactly as bash's `LC_ALL=C` leaves it.
 fn convert_case(value: &mut [u8], how: CaseHow, pattern: Option<&[u8]>, flags: Flags) {
-    let compiled = pattern.map(|pattern| bsh_pattern::Pattern::new(pattern, flags));
+    let compiled = pattern.map(|pattern| bsh_pattern::compiled(pattern, flags));
     for (index, byte) in value.iter_mut().enumerate() {
         if index > 0 && how.first_only() {
             break;

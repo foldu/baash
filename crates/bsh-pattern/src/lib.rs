@@ -275,6 +275,7 @@ impl Pattern {
     /// Parsing is total: malformed input becomes literal text, it never panics
     /// and never returns an error. See the crate docs for the exact fallbacks.
     pub fn new(pattern: &[u8], flags: Flags) -> Self {
+        COMPILATIONS.with(|count| count.set(count.get() + 1));
         let alts = ast::parse(pattern, flags.extglob, flags.utf8);
         let forward = nfa::compile(&alts);
         Self {
@@ -326,9 +327,74 @@ impl Pattern {
 /// Whether `pattern` matches all of `text`.
 ///
 /// Anchored at both ends, like `case` and `[[ x == pat ]]` without an implicit
-/// `*`. See [`Pattern`] to reuse a compiled pattern.
+/// `*`. Goes through [`compiled`], so a pattern retested in a loop is parsed and
+/// compiled once.
 pub fn matches(pattern: &[u8], text: &[u8], flags: Flags) -> bool {
-    Pattern::new(pattern, flags).matches(text)
+    compiled(pattern, flags).matches(text)
+}
+
+/// How many patterns a thread caches before the cache is emptied.
+///
+/// Small on purpose: a shell retests a handful of patterns thousands of times
+/// (`case` in a loop, `${x//pat/rep}` over a field), and the linear scan over a
+/// short list is cheaper than hashing the pattern text.
+const CACHE_CAPACITY: usize = 64;
+
+/// Patterns longer than this are compiled every time.
+///
+/// They are user data rather than script literals, so caching them would let a
+/// program grow the cache with data; the bound keeps that from mattering.
+const MAX_CACHED_PATTERN: usize = 4096;
+
+/// One cached pattern: its text, the flags it was compiled with, and the
+/// compiled form.
+type Cached = (Vec<u8>, Flags, std::sync::Arc<Pattern>);
+
+thread_local! {
+    /// Compiled patterns, newest last. Thread-local because a `Pattern` is not
+    /// shared across threads in practice (shell code runs on one) and this
+    /// avoids a lock on the hottest path in pattern matching.
+    static CACHE: std::cell::RefCell<Vec<Cached>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The compiled form of `pattern`, from the cache when possible.
+///
+/// Compilation is a parse plus an NFA build, which is the dominant cost of a
+/// `case` arm or a `${x//pat/rep}` step; the key includes every flag that
+/// changes what the pattern means, so a hit is exactly what [`Pattern::new`]
+/// would have produced.
+pub fn compiled(pattern: &[u8], flags: Flags) -> std::sync::Arc<Pattern> {
+    if pattern.len() > MAX_CACHED_PATTERN {
+        return std::sync::Arc::new(Pattern::new(pattern, flags));
+    }
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some((_, _, compiled)) = cache
+            .iter()
+            .find(|(bytes, cached_flags, _)| *cached_flags == flags && bytes == pattern)
+        {
+            return std::sync::Arc::clone(compiled);
+        }
+        let compiled = std::sync::Arc::new(Pattern::new(pattern, flags));
+        if cache.len() >= CACHE_CAPACITY {
+            cache.clear();
+        }
+        cache.push((pattern.to_vec(), flags, std::sync::Arc::clone(&compiled)));
+        compiled
+    })
+}
+
+/// How many patterns this process has compiled.
+///
+/// Exposed for tests that assert a loop compiles once rather than once per
+/// iteration; it is not a performance metric and costs one relaxed increment
+/// per compilation.
+pub fn compilations() -> usize {
+    COMPILATIONS.with(|count| count.get())
+}
+
+thread_local! {
+    static COMPILATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Match a prefix of `text` and return the byte offset just past it.
@@ -351,5 +417,42 @@ fn pick(ends: &[bool], n: usize, longest: bool) -> Option<usize> {
         (0..=n).rev().find(|&q| ends[q])
     } else {
         (0..=n).find(|&q| ends[q])
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::{Flags, compilations, matches};
+
+    #[test]
+    fn a_pattern_retested_in_a_loop_compiles_once() {
+        let before = compilations();
+        for _ in 0..500 {
+            assert!(matches(b"a*c", b"abbbc", Flags::default()));
+        }
+        assert_eq!(
+            compilations() - before,
+            1,
+            "a loop over one pattern must compile it once"
+        );
+    }
+
+    #[test]
+    fn flags_are_part_of_the_key() {
+        let before = compilations();
+        assert!(!matches(b"ABC", b"abc", Flags::default()));
+        assert!(matches(
+            b"ABC",
+            b"abc",
+            Flags {
+                nocasematch: true,
+                ..Flags::default()
+            }
+        ));
+        assert_eq!(
+            compilations() - before,
+            2,
+            "the same text under different flags is two patterns"
+        );
     }
 }

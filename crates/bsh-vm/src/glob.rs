@@ -25,7 +25,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use bsh_pattern::{Flags, Pattern};
+use bsh_pattern::{Flags, compiled as compiled_pattern};
 
 /// What the shell options say about pathname expansion.
 #[derive(Clone, Copy, Debug)]
@@ -179,7 +179,7 @@ fn step(base: &[u8], component: &Component<'_>, options: &Options) -> Vec<Vec<u8
         out.extend(join(base, component.bytes).filter(|path| Path::new(os(path)).exists()));
         return out;
     }
-    let compiled = Pattern::new(
+    let compiled = compiled_pattern(
         &crate::pattern::escaped(component.bytes, component.quoted),
         options.flags,
     );

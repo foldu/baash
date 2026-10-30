@@ -29,7 +29,14 @@ pub(crate) fn escaped(bytes: &[u8], quoted: &[bool]) -> Vec<u8> {
 /// The flags come from the caller: `case` and `[[ … == … ]]` disagree about
 /// `extglob` (the conditional forces it on) but not about anything else.
 pub(crate) fn matches(pattern: &Field, subject: &[u8], flags: Flags) -> bool {
-    bsh_pattern::matches(&escaped(&pattern.bytes, &pattern.quoted), subject, flags)
+    // Nothing quoted is the common case (`case $x in *.rs)`), and then the
+    // pattern bytes go to the matcher unchanged: no copy, and the compiled
+    // pattern cache sees the same key every iteration.
+    if pattern.quoted.iter().any(|&quoted| quoted) {
+        bsh_pattern::matches(&escaped(&pattern.bytes, &pattern.quoted), subject, flags)
+    } else {
+        bsh_pattern::matches(&pattern.bytes, subject, flags)
+    }
 }
 
 /// The flags `[[ … == … ]]` matches with: bash uses extglob semantics for the
