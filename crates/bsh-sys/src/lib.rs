@@ -47,6 +47,11 @@
 //! would not agree with bash.
 
 #![warn(missing_docs)]
+// Every `unsafe` block in this crate states the invariant that makes it sound,
+// immediately above the block. The lint keeps the rule enforceable rather than
+// aspirational: a new block without a `// SAFETY:` comment fails the build
+// instead of relying on review.
+#![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod bytes;
 pub mod fd;

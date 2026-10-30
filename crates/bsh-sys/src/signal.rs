@@ -106,9 +106,8 @@ impl SignalSet {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: success means `set` was initialised.
-        Ok(Self {
-            set: unsafe { set.assume_init() },
-        })
+        let set = unsafe { set.assume_init() };
+        Ok(Self { set })
     }
 
     fn apply(&self, how: libc::c_int) -> io::Result<MaskGuard> {
@@ -120,9 +119,8 @@ impl SignalSet {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: success means `previous` was initialised.
-        Ok(MaskGuard {
-            previous: unsafe { previous.assume_init() },
-        })
+        let previous = unsafe { previous.assume_init() };
+        Ok(MaskGuard { previous })
     }
 
     /// The underlying `sigset_t`, for the spawn and signal-fd entry points.
@@ -395,9 +393,8 @@ mod platform {
                 return Err(io::Error::last_os_error());
             }
             // SAFETY: the descriptor is newly created and unowned.
-            Ok(Self {
-                fd: unsafe { OwnedFd::from_raw_fd(fd) },
-            })
+            let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+            Ok(Self { fd })
         }
 
         /// Replace the set of signals this reader reports.
