@@ -9,9 +9,13 @@
 //!
 //! ```text
 //! sessions(id, started_at, pid)
-//! commands(id, session, seq, text, cwd, started_at, duration_ms, status)
-//! meta(name, value)
+//! commands(id, session, seq, text, cwd, started_at, duration_ms, status, deleted)
 //! ```
+//!
+//! There is one schema and no version bookkeeping: the tables are created if
+//! they are absent, and nothing else is promised. History is perishable data,
+//! so a future shape can start from an empty file rather than carry a
+//! migration path that will never be used.
 //!
 //! `text` and `cwd` are `BLOB`: shell text is bytes, not UTF-8. `id` is the
 //! row id, and it is also the history *number*: global, assigned by the
@@ -42,12 +46,6 @@ use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::thread;
 
 use turso::{Builder, Connection, Database, Row, Value};
-
-/// The schema this build writes.
-///
-/// Version 1 was the first cut of this table, before `deleted` existed; a
-/// database carrying it is migrated in place by adding the column.
-const SCHEMA_VERSION: i64 = 2;
 
 /// A command read back from the database, in the order it ran.
 pub(crate) struct Stored {
@@ -361,9 +359,7 @@ fn error(error: turso::Error) -> std::io::Error {
 async fn initialise(connection: &Connection) -> turso::Result<()> {
     connection
         .execute_batch(
-            "CREATE TABLE IF NOT EXISTS meta (\
-                 name TEXT PRIMARY KEY, value TEXT NOT NULL);\
-             CREATE TABLE IF NOT EXISTS sessions (\
+            "CREATE TABLE IF NOT EXISTS sessions (\
                  id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, pid INTEGER NOT NULL);\
              CREATE TABLE IF NOT EXISTS commands (\
                  id INTEGER PRIMARY KEY,\
@@ -378,42 +374,6 @@ async fn initialise(connection: &Connection) -> turso::Result<()> {
              CREATE UNIQUE INDEX IF NOT EXISTS commands_key ON commands (session, seq);",
         )
         .await?;
-    let mut rows = connection
-        .query("SELECT value FROM meta WHERE name = 'schema_version'", ())
-        .await?;
-    match rows.next().await? {
-        Some(row) => {
-            let found = as_version(&row, 0).unwrap_or_default();
-            if found == 1 {
-                // Version 1 had no `deleted` column.
-                connection
-                    .execute(
-                        "ALTER TABLE commands ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0",
-                        (),
-                    )
-                    .await?;
-                connection
-                    .execute(
-                        "UPDATE meta SET value = ?1 WHERE name = 'schema_version'",
-                        (SCHEMA_VERSION.to_string(),),
-                    )
-                    .await?;
-            } else if found != SCHEMA_VERSION {
-                return Err(turso::Error::Error(format!(
-                    "the history database has schema version {found}, but this bsh understands \
-                     version {SCHEMA_VERSION}"
-                )));
-            }
-        }
-        None => {
-            connection
-                .execute(
-                    "INSERT INTO meta (name, value) VALUES ('schema_version', ?1)",
-                    (SCHEMA_VERSION.to_string(),),
-                )
-                .await?;
-        }
-    }
     prune(connection).await?;
     Ok(())
 }
@@ -431,15 +391,6 @@ async fn begin_session(connection: &Connection) -> turso::Result<i64> {
 
 fn as_integer(row: &Row, index: usize) -> Option<i64> {
     match row.get_value(index).ok()? {
-        Value::Integer(value) => Some(value),
-        _ => None,
-    }
-}
-
-/// The schema version `meta.value` carries, as text.
-fn as_version(row: &Row, index: usize) -> Option<i64> {
-    match row.get_value(index).ok()? {
-        Value::Text(text) => text.parse().ok(),
         Value::Integer(value) => Some(value),
         _ => None,
     }
@@ -579,46 +530,6 @@ mod tests {
         mine.flush();
         assert_eq!(mine.recent(10).len(), 1);
         assert_eq!(mine.recent(10)[0].text, b"other");
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
-    }
-
-    #[test]
-    fn a_version_1_database_is_migrated_in_place() {
-        let path = path("migrate");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        {
-            // The schema exactly as version 1 wrote it: no `deleted` column.
-            let database =
-                crate::block_on(Builder::new_local(path.to_str().unwrap()).build()).unwrap();
-            let connection = database.connect().unwrap();
-            crate::block_on(connection.execute_batch(
-                "CREATE TABLE meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);\
-                 CREATE TABLE sessions (id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, \
-                                        pid INTEGER NOT NULL);\
-                 CREATE TABLE commands (id INTEGER PRIMARY KEY, session INTEGER NOT NULL, \
-                                        seq INTEGER NOT NULL, text BLOB NOT NULL, cwd BLOB, \
-                                        started_at INTEGER NOT NULL, duration_ms INTEGER, \
-                                        status INTEGER);\
-                 CREATE UNIQUE INDEX commands_key ON commands (session, seq);\
-                 INSERT INTO meta (name, value) VALUES ('schema_version', '1');\
-                 INSERT INTO sessions (started_at, pid) VALUES (0, 0);",
-            ))
-            .unwrap();
-            crate::block_on(connection.execute(
-                "INSERT INTO commands (session, seq, text, started_at) VALUES (1, 1, ?1, 0)",
-                (b"old".to_vec(),),
-            ))
-            .unwrap();
-        }
-        let store = Store::open(&path).unwrap();
-        let recent = store.recent(10);
-        assert_eq!(recent.len(), 1);
-        assert_eq!(recent[0].text, b"old");
-        // The migrated table accepts the new bookkeeping.
-        let id = store.begin(1, b"new", None).unwrap();
-        store.delete(id);
-        store.flush();
-        assert_eq!(store.recent(10).len(), 1);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
