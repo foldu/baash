@@ -1,0 +1,143 @@
+# Direction after the 2026-10-30 pivot
+
+The project is not trying to be bash. It is trying to be a **fast, pleasant,
+interactive shell that is similar enough to bash to run simple scripts**, with
+an architecture that is not poisoned by `fork`. This document supersedes the
+"conformance first" ordering in `roadmap.md` and the fork-based assumptions in
+`state.md`.
+
+## 1. The five commitments
+
+1. **No `fork()`.** Subshells and command substitution are in-process
+   subinterpreters with scoped state. Anything that cannot work that way is
+   rejected with a diagnostic, not approximated.
+2. **Windows is a first-class target.** Cross-compiled, not CI-tested at first.
+3. **Interactive first.** No lag at the prompt, in completion, or in prompt
+   refresh; enabled by a tokio runtime and worker threads for pure I/O.
+4. **Shell code runs on the main thread.** Workers handle I/O and data, never
+   the interpreter.
+5. **uutils embedded** as built-ins (curated set), so installation does not
+   require a coreutils distribution.
+
+## 2. Decisions taken
+
+| question | decision |
+|---|---|
+| job control | **removed for now.** No `jobs`/`fg`/`bg`/`disown`, no `%` specs, no process groups, no `^Z` handling. Revisit only if it is actually missed. |
+| event loop | **tokio**, not a hand-rolled `poll`. No custom async machinery where a crate exists. |
+| thread ownership | interpreter on the main thread; workers only touch snapshots and I/O. |
+| profiles | **hard cut.** No `--profile=fork`. The fork path is deleted, not kept behind a flag. |
+| conformance | a **curated subset** later; for now measure what works. The Oils number stops being a goal and becomes a regression signal we re-baseline. |
+| Windows CI | none; cross-compile. |
+| uutils | embedded, curated (not all 100+), feature-gated so Linux builds can skip them if desired. |
+| feature ceiling | "up to and including `coproc`" — see the open question in §7, because `coproc` conflicts with the other commitments. |
+
+## 3. What this deletes
+
+* `fork_gate`, `ThreadGate`, `spawn_forked`, `fork_child`, `fork_child_status`.
+* Job control: `JobTable`, `Job`, `enable_job_control`, terminal handover,
+  `TerminalGuard`, stopped-job handling, `WUNTRACED` waits, prompt notices,
+  `SIGTTOU`/`SIGTTIN`/`SIGTSTP` manipulation, `%` job specifications.
+* The completion-`-F` plan as scoped: shell functions may still be callable from
+  completion, but on the main thread (no worker).
+* The `poll`-based live-prompt design in `prompt-watch.md` — replaced by tokio
+  tasks (the document's cost model stays valid, its plumbing does not).
+
+## 4. What gets rejected, and how
+
+New diagnostic `BSH-E0302` (`CAPABILITY`): *this construct needs something this
+shell does not have.* It must name the construct and the reason.
+
+| construct | outcome | why |
+|---|---|---|
+| external command | works (`posix_spawn` / `CreateProcess`) | |
+| `( … )` subshell | works (scope push/pop) | no fork needed |
+| `$( … )` / backticks | works (scope + stdout capture) | the 95 % case |
+| `( exec cmd )` | rejected | `exec` would replace the shell |
+| `builtin \| builtin`, `fn \| fn` | **last stage in-process** (lastpipe), others rejected | `cmd \| while read` is everyday; see §7 |
+| `f &`, `{ … } &` | rejected | a job needs a pid |
+| `sleep &` | works | external, real process |
+| `jobs`/`fg`/`bg`/`disown` | rejected with `CAPABILITY` | job control removed |
+| `%1` in `wait`/`kill` | rejected | no job table |
+| `exec cmd` (top level) | works on Unix, rejected on Windows | no `exec` on Windows |
+| `exec 3<file` | works | just the fd table |
+| `<(...)`, `>(...)` | rejected (today `BSH-E0301`) | needs /dev/fd |
+| `coproc` | **open** — see §7 | |
+| `set -m` | accepted, inert | rc files should not break |
+| `^Z` | unhandled: stops the child and the shell together (bash with `set +m`) | no job control |
+
+## 5. Architecture
+
+**Subinterpreter.** A scope records the mutable state a subshell can change —
+variables (including arrays and namerefs), functions, options, aliases, traps,
+positional parameters, the descriptor table, `cwd`, `umask`, `set -m` — and pops
+it, discarding changes, when the body ends. `$( … )` is the same scope with
+fd 1 temporarily redirected to a pipe (the existing `capture_stdout` pattern is
+the prototype). Everything the previous design got from copy-on-write must be
+enumerated explicitly; a missing field is a silent semantic leak, so the scope
+push should be written as one exhaustive `impl` over the state struct rather
+than a hand-written list in the REPL.
+
+**Rejection is pre-parse where possible.** A subshell body is scanned for
+constructs that cannot execute in-process (`exec`, `&` on shell code, a
+builtin in a non-last pipeline position) *before* the body runs, so a rejection
+cannot leave half its side effects behind. `eval` can still introduce one at run
+time; that case rejects at the point of failure and is documented.
+
+**tokio.** One runtime, main thread. The REPL is an async loop; the interpreter
+remains synchronous and is called from it. Work that can block — completion's
+filesystem scan, `git status` for the prompt, history file I/O — runs on worker
+threads and returns through channels; workers never receive `&mut Interp`.
+Background jobs and foreground waits use tokio's process API where it helps the
+reactor, and `bsh-sys`'s own `wait` where it does not.
+
+**Windows.** See `portability.md` §5 for the four boundaries (process creation,
+UTF-16 at the edges, ConPTY, job control — the last now deleted, which
+simplifies it). No job control means no `tcsetpgrp`, no process groups, and
+`^C` is a console control event.
+
+## 6. Milestones
+
+| # | milestone | acceptance |
+|---|---|---|
+| W1 | delete job control | gate green; `jobs`/`fg`/`bg` report `CAPABILITY`; `wait`/`kill`/`$!` still work for pids; baseline re-recorded |
+| W2 | no-fork subshells | `( … )` and `$( … )` in-process; `exec` in subshell, shell-code `&`, non-last builtin pipeline stages rejected with 302; the four fork call sites and `fork_gate` deleted |
+| W3 | tokio event loop | completion scan and prompt refresh off the main thread; no custom poll code; no input lag while a scan runs |
+| W4 | Windows build | cross-compiles; `bsh -c 'echo hi'` runs; a simple script with `$( … )`, `for`, `if`, functions runs in a ConPTY |
+| W5 | uutils embedded | curated set as built-ins behind a feature; measured size/build cost; `ls`/`cat`/`cp`/`rm`/`mkdir`/`head`/`tail`/`wc` work without external binaries |
+| W6 | curated conformance | a "supported subset" document and a differential runner asserting *match bash or reject*, with silent divergence = 0 |
+
+## 7. Open questions
+
+* **`coproc` is in the ceiling but contradicts two commitments.** A coprocess's
+  body is shell code that must run concurrently with the main thread; with no
+  fork and with shell code pinned to the main thread, the only ways are (a)
+  run the body as a re-exec'd `bsh` child with serialized state, or (b) allow a
+  subinterpreter thread for coproc bodies only. Neither is free. Recommendation:
+  reject `coproc` with `CAPABILITY` until W4 is done, then revisit.
+* **Pipelines with a builtin stage.** The plan is lastpipe semantics by default
+  (`cmd | while read` runs the loop in the parent). That is a deliberate
+  divergence from bash and needs a decision, because it changes variable scope
+  for a very common idiom.
+* **`^Z` with no job control** wedges the shell and the child together. Accept
+  the bash-`set +m` behaviour, or ignore `SIGTSTP` in the shell and kill the
+  stopped child? (Recommendation: accept, document, revisit with W4.)
+* **Windows path spelling**: `C:/…` required, `\` remains an escape.
+* **Where the completion `-F` shell function runs**: main thread, so a slow
+  user completion still blocks the prompt. Acceptable, or reject `-F`?
+
+## 8. Risks
+
+* **Scope leaks.** Every field of shell state that a subshell may mutate must be
+  in the scope. Missing one is a silent bug that only the conformance suite (or
+  a user) will find; this is the main correctness risk of W2.
+* **Clone cost.** If a scope is a deep clone, `$( … )` in a loop is O(state)
+  per iteration where fork was O(1) copy-on-write. Needs a benchmark before
+  W2 ships; a copy-on-write overlay is the fallback.
+* **Conformance drop.** W1 and W2 will both lower the Oils number. The baseline
+  is re-recorded each time, and the *quality* metric (silent divergence) is what
+  matters.
+* **Windows reality.** Cross-compilation proves it builds, not that it works;
+  ConPTY and path semantics need a hand-run harness until a runner exists.
+* **uutils size.** Curated set only; measure binary size and build time before
+  adding a utility.
