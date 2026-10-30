@@ -258,3 +258,79 @@ and would otherwise hold the fork gate open.
   Probably yes, and the scope push/pop is the natural hook.
 * CRLF: strip in the file reader, or teach the lexer? Reader is simpler and
   keeps the lexer byte-faithful.
+
+## 10. Building and running for Windows today (2026-10-30)
+
+Cross-compilation works and the result runs under Wine; the tree does not build
+yet, and this section exists so the toolchain is not rediscovered each time.
+
+The host toolchain has no Windows std, and its `rustup` home is read-only, so a
+private toolchain in `/tmp` is the one that carries the target:
+
+```sh
+export RUSTUP_HOME=/tmp/bsh-rustup CARGO_HOME=/tmp/bsh-cargo-home
+rustup toolchain install stable-x86_64-unknown-linux-gnu --profile minimal \
+    --target x86_64-pc-windows-gnu
+```
+
+Linking goes through `zig` via `cargo-zigbuild` (no mingw sysroot needed). The
+important detail is PATH: the rustup toolchain must come *first*, so `cargo` is
+the one that has the target, while `cargo-zigbuild` and `zig` come from the nix
+shell and stay reachable *after* it. `RUSTFLAGS` must be unset — the workspace's
+mold workaround is a Linux linker flag and breaks the cross build.
+
+```sh
+TC=$(ls -d /tmp/bsh-rustup/toolchains/*/bin | head -1)
+export CARGO_TARGET_DIR=/tmp/bsh-target-win
+unset RUSTFLAGS RUSTDOCFLAGS
+nix shell nixpkgs#cargo-zigbuild nixpkgs#zig --command \
+    sh -c "PATH=$TC:\$PATH cargo zigbuild --target x86_64-pc-windows-gnu -p bsh"
+```
+
+Wine needs a prefix that it owns; `/tmp` is rejected, so use a directory under
+the user's home:
+
+```sh
+export WINEPREFIX=$HOME/.cache/bsh-wine WINEDEBUG=-all
+nix shell nixpkgs#wine64 --command wine target/x86_64-pc-windows-gnu/debug/whello.exe
+```
+
+(`wine: failed to start L"C:\\windows\\syswow64\\rundll32.exe"` is noise from a
+32-bit component the 64-bit prefix does not have; the binary still runs.)
+
+### What fails, measured
+
+`cargo zigbuild --target x86_64-pc-windows-gnu -p bsh` stops on Unix-only APIs,
+in this order:
+
+| crate | `std::os::unix` / `std::os::fd` / `rustix` references |
+|---|---|
+| `bsh-sys` | 61 |
+| `bsh-vm` | 24 |
+| `bsh-lang` | 3 |
+| `bsh-repl` | 3 |
+| `bsh` | 4 |
+
+`bsh-sys` is the wall: it is fd-shaped (`RawFd`, `dup2`, `OwnedFd`) and the
+redirection model is built on `dup2`. The other four crates are small enough to
+fix in one pass — `OsStrExt` for bytes, `MetadataExt` for modes, and
+`std::os::fd` for the tty.
+
+### Order of work
+
+1. **`bsh-sys` platform split.** `mod unix; mod windows;` behind `cfg`, with one
+   public API. The Windows side keeps the fd *number* model by delegating to the
+   CRT (`_dup2`, `_read`, `_write`, `_open`, `_close`), so redirection code does
+   not change shape; `CreateProcess` replaces `posix_spawn`, with the parent's
+   CRT fds converted to inheritable handles.
+2. **The ten non-`bsh-sys` references.** A small `bsh_sys::os` surface for
+   "path bytes ↔ `OsString`" and "file mode", so no other crate names
+   `std::os::unix`.
+3. **`-c 'echo hi'` under Wine**, then a script with `$( … )`, `for`, `if` and a
+   function — the W4 acceptance in `docs/direction.md` §6.
+4. **ConPTY** last: the interactive editor needs a console host, and until then
+   the REPL should report `BSH-E0302` rather than misbehave.
+
+The `Fs` column of §5a still applies: `rustix` stops at the Windows boundary,
+which is why step 1 is a platform module rather than a `cfg` sprinkled through
+`fd.rs`.
