@@ -34,7 +34,13 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use crate::c_int;
-use crate::wait::WaitOutcome;
+
+/// File creation mode.
+///
+/// Windows has no `mode_t`; the CRT's `_open` takes an integer permission set
+/// and ignores it for a non-`O_CREAT` open.
+pub type mode_t = u32;
+use crate::WaitOutcome;
 
 // ---------------------------------------------------------------------------
 // CRT bindings
@@ -95,23 +101,56 @@ fn wide_path(path: &[u8]) -> std::ffi::CString {
 // Descriptors
 // ---------------------------------------------------------------------------
 
+/// A CRT descriptor this crate owns.
+///
+/// Windows `std` has no descriptor abstraction at all — there is no
+/// `std::os::fd` — so the shell's fd-numbered model is this crate's own type.
+/// The number is the CRT's, which is what every other function here operates
+/// on, and `Drop` closes it exactly once.
+#[derive(Debug)]
+pub struct Fd(c_int);
+
+impl Fd {
+    /// Take ownership of a CRT descriptor.
+    fn from_raw(fd: c_int) -> io::Result<Self> {
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(fd))
+    }
+
+    /// The descriptor number.
+    pub fn as_raw_fd(&self) -> c_int {
+        self.0
+    }
+}
+
+impl Drop for Fd {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is a descriptor this type owns and has not closed.
+        unsafe {
+            _close(self.0);
+        }
+    }
+}
+
 /// A pipe: the read end and the write end.
 pub struct Pipe {
     /// The end a reader opens.
-    pub read: std::os::fd::OwnedFd,
+    pub read: Fd,
     /// The end a writer opens.
-    pub write: std::os::fd::OwnedFd,
+    pub write: Fd,
 }
 
 impl Pipe {
     /// The read end's number.
-    pub fn read_fd(&self) -> std::os::fd::RawFd {
-        std::os::fd::AsRawFd::as_raw_fd(&self.read)
+    pub fn read_fd(&self) -> c_int {
+        self.read.as_raw_fd()
     }
 
     /// The write end's number.
-    pub fn write_fd(&self) -> std::os::fd::RawFd {
-        std::os::fd::AsRawFd::as_raw_fd(&self.write)
+    pub fn write_fd(&self) -> c_int {
+        self.write.as_raw_fd()
     }
 
     /// A pipe with a 64 KiB buffer, in binary mode.
@@ -123,20 +162,10 @@ impl Pipe {
             return Err(io::Error::last_os_error());
         }
         Ok(Self {
-            read: owned(fds[0])?,
-            write: owned(fds[1])?,
+            read: Fd::from_raw(fds[0])?,
+            write: Fd::from_raw(fds[1])?,
         })
     }
-}
-
-/// Take ownership of a CRT descriptor.
-fn owned(fd: c_int) -> io::Result<std::os::fd::OwnedFd> {
-    use std::os::fd::FromRawFd;
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: the caller has just created `fd` and hands ownership over.
-    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
 }
 
 /// Close a descriptor.
@@ -301,7 +330,7 @@ fn translate_flags(flags: c_int) -> c_int {
 /// Windows has no `O_TMPFILE`; the file is created, unlinked-on-open semantics
 /// are faked by deleting it on close through [`TempFile`]'s `Drop`, which is
 /// what `create_unlinked_temp` returns. The caller only ever needs its bytes.
-pub fn create_unlinked_temp(fd_floor: c_int) -> io::Result<std::os::fd::OwnedFd> {
+pub fn create_unlinked_temp(fd_floor: c_int) -> io::Result<Fd> {
     let mut file = tempfile_path();
     if file.is_empty() {
         file = b"bsh-temp".to_vec();
@@ -330,7 +359,7 @@ pub fn create_unlinked_temp(fd_floor: c_int) -> io::Result<std::os::fd::OwnedFd>
                 // The name goes away immediately; the handle keeps the bytes
                 // alive, which is what an unlinked temporary file means here.
                 let _ = std::fs::remove_file(&candidate);
-                return owned(fd);
+                return Fd::from_raw(fd);
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
@@ -360,8 +389,7 @@ pub fn poll_readable(fd: c_int, timeout_ms: c_int) -> io::Result<bool> {
 
 /// Probe one handle without consuming from it.
 fn peek_readable(handle: RawHandle) -> bool {
-    use windows_sys_handle::PeekNamedPipe;
-    PeekNamedPipe::available(handle)
+    windows_sys_handle::available(handle)
 }
 
 /// The smallest Windows API surface this module needs beyond the CRT.
@@ -386,10 +414,7 @@ mod windows_sys_handle {
     /// `FILE_TYPE_PIPE`
     const FILE_TYPE_PIPE: u32 = 0x0003;
 
-    pub(super) struct PeekNamedPipe;
-
-    impl PeekNamedPipe {
-        pub(super) fn available(handle: RawHandle) -> bool {
+    pub(super) fn available(handle: RawHandle) -> bool {
             // SAFETY: `handle` comes from `_get_osfhandle`; the out-parameters
             // are a live `u32` each.
             let file_type = unsafe { GetFileType(handle) };
@@ -411,7 +436,6 @@ mod windows_sys_handle {
                 )
             };
             rc != 0 && available > 0
-        }
     }
 }
 
@@ -617,8 +641,23 @@ pub fn send_signal(pid: i32, _signal: c_int) -> io::Result<()> {
     // Only termination is expressible: `kill` sends `SIGTERM` by default, and
     // a Windows process has no other signal that maps.
     let handle = open_process(pid)?;
-    let owned = OwnedHandle::from_raw_handle(handle);
-    drop(owned);
+    // SAFETY: `open_process` just returned an owned handle with terminate
+    // access, and `_exit`ing here is what `kill` means without signals.
+    let owned = unsafe { OwnedHandle::from_raw_handle(handle) };
+    terminate(owned.as_raw_handle())
+}
+
+/// Terminate the process behind `handle`.
+fn terminate(handle: RawHandle) -> io::Result<()> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn TerminateProcess(handle: RawHandle, code: u32) -> i32;
+    }
+    // SAFETY: `handle` was opened with PROCESS_TERMINATE.
+    let rc = unsafe { TerminateProcess(handle, 1) };
+    if rc == 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }
 
@@ -901,9 +940,9 @@ pub fn wait_any_nohang() -> io::Result<Option<i32>> {
 #[derive(Debug)]
 pub struct Pty {
     /// The controlling side.
-    pub master: Option<std::os::fd::OwnedFd>,
+    pub master: Option<Fd>,
     /// The child side.
-    pub slave: Option<std::os::fd::OwnedFd>,
+    pub slave: Option<Fd>,
     /// The child-facing descriptor number.
     pub slave_fd: c_int,
 }
@@ -911,9 +950,7 @@ pub struct Pty {
 impl Pty {
     /// The controlling side's descriptor.
     pub fn master_fd(&self) -> c_int {
-        self.master
-            .as_ref()
-            .map_or(-1, std::os::fd::AsRawFd::as_raw_fd)
+        self.master.as_ref().map_or(-1, Fd::as_raw_fd)
     }
 
     /// The child side's descriptor.

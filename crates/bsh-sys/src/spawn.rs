@@ -38,7 +38,8 @@ use std::os::fd::RawFd;
 
 use crate::bytes::{cstring, cstrings};
 use crate::signal::SignalSet;
-use crate::wait::{WaitOutcome, wait_pid};
+use crate::WaitOutcome;
+use crate::wait::wait_pid;
 
 /// One step in the ordered list of descriptor changes applied in the child.
 ///
