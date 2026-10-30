@@ -97,6 +97,7 @@ count was diffed case by case against the previous commit; nothing else moved.
 | `bsh-diag` | 1946 | diagnostic model and miette rendering; error-code space |
 | `bsh-complete` | 3928 | completion engine: providers, contexts, nucleo ranking, menu layout |
 | `bsh-repl` | 3079 | line editor, key decoding, history navigation, prompt adapter, renderer, terminal abstraction |
+| `bsh-utils` | 206 | embedded coreutils (uutils 0.8 subcrates): the `builtin-utils` fallback used when `PATH` finds nothing; on by default for Windows, opt-in on Linux |
 | `bsh-highlight` | 386 | syntax highlighting (token → style), shared with the editor |
 | `bsh-spec` | 3242 | the Oils-suite runner, comparator, ratchet |
 | `bsh` | 1781 | the binary: argument parsing, startup files, REPL loop, history ownership swap |
