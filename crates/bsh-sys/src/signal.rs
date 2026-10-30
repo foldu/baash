@@ -193,21 +193,6 @@ pub fn send_signal(pid: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
     }
 }
 
-/// Send `signal` to every process in process group `pgroup`.
-///
-/// `pgroup` must be a positive process-group id; zero ("this process's group")
-/// and negative values ("every process") are rejected, so the caller can only
-/// name a group it created.
-pub fn send_group_signal(pgroup: libc::pid_t, signal: libc::c_int) -> io::Result<()> {
-    if pgroup <= 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "process group id must be positive",
-        ));
-    }
-    send_signal(-pgroup, signal)
-}
-
 /// A signal disposition the shell sets on itself rather than through a
 /// handler.
 ///
@@ -552,12 +537,6 @@ mod tests {
             assert!(SignalSet::current().unwrap().contains(libc::SIGUSR2));
         }
         assert_eq!(SignalSet::current().unwrap(), before);
-    }
-
-    #[test]
-    fn group_signal_rejects_non_positive_ids() {
-        assert!(send_group_signal(0, libc::SIGTERM).is_err());
-        assert!(send_group_signal(-1, libc::SIGTERM).is_err());
     }
 
     #[cfg(target_os = "linux")]

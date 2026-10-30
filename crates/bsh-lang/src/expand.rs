@@ -57,8 +57,9 @@ pub mod codes {
 
     /// An expansion form this crate leaves out of scope on purpose.
     pub const UNSUPPORTED: ErrCode = ErrCode::new(301);
-    /// `${x:?word}` on a null parameter.
-    pub const PARAMETER_NULL: ErrCode = ErrCode::new(302);
+    /// A construct the shell understands but cannot implement: it needs
+    /// something this shell does not have. Names the construct and the reason.
+    pub const CAPABILITY: ErrCode = ErrCode::new(302);
     /// `${x?word}` on an unset parameter.
     pub const PARAMETER_UNSET: ErrCode = ErrCode::new(303);
     /// `${x:=word}` where the parameter cannot be assigned.
@@ -69,6 +70,8 @@ pub mod codes {
     pub const HOST: ErrCode = ErrCode::new(306);
     /// A glob matched nothing under `shopt -s failglob`.
     pub const GLOB_NO_MATCH: ErrCode = ErrCode::new(307);
+    /// `${x:?word}` on a null parameter.
+    pub const PARAMETER_NULL: ErrCode = ErrCode::new(308);
 }
 
 /// An expansion failure.

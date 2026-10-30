@@ -73,7 +73,7 @@ pub use pty::{Pty, become_session_leader, open_pty};
 pub use regex::{CaptureRanges, Regex, RegexError};
 pub use signal::{
     Disposition, MaskGuard, SignalEvent, SignalFd, SignalGuard, SignalSet, ignore_signals,
-    replace_signal_mask, send_group_signal, send_signal, set_disposition,
+    replace_signal_mask, send_signal, set_disposition,
 };
 pub use spawn::{
     Child, FdAction, ProcessGroup, ReportPipe, SpawnPlan, exec, exit_child, fork_child,

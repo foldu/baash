@@ -2,7 +2,9 @@
 //!
 //! There is no job control. A background command is a real child remembered by
 //! pid (so `$!`, `wait` and `kill` work), and a foreground command is waited
-//! for directly. There is no job table, so `%` specifications cannot resolve.
+//! for directly. `%` job specifications and the job built-ins are rejected
+//! with [`bsh_lang::codes::CAPABILITY`] instead of being approximated: the shell
+//! has no job table to resolve them against.
 //!
 //! `wait` keeps the shell's `SIGINT`/`SIGQUIT` ignore around it, and every
 //! foreground site (`run_external`, `run_pipeline`, `eval_subshell`,
@@ -16,6 +18,34 @@ use bsh_runtime::{ShellHost, Status, signal_number, signal_short_name, signal_ta
 use super::Interp;
 
 impl Interp {
+    /// `jobs`, `fg`, `bg`, `disown`: known names, deliberately unavailable.
+    ///
+    /// They stay registered so `type`/`command -v` still find them and an rc
+    /// file does not get "command not found"; running one is an error
+    /// (`BSH-E0302`), not a silent no-op.
+    pub(crate) fn bi_job_control_unavailable(&mut self, argv: &[Vec<u8>]) -> Status {
+        let name = super::traps::builtin_name(argv, "jobs");
+        self.report(
+            bsh_lang::codes::CAPABILITY,
+            0..0,
+            format!("{name}: job control is not implemented in this shell"),
+        );
+        Status::FAILURE
+    }
+
+    /// Report a `%` specification to `wait`/`kill` as the capability gap it is.
+    fn reject_job_spec(&mut self, program: &str, operand: &[u8]) -> Status {
+        self.report(
+            bsh_lang::codes::CAPABILITY,
+            0..0,
+            format!(
+                "{program}: {}: job control is not implemented in this shell",
+                bytes_text(operand)
+            ),
+        );
+        Status::FAILURE
+    }
+
     /// `wait [-n] [pid]…`
     pub(crate) fn bi_wait(&mut self, argv: &[Vec<u8>]) -> Status {
         let mut next = false;
@@ -63,8 +93,13 @@ impl Interp {
 
     /// Resolve one `wait`/`kill` operand to a pid.
     ///
-    /// There is no job table, so a `%` specification is just an invalid pid.
+    /// A `%` specification is the one operand shape the shell cannot honor:
+    /// there is no job table, so it is a capability error (status 1), not a
+    /// "no such job" that would suggest a table exists.
     fn operand_pid(&mut self, operand: &[u8], program: &str) -> Result<i32, Status> {
+        if operand.first() == Some(&b'%') {
+            return Err(self.reject_job_spec(program, operand));
+        }
         match std::str::from_utf8(operand)
             .ok()
             .and_then(|text| text.parse().ok())
@@ -141,8 +176,7 @@ impl Interp {
             }
             for pid in pending {
                 match bsh_sys::wait_pid(pid) {
-                    Ok(outcome) => {
-                        self.report_signal_death(outcome);
+                    Ok(_) => {
                         // `wait` consumed the child: a second `wait PID` must
                         // say 127.
                         self.background.remove(&pid);
@@ -172,7 +206,14 @@ impl Interp {
                 Ok(pid) => remaining.push(pid),
                 Err(failure) => {
                     self.reap_background();
-                    return failure;
+                    // A bad pid is 127 here (bash's answer for `wait -n`); a
+                    // `%` specification is the capability error in its own
+                    // right.
+                    return if failure == Status::USAGE {
+                        Status(127)
+                    } else {
+                        failure
+                    };
                 }
             }
         }
@@ -196,7 +237,6 @@ impl Interp {
             // `wait -n` loop responsive without a busy spin.
             match bsh_sys::wait_any_nohang() {
                 Some((pid, outcome)) => {
-                    self.report_signal_death(outcome);
                     let status = Status(outcome.exit_status());
                     match self.background.entry(pid) {
                         std::collections::btree_map::Entry::Occupied(mut slot) => {

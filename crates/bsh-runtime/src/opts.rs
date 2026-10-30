@@ -265,7 +265,11 @@ option_table! {
     /// environment (bash extension).
     Keyword => keyword, "keyword", Some(b'k'), [SetO], true, false, false, &[];
 
-    /// `set -m` / `set -o monitor`: job control.
+    /// `set -m` / `set -o monitor`: accepted and inert.
+    ///
+    /// The shell has no job control (no job table, process groups or terminal
+    /// handover), so toggling this changes nothing; it stays callable so rc
+    /// files and scripts that set it do not fail.
     Monitor => monitor, "monitor", Some(b'm'), [SetO], false, false, false, &[];
 
     /// `set -C` / `set -o noclobber`: `>` does not overwrite existing files.
