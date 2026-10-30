@@ -92,9 +92,10 @@ accepted (the prompt is not visible then). File I/O — directory scans, `stat`,
 the `git status` subprocess — uses compio's completion-based operations instead
 of a thread per blocked read. CPU-bound work (ranking thousands of completion
 candidates) goes to a worker thread and returns through a channel. Inotify is
-not provided by compio: the watcher is a raw inotify fd awaited through the
-runtime's poll support (`winio_pollable` guarantees the fd is actively
-pollable). Workers never receive `&mut Interp`.
+not provided by compio, so `bsh-sys` grows a small inotify wrapper of its own
+(`inotify_init1`/`inotify_add_watch`/event parsing) and the fd is awaited with
+`compio::runtime::fd::PollFd::read_ready` — readiness-based, no extra crate.
+Workers never receive `&mut Interp`.
 
 **Why not tokio.** Our I/O is files and processes, not sockets. Tokio's `fs` is
 `spawn_blocking` underneath on both platforms — a thread parked per operation,
@@ -115,7 +116,7 @@ simplifies it). No job control means no `tcsetpgrp`, no process groups, and
 |---|---|---|
 | W1 | delete job control | gate green; `jobs`/`fg`/`bg` report `CAPABILITY`; `wait`/`kill`/`$!` still work for pids; baseline re-recorded |
 | W2 | no-fork subshells | `( … )` and `$( … )` in-process; `exec` in subshell, shell-code `&`, non-last builtin pipeline stages rejected with 302; the four fork call sites and `fork_gate` deleted |
-| W3 | compio event loop | spike: async raw-mode stdin read, inotify fd awaited, `git status` spawned and awaited, directory scan; then completion scan and prompt refresh off the main thread; no custom poll code; no input lag while a scan runs; a documented fallback when io_uring is unavailable (seccomp, old kernel) |
+| W3 | compio event loop | spike proven (see §9); then the REPL loop on compio, `git status` spawned and awaited, directory scans through compio, completion scan and prompt refresh off the main thread; no custom poll code; no input lag while a scan runs |
 | W4 | Windows build | cross-compiles; `bsh -c 'echo hi'` runs; a simple script with `$( … )`, `for`, `if`, functions runs in a ConPTY |
 | W5 | uutils embedded | curated set as built-ins behind a feature; measured size/build cost; `ls`/`cat`/`cp`/`rm`/`mkdir`/`head`/`tail`/`wc` work without external binaries |
 | W6 | curated conformance | a "supported subset" document and a differential runner asserting *match bash or reject*, with silent divergence = 0 |
@@ -139,6 +140,22 @@ simplifies it). No job control means no `tcsetpgrp`, no process groups, and
 * **Where the completion `-F` shell function runs**: main thread, so a slow
   user completion still blocks the prompt. Acceptable, or reject `-F`?
 
+## 9. Spike results (2026-10-30)
+
+compio 0.19.2, a throwaway crate, real pty:
+
+* **Raw-mode stdin**: `compio::fs::stdin()` is `AsyncFd`-backed on Unix;
+  `read()` on a raw tty delivered the exact bytes typed (`a`, `bc`, `ESC [ A`),
+  coalescing neighbouring bytes, with no blocking thread. This is the editor's
+  input path.
+* **inotify**: `inotify_init1(IN_NONBLOCK|IN_CLOEXEC)` + `inotify_add_watch` in
+  ~40 lines, wrapped in `PollFd::new`, awaited with `read_ready()`; create,
+  modify and delete events arrived with correct masks and names.
+
+Both were driven through compio's own runtime; no poll loop and no extra crate
+was needed. The one place this does not carry over is Windows console input
+(see §8).
+
 ## 8. Risks
 
 * **Scope leaks.** Every field of shell state that a subshell may mutate must be
@@ -154,8 +171,14 @@ simplifies it). No job control means no `tcsetpgrp`, no process groups, and
   ConPTY and path semantics need a hand-run harness until a runner exists.
 * **uutils size.** Curated set only; measure binary size and build time before
   adding a utility.
-* **Runtime immaturity.** compio is pre-1.0 and its API moves; `io_uring` is
-  denied by some seccomp profiles (containers, sandboxes), so the polling
-  fallback is a requirement, not a nicety. The W3 spike is the go/no-go: if
-  raw-mode stdin and inotify cannot both be awaited cleanly, fall back to tokio
-  rather than hand-rolling a driver.
+* **Runtime immaturity.** compio is pre-1.0 and its API moves. Accepted, because
+  the interaction surface is small (fs, process, time, `PollFd`).
+* **`io_uring` availability.** No polling fallback by decision: this is an
+  interactive shell and the owner does not care about seccomp-restricted
+  sandboxes. If the driver cannot be created, startup must fail with a clear
+  message rather than degrade silently.
+* **Windows console input.** compio documents that on Windows a console stdin
+  read is a blocking read on a separate thread and cannot be cancelled. So the
+  "no threads" property holds on Unix (verified) but not for Windows console
+  input; W4 will use the platform's `ReadConsoleInputW` on a dedicated input
+  thread, which is the standard approach there.
