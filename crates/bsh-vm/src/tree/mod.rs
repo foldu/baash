@@ -348,6 +348,9 @@ pub struct Interp {
     /// waited for normally — inside a stage, `$?` after an external command is
     /// that command's status, as in a subshell.
     defer_next_spawn: bool,
+    /// While a trap handler runs: the line number that handler's first line
+    /// stands for, so `$LINENO` inside it names the command being trapped.
+    line_base: Option<u32>,
     /// bash's call stack, which `FUNCNAME`, `BASH_SOURCE` and `BASH_LINENO`
     /// report (see [`CallFrame`]); innermost last.
     pub(crate) calls: Vec<CallFrame>,
@@ -491,6 +494,7 @@ impl Interp {
             pending: None,
             depth: 0,
             calls: Vec::new(),
+            line_base: None,
             array_literals: Vec::new(),
             nameref_cycle: std::cell::Cell::new(false),
             random: std::cell::Cell::new(0x9E37_79B9_7F4A_7C15),
@@ -1042,6 +1046,23 @@ impl Interp {
     /// from the previous offset; a jump backwards (a loop body, a function
     /// called twice) rescans from the top rather than reporting a stale line.
     pub(crate) fn set_line(&mut self, source: &Arc<SourceFile>, offset: usize) {
+        if let Some(base) = self.line_base {
+            // A trap handler is a chunk of its own, but bash reports the line
+            // of the command it is running *for*: `trap 'echo $LINENO' DEBUG`
+            // sees the next command's line, not line 1 of the handler text.
+            let end = offset.min(source.bytes().len());
+            let newlines = source.bytes()[..end]
+                .iter()
+                .filter(|&&byte| byte == b'\n')
+                .count();
+            self.line_number = base.saturating_add(newlines as u32);
+            self.line_offset = end;
+            let text = self.line_number.to_string();
+            if self.lineno != text.as_bytes() {
+                self.lineno = text.into_bytes();
+            }
+            return;
+        }
         if !Arc::ptr_eq(&self.line_source, source) {
             self.line_source = source.clone();
             self.line_offset = 0;

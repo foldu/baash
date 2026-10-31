@@ -1,9 +1,9 @@
 # Roadmap: the 397-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2273/2787** (2220 strict). bash passes 2577/2787 on the same run and
-373 of the cases we fail are ones bash passes (we pass 69 it fails), so the net
-gap is 304 cases.
+now **2292/2787** (2237 strict). bash passes 2577/2787 on the same run and
+354 of the cases we fail are ones bash passes (we pass 69 it fails), so the net
+gap is 285 cases.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
 queue. Interactive usability now outranks script conformance; see
@@ -235,8 +235,8 @@ around 2170.**
 
 ## Tranche 5 — the remaining bash gap (active goal)
 
-Re-measured with `--json --compare bash` after items 1–12 below:
-**2273/2787 total, 2220 strict**. 514 failures, of which **373 are cases bash
+Re-measured with `--json --compare bash` after items 1–14 below:
+**2292/2787 total, 2237 strict**. 495 failures, of which **354 are cases bash
 passes** (the real queue) and 141 are cases bash fails too (osh-only
 expectations, older-bash behaviour, environment). The plan is to work these in
 order, cheapest first, re-measuring after each commit:
@@ -293,8 +293,14 @@ it is not re-litigated.
     bash) — `introspect` (10).
 13. **[open]** `${!x}` indirection edges: `$?`, array/assoc subscripts, bad
     references, strict-array cases — `var-ref` (rest).
-14. **[open]** DEBUG/ERR trap exactness: `$?`, `LINENO`, `||`/`!`/pipeline
-    exclusion, `errtrace` — `builtin-trap-bash` (19) + `builtin-trap-err` (16).
+14. **[done, mostly]** Trap exactness. A handler is its own chunk but bash
+    reports the *trapped command's* line inside it, which one line-base rule
+    now does for every trap kind (`$LINENO` in DEBUG/ERR/EXIT), and the shell's
+    own line state is restored afterwards. `DEBUG` fires for simple commands,
+    `((…))`, `[[ … ]]`, the `case` statement, the `for` header and each
+    `for ((…))` condition/update — but not for `if`/`while` headers or brace
+    groups, which is what bash does — `builtin-trap-bash` 19 → 6,
+    `builtin-trap-err` 16 → 10 remaining.
 15. **[open]** Arithmetic contexts: `${…}`, quoted constants and backticks
     inside `$(( ))`, `nounset` — `arith` (13) + `arith-context` (7).
 16. **[open]** `[[ =~ ]]` right-hand-side parsing: unquoted `(`/`)`/`{`,

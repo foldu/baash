@@ -223,9 +223,26 @@ impl Interp {
             };
         }
         let saved = self.state.vars.last_status();
+        // The handler is its own chunk, so without this its `$LINENO` would be
+        // line 1 of the handler text; bash reports the line of the command the
+        // trap is running for. The shell's own line state is restored
+        // afterwards, so a handler cannot shift it.
+        let line_base = self.line_number();
+        let saved_source = self.line_source.clone();
+        let saved_offset = self.line_offset;
+        let saved_number = self.line_number;
+        self.line_base = Some(line_base.max(0) as u32);
         self.in_trap = true;
         self.run_named("<trap>", code);
         self.in_trap = false;
+        self.line_base = None;
+        self.line_source = saved_source;
+        self.line_offset = saved_offset;
+        self.line_number = saved_number;
+        let text = self.line_number.to_string();
+        if self.lineno != text.as_bytes() {
+            self.lineno = text.into_bytes();
+        }
         let status = self.state.vars.last_status();
         let exit = self.state.take_exit_request();
         // A handler's own status never becomes `$?` unless it called `exit`

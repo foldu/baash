@@ -100,9 +100,15 @@ impl Interp {
                 }
             }
             NodeKind::For { var, in_list, body } => {
+                if let Some(exit) = self.run_debug_trap() {
+                    return Unwind::Exit(exit);
+                }
                 self.eval_for(chunk, var, in_list.as_deref(), *body, ctx)
             }
             NodeKind::ForArith { header, body } => {
+                if let Some(exit) = self.run_debug_trap() {
+                    return Unwind::Exit(exit);
+                }
                 self.sync_specials();
                 self.eval_for_arith(chunk, header.clone(), *body, ctx)
             }
@@ -110,6 +116,9 @@ impl Interp {
                 self.eval_while(chunk, *until, *cond, *body, ctx)
             }
             NodeKind::Case { word, arms } => {
+                if let Some(exit) = self.run_debug_trap() {
+                    return Unwind::Exit(exit);
+                }
                 self.sync_specials();
                 self.eval_case(chunk, word, arms, ctx)
             }
@@ -142,6 +151,11 @@ impl Interp {
                 result
             }
             NodeKind::ArithCommand { expr } => {
+                // `((…))` and `[[ … ]]` are commands of their own, and bash
+                // runs the DEBUG trap for them too.
+                if let Some(exit) = self.run_debug_trap() {
+                    return Unwind::Exit(exit);
+                }
                 self.sync_specials();
                 let text = &chunk.source.bytes()[expr.clone()];
                 match crate::arith::eval(text, self) {
@@ -158,6 +172,11 @@ impl Interp {
                 }
             }
             NodeKind::TestCommand { body } => {
+                // `((…))` and `[[ … ]]` are commands of their own, and bash
+                // runs the DEBUG trap for them too.
+                if let Some(exit) = self.run_debug_trap() {
+                    return Unwind::Exit(exit);
+                }
                 self.sync_specials();
                 let status = super::cond::evaluate(self, chunk, body.clone());
                 Unwind::Status(status)
@@ -591,6 +610,9 @@ impl Interp {
             // until `i` reaches the header's line).
             self.set_line(&chunk.source, header.start);
             if !condition.trim_ascii().is_empty() {
+                if let Some(exit) = self.run_debug_trap() {
+                    return Unwind::Exit(exit);
+                }
                 match crate::arith::eval(condition, self) {
                     Ok(0) => break,
                     Ok(_) => {}
@@ -613,6 +635,11 @@ impl Interp {
                 other => return other,
             }
             self.set_line(&chunk.source, header.start);
+            if !update.trim_ascii().is_empty()
+                && let Some(exit) = self.run_debug_trap()
+            {
+                return Unwind::Exit(exit);
+            }
             if let Err(message) = crate::arith::eval(update, self) {
                 self.report(
                     crate::codes::ARITHMETIC,

@@ -1559,3 +1559,27 @@ fn funcname_and_bash_source_describe_the_call_stack() {
     assert_eq!(code(&output), 1);
     assert_eq!(stdout(&output), "");
 }
+
+#[test]
+fn trap_handlers_run_with_the_line_of_the_command_they_serve() {
+    // bash reports the line of the command the trap is running for, not line 1
+    // of the handler text, and the handler cannot shift the shell's own line.
+    let script = "dbg() { echo \"  [$1]\"; }\ntrap 'dbg $LINENO' DEBUG\necho A\necho B\n";
+    assert_eq!(out(script), "  [3]\nA\n  [4]\nB\n");
+
+    // A compound command contributes its own event where bash has one: the
+    // `case` statement and the `for` header fire, the body's commands fire
+    // individually.
+    let script = "dbg() { echo \"  [$1]\"; }\ntrap 'dbg $LINENO' DEBUG\ncase x in\n  x) echo arm ;;\nesac\nfor i in 1; do\n  echo body\ndone\n";
+    assert_eq!(out(script), "  [3]\n  [4]\narm\n  [6]\n  [7]\nbody\n");
+}
+
+#[test]
+fn the_err_trap_sees_the_failing_line_and_its_status() {
+    let script = "trap 'echo \"err:$?:$LINENO\"' ERR\nfalse\necho done\n";
+    assert_eq!(out(script), "err:1:2\ndone\n");
+    // `errexit` still exits afterwards, with the failing command's status.
+    let output = run("trap 'echo trap' ERR\nset -e\nfalse\necho unreached");
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "trap\n");
+}
