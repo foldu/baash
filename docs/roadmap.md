@@ -1,7 +1,7 @@
 # Roadmap: the 640-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **1980/2787** (1925 strict). bash passes 2574/2787 on the same run, so 640
+now **1979/2787** (1925 strict). bash passes 2574/2787 on the same run, so 595
 cases are things bash does and we do not.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
@@ -97,6 +97,9 @@ At the start of this tranche the suite stood at 1013/2787 total. It is now
 - [x] `${x#pat}`, `${x##pat}`, `${x%pat}`, `${x%%pat}` — 0/29 → 26/29.
 - [x] `${x/a/b}`, `${x//a/b}`, `${x/#a/b}`, `${x/%a/b}` — 1/28 → 25/28.
 - [x] `${x^pat}`, `${x^^pat}`, `${x,}`, `${x,,}`, including on `$@`/arrays.
+- [x] `${!x}` and `${!x<op>}` indirect expansion (name, positional, special,
+      subscripted; operators applied to the target). `var-ref.test.sh` 6/31 →
+      16/31.
 - [ ] `${x@Q}`, `${x@E}`, `${x@P}`, `${!prefix@}` (the rest of `var-op-bash`).
 - [x] `shopt` plus the `pattern_flags()` override, so `extglob`/`nocasematch`
       reach the matcher.
@@ -144,3 +147,63 @@ At the start of this tranche the suite stood at 1013/2787 total. It is now
 
 `[[` in `sh` mode only, `ysh` (1162 skipped cases), `coproc` if it never earns
 its keep, `zsh` emulation.
+
+## Tranche 4 — the measured queue (after indirect expansion)
+
+Measured with `bsh-spec --json` on the current tree: 1979/2787 total, 1925
+strict, 808 failures, of which 657 are cases bash passes and 151 are cases
+bash fails too (not worth chasing). Ordered by cases per unit of work; every
+entry names the suite file that measures it.
+
+### Tier A — cheap, and the design already supports them (~140 cases)
+
+- [ ] `${!prefix@}` / `${!prefix*}` and `${x@Q}`/`${x@E}` — `var-op-bash` (14).
+      Needs a name listing on the `Vars` seam for the prefix forms.
+- [ ] `$-` reflects the *active* options, and `sh` invocation flags
+      (`+c`, `--`, flags after the script) — `sh-options` (19) + `sh-usage`
+      (13). Today `$-` is a fixed `Bhu`.
+- [ ] `umask`, numeric and symbolic — `builtin-umask` (21). One `bsh-sys`
+      call plus bash's symbolic grammar.
+- [ ] `exec --`, `exec -a`, redirect-only `exec` — `builtin-process` (18).
+- [ ] `pushd` / `popd` / `dirs` — `builtin-dirs` (16). Pure state.
+- [ ] Special variables initialised only when unset (`PATH`, `PWD`, `IFS`,
+      `PS4`) — `vars-special` (22; `HISTFILE` is a deliberate divergence).
+- [ ] `GLOBIGNORE` — `globignore` (16). One rule in the glob layer.
+- [ ] `${x:o:l}` unicode/negative slices, `${x@}` case folding — `var-op-slice`
+      (14) + `var-op-bash` (part of 14).
+
+### Tier B — medium, still inside the design (~150 cases)
+
+- [ ] `DEBUG`/`ERR` trap refinements (`$?`, `LINENO`, `errexit` interplay) —
+      `builtin-trap-bash` (19) + `builtin-trap-err` (17).
+- [ ] `printf -v`, `%q`, no-arg usage — `builtin-printf` (19). **Needs a
+      decision**: `printf` is deliberately external; only bash's builtin has
+      `-v`. Either add a VM body with PATH-first kept for plain calls, or drop
+      this cluster.
+- [ ] `set -x` / `PS4` / `set -v` — `xtrace` (16).
+- [ ] `FUNCNAME` / `BASH_SOURCE` / `BASH_LINENO` — `introspect` (12), and the
+      two remaining `var-ref` cases.
+- [ ] Arithmetic inside `${…}` and quoted constants — `arith` (13).
+- [ ] Array subscripts through an indirect reference, negative out-of-range
+      assignment — `array-sparse` (19, of which 15 fail for bash too).
+- [ ] Named file descriptors and `{fd}>` — `redirect` (11).
+- [ ] `{` as a regex parse error, fatal errors inside `[[ =~ ]]` —
+      `regex` (12).
+- [ ] `sh --rcfile`/`--norc`/`--rcdir` startup selection — `interactive` (13).
+- [ ] Array literal/parse edge cases — `array` (13).
+
+### Tier C — cheap only in the strict column
+
+54 cases pass today *only* because a per-shell `## OK …` alternative matched.
+Matching the primary expectation on them raises strict by up to 54 without
+changing behaviour; work through `--list-failures` on a full run and compare
+each case's primary output with the alternative we accept.
+
+### Not planned
+
+`history -a/-w/-r` (15), `fc` (12), `wait -n`/jobspec/job control (18),
+`HISTFILE` (inside `vars-special`), `strict_errexit`/`strict_arith` (23 + 11),
+and the 151 cases bash fails too. These are decisions, not gaps.
+
+**Target if Tier A and B land: +250–290 → about 2230/2787 (80%), strict
+around 2170.**
