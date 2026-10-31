@@ -132,6 +132,18 @@ static VM_BUILTINS: &[VmBuiltin] = &[
         run: super::umask::bi_umask,
     },
     VmBuiltin {
+        name: b"dirs",
+        run: super::dirs::bi_dirs,
+    },
+    VmBuiltin {
+        name: b"pushd",
+        run: super::dirs::bi_pushd,
+    },
+    VmBuiltin {
+        name: b"popd",
+        run: super::dirs::bi_popd,
+    },
+    VmBuiltin {
         name: b"mapfile",
         run: super::mapfile::bi_mapfile,
     },
@@ -454,23 +466,19 @@ fn bi_cd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
         Some(path) => path,
     };
 
-    if let Err(error) = bsh_sys::chdir(&target) {
-        diagnose(
-            interp,
-            format!("{name}: {}: {error}", String::from_utf8_lossy(&target)),
-        );
-        return Status::FAILURE;
-    }
-    let previous = interp.state.vars.scalar(b"PWD").map(<[u8]>::to_vec);
-    let current = std::env::current_dir()
-        .map(bsh_sys::os::bytes_from_os)
-        .unwrap_or_else(|_| target.clone());
-    if let Some(previous) = previous {
-        let _ = interp.state.vars.assign_scalar(b"OLDPWD", &previous);
-        let _ = interp.state.vars.mark_exported(b"OLDPWD");
-    }
-    let _ = interp.state.vars.assign_scalar(b"PWD", &current);
-    let _ = interp.state.vars.mark_exported(b"PWD");
+    let current = match super::dirs::enter(interp, &target) {
+        Ok(current) => current,
+        Err(error) => {
+            diagnose(
+                interp,
+                format!("{name}: {}: {error}", String::from_utf8_lossy(&target)),
+            );
+            return Status::FAILURE;
+        }
+    };
+    // `cd` replaces the current directory on the stack; the pushed entries
+    // stay where they are.
+    super::dirs::sync(interp, &current);
     if print {
         let mut out = current;
         out.push(b'\n');

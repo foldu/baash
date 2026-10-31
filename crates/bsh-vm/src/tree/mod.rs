@@ -123,6 +123,7 @@ mod builtins;
 mod command;
 mod complete;
 mod cond;
+mod dirs;
 mod eval;
 mod mapfile;
 mod process;

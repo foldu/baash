@@ -117,6 +117,13 @@ pub struct ShellState {
     /// Command history, the one ring the `history` built-in and the editor
     /// share. See `bsh_history` for the database behind it.
     pub history: History,
+    /// The directory stack `pushd` maintains: element 0 is the current
+    /// directory, matching bash's `DIRSTACK` order.
+    ///
+    /// Empty until the first `pushd` (or `dirs -c`), because `dirs` with no
+    /// stack is just `PWD` and a shell that never uses `pushd` should not pay
+    /// for a copy. `cd` rewrites element 0 when there is one.
+    pub dirs: Vec<Vec<u8>>,
     /// How many lines of input the interactive loop has handed to the
     /// interpreter.
     ///
@@ -163,6 +170,7 @@ impl ShellState {
             completions: complete::CompletionTable::default(),
             completion: complete::CompletionRun::default(),
             history: History::new(),
+            dirs: Vec::new(),
             command_number: 0,
             getopts: GetoptsState::default(),
             error: None,

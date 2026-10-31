@@ -1,7 +1,7 @@
-# Roadmap: the 571-case gap
+# Roadmap: the 555-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2003/2787** (1949 strict). bash passes 2574/2787 on the same run, so 571
+now **2019/2787** (1965 strict). bash passes 2574/2787 on the same run, so 555
 cases are things bash does and we do not.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
@@ -150,8 +150,8 @@ its keep, `zsh` emulation.
 
 ## Tranche 4 — the measured queue (after indirect expansion)
 
-Measured with `bsh-spec --json` on the current tree: 2003/2787 total, 1949
-strict, 784 failures, of which 633 are cases bash passes and 151 are cases
+Measured with `bsh-spec --json` on the current tree: 2019/2787 total, 1965
+strict, 768 failures, of which 555 are cases bash passes and 213 are cases
 bash fails too (not worth chasing). Ordered by cases per unit of work; every
 entry names the suite file that measures it.
 
@@ -168,7 +168,9 @@ entry names the suite file that measures it.
 - [~] `exec --`, `exec -a`, redirect-only `exec` — `builtin-process` (18),
       now 7/25 → 10/25; the rest of the file is `exec` failure modes and
       dynamic-loader behaviour.
-- [ ] `pushd` / `popd` / `dirs` — `builtin-dirs` (16). Pure state.
+- [x] `pushd` / `popd` / `dirs` — `builtin-dirs` (16), now 18/18. The stack
+      lives in `ShellState` so a subshell cannot leak it; `cd` rewrites element
+      0, and paths stay lexical so a symlink keeps the name typed.
 - [ ] Special variables initialised only when unset (`PATH`, `PWD`, `IFS`,
       `PS4`) — `vars-special` (22; `HISTFILE` is a deliberate divergence).
 - [ ] `GLOBIGNORE` — `globignore` (16). One rule in the glob layer.
