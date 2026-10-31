@@ -711,9 +711,9 @@ fn bi_exit(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
             format!("{}: too many arguments", program_name(argv, "exit")),
         );
         if !host.is_interactive() {
-            host.state().request_exit(Status(1));
+            host.state().request_exit(Status(2));
         }
-        return Status(1);
+        return Status(2);
     }
 
     enum Request {
@@ -753,8 +753,8 @@ fn bi_exit(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
                     display(&bytes)
                 ),
             );
-            host.state().request_exit(Status(2));
-            Status(2)
+            host.state().request_exit(Status(1));
+            Status(1)
         }
     }
 }

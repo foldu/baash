@@ -1,7 +1,7 @@
-# Roadmap: the 455-case gap
+# Roadmap: the 441-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2119/2787** (2068 strict). bash passes 2574/2787 on the same run, so 455
+now **2133/2787** (2082 strict). bash passes 2574/2787 on the same run, so 441
 cases are things bash does and we do not.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
@@ -150,8 +150,8 @@ its keep, `zsh` emulation.
 
 ## Tranche 4 — the measured queue (after indirect expansion)
 
-Measured with `bsh-spec --json` on the current tree: 2119/2787 total, 2068
-strict, 668 failures, of which 455 are cases bash passes and 213 are cases
+Measured with `bsh-spec --json` on the current tree: 2133/2787 total, 2082
+strict, 654 failures, of which 441 are cases bash passes and 213 are cases
 bash fails too (not worth chasing). Ordered by cases per unit of work; every
 entry names the suite file that measures it.
 
@@ -172,6 +172,9 @@ entry names the suite file that measures it.
       failure is 126 rather than 127 — `command_` 8/16 -> 13/16. A shell
       reading stdin also keeps a `$0`, which fixed `${@:0}` (`var-op-slice`
       8/22 -> 12/22) and the `$0` cases in other files.
+- [x] `ulimit` over the real `getrlimit`/`setrlimit` (one resource at a time,
+      `-a` summary, `-S`/`-H`, 512/1024-byte units, `unlimited`) and `exit`’s
+      usage statuses — `builtin-process` 10/25 -> 23/25.
 - [~] `exec --`, `exec -a`, redirect-only `exec` — `builtin-process` (18),
       now 7/25 → 10/25; the rest of the file is `exec` failure modes and
       dynamic-loader behaviour.

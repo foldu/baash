@@ -136,6 +136,7 @@ mod complete;
 mod cond;
 mod dirs;
 mod eval;
+mod limits;
 mod mapfile;
 mod process;
 mod read;

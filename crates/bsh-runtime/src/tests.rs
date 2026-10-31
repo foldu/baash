@@ -885,8 +885,10 @@ fn exit_requests_unwinding() {
     assert_eq!(host.state.exit_requested(), Some(Status(3)));
     host.state.take_exit_request();
 
-    assert_eq!(host.run(&[b"exit", b"abc"]), Status(2));
-    assert_eq!(host.state.exit_requested(), Some(Status(2)));
+    // A bad operand is a runtime error (1); too many operands is a usage
+    // error (2). The suite pins both against the reference shell.
+    assert_eq!(host.run(&[b"exit", b"abc"]), Status(1));
+    assert_eq!(host.state.exit_requested(), Some(Status(1)));
     assert_eq!(host.diagnostics.len(), 1);
     host.state.take_exit_request();
 
@@ -895,12 +897,12 @@ fn exit_requests_unwinding() {
     assert_eq!(status.exit_code(), 255);
     host.state.take_exit_request();
 
-    // Too many operands is an error; a non-interactive shell exits 1.
-    assert_eq!(host.run(&[b"exit", b"1", b"2"]), Status(1));
-    assert_eq!(host.state.exit_requested(), Some(Status(1)));
+    // Too many operands is a usage error; a non-interactive shell exits 2.
+    assert_eq!(host.run(&[b"exit", b"1", b"2"]), Status(2));
+    assert_eq!(host.state.exit_requested(), Some(Status(2)));
     host.state.take_exit_request();
     host.interactive = true;
-    assert_eq!(host.run(&[b"exit", b"1", b"2"]), Status(1));
+    assert_eq!(host.run(&[b"exit", b"1", b"2"]), Status(2));
     assert_eq!(host.state.exit_requested(), None, "interactive shells stay");
 }
 

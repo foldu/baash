@@ -267,6 +267,81 @@ pub fn hostname() -> Vec<u8> {
         .unwrap_or_default()
 }
 
+/// The resource limits `ulimit` exposes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Limit {
+    /// `-c`: size of core dumps.
+    Core,
+    /// `-d`: data segment size.
+    Data,
+    /// `-f`: file size.
+    Fsize,
+    /// `-l`: locked memory.
+    Memlock,
+    /// `-m`: resident set size.
+    Rss,
+    /// `-n`: open file descriptors.
+    Nofile,
+    /// `-s`: stack size.
+    Stack,
+    /// `-t`: CPU time in seconds.
+    Cpu,
+    /// `-u`: processes per user.
+    Processes,
+    /// `-v`: address space.
+    AddressSpace,
+}
+
+/// The soft and hard value of `limit`; `None` means unlimited.
+#[cfg(unix)]
+pub fn get_limit(limit: Limit) -> Option<(Option<u64>, Option<u64>)> {
+    let resource = resource(limit);
+    let value = rustix::process::getrlimit(resource);
+    Some((value.current, value.maximum))
+}
+
+/// The soft and hard value of `limit`; Windows has no `ulimit`.
+#[cfg(windows)]
+pub fn get_limit(_limit: Limit) -> Option<(Option<u64>, Option<u64>)> {
+    None
+}
+
+/// Set the soft and hard value of `limit` (`None` is unlimited).
+#[cfg(unix)]
+pub fn set_limit(limit: Limit, soft: Option<u64>, hard: Option<u64>) -> std::io::Result<()> {
+    rustix::process::setrlimit(
+        resource(limit),
+        rustix::process::Rlimit {
+            current: soft,
+            maximum: hard,
+        },
+    )
+    .map_err(std::io::Error::from)
+}
+
+/// Set a limit; Windows has no `ulimit`.
+#[cfg(windows)]
+pub fn set_limit(_limit: Limit, _soft: Option<u64>, _hard: Option<u64>) -> std::io::Result<()> {
+    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+}
+
+#[cfg(unix)]
+fn resource(limit: Limit) -> rustix::process::Resource {
+    use rustix::process::Resource;
+    match limit {
+        Limit::Core => Resource::Core,
+        Limit::Data => Resource::Data,
+        Limit::Fsize => Resource::Fsize,
+        Limit::Memlock => Resource::Memlock,
+        Limit::Rss => Resource::Rss,
+        Limit::Nofile => Resource::Nofile,
+        Limit::Stack => Resource::Stack,
+        Limit::Cpu => Resource::Cpu,
+        Limit::Processes => Resource::Nproc,
+        Limit::AddressSpace => Resource::As,
+    }
+}
+
 /// Sets the process mask to `mask`, returning the previous value.
 ///
 /// The mask is process-wide, so the `umask` built-in is the only caller and it

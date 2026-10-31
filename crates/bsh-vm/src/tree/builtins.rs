@@ -132,6 +132,10 @@ static VM_BUILTINS: &[VmBuiltin] = &[
         run: super::umask::bi_umask,
     },
     VmBuiltin {
+        name: b"ulimit",
+        run: super::limits::bi_ulimit,
+    },
+    VmBuiltin {
         name: b"dirs",
         run: super::dirs::bi_dirs,
     },
