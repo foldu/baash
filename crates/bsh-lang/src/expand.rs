@@ -1090,7 +1090,7 @@ fn expand_param<S: Shell>(
             let flags = match_flags(ctx);
             let how = *how;
             let mut convert = |value: &mut Vec<u8>| {
-                convert_case(value, how, pattern.as_deref(), flags);
+                *value = convert_case(value, how, pattern.as_deref(), flags);
             };
             map_parameter(ctx, &exp.name, quoted, out, &mut convert);
             Ok(())
@@ -1900,17 +1900,47 @@ fn replace_value(
 /// tested on. With byte units a multi-byte character is several characters,
 /// and no byte above 0x7f has an ASCII case mapping, so non-ASCII text is
 /// never changed — `μ` stays `μ` exactly as bash's `LC_ALL=C` leaves it.
-fn convert_case(value: &mut [u8], how: CaseHow, pattern: Option<&[u8]>, flags: Flags) {
+fn convert_case(value: &[u8], how: CaseHow, pattern: Option<&[u8]>, flags: Flags) -> Vec<u8> {
     let compiled = pattern.map(|pattern| bsh_pattern::compiled(pattern, flags));
-    for (index, byte) in value.iter_mut().enumerate() {
+    let matched = |bytes: &[u8]| match &compiled {
+        None => true,
+        Some(pattern) => pattern.matches(bytes),
+    };
+    // Case conversion is character based whenever the value is valid UTF-8,
+    // even under `LC_ALL=C`: the suite's expectations (recorded from bash)
+    // fold `À` and `á`, and byte-wise ASCII mapping would leave both alone.
+    // The mapping may change length (`ß` upper-cases to `SS`), so the result
+    // has to be a new string.
+    if let Ok(text) = std::str::from_utf8(value) {
+        let mut out = Vec::with_capacity(value.len());
+        for (index, character) in text.chars().enumerate() {
+            let mut buffer = [0u8; 4];
+            let encoded = character.encode_utf8(&mut buffer);
+            let convert = (index == 0 || !how.first_only()) && matched(encoded.as_bytes());
+            if convert {
+                let mapped: Box<dyn Iterator<Item = char>> = if how.to_upper() {
+                    Box::new(character.to_uppercase())
+                } else {
+                    Box::new(character.to_lowercase())
+                };
+                for mapped in mapped {
+                    let mut buffer = [0u8; 4];
+                    out.extend_from_slice(mapped.encode_utf8(&mut buffer).as_bytes());
+                }
+            } else {
+                out.extend_from_slice(encoded.as_bytes());
+            }
+        }
+        return out;
+    }
+    // The C locale is byte units: no byte above 0x7f has an ASCII mapping, so
+    // non-ASCII text is left exactly as it is.
+    let mut out = value.to_vec();
+    for (index, byte) in out.iter_mut().enumerate() {
         if index > 0 && how.first_only() {
             break;
         }
-        let matched = match &compiled {
-            None => true,
-            Some(pattern) => pattern.matches(&[*byte]),
-        };
-        if matched {
+        if matched(&[*byte]) {
             *byte = if how.to_upper() {
                 byte.to_ascii_uppercase()
             } else {
@@ -1918,6 +1948,7 @@ fn convert_case(value: &mut [u8], how: CaseHow, pattern: Option<&[u8]>, flags: F
             };
         }
     }
+    out
 }
 
 /// `${x:offset:length}` on a byte string.

@@ -53,13 +53,14 @@ fn case_operators_match_one_character_at_a_time() {
 }
 
 #[test]
-fn case_operators_are_ascii_and_honour_quoting() {
-    // Only ASCII has a case mapping: the two bytes of `μ` are left alone, and
-    // `?` matches one byte at a time because the shell is in the C locale.
+fn case_operators_are_character_based_and_honour_quoting() {
+    // Case conversion is character based even in the C locale: the recorded
+    // expectations fold `À` and `á`, so `μ` upper-cases to `Μ` rather than
+    // staying a pair of untouched bytes.
     let mut shell = TestShell::new().var(b"x", "μabc".as_bytes());
     assert_eq!(
         expand_one_bytes(b"\"${x^^}\"", &mut shell),
-        values(&["μABC".as_bytes()])
+        values(&["ΜABC".as_bytes()])
     );
     // A quoted `?` is literal, so only the `?` itself is considered.
     let mut shell = TestShell::new().var(b"x", b"a?b").var(b"p", b"?");

@@ -47,18 +47,18 @@ a stale brief has already cost two wrong scopes (arrays: 54 vs real; namerefs:
 
 | measure | value |
 |---|---|
-| comparable cases | **2047 / 2787 = 73.4 %** |
-| strict (primary expectation only) | 1993 / 2787 = 71.5 % |
-| failing | 740 |
+| comparable cases | **2048 / 2787 = 73.5 %** |
+| strict (primary expectation only) | 1994 / 2787 = 71.5 % |
+| failing | 739 |
 | timeouts | 0 |
 | of the whole suite (3971 cases) | 51.6 % |
-| as a fraction of bash's score | 2047 / 2574 = 79.5 % |
-| share of the bash gap closed since 1013 | 1034 / 1561 = 66.2 % |
+| as a fraction of bash's score | 2048 / 2574 = 79.6 % |
+| share of the bash gap closed since 1013 | 1035 / 1561 = 66.3 % |
 | our test count | 1201 |
 
 Measured with `bash 5.3.20` as the comparison shell, harness forced to
 `LC_ALL=C` (bash scores *worse* under `C.UTF-8`: 2574 → 2435, so the C locale
-is the fair denominator). We pass 46 cases bash fails; bash passes 573 we fail.
+is the fair denominator). We pass 46 cases bash fails; bash passes 572 we fail.
 
 **1184 skipped** cases: 745 from the ysh-only suite files, 417 marked
 `our_shell: ysh`, 22 needing a `python2` helper we do not provide. 100 % is not
@@ -66,8 +66,8 @@ a meaningful target: bash itself scores 92.4 %, and 55 of our passes come from
 `## OK <shell>` alternatives rather than the primary expectation — which is
 exactly the 71.1 % vs 69.1 % split, and why both numbers are ratcheted.
 
-Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 2047`,
-`strict = 1993`). `--ratchet` exits 1 below either, 2 if it cannot measure.
+Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 2048`,
+`strict = 1994`). `--ratchet` exits 1 below either, 2 if it cannot measure.
 
 **The W1 drop is expected.** Removing job control failed seven Oils cases that
 exercise `%` specifications, `jobs -p` and `kill %job` (one trap case improved
