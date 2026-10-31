@@ -568,7 +568,7 @@ fn skip_subscript(src: &[u8], open: usize, end: usize) -> Option<usize> {
 
 /// The offset just past the `=` of a valid `NAME=value` assignment word,
 /// `NAME+=value` included. `NAME[sub]=value` also qualifies.
-pub(crate) fn assignment_value_start(src: &[u8], span: &Span) -> Option<usize> {
+pub fn assignment_value_start(src: &[u8], span: &Span) -> Option<usize> {
     let eq = find_assignment_eq(src, span)?;
     let mut name_end = eq;
     if src.get(eq.wrapping_sub(1)) == Some(&b'+') {

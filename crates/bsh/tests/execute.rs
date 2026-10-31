@@ -1270,3 +1270,99 @@ fn monitor_option_is_accepted_and_inert() {
         "monitor\toff\n"
     );
 }
+
+#[test]
+fn tilde_expansion_reads_the_user_database_even_without_home() {
+    // `$HOME` first, the password database second: bash only asks the
+    // database when `HOME` is unset, and then it asks for the user running
+    // the shell rather than for the empty login name.
+    let output = bsh()
+        .env_remove("HOME")
+        .arg("-c")
+        .arg(r#"x="~"; eval y="$x"; echo "$y"; echo ~"#)
+        .output()
+        .expect("spawn bsh");
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    let text = stdout(&output);
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    assert_eq!(lines.len(), 2);
+    for line in lines {
+        assert!(line.starts_with('/'), "expected a home path, got {line:?}");
+    }
+
+    // `~user` still resolves a named login, and an unknown one stays literal.
+    let output = bsh()
+        .env("HOME", "/home/bob")
+        .arg("-c")
+        .arg("echo ~root; echo ~nosuchuser99")
+        .output()
+        .expect("spawn bsh");
+    let text = stdout(&output);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "/root");
+    assert_eq!(lines[1], "~nosuchuser99");
+}
+
+#[test]
+fn declaration_operands_expand_tilde_after_the_equals() {
+    // `declare x=~/p` is an assignment word even though it is an argument, so
+    // the tilde that starts the *value* expands; a quoted `=` is not the
+    // separator, so its tilde stays literal.
+    let output = bsh()
+        .env("HOME", "/home/bob")
+        .arg("-c")
+        .arg(
+            r#"readonly c=~/src; echo "$c"
+declare d=~/x; echo "$d"
+export e=~/y; echo "$e"
+declare "q=~/p"; echo "$q"
+declare a[1]=~/one; echo "${a[1]}""#,
+        )
+        .output()
+        .expect("spawn bsh");
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "/home/bob/src\n/home/bob/x\n/home/bob/y\n~/p\n/home/bob/one\n"
+    );
+
+    // A declaration's value is not globbed, and neither is an array
+    // subscript: the name keeps its source text.
+    let output = bsh()
+        .arg("-c")
+        .arg("declare s[1]=*; echo \"${s[1]}\"; readonly r=*; echo \"$r\"")
+        .current_dir(std::env::temp_dir())
+        .output()
+        .expect("spawn bsh");
+    assert_eq!(stdout(&output), "*\n*\n");
+}
+
+#[test]
+fn a_bad_array_subscript_is_an_expansion_error() {
+    // An unset *name* in a subscript is arithmetic zero, but a malformed
+    // expression is fatal: bash abandons the line (and a non-interactive
+    // shell exits) rather than expanding to nothing.
+    for script in [
+        "a=(x y); echo ${a[~+]}; echo unreached",
+        "a=(x y); echo ${#a[~+]}; echo unreached",
+        "a=(x y); echo ${a[~+]:-d}; echo unreached",
+        "a=(x y); a[~+]=1; echo unreached",
+        "declare -i n; n=1+; echo unreached",
+    ] {
+        let output = run(script);
+        assert_eq!(code(&output), 1, "expected status 1 for `{script}`");
+        assert_eq!(stdout(&output), "", "expected no output for `{script}`");
+        assert!(
+            !stderr(&output).is_empty(),
+            "expected a diagnostic for `{script}`"
+        );
+    }
+
+    // The benign cases keep working: an unset name is zero, and `${a[foo]:-d}`
+    // still prints the default word.
+    assert_eq!(out("a=(x y); echo ${a[foo]:-d}"), "x\n");
+    assert_eq!(
+        out("a=(x y); declare -i n; n=1+2; echo $n ${a[1]}"),
+        "3 y\n"
+    );
+}

@@ -77,9 +77,8 @@
 //!   `printf`/`test`/`[`/`pwd` are served from `PATH` until `bsh-runtime`
 //!   writes their bodies, which is where POSIX puts a regular built-in — which
 //!   is also why `type -t [` reports `file` rather than `builtin`.
-//! * **`~user`** — `bsh_lang::Shell::home_dir` has a default of `None` and
-//!   `bsh-sys` exposes no `getpwnam`, so `~root` is left as written. `~`,
-//!   `~+` and `~-` work.
+//! * **`~+N`/`~-N`** — bash's directory-stack forms of `~`, which this shell
+//!   does not model; `~`, `~user`, `~+` and `~-` work.
 //! * **Command substitution inside arithmetic** — `$(( $(cmd) + 1 ))` reports
 //!   a syntax error, because arithmetic evaluation has no access to the
 //!   command-substitution callback ([`crate::arith::IntVars`] is deliberately
@@ -1053,10 +1052,17 @@ impl Interp {
         if matches!(error.kind, bsh_lang::ErrorKind::GlobNoMatch { .. }) {
             return Unwind::Status(Status(1));
         }
+        self.abort_expansion()
+    }
+
+    /// The consequence of an expansion error, once it has been reported.
+    ///
+    /// bash does not exit an interactive shell on one: it abandons the line
+    /// (`set -u; echo a; echo $x; echo b` prints `a` and runs the *next* line)
+    /// and keeps the status of the failure. A non-interactive shell treats it
+    /// as fatal (POSIX XCU 2.8.1).
+    pub(crate) fn abort_expansion(&mut self) -> Unwind {
         if self.interactive {
-            // bash does not exit an interactive shell on an expansion error: it
-            // abandons the line (`set -u; echo a; echo $x; echo b` prints `a`
-            // and runs the *next* line) and keeps the status of the failure.
             self.state.clear_error();
             return Unwind::Discard(Status(1));
         }
@@ -1201,6 +1207,17 @@ fn current_tty() -> Vec<u8> {
 }
 
 impl bsh_lang::Shell for Interp {
+    fn home_dir(&mut self, user: &[u8]) -> Option<Vec<u8>> {
+        // `~user` asks the platform's user database. A bare `~` uses `$HOME`
+        // first and only lands here when it is unset, in which case bash asks
+        // the same database for the user running the shell — not for the
+        // empty login name. An unknown login stays literal.
+        if user.is_empty() {
+            return bsh_sys::os::own_home();
+        }
+        bsh_sys::os::user_home(user)
+    }
+
     fn brace_expansion(&self) -> bool {
         // `set -B`/`set +B`, and `set -o braceexpand`. The other stages are
         // not switchable, which is why this is the pipeline's only option.
@@ -1615,6 +1632,7 @@ impl ShellHost for Interp {
             .expand_subscript(subscript)
             .map_err(|()| format!("{}: bad array subscript", String::from_utf8_lossy(name)))?;
         self.assign_element(name, &text, false, value)
+            .map_err(|failure| failure.message().to_string())
     }
 
     fn variable_is_set(&mut self, operand: &[u8]) -> Option<bool> {

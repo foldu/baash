@@ -448,6 +448,92 @@ pub mod os {
         value.as_ref().to_string_lossy().into_owned().into_bytes()
     }
 
+    /// The home directory of a login name, from the platform's user database.
+    ///
+    /// Returns `None` for an unknown name, which leaves `~name` unexpanded —
+    /// bash's behaviour for a login that does not exist.
+    #[cfg(unix)]
+    pub fn user_home(name: &[u8]) -> Option<Vec<u8>> {
+        use std::ffi::CString;
+
+        let name = CString::new(name).ok()?;
+        passwd_home(|entry, buffer, found| {
+            // SAFETY: `name` is NUL-terminated, and `passwd_home` passes an
+            // `entry` and `buffer` valid for the duration of the call plus a
+            // `found` slot for the result the call may point into `entry`.
+            unsafe {
+                libc::getpwnam_r(
+                    name.as_ptr(),
+                    entry,
+                    buffer.as_mut_ptr(),
+                    buffer.len(),
+                    found,
+                )
+            }
+        })
+    }
+
+    /// This process's home directory, from the platform's user database.
+    ///
+    /// This is the fallback for `~` when `HOME` is unset, which is bash's
+    /// second source of truth: it asks the password database for the user
+    /// running the shell.
+    #[cfg(unix)]
+    pub fn own_home() -> Option<Vec<u8>> {
+        // SAFETY: `geteuid` takes no arguments and cannot fail.
+        let uid = unsafe { libc::geteuid() };
+        passwd_home(|entry, buffer, found| {
+            // SAFETY: `passwd_home` passes an `entry` and `buffer` valid for
+            // the duration of the call plus a `found` slot for the result the
+            // call may point into `entry`.
+            unsafe { libc::getpwuid_r(uid, entry, buffer.as_mut_ptr(), buffer.len(), found) }
+        })
+    }
+
+    /// One passwd lookup, sharing the caller-storage buffer protocol.
+    ///
+    /// The `_r` variants of the passwd calls write the entry into caller
+    /// storage and report `ERANGE` when the buffer is too small; grow once per
+    /// report.
+    #[cfg(unix)]
+    fn passwd_home(
+        lookup: impl Fn(&mut libc::passwd, &mut [libc::c_char], &mut *mut libc::passwd) -> libc::c_int,
+    ) -> Option<Vec<u8>> {
+        use std::ffi::CStr;
+
+        let mut buffer = vec![0 as libc::c_char; 1024];
+        loop {
+            // SAFETY: `passwd` is a plain C struct whose all-zero bit pattern
+            // is a valid initial value (null pointers and zero counts).
+            let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+            let mut found: *mut libc::passwd = std::ptr::null_mut();
+            let code = lookup(&mut entry, &mut buffer, &mut found);
+            if code == libc::ERANGE {
+                buffer.resize(buffer.len() * 2, 0);
+                continue;
+            }
+            if code != 0 || found.is_null() {
+                return None;
+            }
+            // SAFETY: a successful call leaves `pw_dir` pointing at a
+            // NUL-terminated string inside `buffer`.
+            let home = unsafe { CStr::from_ptr(entry.pw_dir) };
+            return Some(home.to_bytes().to_vec());
+        }
+    }
+
+    /// The home directory of a login name; Windows has no passwd database.
+    #[cfg(windows)]
+    pub fn user_home(_name: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// This process's home directory; Windows has no passwd database.
+    #[cfg(windows)]
+    pub fn own_home() -> Option<Vec<u8>> {
+        None
+    }
+
     /// This user's id, when the platform has one.
     #[cfg(unix)]
     pub fn own_uid() -> Option<u32> {

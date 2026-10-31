@@ -68,6 +68,16 @@ pub fn is_assignment_word(src: &[u8], span: &bsh_diag::Span) -> bool {
     lexer::assignment_value_start(src, span).is_some()
 }
 
+/// The byte offset just past the `=` of an assignment word, i.e. where its
+/// value begins. `None` when the word is not an assignment.
+///
+/// The declaration built-ins need the boundary: their operand arrives as one
+/// word, but `declare x=~/p` expands the tilde at the start of the *value*
+/// only, so the front end and the VM must agree on where the value starts.
+pub fn assignment_value_start(src: &[u8], span: &bsh_diag::Span) -> Option<usize> {
+    lexer::assignment_value_start(src, span)
+}
+
 /// Diagnostic codes produced by this crate.
 ///
 /// The code is stable; the message is not. Anything matching on stderr should

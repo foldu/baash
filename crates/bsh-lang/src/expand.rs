@@ -676,24 +676,26 @@ impl<S: Shell> Ctx<'_, S> {
         }
     }
 
-    fn is_set(&mut self, name: &ParamName) -> bool {
-        match name {
+    fn is_set(&mut self, name: &ParamName) -> Result<bool, Error> {
+        Ok(match name {
             ParamName::At | ParamName::Star => !self.shell.positional().is_empty(),
-            ParamName::Element { name, subscript } => read_element(self, name, subscript).is_some(),
+            ParamName::Element { name, subscript } => {
+                read_element(self, name, subscript)?.is_some()
+            }
             ParamName::Elements { name, .. } => self
                 .shell
                 .array(name)
                 .map(|array| !array.is_empty())
                 .unwrap_or_else(|| self.shell.get(name).is_some()),
             _ => self.value(name).is_some(),
-        }
+        })
     }
 
-    fn is_nonnull(&mut self, name: &ParamName) -> bool {
-        match name {
+    fn is_nonnull(&mut self, name: &ParamName) -> Result<bool, Error> {
+        Ok(match name {
             ParamName::At | ParamName::Star => !self.shell.positional().is_empty(),
             ParamName::Element { name, subscript } => {
-                read_element(self, name, subscript).is_some_and(|value| !value.is_empty())
+                read_element(self, name, subscript)?.is_some_and(|value| !value.is_empty())
             }
             ParamName::Elements { name, .. } => {
                 // bash's `${a[@]:-word}` rule: a one-element list behaves like
@@ -712,7 +714,7 @@ impl<S: Shell> Ctx<'_, S> {
                 }
             }
             _ => self.value(name).is_some_and(|value| !value.is_empty()),
-        }
+        })
     }
 }
 
@@ -736,7 +738,7 @@ fn indirect_target<S: Shell>(
     required: bool,
 ) -> Result<ParamName, Error> {
     let value = match name {
-        ParamName::Element { name, subscript } => read_element(ctx, name, subscript),
+        ParamName::Element { name, subscript } => read_element(ctx, name, subscript)?,
         ParamName::Elements { .. } => None,
         other => ctx.value(other),
     };
@@ -822,17 +824,27 @@ fn is_name(name: &[u8]) -> bool {
         })
 }
 
-fn read_element<S: Shell>(ctx: &mut Ctx<'_, S>, name: &[u8], subscript: &Word) -> Option<Vec<u8>> {
+/// Read one element, letting a subscript that fails arithmetic fail the
+/// expansion.
+///
+/// An *unset name* inside the subscript is not an error — arithmetic reads it
+/// as zero, which is why `${a[foo]:-d}` still prints `d` — but a malformed
+/// expression is: bash aborts the whole expansion with status 1.
+fn read_element<S: Shell>(
+    ctx: &mut Ctx<'_, S>,
+    name: &[u8],
+    subscript: &Word,
+) -> Result<Option<Vec<u8>>, Error> {
     let kind = ctx.shell.array(name).map(|array| array.kind());
-    let text = expand_word_to_scalar(subscript, false, ctx).ok()?;
-    match kind {
+    let text = expand_word_to_scalar(subscript, false, ctx)?;
+    Ok(match kind {
         Some(ArrayKind::Associative) => ctx
             .shell
             .array(name)
             .and_then(|array| array.get(&text))
             .map(<[u8]>::to_vec),
         Some(ArrayKind::Indexed) => {
-            let index = arithmetic(&text, subscript, ctx).ok()?;
+            let index = arithmetic(&text, subscript, ctx)?;
             let key = index.to_string().into_bytes();
             ctx.shell
                 .array(name)
@@ -842,14 +854,14 @@ fn read_element<S: Shell>(ctx: &mut Ctx<'_, S>, name: &[u8], subscript: &Word) -
         // No shape: bash treats the subscript arithmetically and a scalar is
         // an indexed array with one element.
         None => {
-            let index = arithmetic(&text, subscript, ctx).ok()?;
+            let index = arithmetic(&text, subscript, ctx)?;
             if index == 0 {
                 ctx.shell.get(name).map(<[u8]>::to_vec)
             } else {
                 None
             }
         }
-    }
+    })
 }
 
 /// Evaluate subscript text as arithmetic, through the runtime's evaluator.
@@ -920,7 +932,7 @@ fn expand_param<S: Shell>(
     if ctx.shell.nounset()
         && needs_set_value(&exp.op)
         && enumerable(&exp.name)
-        && !ctx.is_set(&exp.name)
+        && !ctx.is_set(&exp.name)?
     {
         return Err(Error::new(
             ErrorKind::ParameterUnset {
@@ -950,7 +962,7 @@ fn expand_param<S: Shell>(
                         None => usize::from(ctx.shell.get(name).is_some()),
                     }
                 }
-                ParamName::Element { name, subscript } => read_element(ctx, name, subscript)
+                ParamName::Element { name, subscript } => read_element(ctx, name, subscript)?
                     .map_or(0, |value| char_count(&value, ctx.shell.utf8())),
                 name => ctx
                     .value(name)
@@ -1035,7 +1047,7 @@ fn expand_param<S: Shell>(
                 return Ok(());
             }
             if let ParamName::Element { name, subscript } = &exp.name {
-                let value = read_element(ctx, name, subscript).unwrap_or_default();
+                let value = read_element(ctx, name, subscript)?.unwrap_or_default();
                 let slice = substring(&value, *offset, *length, ctx.shell.utf8(), span)?;
                 out.push(slice.to_vec(), quoted, !quoted);
                 return Ok(());
@@ -1079,7 +1091,7 @@ fn expand_param<S: Shell>(
             let mut replace = |value: &mut Vec<u8>| {
                 *value = replace_value(value, &pattern, &replacement, mode, flags);
             };
-            map_parameter(ctx, &exp.name, quoted, out, &mut replace);
+            map_parameter(ctx, &exp.name, quoted, out, &mut replace)?;
             Ok(())
         }
         ParamOp::Case { how, pattern } => {
@@ -1092,11 +1104,11 @@ fn expand_param<S: Shell>(
             let mut convert = |value: &mut Vec<u8>| {
                 *value = convert_case(value, how, pattern.as_deref(), flags);
             };
-            map_parameter(ctx, &exp.name, quoted, out, &mut convert);
+            map_parameter(ctx, &exp.name, quoted, out, &mut convert)?;
             Ok(())
         }
         ParamOp::Value => {
-            substitute(&exp.name, quoted, ctx, out);
+            substitute(&exp.name, quoted, ctx, out)?;
             Ok(())
         }
         ParamOp::NamesPrefix { star } => {
@@ -1115,16 +1127,16 @@ fn expand_param<S: Shell>(
             Ok(())
         }
         ParamOp::UseDefault { word, colon } => {
-            let use_word = !ctx.is_set(&exp.name) || (*colon && !ctx.is_nonnull(&exp.name));
+            let use_word = !ctx.is_set(&exp.name)? || (*colon && !ctx.is_nonnull(&exp.name)?);
             if use_word {
                 expand_word_field(word, quoted, ctx, out)
             } else {
-                substitute(&exp.name, quoted, ctx, out);
+                substitute(&exp.name, quoted, ctx, out)?;
                 Ok(())
             }
         }
         ParamOp::UseAlternate { word, colon } => {
-            let use_word = ctx.is_set(&exp.name) && (!*colon || ctx.is_nonnull(&exp.name));
+            let use_word = ctx.is_set(&exp.name)? && (!*colon || ctx.is_nonnull(&exp.name)?);
             if use_word {
                 expand_word_field(word, quoted, ctx, out)
             } else {
@@ -1135,9 +1147,9 @@ fn expand_param<S: Shell>(
             }
         }
         ParamOp::AssignDefault { word, colon } => {
-            let assign = !ctx.is_set(&exp.name) || (*colon && !ctx.is_nonnull(&exp.name));
+            let assign = !ctx.is_set(&exp.name)? || (*colon && !ctx.is_nonnull(&exp.name)?);
             if !assign {
-                substitute(&exp.name, quoted, ctx, out);
+                substitute(&exp.name, quoted, ctx, out)?;
                 return Ok(());
             }
             let name = assignable_name(&exp.name)
@@ -1150,9 +1162,9 @@ fn expand_param<S: Shell>(
             Ok(())
         }
         ParamOp::Error { word, colon } => {
-            let fail = !ctx.is_set(&exp.name) || (*colon && !ctx.is_nonnull(&exp.name));
+            let fail = !ctx.is_set(&exp.name)? || (*colon && !ctx.is_nonnull(&exp.name)?);
             if !fail {
-                substitute(&exp.name, quoted, ctx, out);
+                substitute(&exp.name, quoted, ctx, out)?;
                 return Ok(());
             }
             let message = match word {
@@ -1412,7 +1424,7 @@ fn expand_transform<S: Shell>(
                 ParamName::Star => (ctx.shell.positional().to_vec(), true),
                 ParamName::Elements { name, star } => (array_values(ctx, name), *star),
                 ParamName::Element { name, subscript } => {
-                    let value = read_element(ctx, name, subscript).unwrap_or_default();
+                    let value = read_element(ctx, name, subscript)?.unwrap_or_default();
                     let bytes = prompt::expand_with_variables(&value, &prompt, ctx.shell);
                     out.push(bytes.into_bytes(), quoted, !quoted);
                     return Ok(());
@@ -1447,7 +1459,7 @@ fn expand_transform<S: Shell>(
                     // Unset is not empty: `${x@Q}` on an unset name is the
                     // empty string, while a set-but-empty one is `''`, so a
                     // re-read assigns something rather than nothing.
-                    let value = read_element(ctx, name, subscript)
+                    let value = read_element(ctx, name, subscript)?
                         .map(|value| apply_transform(value, transform))
                         .unwrap_or_default();
                     out.push(value, quoted, !quoted);
@@ -1518,7 +1530,12 @@ fn quote_for_reinput(value: &[u8]) -> Vec<u8> {
     out
 }
 
-fn substitute<S: Shell>(name: &ParamName, quoted: bool, ctx: &mut Ctx<'_, S>, out: &mut Expanded) {
+fn substitute<S: Shell>(
+    name: &ParamName,
+    quoted: bool,
+    ctx: &mut Ctx<'_, S>,
+    out: &mut Expanded,
+) -> Result<(), Error> {
     match name {
         ParamName::At => emit_at(ctx, quoted, out),
         ParamName::Star => emit_star(ctx, quoted, out),
@@ -1527,7 +1544,7 @@ fn substitute<S: Shell>(name: &ParamName, quoted: bool, ctx: &mut Ctx<'_, S>, ou
             emit_values(ctx, &values, *star, quoted, out);
         }
         ParamName::Element { name, subscript } => {
-            let value = read_element(ctx, name, subscript).unwrap_or_default();
+            let value = read_element(ctx, name, subscript)?.unwrap_or_default();
             out.push(value, quoted, !quoted);
         }
         _ => {
@@ -1535,6 +1552,7 @@ fn substitute<S: Shell>(name: &ParamName, quoted: bool, ctx: &mut Ctx<'_, S>, ou
             out.push(value, quoted, !quoted);
         }
     }
+    Ok(())
 }
 
 /// Emit a list expansion (`$@`/`$*` or `${a[@]}`/`${a[*]}`).
@@ -1771,7 +1789,7 @@ fn strip_parameter<S: Shell>(
     let pattern = expand_pattern(pattern, ctx)?;
     let flags = strip_flags(ctx);
     let mut strip = |value: &mut Vec<u8>| strip_value(value, &pattern, longest, prefix, flags);
-    map_parameter(ctx, &exp.name, quoted, out, &mut strip);
+    map_parameter(ctx, &exp.name, quoted, out, &mut strip)?;
     Ok(())
 }
 
@@ -1787,7 +1805,7 @@ fn map_parameter<S: Shell>(
     quoted: bool,
     out: &mut Expanded,
     transform: &mut impl FnMut(&mut Vec<u8>),
-) {
+) -> Result<(), Error> {
     match name {
         ParamName::At | ParamName::Star => {
             let mut values: Vec<Vec<u8>> = ctx.shell.positional().to_vec();
@@ -1804,7 +1822,7 @@ fn map_parameter<S: Shell>(
             emit_values(ctx, &values, *star, quoted, out);
         }
         ParamName::Element { name, subscript } => {
-            let mut value = read_element(ctx, name, subscript).unwrap_or_default();
+            let mut value = read_element(ctx, name, subscript)?.unwrap_or_default();
             transform(&mut value);
             out.push(value, quoted, !quoted);
         }
@@ -1814,6 +1832,7 @@ fn map_parameter<S: Shell>(
             out.push(value, quoted, !quoted);
         }
     }
+    Ok(())
 }
 
 /// `${x#pat}` / `${x%pat}` on one value.

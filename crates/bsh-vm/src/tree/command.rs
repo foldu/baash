@@ -570,13 +570,26 @@ impl Interp {
         for (index, word) in command.words.iter().enumerate() {
             let assignment_argument =
                 index > 0 && declaration && bsh_syntax::is_assignment_word(source, &word.span);
-            let mode = if assignment_argument {
-                Mode::Assignment
-            } else {
-                Mode::Command
-            };
             let before = argv.len();
-            argv.extend(expand_word_with(word, self, mode)?);
+            if assignment_argument {
+                // The operand of a declaration builtin arrives as one
+                // `name=value` word, but only the *value* is expanded as an
+                // assignment: `declare x=~/p` expands that tilde while
+                // `declare "x=~/p"` keeps it, and `declare a[1]=*` must not
+                // glob the subscript. So the name keeps its source text and
+                // the value goes through the assignment pipeline on its own.
+                match assignment_parts(source, word) {
+                    Some((name, value)) => {
+                        let value = expand_assignment(&value, self)?;
+                        let mut bytes = name.to_vec();
+                        bytes.extend_from_slice(&value);
+                        argv.push(bytes);
+                    }
+                    None => argv.extend(expand_word_with(word, self, Mode::Assignment)?),
+                }
+            } else {
+                argv.extend(expand_word_with(word, self, Mode::Command)?);
+            }
             if !awaiting_command || argv.len() == before {
                 continue;
             }
@@ -636,6 +649,10 @@ impl Interp {
                     self.report(crate::codes::ASSIGNMENT, 0..0, message);
                     Unwind::Exit(Status::FAILURE)
                 }
+                AssignmentFailure::Expansion(message) => {
+                    self.report(crate::codes::ARITHMETIC, 0..0, message);
+                    self.abort_expansion()
+                }
             };
         }
         self.restore_fds(saved);
@@ -661,8 +678,7 @@ impl Interp {
                         let evaluated = match crate::arith::eval(value, self) {
                             Ok(number) => number,
                             Err(message) => {
-                                self.report(crate::codes::ARITHMETIC, 0..0, message.clone());
-                                return Err(AssignmentFailure::Refused(message));
+                                return Err(AssignmentFailure::Expansion(message));
                             }
                         };
                         let number = if *append {
@@ -700,8 +716,7 @@ impl Interp {
                     value,
                     append,
                 } => {
-                    self.assign_element(name, subscript, *append, value)
-                        .map_err(AssignmentFailure::Refused)?;
+                    self.assign_element(name, subscript, *append, value)?;
                 }
                 AssignmentAction::Array {
                     name,
@@ -743,7 +758,7 @@ impl Interp {
         subscript: &[u8],
         append: bool,
         value: &[u8],
-    ) -> Result<(), String> {
+    ) -> Result<(), AssignmentFailure> {
         match self.state.vars.shape(name) {
             Some(ArrayShape::Associative) => {
                 let result = if append {
@@ -751,16 +766,17 @@ impl Interp {
                 } else {
                     self.state.vars.set_assoc(name, subscript, value)
                 };
-                result.map_err(|error| error.message())
+                result.map_err(|error| AssignmentFailure::Refused(error.message()))
             }
             _ => {
-                let index = crate::arith::eval(subscript, self)?;
+                let index =
+                    crate::arith::eval(subscript, self).map_err(AssignmentFailure::Expansion)?;
                 let result = if append {
                     self.state.vars.append_indexed(name, index, value)
                 } else {
                     self.state.vars.set_indexed(name, index, value)
                 };
-                result.map_err(|error| error.message())
+                result.map_err(|error| AssignmentFailure::Refused(error.message()))
             }
         }
     }
@@ -1730,7 +1746,7 @@ impl Interp {
 }
 
 /// How an assignment word failed.
-enum AssignmentFailure {
+pub(crate) enum AssignmentFailure {
     /// A variable the shell cannot write (`readonly`): fatal for a
     /// non-interactive shell.
     Readonly(String),
@@ -1739,9 +1755,24 @@ enum AssignmentFailure {
     Refused(String),
     /// An operation the shell refuses outright: stop with status 1.
     Fatal(String),
+    /// An arithmetic error while resolving an assignment target or an
+    /// integer value. bash treats it as an *expansion* failure, not an
+    /// assignment one: the current line is abandoned (and a non-interactive
+    /// shell exits) instead of running the rest of the command.
+    Expansion(String),
 }
 
 impl AssignmentFailure {
+    /// The message for the caller that only reports.
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            Self::Readonly(message)
+            | Self::Refused(message)
+            | Self::Fatal(message)
+            | Self::Expansion(message) => message,
+        }
+    }
+
     fn from_error(error: bsh_runtime::Error) -> Self {
         match error {
             bsh_runtime::Error::Readonly { .. } => Self::Readonly(error.message()),
@@ -1756,6 +1787,21 @@ impl AssignmentFailure {
 enum BuiltinBody<'a> {
     Vm(&'static super::builtins::VmBuiltin),
     Runtime(&'a bsh_runtime::BuiltinDef),
+}
+
+/// The `name=` text and the value word of a declaration operand.
+///
+/// `None` when the `=` is quoted (then the word is not an assignment at all,
+/// and the whole word is expanded as one value) or when the parts cannot be
+/// split. The name is returned as source bytes because a declaration's name is
+/// never expanded — `declare a[1]=x` keeps the literal subscript.
+fn assignment_parts<'a>(
+    source: &'a [u8],
+    word: &bsh_lang::Word,
+) -> Option<(&'a [u8], bsh_lang::Word)> {
+    let start = bsh_syntax::assignment_value_start(source, &word.span)?;
+    let (_, value) = word.split_unquoted(b'=', false)?;
+    Some((&source[word.span.start..start], value))
 }
 
 /// Whether `path` names a regular file with an execute bit set.

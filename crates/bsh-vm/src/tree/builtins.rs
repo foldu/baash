@@ -1083,8 +1083,8 @@ fn declare_operand(
             );
             return Err(DeclFailure::plain());
         }
-        if let Err(message) = interp.assign_element(variable, subscript, append, value) {
-            diagnose(interp, format!("{name}: {message}"));
+        if let Err(failure) = interp.assign_element(variable, subscript, append, value) {
+            diagnose(interp, format!("{name}: {}", failure.message()));
             return Err(DeclFailure::plain());
         }
         apply_declaration_attrs(interp, variable, flags).map_err(|_| DeclFailure::plain())?;
