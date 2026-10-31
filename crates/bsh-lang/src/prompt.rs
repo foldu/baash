@@ -978,6 +978,206 @@ fn short_host(host: &[u8]) -> &[u8] {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The default prompt
+// ---------------------------------------------------------------------------
+
+/// The fish-like prompt an interactive shell draws when `PS1` is untouched.
+///
+/// The shell's default `PS1` stays bash's `\s-\v\$ ` (the conformance suite
+/// reads it, and `${PS1@P}` decodes it), but the *rendered* prompt of an
+/// unmodified `PS1` is this instead:
+///
+/// ```text
+/// ~/src/bshell main !4 ?3
+/// ```
+///
+/// in this order, with a component's leading space omitted together with the
+/// component:
+///
+/// * `cwd`, with a leading `$HOME` abbreviated to `~.  The bytes are kept as
+///   bytes: a path that is not UTF-8 renders exactly, and nothing here is
+///   expanded a second time, so a `$` or `\` in a directory name stays literal.
+/// * the git branch from [`git_branch`], plain and unbracketed.
+/// * `!N` for `job_count` background children, only when `N > 0`.
+/// * `?N` for a non-zero `last_status`.
+///
+/// The result ends with one space, so typing starts after the prompt rather
+/// than against it. It is built directly rather than through `PS1` escapes:
+/// the paths and branch names are data, and the escape decoder (or the
+/// `promptvars` second pass) would reinterpret them.
+pub fn fish_prompt(
+    cwd: &[u8],
+    home: &[u8],
+    branch: Option<&[u8]>,
+    job_count: u32,
+    last_status: i32,
+) -> ExpandedPrompt {
+    let mut bytes = abbreviate_home(cwd, home);
+    if let Some(branch) = branch {
+        bytes.push(b' ');
+        bytes.extend_from_slice(branch);
+    }
+    if job_count > 0 {
+        bytes.extend_from_slice(format!(" !{job_count}").as_bytes());
+    }
+    if last_status != 0 {
+        bytes.extend_from_slice(format!(" ?{last_status}").as_bytes());
+    }
+    bytes.push(b' ');
+    ExpandedPrompt::from_bytes(bytes)
+}
+
+/// The branch the repository containing `cwd` has checked out, if any.
+///
+/// This is the default prompt's git segment and it never forks: walking up to
+/// find `.git` is `stat`, and the branch is a small file read, which is why the
+/// prompt can be exact on every line (`docs/prompt-watch.md` §2). A `.git`
+/// *file* is followed, because that is how a linked worktree and a submodule
+/// point at their real repository.
+///
+/// A symbolic `HEAD` outside `refs/heads/` is resolved through the loose ref,
+/// the worktree's `commondir`, and `packed-refs`, in that order; whatever it
+/// resolves to is shown as an abbreviated commit id. A detached `HEAD` is a
+/// raw object id and is abbreviated directly. Nothing in a file we cannot read
+/// is guessed at: the answer is `None`, and the prompt omits the branch.
+pub fn git_branch(cwd: &[u8]) -> Option<Vec<u8>> {
+    let git_dir = find_git_dir(&os_path(cwd))?;
+    let head = read_trimmed(&git_dir.join("HEAD"))?;
+    if let Some(name) = head.strip_prefix(b"ref: refs/heads/") {
+        return (!name.is_empty()).then(|| name.to_vec());
+    }
+    if let Some(reference) = head.strip_prefix(b"ref: ") {
+        return resolve_ref(&git_dir, reference).map(|commit| abbreviate_commit(&commit));
+    }
+    is_object_id(&head).then(|| abbreviate_commit(&head))
+}
+
+/// Walk up from `start` to the repository root, following a `.git` file.
+fn find_git_dir(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut at = Some(start);
+    while let Some(directory) = at {
+        let dot_git = directory.join(".git");
+        if dot_git.is_dir() {
+            return Some(dot_git);
+        }
+        if dot_git.is_file()
+            && let Some(target) = gitdir_pointer(&dot_git)
+            && target.is_dir()
+        {
+            return Some(target);
+        }
+        at = directory.parent();
+    }
+    None
+}
+
+/// The directory a `.git` file names: `gitdir: <path>`, relative to the file.
+fn gitdir_pointer(dot_git: &std::path::Path) -> Option<std::path::PathBuf> {
+    let contents = std::fs::read(dot_git).ok()?;
+    let contents = trim_ascii_end(&contents);
+    let target = contents.strip_prefix(b"gitdir:")?.trim_ascii_start();
+    if target.is_empty() {
+        return None;
+    }
+    let target = os_path(target);
+    if target.is_absolute() {
+        Some(target)
+    } else {
+        dot_git.parent().map(|parent| parent.join(target))
+    }
+}
+
+/// The object id a symbolic ref names.
+fn resolve_ref(git_dir: &std::path::Path, reference: &[u8]) -> Option<Vec<u8>> {
+    if let Some(commit) = read_loose_ref(git_dir, reference) {
+        return Some(commit);
+    }
+    let common = common_dir(git_dir);
+    if common != git_dir
+        && let Some(commit) = read_loose_ref(&common, reference)
+    {
+        return Some(commit);
+    }
+    for directory in [git_dir, common.as_path()] {
+        if let Some(commit) = read_packed_ref(directory, reference) {
+            return Some(commit);
+        }
+    }
+    None
+}
+
+/// `<git_dir>/<ref>`, when the ref is stored loose.
+fn read_loose_ref(git_dir: &std::path::Path, reference: &[u8]) -> Option<Vec<u8>> {
+    let relative = os_path(reference);
+    if relative.is_absolute() {
+        return None;
+    }
+    let contents = read_trimmed(&git_dir.join(relative))?;
+    is_object_id(&contents).then_some(contents)
+}
+
+/// A linked worktree's shared git directory, from `commondir`.
+fn common_dir(git_dir: &std::path::Path) -> std::path::PathBuf {
+    let Some(contents) = read_trimmed(&git_dir.join("commondir")) else {
+        return git_dir.to_path_buf();
+    };
+    if contents.is_empty() {
+        return git_dir.to_path_buf();
+    }
+    let path = os_path(&contents);
+    if path.is_absolute() {
+        path
+    } else {
+        git_dir.join(path)
+    }
+}
+
+/// A ref stored in `packed-refs`, by exact name.
+fn read_packed_ref(git_dir: &std::path::Path, reference: &[u8]) -> Option<Vec<u8>> {
+    let contents = std::fs::read(git_dir.join("packed-refs")).ok()?;
+    for line in contents.split(|&byte| byte == b'\n') {
+        if line.is_empty() || line[0] == b'#' || line[0] == b'^' {
+            continue;
+        }
+        let Some(space) = line.iter().position(|&byte| byte == b' ') else {
+            continue;
+        };
+        if line[space + 1..].trim_ascii() == reference {
+            let commit = trim_ascii_end(&line[..space]);
+            if is_object_id(commit) {
+                return Some(commit.to_vec());
+            }
+        }
+    }
+    None
+}
+
+/// A whole file read and stripped of the newline the ref formats end with.
+fn read_trimmed(path: &std::path::Path) -> Option<Vec<u8>> {
+    let contents = std::fs::read(path).ok()?;
+    let contents = trim_ascii_end(&contents);
+    (!contents.is_empty()).then(|| contents.to_vec())
+}
+
+fn trim_ascii_end(bytes: &[u8]) -> &[u8] {
+    let mut end = bytes.len();
+    while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
+        end -= 1;
+    }
+    &bytes[..end]
+}
+
+/// Whether `bytes` is a complete object id (SHA-1, or SHA-256 in a newer repo).
+fn is_object_id(bytes: &[u8]) -> bool {
+    matches!(bytes.len(), 40 | 64) && bytes.iter().all(u8::is_ascii_hexdigit)
+}
+
+/// The short form git prints by default.
+fn abbreviate_commit(commit: &[u8]) -> Vec<u8> {
+    commit[..commit.len().min(7)].to_vec()
+}
+
 fn abbreviate_home(cwd: &[u8], home: &[u8]) -> Vec<u8> {
     if home.len() <= 1 || !cwd.starts_with(home) {
         return cwd.to_vec();
@@ -1826,5 +2026,176 @@ mod tests {
         assert_eq!(tzif_offset(&data, 1999), Some((0, false)));
         assert_eq!(tzif_offset(&data, 2000), Some((3600, true)));
         assert_eq!(tzif_offset(&data, 10_000), Some((3600, true)));
+    }
+
+    // -----------------------------------------------------------------------
+    // The default prompt and its git branch
+    // -----------------------------------------------------------------------
+
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A fresh directory under the system temporary directory.
+    fn scratch(label: &str) -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "bsh-prompt-{}-{}-{label}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).expect("create scratch directory");
+        path
+    }
+
+    fn as_bytes(path: &std::path::Path) -> Vec<u8> {
+        os_bytes(path.as_os_str())
+    }
+
+    fn render(cwd: &[u8], home: &[u8], branch: Option<&[u8]>, jobs: u32, status: i32) -> Vec<u8> {
+        fish_prompt(cwd, home, branch, jobs, status).into_bytes()
+    }
+
+    #[test]
+    fn the_default_prompt_abbreviates_home_and_orders_the_segments() {
+        assert_eq!(
+            render(b"/home/ada/src/bshell", b"/home/ada", Some(b"main"), 4, 3),
+            b"~/src/bshell main !4 ?3 "
+        );
+        assert_eq!(
+            render(b"/home/ada", b"/home/ada", Some(b"main"), 0, 0),
+            b"~ main "
+        );
+    }
+
+    #[test]
+    fn a_path_outside_home_stays_absolute() {
+        assert_eq!(
+            render(b"/opt/bshell", b"/home/ada", None, 0, 0),
+            b"/opt/bshell "
+        );
+        // A `$HOME` prefix that is not at a path boundary is not abbreviated.
+        assert_eq!(
+            render(b"/home/adam/x", b"/home/ada", None, 0, 0),
+            b"/home/adam/x "
+        );
+    }
+
+    #[test]
+    fn counters_appear_only_when_non_zero() {
+        // Each component carries its own space, so no component leaves a
+        // double space behind.
+        assert_eq!(render(b"/x", b"/h", None, 2, 0), b"/x !2 ");
+        assert_eq!(render(b"/x", b"/h", None, 0, 1), b"/x ?1 ");
+        assert_eq!(render(b"/x", b"/h", Some(b"dev"), 0, 0), b"/x dev ");
+        assert_eq!(render(b"/x", b"/h", None, 0, 0), b"/x ");
+    }
+
+    #[test]
+    fn a_non_utf8_path_is_byte_exact() {
+        // Paths are bytes. Nothing in the default prompt decodes them, so an
+        // undecodable byte survives exactly and cannot become U+FFFD.
+        let cwd = b"/tmp/caf\xe9/\xff";
+        assert_eq!(render(cwd, b"/tmp", None, 0, 0), b"~/caf\xe9/\xff ");
+        assert_eq!(
+            render(b"/home/ada/\xff", b"/home/ada", Some(b"ma\xefn"), 0, 0),
+            b"~/\xff ma\xefn "
+        );
+    }
+
+    #[test]
+    fn branch_from_a_git_directory() {
+        let root = scratch("git-dir");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+        assert_eq!(git_branch(&as_bytes(&root)), Some(b"main".to_vec()));
+
+        // A nested directory finds the repository above it.
+        let nested = root.join("src/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(git_branch(&as_bytes(&nested)), Some(b"main".to_vec()));
+    }
+
+    #[test]
+    fn branch_from_a_worktree_git_file() {
+        // A linked worktree has a `.git` *file* naming the real git directory,
+        // which is where HEAD lives.
+        let root = scratch("worktree");
+        let git_dir = root.join("repo/.git/worktrees/wt");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("HEAD"), b"ref: refs/heads/feature/x\n").unwrap();
+        let worktree = root.join("checkout");
+        std::fs::create_dir_all(worktree.join("sub")).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            b"gitdir: ../repo/.git/worktrees/wt\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            git_branch(&as_bytes(&worktree.join("sub"))),
+            Some(b"feature/x".to_vec())
+        );
+    }
+
+    #[test]
+    fn a_detached_head_is_the_abbreviated_commit() {
+        let root = scratch("detached");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(
+            root.join(".git/HEAD"),
+            b"2f4a9c1d0e5b6a7c8d9e0f1a2b3c4d5e6f708192\n",
+        )
+        .unwrap();
+        assert_eq!(
+            git_branch(&as_bytes(&root)),
+            Some(b"2f4a9c1".to_vec()),
+            "a detached HEAD shows git's seven-character abbreviation"
+        );
+    }
+
+    #[test]
+    fn no_repository_has_no_branch() {
+        let root = scratch("no-repo");
+        assert_eq!(git_branch(&as_bytes(&root)), None);
+        assert_eq!(render(&as_bytes(&root), b"/h", None, 0, 0), {
+            let mut expected = as_bytes(&root);
+            expected.push(b' ');
+            expected
+        });
+    }
+
+    #[test]
+    fn a_symbolic_ref_outside_heads_resolves_through_packed_refs() {
+        // `HEAD` is allowed to name a tag or another ref; the prompt then shows
+        // the commit, which may only exist in `packed-refs` after `git gc`.
+        let root = scratch("packed");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), b"ref: refs/tags/v1\n").unwrap();
+        std::fs::write(
+            root.join(".git/packed-refs"),
+            b"# pack-refs with: peeled fully-peeled sorted\n\
+              a1b2c3d4e5f60718293a4b5c6d7e8f9012345678 refs/tags/v1\n\
+              ^a1b2c3d4e5f60718293a4b5c6d7e8f9012345678\n",
+        )
+        .unwrap();
+        assert_eq!(git_branch(&as_bytes(&root)), Some(b"a1b2c3d".to_vec()));
+    }
+
+    #[test]
+    fn a_loose_ref_wins_over_packed_refs() {
+        let root = scratch("loose-ref");
+        std::fs::create_dir_all(root.join(".git/refs/tags")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), b"ref: refs/tags/current\n").unwrap();
+        std::fs::write(
+            root.join(".git/refs/tags/current"),
+            b"1111111111111111111111111111111111111111\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".git/packed-refs"),
+            b"2222222222222222222222222222222222222222 refs/tags/current\n",
+        )
+        .unwrap();
+        assert_eq!(git_branch(&as_bytes(&root)), Some(b"1111111".to_vec()));
     }
 }

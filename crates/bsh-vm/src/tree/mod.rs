@@ -381,6 +381,11 @@ const MAX_FUNCTION_DEPTH: usize = 512;
 /// bash's default `PS1` for an interactive shell, as a value rather than the
 /// rendered text: `\s-\v\$ ` is what `declare -p PS1` shows and what
 /// `${PS1@P}` decodes. Measured against 5.3.20.
+///
+/// The *variable* keeps bash's value (the conformance suite reads it), while
+/// [`Interp::render_prompt`] substitutes the fish-like default when the value
+/// is still this one. A user who sets `PS1` at all — in the environment, an rc
+/// file or at the prompt — replaces it and gets exactly their template.
 const DEFAULT_PS1: &[u8] = b"\\s-\\v\\$ ";
 
 /// bash's default `PS2` for an interactive shell.
@@ -514,6 +519,21 @@ impl Interp {
         self.sync_specials();
     }
 
+    /// Whether the shell is still using its built-in `PS1`.
+    ///
+    /// The value is bash's default, which is what makes it distinguishable
+    /// from a user's template without tracking assignments: an interactive
+    /// shell starts with it, and the environment and the startup file
+    /// overwrite it when they define `PS1`. The REPL uses this to leave its
+    /// legacy `[branch]` segment off the fish-like default, which already
+    /// contains the branch.
+    pub fn uses_default_prompt(&self) -> bool {
+        self.state
+            .vars
+            .scalar(b"PS1")
+            .is_some_and(|value| value == DEFAULT_PS1)
+    }
+
     /// Render a `PS1`/`PS2` template the way the interactive prompt needs it.
     ///
     /// This is the shared expander with the shell as its second-pass host, so
@@ -521,10 +541,29 @@ impl Interp {
     /// The last status is put back afterwards: bash's prompt expansion does
     /// not change `$?` even though it may run commands (measured against
     /// 5.3.20 with `PS1='$(false)$ '`).
+    ///
+    /// The stock `PS1` is the one exception: it renders as the fish-like
+    /// [`bsh_lang::prompt::fish_prompt`] instead of bash's `bsh-0.0$ `. That
+    /// prompt is built from data rather than decoded from a template, so a
+    /// directory or branch containing `$`, a backslash or an escape-looking
+    /// sequence is painted literally and cannot be expanded twice. The
+    /// `PS1` *variable* is untouched, so `${PS1@P}` and `$PS1` keep the value
+    /// the conformance suite expects.
     pub fn render_prompt(&mut self, template: &[u8]) -> bsh_lang::prompt::ExpandedPrompt {
         let context = self.repl_prompt_context();
         let status = self.state.vars.last_status();
-        let rendered = bsh_lang::prompt::expand_with_variables(template, &context, self);
+        let rendered = if template == DEFAULT_PS1 {
+            let branch = bsh_lang::prompt::git_branch(&context.cwd);
+            bsh_lang::prompt::fish_prompt(
+                &context.cwd,
+                &context.home,
+                branch.as_deref(),
+                context.job_count,
+                status.0,
+            )
+        } else {
+            bsh_lang::prompt::expand_with_variables(template, &context, self)
+        };
         self.state.vars.set_last_status(status);
         self.sync_specials();
         rendered

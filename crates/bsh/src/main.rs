@@ -667,6 +667,11 @@ fn refresh_prompt(
     run_prompt_command(shell);
     let primary = prompt_template(shell, b"PS1").unwrap_or_default();
     let secondary = prompt_template(shell, b"PS2").unwrap_or_else(|| b"> ".to_vec());
+    // The stock prompt already contains the branch, inline and in the
+    // cwd → branch → counters order. The legacy segment is a bracketed suffix,
+    // so appending it there would show the branch twice and out of order; it
+    // stays for user-defined `PS1`s only.
+    let stock_prompt = shell.uses_default_prompt();
     let primary = shell.render_prompt(&primary);
     let secondary = shell.render_prompt(&secondary);
     // The REPL owns the live segment: `PS1` and `PROMPT_COMMAND` see the prompt
@@ -674,12 +679,12 @@ fn refresh_prompt(
     // because the bytes come from a cache (`docs/prompt-watch.md` §3). The
     // segment is plain text, so it adds no `\[`/`\]` non-printing range yet.
     let primary = match segment {
-        Some(segment) => {
+        Some(segment) if !stock_prompt => {
             let mut bytes = primary.into_bytes();
             bytes.extend_from_slice(segment);
             bsh_repl::ExpandedPrompt::from_bytes(bytes)
         }
-        None => primary,
+        _ => primary,
     };
     // The completion engine reads the same state the prompt does, so it is
     // refreshed here: `PROMPT_COMMAND` may have defined a function or a
@@ -776,18 +781,26 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
         if let Ok(index) = index_rx.try_recv() {
             commands.install_index(index);
         }
-        // The segment is refreshed from a cache: the branch is one small file
-        // read, and the dirty count comes from a worker's `git status`.
-        let cwd = shell
-            .state()
-            .vars
-            .scalar(b"PWD")
-            .map(bsh_sys::os::path_from_bytes)
-            .or_else(|| std::env::current_dir().ok());
-        if let Some(cwd) = cwd {
-            git.tick(&cwd);
-        }
-        let segment = git.render().map(<[u8]>::to_vec);
+        // The segment belongs to user-defined prompts. The stock fish-like
+        // prompt carries the branch inline and must not put a `git status`
+        // worker (or a duplicate branch) behind itself.
+        let stock_prompt = shell.uses_default_prompt();
+        let segment = if stock_prompt {
+            None
+        } else {
+            // The segment is refreshed from a cache: the branch is one small
+            // file read, and the dirty count comes from a worker's `git status`.
+            let cwd = shell
+                .state()
+                .vars
+                .scalar(b"PWD")
+                .map(bsh_sys::os::path_from_bytes)
+                .or_else(|| std::env::current_dir().ok());
+            if let Some(cwd) = cwd {
+                git.tick(&cwd);
+            }
+            git.render().map(<[u8]>::to_vec)
+        };
         refresh_prompt(shell, &mut editor, &engine, segment.as_deref());
         // `PROMPT_COMMAND='exit'` leaves the shell before the prompt is drawn.
         if let Some(requested) = shell.state().take_exit_request() {
