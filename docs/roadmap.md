@@ -1,7 +1,7 @@
-# Roadmap: the 441-case gap
+# Roadmap: the 438-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2133/2787** (2082 strict). bash passes 2574/2787 on the same run, so 441
+now **2136/2787** (2085 strict). bash passes 2574/2787 on the same run, so 438
 cases are things bash does and we do not.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
@@ -150,8 +150,8 @@ its keep, `zsh` emulation.
 
 ## Tranche 4 — the measured queue (after indirect expansion)
 
-Measured with `bsh-spec --json` on the current tree: 2133/2787 total, 2082
-strict, 654 failures, of which 441 are cases bash passes and 213 are cases
+Measured with `bsh-spec --json` on the current tree: 2136/2787 total, 2085
+strict, 651 failures, of which 438 are cases bash passes and 213 are cases
 bash fails too (not worth chasing). Ordered by cases per unit of work; every
 entry names the suite file that measures it.
 
@@ -160,7 +160,9 @@ entry names the suite file that measures it.
 - [x] `${!prefix@}` / `${!prefix*}` and `${x@a}` — `var-op-bash` 15/26 -> 22/26.
       `names()` and `attributes()` on the `Vars` seam; arrays repeat the
       attribute per element.
-- [x] `$-` and invocation flags — `sh-options` 20/39 -> 29/39, `sh-usage`
+- [x] `noclobber` (`set -C`): `>` refuses an existing regular file, `>|`
+      overrides it, and devices/FIFOs stay writable — `sh-options` 29/39 -> 32/39.
+- [x] `$-` and invocation flags — `sh-options` 20/39 -> 32/39, `sh-usage`
       11/24 -> 23/24. `$-` lists only options that differ from the profile,
       `i` comes from the interactive path, and `shopt` gained the `set -o`
       table (`-o`, `-p -o`, `-q`).

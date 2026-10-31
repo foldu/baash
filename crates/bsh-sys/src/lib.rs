@@ -140,6 +140,8 @@ pub mod flags {
     pub const TRUNC: c_int = libc::O_TRUNC;
     /// Append to the file.
     pub const APPEND: c_int = libc::O_APPEND;
+    /// Fail when the file already exists (`set -C`).
+    pub const EXCL: c_int = libc::O_EXCL;
 }
 
 // Signal numbers.

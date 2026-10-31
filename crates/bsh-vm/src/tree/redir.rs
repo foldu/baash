@@ -247,7 +247,12 @@ impl Interp {
                     // bash's obsolete `>&file` means `&>file`; `<&file` is an
                     // error because there is nothing to duplicate.
                     if redirect.op == RedirectOp::DupWrite {
-                        steps.push(open_step(&word, RedirectOp::Write, 1)?);
+                        steps.push(open_step(
+                            &word,
+                            RedirectOp::Write,
+                            1,
+                            self.state.opts.noclobber,
+                        )?);
                         steps.push(Step::Dup { from: 1, to: 2 });
                         continue;
                     }
@@ -265,12 +270,12 @@ impl Interp {
                         RedirectOp::Append
                     };
                     let path = self.redirect_path(redirect)?;
-                    steps.push(open_step(&path, op, 1)?);
+                    steps.push(open_step(&path, op, 1, self.state.opts.noclobber)?);
                     steps.push(Step::Dup { from: 1, to: 2 });
                 }
                 op => {
                     let path = self.redirect_path(redirect)?;
-                    steps.push(open_step(&path, op, target)?);
+                    steps.push(open_step(&path, op, target, self.state.opts.noclobber)?);
                 }
             }
         }
@@ -381,13 +386,27 @@ fn default_fd(op: RedirectOp, explicit: Option<u32>) -> RawFd {
 }
 
 /// Build an `Open` step for `path` under `op`, onto `to`.
-fn open_step(path: &[u8], op: RedirectOp, to: RawFd) -> Result<Step, ()> {
+fn open_step(path: &[u8], op: RedirectOp, to: RawFd, noclobber: bool) -> Result<Step, ()> {
+    // `set -C` protects *regular* files. A device or FIFO that already exists
+    // is still writable in bash (`> /dev/null` must keep working), so the
+    // exclusive flag only goes on when the target is absent or regular.
+    let regular_or_absent = match std::fs::metadata(bsh_sys::os::path_from_bytes(path)) {
+        Ok(metadata) => metadata.is_file(),
+        Err(_) => true,
+    };
+    let exclusive =
+        noclobber && matches!(op, RedirectOp::Write | RedirectOp::Both) && regular_or_absent;
     let (flags, _) = match op {
         RedirectOp::Read => (bsh_sys::flags::RDONLY, ()),
-        RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Both => (
-            bsh_sys::flags::WRONLY | bsh_sys::flags::CREAT | bsh_sys::flags::TRUNC,
-            (),
-        ),
+        RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Both => {
+            let mut flags = bsh_sys::flags::WRONLY | bsh_sys::flags::CREAT | bsh_sys::flags::TRUNC;
+            if exclusive {
+                // `set -C`: `>` refuses an existing file; `>|` is the explicit
+                // override and never sets this.
+                flags |= bsh_sys::flags::EXCL;
+            }
+            (flags, ())
+        }
         RedirectOp::Append | RedirectOp::BothAppend => (
             bsh_sys::flags::WRONLY | bsh_sys::flags::CREAT | bsh_sys::flags::APPEND,
             (),
