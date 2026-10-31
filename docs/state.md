@@ -52,13 +52,13 @@ a stale brief has already cost two wrong scopes (arrays: 54 vs real; namerefs:
 | failing | 607 |
 | timeouts | 0 |
 | of the whole suite (3971 cases) | 54.9 % |
-| as a fraction of bash's score | 2180 / 2574 = 84.7 % |
-| share of the bash gap closed since 1013 | 1167 / 1561 = 74.8 % |
+| as a fraction of bash's score | 2180 / 2577 = 84.6 % |
+| share of the bash gap closed since 1013 | 1167 / 1564 = 74.6 % |
 | our test count | 1240 |
 
 Measured with `bash 5.3.20` as the comparison shell, harness forced to
 `LC_ALL=C` (bash scores *worse* under `C.UTF-8`: 2574 → 2435, so the C locale
-is the fair denominator). We pass 213 cases bash fails; bash passes 394 we fail.
+is the fair denominator). We pass 67 cases bash fails; bash passes 464 we fail.
 
 **1184 skipped** cases: 745 from the ysh-only suite files, 417 marked
 `our_shell: ysh`, 22 needing a `python2` helper we do not provide. 100 % is not
