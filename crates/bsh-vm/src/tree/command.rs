@@ -303,6 +303,51 @@ impl Interp {
             return Unwind::Exit(exit);
         }
 
+        // 3. `set -x` prints the expanded command before it runs; with no
+        //    command word each assignment is its own traced command, which is
+        //    also the order the assignments are applied in.
+        if self.state.opts.xtrace {
+            let raw: Vec<Vec<u8>> = array_literals
+                .iter()
+                .map(|literal| literal.raw.clone())
+                .collect();
+            if argv.is_empty() {
+                for action in &actions {
+                    match action {
+                        AssignmentAction::Scalar {
+                            name,
+                            value,
+                            append,
+                        } => {
+                            let mut word = name.clone();
+                            if *append {
+                                word.push(b'+');
+                            }
+                            word.push(b'=');
+                            word.extend_from_slice(value);
+                            super::xtrace::trace(self, &[word], &[]);
+                        }
+                        // An array literal is source text; its raw form is
+                        // what the reference shell traces.
+                        AssignmentAction::Array { name, .. } => {
+                            if let Some(literal) =
+                                array_literals.iter().find(|literal| &literal.name == name)
+                            {
+                                super::xtrace::trace(
+                                    self,
+                                    std::slice::from_ref(&literal.raw),
+                                    std::slice::from_ref(&literal.raw),
+                                );
+                            }
+                        }
+                        AssignmentAction::Element { .. } => {}
+                    }
+                }
+            } else {
+                super::xtrace::trace(self, &argv, &raw);
+            }
+        }
+
         // 3. No command word: the assignments persist, the redirections are
         //    scoped to this command (POSIX §2.9.1.4).
         if argv.is_empty() {

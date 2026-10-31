@@ -1,7 +1,7 @@
-# Roadmap: the 555-case gap
+# Roadmap: the 527-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2019/2787** (1965 strict). bash passes 2574/2787 on the same run, so 555
+now **2047/2787** (1993 strict). bash passes 2574/2787 on the same run, so 527
 cases are things bash does and we do not.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
@@ -150,8 +150,8 @@ its keep, `zsh` emulation.
 
 ## Tranche 4 — the measured queue (after indirect expansion)
 
-Measured with `bsh-spec --json` on the current tree: 2019/2787 total, 1965
-strict, 768 failures, of which 555 are cases bash passes and 213 are cases
+Measured with `bsh-spec --json` on the current tree: 2047/2787 total, 1993
+strict, 740 failures, of which 527 are cases bash passes and 213 are cases
 bash fails too (not worth chasing). Ordered by cases per unit of work; every
 entry names the suite file that measures it.
 

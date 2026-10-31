@@ -260,6 +260,35 @@ pub fn umask(_mask: u32) -> Option<u32> {
     None
 }
 
+/// Whether the C library knows `name` as an `LC_CTYPE` locale.
+///
+/// `newlocale` is used instead of `setlocale` so asking the question does not
+/// change the process locale the regex engine and globbing depend on.
+#[cfg(unix)]
+pub fn locale_exists(name: &[u8]) -> bool {
+    let Ok(name) = std::ffi::CString::new(name) else {
+        return false;
+    };
+    // SAFETY: `name` is a valid NUL-terminated string, the base locale is
+    // null (the current one is not modified), and `freelocale` is given back
+    // exactly the object `newlocale` returned.
+    unsafe {
+        let locale = libc::newlocale(libc::LC_CTYPE_MASK, name.as_ptr(), std::ptr::null_mut());
+        if locale.is_null() {
+            false
+        } else {
+            libc::freelocale(locale);
+            true
+        }
+    }
+}
+
+/// Locale existence is a Unix question; Windows accepts the name.
+#[cfg(windows)]
+pub fn locale_exists(_name: &[u8]) -> bool {
+    true
+}
+
 /// Paths and OS strings in shell bytes.
 ///
 /// Shell strings are bytes; `OsStr` is only bytes on Unix. Every crate that

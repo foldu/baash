@@ -76,6 +76,10 @@ struct ShellFlags {
     rcfile: Option<std::path::PathBuf>,
     /// `--norc`: read no startup file at all.
     norc: bool,
+    /// `--eval FILE`: run these files, in order, before the command or script.
+    /// The positional parameters are the ones the command text will get, so
+    /// `bsh --eval setup.sh -c 'echo "$@"' name a b` sees `a b` in both.
+    eval: Vec<std::path::PathBuf>,
 }
 
 impl ShellFlags {
@@ -155,13 +159,32 @@ fn parse_args(args: &[OsString]) -> Result<(Mode, bool, ShellFlags), String> {
     let mut interactive = false;
     let mut flags = ShellFlags::default();
     let mut positional: Vec<Vec<u8>> = Vec::new();
+    // `--`, `-`, the script name and the command text all end option
+    // processing: everything after them is a positional argument, even when it
+    // looks like a flag (`bsh script.sh --help` must pass `--help` on).
+    let mut options_done = false;
+    // `-c` does not take the text it will run from the next word directly:
+    // bash keeps parsing options after it, so `-c -x 'echo hi'` traces the
+    // command and `-c -z` is an invalid option. The first word that is not an
+    // option becomes the command text once `-c` has been seen.
+    let mut command_pending = false;
 
     while index < args.len() {
         let argument = bytes(&args[index]);
+        if options_done || command.is_some() || !positional.is_empty() {
+            if command_pending && command.is_none() && positional.is_empty() {
+                command = Some(argument);
+            } else {
+                positional.push(argument);
+            }
+            index += 1;
+            continue;
+        }
         match argument.as_slice() {
             b"-h" | b"--help" => return Ok((Mode::Help, false, ShellFlags::default())),
             b"-V" | b"--version" => return Ok((Mode::Version, false, ShellFlags::default())),
             b"--highlight" => highlight = true,
+            b"--interactive" => interactive = true,
             b"--lint" => {
                 return Ok((
                     Mode::Lint(source_from(&positional, &mut None)?),
@@ -169,37 +192,10 @@ fn parse_args(args: &[OsString]) -> Result<(Mode, bool, ShellFlags), String> {
                     ShellFlags::default(),
                 ));
             }
-            b"-i" | b"--interactive" => interactive = true,
-            b"-n" => parse_only = true,
-            b"-c" => {
-                index += 1;
-                let Some(text) = args.get(index) else {
-                    return Err("-c requires an argument".to_owned());
-                };
-                command = Some(bytes(text));
-            }
-            b"-s" => {}
-            b"-o" | b"+o" => {
-                let on = argument[0] == b'-';
-                index += 1;
-                let Some(name) = args.get(index) else {
-                    return Err(format!("{}o requires an argument", char::from(argument[0])));
-                };
-                let name = bytes(name);
-                if on {
-                    flags.set.push(FlagSpec::Named(name));
-                } else {
-                    flags.clear.push(FlagSpec::Named(name));
-                }
-            }
-            b"--" => {
-                index += 1;
-                while index < args.len() {
-                    positional.push(bytes(&args[index]));
-                    index += 1;
-                }
-                break;
-            }
+            // `-` stops flag processing too, and is not a script name: the
+            // next argument is. A lone `-` with nothing after it reads stdin.
+            b"--" => options_done = true,
+            b"-" => options_done = true,
             b"--rcfile" => {
                 index += 1;
                 let Some(path) = args.get(index) else {
@@ -208,6 +204,17 @@ fn parse_args(args: &[OsString]) -> Result<(Mode, bool, ShellFlags), String> {
                 flags.rcfile = Some(std::path::PathBuf::from(path));
             }
             b"--norc" => flags.norc = true,
+            b"--eval" => {
+                index += 1;
+                let Some(path) = args.get(index) else {
+                    return Err("--eval requires a path".to_string());
+                };
+                flags.eval.push(std::path::PathBuf::from(path));
+            }
+            // A login shell reads profile files this shell does not have;
+            // accepting the flag keeps `bsh -l` (and `env -i bsh -lc …`)
+            // working instead of failing on an unknown option.
+            b"--login" => {}
             other if other.starts_with(b"--") => {
                 // Every long option this shell has is matched above; the rest
                 // are errors rather than a bundle of `set` letters.
@@ -216,48 +223,75 @@ fn parse_args(args: &[OsString]) -> Result<(Mode, bool, ShellFlags), String> {
                     String::from_utf8_lossy(other)
                 ));
             }
-            other @ (b"-O" | b"+O") => {
-                // `-O extglob` is how bash lets a *script* be parsed with
-                // extglob on. The decision is parse-time, so it has to be a
-                // command-line flag, not a `shopt` the file itself runs.
-                index += 1;
-                let Some(name) = args.get(index) else {
-                    return Err(format!(
-                        "{} requires an option name",
-                        String::from_utf8_lossy(other)
-                    ));
-                };
-                let name = bytes(name);
-                if !bsh_runtime::Opts::is_shopt_name(&name) {
-                    return Err(format!(
-                        "unknown shopt option `{}`",
-                        String::from_utf8_lossy(&name)
-                    ));
-                }
-                if other == b"-O" {
-                    flags.shopt_set.push(name);
-                } else {
-                    flags.shopt_clear.push(name);
-                }
-            }
             other if other.len() > 1 && (other[0] == b'-' || other[0] == b'+') => {
-                // A bundle of `set` letters: `-eu`, `+x`. The letters this CLI
-                // handles itself were matched above, so anything here is a
-                // shell option and is validated by `Opts`.
+                // A bundle of letters: `-eu`, `+x`, `-oo errexit`. Each `o`/`O`
+                // takes the *next argument* as its name, even when it is
+                // attached in the same word, which is why `-oo errexit noglob`
+                // sets both options.
                 let on = other[0] == b'-';
                 for letter in &other[1..] {
-                    if on {
-                        flags.set.push(FlagSpec::Short(*letter));
-                    } else {
-                        flags.clear.push(FlagSpec::Short(*letter));
+                    match letter {
+                        // Accepted and ignored: login, and `-s` (read stdin,
+                        // which is already the default without a script name).
+                        b'l' | b's' => {}
+                        b'c' => command_pending = true,
+                        b'i' => interactive = true,
+                        b'n' => parse_only = true,
+                        b'o' | b'O' => {
+                            index += 1;
+                            let Some(name) = args.get(index) else {
+                                return Err(format!(
+                                    "{} requires an argument",
+                                    char::from(*letter)
+                                ));
+                            };
+                            let name = bytes(name);
+                            if *letter == b'O' {
+                                // `-O extglob` is how bash lets a *script* be
+                                // parsed with extglob on: the decision is
+                                // parse-time, so it has to be a command-line
+                                // flag rather than a `shopt` the file runs.
+                                if !bsh_runtime::Opts::is_shopt_name(&name) {
+                                    return Err(format!(
+                                        "unknown shopt option `{}`",
+                                        String::from_utf8_lossy(&name)
+                                    ));
+                                }
+                                if on {
+                                    flags.shopt_set.push(name);
+                                } else {
+                                    flags.shopt_clear.push(name);
+                                }
+                            } else if on {
+                                flags.set.push(FlagSpec::Named(name));
+                            } else {
+                                flags.clear.push(FlagSpec::Named(name));
+                            }
+                        }
+                        short => {
+                            if on {
+                                flags.set.push(FlagSpec::Short(*short));
+                            } else {
+                                flags.clear.push(FlagSpec::Short(*short));
+                            }
+                        }
                     }
                 }
             }
-            _ => positional.push(argument),
+            _ => {
+                if command_pending && command.is_none() {
+                    command = Some(argument);
+                } else {
+                    positional.push(argument);
+                }
+            }
         }
         index += 1;
     }
 
+    if command_pending && command.is_none() {
+        return Err("-c requires an argument".to_string());
+    }
     if highlight {
         return Ok((Mode::Highlight, false, flags));
     }
@@ -325,6 +359,12 @@ fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
             let from_stdin = matches!(source, Source::Stdin);
             let repl = from_stdin && stdin_tty;
             let interactive = interactive_flag || repl;
+            // `--rcfile` is an interactive-shell option. bash silently ignores
+            // it otherwise, which hides a typo'd wrapper script; say so, but
+            // only when the file is really not read.
+            if !interactive && flags.rcfile.is_some() {
+                eprintln!("bsh: warning: --rcfile is only read by interactive shells");
+            }
             let mut shell = shell(interactive, &flags);
             // bash reads a startup file only for an interactive shell, and
             // `--rcfile` replaces the default rather than adding to it.
@@ -335,6 +375,24 @@ fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
                 // piped `-i` must not depend on (or write to) the user's data
                 // directory, which is what keeps conformance deterministic.
                 shell.initialize_history(repl);
+            }
+            if !flags.eval.is_empty() {
+                // The eval files run in the same shell, so `$?` carries the
+                // last one's status into the command; `execute` then resets
+                // `$0`/`$@` for the command itself.
+                let arguments = match &source {
+                    // `argv[0]` is the name the command text gets, not a
+                    // positional parameter.
+                    Source::Command(_, argv) => argv.get(1..).unwrap_or(&[]).to_vec(),
+                    Source::File(_, argv) => argv.clone(),
+                    Source::Stdin => Vec::new(),
+                };
+                for path in &flags.eval {
+                    let _ = execute(
+                        &mut shell,
+                        Source::File(bsh_sys::os::bytes_from_os(path), arguments.clone()),
+                    );
+                }
             }
             if repl {
                 run_repl_on_runtime(&mut shell)
@@ -395,6 +453,19 @@ fn shell(interactive: bool, flags: &ShellFlags) -> Interp {
     // The one place that knows it is running for a user rather than a test:
     // character widths come from the environment here and nowhere else.
     shell.detect_locale();
+    // bash and osh warn once when the environment names a locale the C library
+    // does not know; without the warning the fallback to the C locale is
+    // invisible, and globbing quietly changes behaviour.
+    let locale = std::env::var_os("LC_ALL").or_else(|| std::env::var_os("LC_CTYPE"));
+    if let Some(locale) = locale {
+        let name = bsh_sys::os::bytes_from_os(&locale);
+        if !name.is_empty() && !bsh_sys::locale_exists(&name) {
+            eprintln!(
+                "bsh: warning: {}: invalid locale",
+                String::from_utf8_lossy(&name)
+            );
+        }
+    }
     if let Err(message) = flags.apply(&mut shell.state().opts) {
         eprintln!("bsh: {message}");
         eprintln!("Try 'bsh --help' for more information.");

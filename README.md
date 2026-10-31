@@ -14,13 +14,13 @@ comparable.
 
 | | passing | of 2787 |
 | --- | ---: | ---: |
-| `bsh`, any `## OK <shell>` alternative | **2019** | 72.4% |
-| `bsh`, strict (primary expectation only) | **1965** | 70.5% |
+| `bsh`, any `## OK <shell>` alternative | **2047** | 73.4% |
+| `bsh`, strict (primary expectation only) | **1993** | 71.5% |
 | bash 5.3.20, on the same run | 2574 | 92.4% |
 
 54 of the passing cases pass only because a per-shell `## OK …` alternative
-matched, which is the difference between the two `bsh` rows. bash passes 555
-cases we do not, so we pass 78.4% of what bash passes. Both numbers live in
+matched, which is the difference between the two `bsh` rows. bash passes 527
+cases we do not, so we pass 79.5% of what bash passes. Both numbers live in
 `crates/bsh-spec/baseline.txt`, and CI fails if either drops below it.
 
 Conformance is measured but no longer the priority: interactive use comes

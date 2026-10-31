@@ -133,6 +133,7 @@ mod scope;
 mod traps;
 mod umask;
 mod words;
+mod xtrace;
 
 pub use eval::TrapKind;
 
@@ -468,6 +469,10 @@ impl Interp {
         // counts from there; a script that never mentions it still needs the
         // value (`echo $OPTIND` is `1`, not empty).
         let _ = interp.state.vars.assign_scalar(b"OPTIND", b"1");
+        // `PS4` has a default in bash, not merely a fallback in the tracer: a
+        // script that never sets it still traces with `+ `, while `unset PS4`
+        // makes the prefix empty. The environment import can replace it.
+        let _ = interp.state.vars.assign_scalar(b"PS4", b"+ ");
         // `$?`, `$$` and `$-` must answer before the first command runs.
         interp.sync_specials();
         // bash turns history recording on for an interactive shell (the
