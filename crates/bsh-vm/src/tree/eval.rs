@@ -724,6 +724,13 @@ impl Interp {
         // synchronously and puts the flag back afterwards.
         let deferred = std::mem::replace(&mut self.defer_next_spawn, false);
         let scope = self.open_scope();
+        // bash resets `errexit` inside a command substitution: a failure in the
+        // body contributes to the substitution's status and the rest of the body
+        // still runs. `shopt -s inherit_errexit` opts into the other behaviour,
+        // and a `set -e` written by the body itself still applies.
+        if !self.state.opts.inherit_errexit {
+            self.state.opts.errexit = false;
+        }
         // The body writes to the file through descriptor 1, exactly as it would
         // through a pipe: built-ins write with `write_fd`, and an external
         // command inherits the descriptor through its spawn plan.

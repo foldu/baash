@@ -582,40 +582,37 @@ impl Opts {
     ///
     /// `i` (interactive) is not an option and is added by the caller if it
     /// wants it; POSIX leaves the letter set implementation-defined.
-    /// The value `SHELLOPTS` should have: enabled `set -o` options, in table
-    /// order, colon-separated.
+    /// The value `SHELLOPTS` should have: enabled `set -o` options,
+    /// alphabetically, colon-separated.
     ///
     /// It is a *derived* variable, not stored state — bash recomputes it, and
     /// storing a copy is how a shell ends up with a `SHELLOPTS` that disagrees
-    /// with `set -o`.
+    /// with `set -o`. bash spells the shared option `interactive-comments` here
+    /// and `interactive_comments` in `shopt`; the hyphen is the `set -o`
+    /// spelling this table has to reproduce.
     pub fn shellopts(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        for option in self.options(OptionKind::SetO) {
-            if !option.on {
-                continue;
-            }
-            if !out.is_empty() {
-                out.push(b':');
-            }
-            out.extend_from_slice(option.name.as_bytes());
-        }
-        out
+        let mut names: Vec<&str> = self
+            .options(OptionKind::SetO)
+            .filter(|option| option.on)
+            .map(|option| match option.name {
+                "interactive_comments" => "interactive-comments",
+                name => name,
+            })
+            .collect();
+        names.sort_unstable();
+        names.join(":").into_bytes()
     }
 
-    /// The value `BASHOPTS` should have: enabled `shopt` options, in table
-    /// order, colon-separated.
+    /// The value `BASHOPTS` should have: enabled `shopt` options,
+    /// alphabetically, colon-separated.
     pub fn bashopts(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        for option in self.options(OptionKind::Shopt) {
-            if !option.on {
-                continue;
-            }
-            if !out.is_empty() {
-                out.push(b':');
-            }
-            out.extend_from_slice(option.name.as_bytes());
-        }
-        out
+        let mut names: Vec<&str> = self
+            .options(OptionKind::Shopt)
+            .filter(|option| option.on)
+            .map(|option| option.name)
+            .collect();
+        names.sort_unstable();
+        names.join(":").into_bytes()
     }
 
     /// The value `$-` should have: enabled single-letter `set` options, in

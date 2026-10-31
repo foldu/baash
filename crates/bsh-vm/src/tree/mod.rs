@@ -495,10 +495,15 @@ impl Interp {
         // POSIX's default field separators, and the option list a script can
         // read (`SHELLOPTS` is non-empty in every real shell).
         let _ = interp.state.vars.assign_scalar(b"IFS", b" \t\n");
-        let _ = interp
-            .state
-            .vars
-            .assign_scalar(b"SHELLOPTS", b"braceexpand:hashall");
+        // Both option lists are derived from the table (`Opts::shellopts`),
+        // and both are readonly for scripts; `refresh_option_lists` keeps them
+        // current after every command.
+        let shellopts = interp.state.opts.shellopts();
+        let _ = interp.state.vars.assign_scalar(b"SHELLOPTS", &shellopts);
+        let bashopts = interp.state.opts.bashopts();
+        let _ = interp.state.vars.assign_scalar(b"BASHOPTS", &bashopts);
+        let _ = interp.state.vars.mark_readonly(b"SHELLOPTS");
+        let _ = interp.state.vars.mark_readonly(b"BASHOPTS");
         // Read-only identity variables bash provides: the environment cannot
         // override them, and a script cannot assign them.
         if let Some(uid) = bsh_sys::os::own_uid() {
@@ -539,6 +544,9 @@ impl Interp {
             // that reads `$PS1` from an interactive shell sees bash's value.
             let _ = interp.state.vars.assign_scalar(b"PS1", DEFAULT_PS1);
             let _ = interp.state.vars.assign_scalar(b"PS2", DEFAULT_PS2);
+            // `emacs` and `history` were turned on just above; the option lists
+            // must include them before the first prompt is drawn.
+            interp.refresh_option_lists();
         }
         interp
     }
@@ -637,6 +645,26 @@ impl Interp {
             entries.push(entry);
         }
         self.state.vars.import_envp(&entries);
+        // bash applies exported option lists from the environment: that is how
+        // `export SHELLOPTS` hands tracing to a child shell. The imported
+        // values are then recomputed, because this shell may have started with
+        // different defaults.
+        for (name, shopt) in [(b"SHELLOPTS".as_slice(), false), (b"BASHOPTS", true)] {
+            let Some(value) = self.state.vars.scalar(name).map(<[u8]>::to_vec) else {
+                continue;
+            };
+            for option in value.split(|&byte| byte == b':') {
+                if option.is_empty() {
+                    continue;
+                }
+                let _ = if shopt {
+                    Opts::set_shopt_by_name(&mut self.state.opts, option, true)
+                } else {
+                    self.state.opts.set_by_name(option, true)
+                };
+            }
+        }
+        self.refresh_option_lists();
     }
 
     /// Give an interactive shell its history database.
@@ -801,7 +829,21 @@ impl Interp {
 
     /// Refresh the cached special parameters. Called before expansion, because
     /// `Vars::get` cannot allocate and `$?` must be current.
+    /// Recompute `SHELLOPTS` and `BASHOPTS` from the live option table.
+    ///
+    /// Both are derived variables: bash recomputes them whenever an option
+    /// changes, and a script cannot assign them. The write has to bypass the
+    /// readonly attribute they carry, which is why it goes through
+    /// [`bsh_runtime::Vars::refresh_derived`].
+    fn refresh_option_lists(&mut self) {
+        let shellopts = self.state.opts.shellopts();
+        let _ = self.state.vars.refresh_derived(b"SHELLOPTS", &shellopts);
+        let bashopts = self.state.opts.bashopts();
+        let _ = self.state.vars.refresh_derived(b"BASHOPTS", &bashopts);
+    }
+
     pub(crate) fn sync_specials(&mut self) {
+        self.refresh_option_lists();
         let status = self.state.vars.last_status().exit_code().to_string();
         // `$RANDOM` is a fresh value per command: bash gives a new one on
         // every read, but one per command is enough for `$RANDOM` to look

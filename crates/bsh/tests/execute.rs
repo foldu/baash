@@ -738,6 +738,78 @@ fn errexit_exits_on_a_failing_command() {
 }
 
 #[test]
+fn errexit_is_reset_inside_a_command_substitution() {
+    // bash resets `errexit` for the body of a command substitution: a failure
+    // contributes to the substitution's status and the body keeps going.
+    assert_eq!(
+        out("set -e; echo $(echo one; false; echo two); echo parent=$?"),
+        "one two\nparent=0\n"
+    );
+    // `shopt -s inherit_errexit` is the opt-in to the other behaviour.
+    assert_eq!(
+        out("set -e; shopt -s inherit_errexit; echo $(echo one; false; echo two)"),
+        "one\n"
+    );
+    // `set -e` written by the body itself still applies to the body.
+    assert_eq!(
+        out("echo $(set -e; false; echo two); echo st=$?"),
+        "\nst=0\n"
+    );
+    // The substitution's status still reaches an assignment, and `-e` then
+    // ends the shell.
+    let output = run("set -e; x=$(false); echo unreached");
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "");
+}
+
+#[test]
+fn shellopts_and_bashopts_are_derived_from_the_live_options() {
+    // The lists follow the option table, alphabetically, and the `set -o`
+    // spelling of the shared option is hyphenated.
+    assert_eq!(
+        out("echo $SHELLOPTS"),
+        "braceexpand:hashall:interactive-comments\n"
+    );
+    assert_eq!(
+        out("set -e; echo $SHELLOPTS"),
+        "braceexpand:errexit:hashall:interactive-comments\n"
+    );
+    assert_eq!(
+        out("set -e; set +e; echo $SHELLOPTS"),
+        "braceexpand:hashall:interactive-comments\n"
+    );
+    assert!(
+        out("echo $BASHOPTS")
+            .split(':')
+            .any(|name| name == "promptvars")
+    );
+    // Both exist for `test -v` and `${x:?}`.
+    assert_eq!(
+        out("test -v SHELLOPTS && test -v BASHOPTS && echo both"),
+        "both\n"
+    );
+    // They are readonly, and a readonly assignment is a POSIX fatal error in a
+    // non-interactive shell (see `a_failing_special_builtin_exits_a_non_interactive_shell`).
+    let output = run("SHELLOPTS=x; echo unreached");
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).contains("readonly"));
+}
+
+#[test]
+fn an_exported_shellopts_turns_tracing_on_in_a_child() {
+    let output = bsh()
+        .env("SHELLOPTS", "xtrace:braceexpand")
+        .arg("-c")
+        .arg("echo hi")
+        .output()
+        .expect("spawn bsh");
+    assert_eq!(code(&output), 0);
+    assert_eq!(stdout(&output), "hi\n");
+    assert_eq!(stderr(&output), "+ echo hi\n");
+}
+
+#[test]
 fn break_and_continue_only_unwind_to_their_loop() {
     // A `break` inside a function unwinds outwards, as bash does.
     assert_eq!(

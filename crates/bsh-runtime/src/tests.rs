@@ -1729,10 +1729,25 @@ fn shellopts_and_bashopts_are_derived_from_the_tables() {
     // SHELLOPTS; bash keeps the two lists disjoint.
     assert!(!shellopts.split(':').any(|name| name == "extglob"));
 
+    // bash sorts both lists and spells the shared option with a hyphen in
+    // SHELLOPTS (its `set -o` spelling) but an underscore in BASHOPTS.
+    let names: Vec<&str> = shellopts.split(':').collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted, "SHELLOPTS is alphabetical");
+    assert!(names.contains(&"interactive-comments"));
+    assert!(!names.contains(&"interactive_comments"));
+
     Opts::set_shopt_by_name(&mut opts, b"extglob", true).expect("extglob");
     let bashopts = String::from_utf8(opts.bashopts()).expect("ascii");
     assert!(bashopts.split(':').any(|name| name == "extglob"));
     assert!(!bashopts.split(':').any(|name| name == "hashall"));
+    let names: Vec<&str> = bashopts.split(':').collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted, "BASHOPTS is alphabetical");
+    assert!(names.contains(&"interactive_comments"));
+    assert!(!names.contains(&"interactive-comments"));
 
     // Disabling removes it again: the strings are derived, never cached.
     Opts::set_shopt_by_name(&mut opts, b"extglob", false).expect("unset");

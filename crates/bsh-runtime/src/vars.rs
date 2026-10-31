@@ -357,6 +357,28 @@ impl Vars {
         }
     }
 
+    /// Overwrite a *derived* variable that scripts cannot assign.
+    ///
+    /// `SHELLOPTS` and `BASHOPTS` are readonly for scripts, but the shell
+    /// recomputes their values after every command (and when options arrive
+    /// from the environment), so the interpreter needs a write that bypasses
+    /// the readonly check without dropping the attribute.
+    pub fn refresh_derived(&mut self, name: &[u8], value: &[u8]) -> Result<(), Error> {
+        // Not `resolve`: that goes through the readonly check, which is exactly
+        // the one this write is allowed to bypass.
+        let target = match self.resolve_chain(name)? {
+            Resolved::Var(target) => target,
+            _ => {
+                return Err(Error::InvalidName {
+                    name: name.to_vec(),
+                });
+            }
+        };
+        let var = self.cell_mut(&target, CreateScope::Default, false)?;
+        var.value = VarValue::Str(value.to_vec());
+        Ok(())
+    }
+
     /// Number of open frames.
     pub fn frame_depth(&self) -> usize {
         self.frames.len()
