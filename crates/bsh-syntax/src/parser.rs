@@ -2154,6 +2154,12 @@ impl<'a> Parser<'a, '_> {
     /// becomes a [`LitKind::Quoted`] literal, and `$'…'` escapes are decoded
     /// here.
     fn parse_word_span(&mut self, span: Span) -> Word {
+        self.parse_word_in(span, Quote::Plain)
+    }
+
+    /// The same, scanned in `quote`'s context; see [`Quote`].
+    fn parse_word_in(&mut self, span: Span, quote: Quote) -> Word {
+        let in_dquote = quote != Quote::Plain;
         let src: &'a [u8] = self.src;
         let end = span.end;
         let mut parts: Vec<Part> = Vec::new();
@@ -2161,7 +2167,7 @@ impl<'a> Parser<'a, '_> {
 
         // A word-initial unquoted tilde is the only place tilde expansion is
         // permitted (`~`, `~/x`, `~user`, `~user/x`).
-        if i < end && src[i] == b'~' {
+        if quote == Quote::Plain && i < end && src[i] == b'~' {
             if let Some(after) = tilde_prefix_end(src, i, end) {
                 parts.push(Part::Tilde(TildeSpec::new(src[i + 1..after].to_vec())));
                 i = after;
@@ -2171,6 +2177,13 @@ impl<'a> Parser<'a, '_> {
         let mut run: Vec<u8> = Vec::new();
         while i < end {
             match src[i] {
+                b'\'' if quote == Quote::DoubleBraced => {
+                    // Inside `"${…}"` bash's operand scanner does not treat a
+                    // single quote as an opening quote (`"${u-'a b'}"` keeps
+                    // the quotes), but it does still recognise `$'…'`.
+                    run.push(b'\'');
+                    i += 1;
+                }
                 b'\'' => {
                     flush_run(&mut run, &mut parts);
                     let close = lexer::skip_squote(src, i + 1).unwrap_or(end);
@@ -2187,12 +2200,20 @@ impl<'a> Parser<'a, '_> {
                 }
                 b'\\' => {
                     if i + 1 < end {
-                        if src[i + 1] == b'\n' {
+                        let next = src[i + 1];
+                        if in_dquote && !matches!(next, b'$' | b'`' | b'"' | b'\\' | b'\n') {
+                            // Inside double quotes a backslash only escapes
+                            // those four bytes and newline; anything else
+                            // keeps it, `${undef-\(}` included.
+                            run.push(b'\\');
+                            run.push(next);
+                            i += 2;
+                        } else if next == b'\n' {
                             // A line continuation contributes nothing.
                             i += 2;
                         } else {
                             flush_run(&mut run, &mut parts);
-                            parts.push(Part::quoted(vec![src[i + 1]]));
+                            parts.push(Part::quoted(vec![next]));
                             i += 2;
                         }
                     } else {
@@ -2202,7 +2223,7 @@ impl<'a> Parser<'a, '_> {
                 }
                 b'$' => {
                     flush_run(&mut run, &mut parts);
-                    i = self.parse_dollar(&mut parts, i, end, false);
+                    i = self.parse_dollar(&mut parts, i, end, quote);
                 }
                 b'`' => {
                     flush_run(&mut run, &mut parts);
@@ -2215,7 +2236,11 @@ impl<'a> Parser<'a, '_> {
                     parts.push(Part::CmdSub(sub));
                     i = close;
                 }
-                b'<' | b'>' if i == span.start && src.get(i + 1) == Some(&b'(') => {
+                b'<' | b'>'
+                    if quote == Quote::Plain
+                        && i == span.start
+                        && src.get(i + 1) == Some(&b'(') =>
+                {
                     flush_run(&mut run, &mut parts);
                     let rp = lexer::region_end(src, i + 2, self.depth).unwrap_or(end);
                     let full_end = (rp + 1).min(end);
@@ -2246,6 +2271,15 @@ impl<'a> Parser<'a, '_> {
         }
         flush_run(&mut run, &mut parts);
         Word { parts, span }
+    }
+
+    /// The quoting context a word is scanned in; see [`Quote`].
+    fn operand_quote(quote: Quote) -> Quote {
+        match quote {
+            Quote::Plain => Quote::Plain,
+            // A nested expansion inside `"…"` is still quoted by that context.
+            Quote::Double | Quote::DoubleBraced => Quote::DoubleBraced,
+        }
     }
 
     /// Parse the inside of a `"…"` group; `from` is just past the opening
@@ -2284,7 +2318,7 @@ impl<'a> Parser<'a, '_> {
                 }
                 b'$' => {
                     flush_run(&mut run, parts);
-                    i = self.parse_dollar(parts, i, end, true);
+                    i = self.parse_dollar(parts, i, end, Quote::Double);
                 }
                 b'`' => {
                     flush_run(&mut run, parts);
@@ -2308,16 +2342,12 @@ impl<'a> Parser<'a, '_> {
     }
 
     /// Parse one `$` construct, pushing the part(s) it produces.
-    fn parse_dollar(
-        &mut self,
-        parts: &mut Vec<Part>,
-        i: usize,
-        end: usize,
-        in_dquote: bool,
-    ) -> usize {
+    fn parse_dollar(&mut self, parts: &mut Vec<Part>, i: usize, end: usize, quote: Quote) -> usize {
         let src: &'a [u8] = self.src;
         match src.get(i + 1).copied() {
-            Some(b'\'') if !in_dquote => {
+            // `$'…'` is ANSI-C quoting even inside `"${…}"`, though not in
+            // plain double-quoted text.
+            Some(b'\'') if quote != Quote::Double => {
                 let close = lexer::skip_ansic(src, i + 2).unwrap_or(end);
                 let content_end = quoted_content_end(src, i + 2, close, b'\'');
                 parts.push(Part::ansi_c(decode_ansi_c(&src[i + 2..content_end])));
@@ -2328,7 +2358,7 @@ impl<'a> Parser<'a, '_> {
                 );
                 close
             }
-            Some(b'"') if !in_dquote => {
+            Some(b'"') if quote == Quote::Plain => {
                 let mut inner: Vec<Part> = Vec::new();
                 let after = self.parse_dquote(&mut inner, i + 2, end);
                 parts.push(Part::double_quoted(inner));
@@ -2372,7 +2402,7 @@ impl<'a> Parser<'a, '_> {
             }
             Some(b'{') => match lexer::skip_param(src, i + 2, self.depth, &mut Vec::new()) {
                 Some(close) => {
-                    let exp = self.parse_param_exp(i..close, (i + 2)..(close - 1));
+                    let exp = self.parse_param_exp(i..close, (i + 2)..(close - 1), quote);
                     parts.push(Part::Param(exp));
                     close
                 }
@@ -2421,7 +2451,8 @@ impl<'a> Parser<'a, '_> {
     /// arrive as the matching [`UnsupportedOp`], never as a silently partial
     /// parse, and `${x:off:len}` offsets are pre-evaluated only when they are
     /// pure integer literals.
-    fn parse_param_exp(&mut self, span: Span, inner: Span) -> ParamExp {
+    fn parse_param_exp(&mut self, span: Span, inner: Span, quote: Quote) -> ParamExp {
+        let in_dquote = Self::operand_quote(quote);
         let src: &'a [u8] = self.src;
         let text = &src[inner.clone()];
         let mut i = 0usize;
@@ -2507,7 +2538,9 @@ impl<'a> Parser<'a, '_> {
                 }
                 ParamName::Var(base) => ParamName::element(
                     base,
-                    self.parse_word_span(inner.start + i + 1..inner.start + close),
+                    // A subscript is a word like any other: quotes group
+                    // (`${a['k']}` is the key `k`), even inside `"…"`.
+                    self.parse_word_in(inner.start + i + 1..inner.start + close, Quote::Plain),
                 ),
                 other => {
                     // `${@[0]}` and friends are not a thing.
@@ -2585,28 +2618,25 @@ impl<'a> Parser<'a, '_> {
                 span,
             };
         }
-        let list_param = matches!(name, ParamName::At | ParamName::Star);
-        let array_param = matches!(name, ParamName::Elements { .. });
-
         let op = if rest.starts_with(b":-") || rest.starts_with(b"-") {
             let colon = rest[0] == b':';
             let len = if colon { 2 } else { 1 };
             ParamOp::UseDefault {
-                word: self.parse_word_span((op_start + len)..inner.end),
+                word: self.parse_word_in((op_start + len)..inner.end, in_dquote),
                 colon,
             }
         } else if rest.starts_with(b":+") || rest.starts_with(b"+") {
             let colon = rest[0] == b':';
             let len = if colon { 2 } else { 1 };
             ParamOp::UseAlternate {
-                word: self.parse_word_span((op_start + len)..inner.end),
+                word: self.parse_word_in((op_start + len)..inner.end, in_dquote),
                 colon,
             }
         } else if rest.starts_with(b":=") || rest.starts_with(b"=") {
             let colon = rest[0] == b':';
             let len = if colon { 2 } else { 1 };
             ParamOp::AssignDefault {
-                word: self.parse_word_span((op_start + len)..inner.end),
+                word: self.parse_word_in((op_start + len)..inner.end, in_dquote),
                 colon,
             }
         } else if rest.starts_with(b":?") || rest.starts_with(b"?") {
@@ -2616,31 +2646,31 @@ impl<'a> Parser<'a, '_> {
             let word = if word_span.is_empty() {
                 None
             } else {
-                Some(self.parse_word_span(word_span))
+                Some(self.parse_word_in(word_span, in_dquote))
             };
             ParamOp::Error { word, colon }
         } else if rest.starts_with(b"##") {
             ParamOp::RemovePrefix {
-                pattern: self.parse_word_span((op_start + 2)..inner.end),
+                pattern: self.parse_word_in((op_start + 2)..inner.end, Quote::Plain),
                 longest: true,
             }
         } else if rest.starts_with(b"#") {
             ParamOp::RemovePrefix {
-                pattern: self.parse_word_span((op_start + 1)..inner.end),
+                pattern: self.parse_word_in((op_start + 1)..inner.end, Quote::Plain),
                 longest: false,
             }
         } else if rest.starts_with(b"%%") {
             ParamOp::RemoveSuffix {
-                pattern: self.parse_word_span((op_start + 2)..inner.end),
+                pattern: self.parse_word_in((op_start + 2)..inner.end, Quote::Plain),
                 longest: true,
             }
         } else if rest.starts_with(b"%") {
             ParamOp::RemoveSuffix {
-                pattern: self.parse_word_span((op_start + 1)..inner.end),
+                pattern: self.parse_word_in((op_start + 1)..inner.end, Quote::Plain),
                 longest: false,
             }
         } else if rest.starts_with(b"/") {
-            self.parse_replace_op(op_start, inner.end)
+            self.parse_replace_op(op_start, inner.end, Quote::Plain)
         } else if rest.starts_with(b"@") {
             // `${x@P}` and friends. A letter this crate does not know stays
             // unsupported rather than being guessed at: the error names the
@@ -2657,23 +2687,19 @@ impl<'a> Parser<'a, '_> {
             };
             // Case conversion applies element-wise to `$@`/`a[@]`; the
             // expansion layer already vectorises it.
-            self.parse_case_op(how, op_start + 2, inner.end)
+            self.parse_case_op(how, op_start + 2, inner.end, Quote::Plain)
         } else if rest.starts_with(b"^") || rest.starts_with(b",") {
             let how = if rest.starts_with(b"^") {
                 CaseHow::UpperFirst
             } else {
                 CaseHow::LowerFirst
             };
-            self.parse_case_op(how, op_start + 1, inner.end)
+            self.parse_case_op(how, op_start + 1, inner.end, Quote::Plain)
         } else if rest.starts_with(b":") {
-            // Array and positional-list slices evaluate their bounds
-            // arithmetically, so the bounds stay words; a scalar slice is
-            // pre-evaluated only when it is a pure integer literal.
-            if list_param || array_param {
-                self.array_slice_op(&src[(op_start + 1)..inner.end], op_start + 1)
-            } else {
-                substring_op(&src[(op_start + 1)..inner.end])
-            }
+            // Strings and lists alike evaluate the bounds arithmetically, so
+            // both stay words; only their unit differs (`${x:1:2}` slices a
+            // string, `${a[@]:1:2}` a list).
+            self.slice_op(&src[(op_start + 1)..inner.end], op_start + 1, in_dquote)
         } else {
             ParamOp::Unsupported(UnsupportedOp::Other)
         };
@@ -2690,9 +2716,15 @@ impl<'a> Parser<'a, '_> {
     /// The pattern is a word: `${x^^[a-c]}` matches a character class and
     /// `${x^^"$p"}` compares literally. With no pattern written, `pattern` is
     /// `None`, which bash treats as "every character".
-    fn parse_case_op(&mut self, how: CaseHow, start: usize, end: usize) -> ParamOp {
+    fn parse_case_op(
+        &mut self,
+        how: CaseHow,
+        start: usize,
+        end: usize,
+        in_dquote: Quote,
+    ) -> ParamOp {
         let pattern = if start < end {
-            Some(self.parse_word_span(start..end))
+            Some(self.parse_word_in(start..end, in_dquote))
         } else {
             None
         };
@@ -2711,7 +2743,7 @@ impl<'a> Parser<'a, '_> {
     /// * the global form may not split at its first byte, so `${x////c}`
     ///   replaces `/` with `c` while `${x/'/'/c}` does the same with a quoted
     ///   pattern.
-    fn parse_replace_op(&mut self, op_start: usize, end: usize) -> ParamOp {
+    fn parse_replace_op(&mut self, op_start: usize, end: usize, in_dquote: Quote) -> ParamOp {
         let src: &'a [u8] = self.src;
         let mut body_start = op_start + 1;
         let mut mode = ReplaceMode::First;
@@ -2730,7 +2762,7 @@ impl<'a> Parser<'a, '_> {
             }
             _ => {}
         }
-        let mut word = self.parse_word_span(body_start..end);
+        let mut word = self.parse_word_in(body_start..end, in_dquote);
         if mode == ReplaceMode::First {
             if let Some(rest) = word.strip_leading_unquoted(b'#') {
                 word = rest;
@@ -3535,54 +3567,42 @@ fn unbraced_param_name(src: &[u8], from: usize, end: usize) -> (Option<ParamName
     (Some(name), 1)
 }
 
-/// Pre-evaluate `${x:off:len}` only for pure integer literals; anything else
-/// is reported as unsupported rather than guessed (`bsh-lang` does not parse
-/// arithmetic there).
-fn substring_op(text: &[u8]) -> ParamOp {
-    let (offset_text, length_text) = match text.iter().position(|&b| b == b':') {
-        Some(i) => (&text[..i], Some(&text[i + 1..])),
-        None => (text, None),
-    };
-    let offset = if is_blank(offset_text) {
-        // `${x::2}` means offset 0, but `${x:}` is a bad substitution.
-        if length_text.is_none() {
-            return ParamOp::Unsupported(UnsupportedOp::Other);
-        }
-        0
-    } else {
-        match parse_int(offset_text) {
-            Some(n) => n,
-            None => return ParamOp::Unsupported(UnsupportedOp::ArithmeticSubstring),
-        }
-    };
-    let length = match length_text {
-        None => None,
-        Some(t) if is_blank(t) => Some(0),
-        Some(t) => match parse_int(t) {
-            Some(n) => Some(n),
-            None => return ParamOp::Unsupported(UnsupportedOp::ArithmeticSubstring),
-        },
-    };
-    ParamOp::Substring { offset, length }
-}
-
-/// `${a[@]:offset:length}` / `${@:offset:length}`: the bounds stay words
+/// `${x:off:len}` / `${a[@]:off:len}` / `${@:off:len}`: the bounds stay words
 /// because bash evaluates them arithmetically when the expansion runs.
 impl Parser<'_, '_> {
-    /// `${a[@]:offset:length}` / `${@:offset:length}`: the bounds stay words
-    /// because bash evaluates them arithmetically when the expansion runs.
-    fn array_slice_op(&mut self, text: &[u8], start: usize) -> ParamOp {
+    fn slice_op(&mut self, text: &[u8], start: usize, in_dquote: Quote) -> ParamOp {
         let (offset_text, length_text) = match split_top_level_colon(text) {
             Some(index) => (&text[..index], Some(&text[index + 1..])),
+            // `${x:}` — no offset *and* no length is a bad substitution; an
+            // empty offset word is what expansion rejects in that one case.
             None => (text, None),
         };
         let offset_end = start + offset_text.len();
-        ParamOp::ArraySlice {
-            offset: self.parse_word_span(start..offset_end),
-            length: length_text
-                .map(|text| self.parse_word_span(offset_end + 1..offset_end + 1 + text.len())),
+        ParamOp::Substring {
+            offset: self.parse_word_in(start..offset_end, in_dquote),
+            length: length_text.map(|text| {
+                self.parse_word_in(offset_end + 1..offset_end + 1 + text.len(), in_dquote)
+            }),
         }
     }
+}
+
+/// The quoting context a word is scanned in.
+///
+/// bash scans the operand of `${…}` with its own rules, and they depend on
+/// where the expansion sits: an operand written inside `"…"` keeps the
+/// double-quote backslash rule, treats `'` as literal text, and *still*
+/// recognises `$'…'`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Quote {
+    /// Ordinary word text: quotes group, a backslash escapes any byte, and a
+    /// leading `~` is a tilde prefix.
+    Plain,
+    /// Plain text inside `"…"`: a backslash escapes only `$`, `` ` ``, `"`,
+    /// `\` and newline, and `$'…'` is not ANSI-C quoting.
+    Double,
+    /// The operand of `${…}` written inside `"…"`.
+    DoubleBraced,
 }
 
 /// Split at the first `:` that is not inside brackets or quotes.
@@ -3606,35 +3626,6 @@ fn split_top_level_colon(text: &[u8]) -> Option<usize> {
         }
     }
     None
-}
-
-fn is_blank(text: &[u8]) -> bool {
-    text.iter().all(|b| matches!(b, b' ' | b'\t' | b'\n'))
-}
-
-fn parse_int(text: &[u8]) -> Option<i64> {
-    let mut start = 0;
-    let mut end = text.len();
-    while start < end && matches!(text[start], b' ' | b'\t' | b'\n') {
-        start += 1;
-    }
-    while end > start && matches!(text[end - 1], b' ' | b'\t' | b'\n') {
-        end -= 1;
-    }
-    let text = &text[start..end];
-    let (negative, digits) = match text.first() {
-        Some(b'-') => (true, &text[1..]),
-        Some(b'+') => (false, &text[1..]),
-        _ => (false, text),
-    };
-    if digits.is_empty() || !digits.iter().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let mut value: i64 = 0;
-    for &b in digits {
-        value = value.checked_mul(10)?.checked_add((b - b'0') as i64)?;
-    }
-    Some(if negative { -value } else { value })
 }
 
 /// Remove the extra backslash escape layer of a legacy `` `…` `` substitution.

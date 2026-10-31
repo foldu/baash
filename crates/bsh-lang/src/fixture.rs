@@ -769,18 +769,6 @@ fn parse_param(inner: &[u8]) -> Part {
         return Part::lit(inner.to_vec());
     };
     let op = parse_op(rest);
-    // An array/positional-list slice keeps its bounds as words so expansion
-    // can evaluate them arithmetically, exactly like the real front end.
-    let op = if matches!(
-        name,
-        ParamName::Elements { .. } | ParamName::At | ParamName::Star
-    ) && (matches!(op, ParamOp::Substring { .. })
-        || matches!(op, ParamOp::Unsupported(UnsupportedOp::ArithmeticSubstring)))
-    {
-        parse_list_slice(rest).unwrap_or(op)
-    } else {
-        op
-    };
     // Case conversion of a whole list is out of scope, exactly as the real
     // front end reports it. The strip and replacement operators *are*
     // vectorised, so only `Case` is downgraded.
@@ -880,7 +868,7 @@ fn parse_op(rest: &[u8]) -> ParamOp {
         }
     }
     if let Some(body) = rest.strip_prefix(b":") {
-        return parse_substring(body);
+        return parse_slice(body);
     }
     if let Some(body) = rest.strip_prefix(b"##") {
         return strip_op(body, true, true);
@@ -970,75 +958,17 @@ fn case_op(body: &[u8], how: CaseHow) -> ParamOp {
     ParamOp::Case { how, pattern }
 }
 
-/// `${a[@]:off:len}` / `${@:off:len}`: the bounds stay words.
-fn parse_list_slice(rest: &[u8]) -> Option<ParamOp> {
-    let body = rest.strip_prefix(b":")?;
-    if body.starts_with(b"-")
-        || body.starts_with(b"=")
-        || body.starts_with(b"+")
-        || body.starts_with(b"?")
-    {
-        return None;
-    }
+/// `${x:off:len}`, `${a[@]:off:len}` and `${@:off:len}`: the bounds stay
+/// words, because expansion evaluates them arithmetically.
+fn parse_slice(body: &[u8]) -> ParamOp {
     let (offset, length) = match body.iter().position(|&byte| byte == b':') {
         Some(index) => (&body[..index], Some(&body[index + 1..])),
         None => (body, None),
     };
-    Some(ParamOp::ArraySlice {
+    ParamOp::Substring {
         offset: parse_subword(offset),
         length: length.map(parse_subword),
-    })
-}
-
-fn parse_substring(body: &[u8]) -> ParamOp {
-    let (offset_src, length_src) = match body.iter().position(|&b| b == b':') {
-        Some(index) => (&body[..index], Some(&body[index + 1..])),
-        None => (body, None),
-    };
-    let Some(offset) = parse_int(offset_src) else {
-        return ParamOp::Unsupported(UnsupportedOp::ArithmeticSubstring);
-    };
-    let length = match length_src {
-        None => None,
-        Some(src) => match parse_int(src) {
-            Some(value) => Some(value),
-            None => return ParamOp::Unsupported(UnsupportedOp::ArithmeticSubstring),
-        },
-    };
-    ParamOp::Substring { offset, length }
-}
-
-fn parse_int(src: &[u8]) -> Option<i64> {
-    let mut index = 0;
-    while index < src.len() && matches!(src[index], b' ' | b'\t') {
-        index += 1;
     }
-    let mut negative = false;
-    if index < src.len() && (src[index] == b'+' || src[index] == b'-') {
-        negative = src[index] == b'-';
-        index += 1;
-        while index < src.len() && matches!(src[index], b' ' | b'\t') {
-            index += 1;
-        }
-    }
-    let digits_start = index;
-    while index < src.len() && src[index].is_ascii_digit() {
-        index += 1;
-    }
-    if index == digits_start {
-        return None;
-    }
-    let value: i64 = std::str::from_utf8(&src[digits_start..index])
-        .ok()?
-        .parse()
-        .ok()?;
-    while index < src.len() && matches!(src[index], b' ' | b'\t') {
-        index += 1;
-    }
-    if index != src.len() {
-        return None;
-    }
-    Some(if negative { -value } else { value })
 }
 
 fn parse_subword(src: &[u8]) -> Word {

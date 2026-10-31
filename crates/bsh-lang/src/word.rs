@@ -490,22 +490,22 @@ pub enum ParamOp {
     /// `${#x}`: the length in bytes (POSIX counts characters; ßhell is
     /// byte-oriented, i.e. `LC_ALL=C` semantics — see the crate docs).
     Length,
-    /// `${x:offset}` or `${x:offset:length}`. Negative offsets count from the
-    /// end; units are bytes.
-    Substring {
-        /// The offset; negative counts from the end of the value.
-        offset: i64,
-        /// The length; negative means "up to this many bytes from the end".
-        length: Option<i64>,
-    },
-    /// `${a[@]:offset:length}` and `${a[*]:offset:length}`: a contiguous
-    /// slice of an array's element list (after holes are skipped).
+    /// `${x:offset[:length]}`, `${a[i]:offset[:length]}`,
+    /// `${a[@]:offset[:length]}` and `${@:offset[:length]}`: one operator for
+    /// strings and lists alike.
     ///
-    /// The bounds are words rather than integers because bash evaluates them
-    /// arithmetically (`${a[@]:i-4:2}`), and the subscript-arithmetic seam
-    /// already exists; expansion expands the word and evaluates the result.
-    ArraySlice {
-        /// The offset expression; negative counts from the end of the list.
+    /// Both bounds are [`Word`]s because bash evaluates them arithmetically
+    /// (`${x:i-4:2}`, `${a[@]:i-4:2}`), and the subscript-arithmetic seam
+    /// already exists; expansion expands each word and evaluates the result.
+    /// The unit — bytes or characters — follows the locale, and a negative
+    /// offset counts back from the end.
+    ///
+    /// An offset with *no* text at all (`${x:}`, `${a[@]:}`) is bash's "bad
+    /// substitution" unless a length was written: `${x::2}` means offset 0.
+    /// A blank-but-present offset (`${x: }`) is arithmetic zero, which is why
+    /// the two are told apart here rather than by `is_empty` on the text.
+    Substring {
+        /// The offset expression; an empty word is "absent".
         offset: Word,
         /// The length expression; negative is an error, as bash reports.
         length: Option<Word>,

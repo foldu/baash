@@ -674,27 +674,32 @@ fn parameter_operators_map_to_bsh_lang() {
         (
             b"echo ${x:1:2}",
             ParamOp::Substring {
-                offset: 1,
-                length: Some(2),
+                offset: Word::lit("1").with_span(9..10),
+                length: Some(Word::lit("2").with_span(11..12)),
             },
         ),
         (
             b"echo ${x:1}",
             ParamOp::Substring {
-                offset: 1,
+                offset: Word::lit("1").with_span(9..10),
                 length: None,
             },
         ),
         (
             b"echo ${x: -2}",
             ParamOp::Substring {
-                offset: -2,
+                offset: Word::lit(" -2").with_span(9..12),
                 length: None,
             },
         ),
+        // A bound is a word, so arithmetic in it is evaluated by expansion
+        // rather than being rejected here.
         (
             b"echo ${x:1+2}",
-            ParamOp::Unsupported(UnsupportedOp::ArithmeticSubstring),
+            ParamOp::Substring {
+                offset: Word::lit("1+2").with_span(9..12),
+                length: None,
+            },
         ),
         (
             b"echo ${x^^}",

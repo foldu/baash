@@ -691,16 +691,44 @@ impl<S: Shell> Ctx<'_, S> {
         })
     }
 
-    fn is_nonnull(&mut self, name: &ParamName) -> Result<bool, Error> {
+    /// Whether `name` is set and expands to something non-empty.
+    ///
+    /// `quoted` decides what `${a[*]}` *is*: quoted it is the joined string,
+    /// unquoted it is the element list, and bash's null test follows. With
+    /// `IFS=` and `a=("" "")` — joined to the empty string but two elements —
+    /// `"${a[*]:-word}"` uses `word` while `${a[*]:-word}` expands the list
+    /// (one empty field), which is the asymmetry `var-op-test` pins.
+    fn is_nonnull(&mut self, name: &ParamName, quoted: bool) -> Result<bool, Error> {
         Ok(match name {
             ParamName::At | ParamName::Star => !self.shell.positional().is_empty(),
             ParamName::Element { name, subscript } => {
                 read_element(self, name, subscript)?.is_some_and(|value| !value.is_empty())
             }
-            ParamName::Elements { name, .. } => {
+            ParamName::Elements { name, star } => {
                 // bash's `${a[@]:-word}` rule: a one-element list behaves like
                 // a scalar for the null test, while a longer list is non-null
                 // as a list (`a=("" ""); "${a[@]:-x}"` yields two empties).
+                //
+                // `[*]` is the exception, because it joins first: with `IFS=`
+                // two empty elements join to the empty string, which is null
+                // and lets the word through (`a=("" ""); IFS=;
+                // "${a[*]:-x}"` is `x`).
+                if *star && quoted {
+                    let values = array_values(self, name);
+                    let separator = Ifs::from_vars(&*self.shell).join_separator();
+                    let mut joined: Vec<u8> = Vec::new();
+                    for (index, value) in values.iter().enumerate() {
+                        if index > 0
+                            && let Some(separator) = separator
+                        {
+                            joined.push(separator);
+                        }
+                        joined.extend_from_slice(value);
+                    }
+                    if !values.is_empty() || self.shell.get(name).is_some() {
+                        return Ok(!joined.is_empty());
+                    }
+                }
                 match self.shell.array(name) {
                     Some(array) => match array.len() {
                         0 => false,
@@ -1009,67 +1037,44 @@ fn expand_param<S: Shell>(
                 out,
             )
         }
-        ParamOp::ArraySlice { offset, length } => {
-            if let ParamName::Elements { name, star } = &exp.name {
-                let indices = ctx
-                    .shell
-                    .array(name)
-                    .map(|array| array.indices())
-                    .unwrap_or_default();
-                let values = array_values(ctx, name);
-                let bounds = slice_bounds(offset, length.as_ref(), ctx)?;
-                let values = slice_by_subscript(&indices, &values, bounds, span)?;
-                emit_values(ctx, &values, *star, quoted, out);
-                return Ok(());
-            }
-            let bounds = slice_bounds(offset, length.as_ref(), ctx)?;
-            if matches!(&exp.name, ParamName::At | ParamName::Star) {
-                let values = slice_positional(ctx, bounds, span)?;
-                let star = matches!(&exp.name, ParamName::Star);
-                emit_values(ctx, &values, star, quoted, out);
-                return Ok(());
-            }
-            let (source, star) = match &exp.name {
-                ParamName::Elements { name, star } => (array_values(ctx, name), *star),
-                _ => return Err(Error::unsupported(UnsupportedOp::SubstringOfList, span)),
-            };
-            let values = slice_list(&source, bounds, span)?;
-            emit_values(ctx, &values, star, quoted, out);
-            Ok(())
-        }
         ParamOp::Substring { offset, length } => {
-            if matches!(&exp.name, ParamName::At | ParamName::Star) {
+            let bounds = slice_bounds(offset, length.as_ref(), ctx)?;
+            match &exp.name {
                 // bash slices the parameter *list* here, with a one-based
                 // offset; slicing a joined string would be quietly wrong.
-                let values = slice_positional(ctx, (*offset, *length), span)?;
-                let star = matches!(&exp.name, ParamName::Star);
-                emit_values(ctx, &values, star, quoted, out);
-                return Ok(());
+                ParamName::At | ParamName::Star => {
+                    let values = slice_positional(ctx, bounds, span)?;
+                    let star = matches!(&exp.name, ParamName::Star);
+                    emit_values(ctx, &values, star, quoted, out);
+                    Ok(())
+                }
+                ParamName::Element { name, subscript } => {
+                    let value = read_element(ctx, name, subscript)?.unwrap_or_default();
+                    let slice = substring(&value, bounds.0, bounds.1, ctx.shell.utf8(), span)?;
+                    out.push(slice.to_vec(), quoted, !quoted);
+                    Ok(())
+                }
+                ParamName::Elements { name, star } => {
+                    let indices = ctx
+                        .shell
+                        .array(name)
+                        .map(|array| array.indices())
+                        .unwrap_or_default();
+                    let values = array_values(ctx, name);
+                    let values = slice_by_subscript(&indices, &values, bounds, span)?;
+                    emit_values(ctx, &values, *star, quoted, out);
+                    Ok(())
+                }
+                _ => {
+                    let Some(value) = ctx.value(&exp.name) else {
+                        out.push(Vec::new(), quoted, !quoted);
+                        return Ok(());
+                    };
+                    let slice = substring(&value, bounds.0, bounds.1, ctx.shell.utf8(), span)?;
+                    out.push(slice.to_vec(), quoted, !quoted);
+                    Ok(())
+                }
             }
-            if let ParamName::Element { name, subscript } = &exp.name {
-                let value = read_element(ctx, name, subscript)?.unwrap_or_default();
-                let slice = substring(&value, *offset, *length, ctx.shell.utf8(), span)?;
-                out.push(slice.to_vec(), quoted, !quoted);
-                return Ok(());
-            }
-            if let ParamName::Elements { name, star } = &exp.name {
-                let indices = ctx
-                    .shell
-                    .array(name)
-                    .map(|array| array.indices())
-                    .unwrap_or_default();
-                let values = array_values(ctx, name);
-                let values = slice_by_subscript(&indices, &values, (*offset, *length), span)?;
-                emit_values(ctx, &values, *star, quoted, out);
-                return Ok(());
-            }
-            let Some(value) = ctx.value(&exp.name) else {
-                out.push(Vec::new(), quoted, !quoted);
-                return Ok(());
-            };
-            let slice = substring(&value, *offset, *length, ctx.shell.utf8(), span)?;
-            out.push(slice.to_vec(), quoted, !quoted);
-            Ok(())
         }
         ParamOp::RemovePrefix { pattern, longest } => {
             let prefix = true;
@@ -1127,7 +1132,8 @@ fn expand_param<S: Shell>(
             Ok(())
         }
         ParamOp::UseDefault { word, colon } => {
-            let use_word = !ctx.is_set(&exp.name)? || (*colon && !ctx.is_nonnull(&exp.name)?);
+            let use_word =
+                !ctx.is_set(&exp.name)? || (*colon && !ctx.is_nonnull(&exp.name, quoted)?);
             if use_word {
                 expand_word_field(word, quoted, ctx, out)
             } else {
@@ -1136,7 +1142,8 @@ fn expand_param<S: Shell>(
             }
         }
         ParamOp::UseAlternate { word, colon } => {
-            let use_word = ctx.is_set(&exp.name)? && (!*colon || ctx.is_nonnull(&exp.name)?);
+            let use_word =
+                ctx.is_set(&exp.name)? && (!*colon || ctx.is_nonnull(&exp.name, quoted)?);
             if use_word {
                 expand_word_field(word, quoted, ctx, out)
             } else {
@@ -1147,7 +1154,8 @@ fn expand_param<S: Shell>(
             }
         }
         ParamOp::AssignDefault { word, colon } => {
-            let assign = !ctx.is_set(&exp.name)? || (*colon && !ctx.is_nonnull(&exp.name)?);
+            let assign =
+                !ctx.is_set(&exp.name)? || (*colon && !ctx.is_nonnull(&exp.name, quoted)?);
             if !assign {
                 substitute(&exp.name, quoted, ctx, out)?;
                 return Ok(());
@@ -1162,7 +1170,7 @@ fn expand_param<S: Shell>(
             Ok(())
         }
         ParamOp::Error { word, colon } => {
-            let fail = !ctx.is_set(&exp.name)? || (*colon && !ctx.is_nonnull(&exp.name)?);
+            let fail = !ctx.is_set(&exp.name)? || (*colon && !ctx.is_nonnull(&exp.name, quoted)?);
             if !fail {
                 substitute(&exp.name, quoted, ctx, out)?;
                 return Ok(());
@@ -1245,16 +1253,28 @@ fn slice_bounds<S: Shell>(
     length: Option<&Word>,
     ctx: &mut Ctx<'_, S>,
 ) -> Result<(i64, Option<i64>), Error> {
-    let offset_text = expand_word_to_scalar(offset, false, ctx)?;
-    let offset = arithmetic(&offset_text, offset, ctx)?;
-    let length = match length {
-        None => None,
-        Some(word) => {
-            let text = expand_word_to_scalar(word, false, ctx)?;
-            Some(arithmetic(&text, word, ctx)?)
-        }
-    };
+    // `${x:}` names no offset at all, which bash rejects as a bad
+    // substitution; `${x::2}` names none but supplies a length, so the offset
+    // is zero. A space is a *present* offset, and arithmetic reads it as zero
+    // (`${x: }` is the whole string).
+    if offset.parts.is_empty() {
+        let Some(length) = length else {
+            return Err(Error::unsupported(
+                UnsupportedOp::Other,
+                offset.span.clone(),
+            ));
+        };
+        return Ok((0, Some(slice_bound(length, ctx)?)));
+    }
+    let offset = slice_bound(offset, ctx)?;
+    let length = length.map(|word| slice_bound(word, ctx)).transpose()?;
     Ok((offset, length))
+}
+
+/// One slice bound: expand the word, then evaluate the text arithmetically.
+fn slice_bound<S: Shell>(word: &Word, ctx: &mut Ctx<'_, S>) -> Result<i64, Error> {
+    let text = expand_word_to_scalar(word, false, ctx)?;
+    arithmetic(&text, word, ctx)
 }
 
 /// `values[offset..offset+length]`, with bash's list slicing rules.
