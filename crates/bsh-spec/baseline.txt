@@ -3,5 +3,5 @@
 # Re-record with `bsh-spec --record` after a change that improves the
 # numbers, and commit the result. `total` accepts `## OK <shell>`
 # alternatives; `strict` counts only the primary expectation.
-total = 2077
-strict = 2022
+total = 2085
+strict = 2034

@@ -752,7 +752,12 @@ impl Interp {
     /// `Vars::get` cannot allocate and `$?` must be current.
     pub(crate) fn sync_specials(&mut self) {
         let status = self.state.vars.last_status().exit_code().to_string();
-        let dash = self.state.opts.dash_flags();
+        let mut dash = self.state.opts.dash_flags();
+        // `-i` has no `set -o` row (it is an invocation mode, not a toggle),
+        // so `$-` has to add it here.
+        if self.interactive && !dash.contains(&b'i') {
+            dash.push(b'i');
+        }
         let pid = self.state.vars.shell_pid().to_string();
         let bang = self
             .state

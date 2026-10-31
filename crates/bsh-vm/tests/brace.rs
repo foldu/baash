@@ -85,11 +85,12 @@ fn quoted_and_parameter_brace_text_stays_literal() {
 fn the_braceexpand_option_switches_the_stage() {
     assert_eq!(words("set +B; set -- a{b,c}d"), ["a{b,c}d"]);
     assert_eq!(words("set +B; set -B; set -- a{b,c}d"), ["abd", "acd"]);
-    // The short flag is reported in `$-` only while the stage is on.
+    // `$-` reports what differs from the profile, so a default-on option like
+    // `B` is never listed while an explicit `set -e` is.
     let mut interp = shell();
-    run(&mut interp, "set -B");
-    assert!(text(&interp, b"-").contains('B'));
-    run(&mut interp, "set +B");
+    run(&mut interp, "set -e");
+    assert!(text(&interp, b"-").contains('e'));
+    run(&mut interp, "set +e; set +B");
     assert!(!text(&interp, b"-").contains('B'));
 }
 

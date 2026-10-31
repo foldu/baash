@@ -514,6 +514,11 @@ impl Opts {
             });
         }
         self.set_flag(flag, on);
+        // `set -o vi` and `set -o emacs` are one choice with two names, so
+        // enabling one disables the other here as well as in `set_by_name`.
+        if on && let Some(other) = flag.editor_opposite() {
+            self.set_flag(other, false);
+        }
         Ok(())
     }
 
@@ -619,9 +624,16 @@ impl Opts {
     /// The `c` (command string) and `i` (interactive) letters are not options
     /// and are added by the caller that knows how the shell was started.
     pub fn dash_flags(&self) -> Vec<u8> {
+        // `$-` reports the options that *differ* from the profile's default,
+        // which is what the reference shell prints: `set -o nounset -c` is
+        // `u`, not the whole `Bhu` bundle bash shows. Defaults like
+        // `braceexpand` and `hashall` are only listed after being turned back
+        // on following a `set +B`.
         ALL_FLAGS
             .iter()
             .filter(|flag| flag.in_kind(OptionKind::SetO))
+            .filter(|flag| flag.short().is_some())
+            .filter(|flag| self.get_flag(**flag) != Opts::BASH.get_flag(**flag))
             .filter(|flag| self.get_flag(**flag))
             .filter_map(|flag| flag.short())
             .collect()

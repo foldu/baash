@@ -278,22 +278,20 @@ fn presets_are_presets_not_code_paths() {
     assert_eq!(Opts::default(), bash);
 }
 #[test]
-fn dash_flags_lists_enabled_short_options() {
+fn dash_flags_lists_options_that_differ_from_the_profile() {
     let mut opts = Opts::BASH;
-    let flags = opts.dash_flags();
-    assert!(flags.contains(&b'h'), "hashall is on in the bash profile");
-    // `braceexpand` is a bash default and brace expansion is implemented, so
-    // `$-` reports the flag the stage actually honours.
-    assert!(
-        flags.contains(&b'B'),
-        "braceexpand is on in the bash profile"
-    );
-    assert!(!flags.contains(&b'e'));
+    // `$-` reports what differs from the profile, which is why a plain
+    // `set -o nounset -c` is `u` and not the whole default bundle.
+    assert!(opts.dash_flags().is_empty());
     opts.errexit = true;
-    assert!(opts.dash_flags().contains(&b'e'));
+    assert_eq!(opts.dash_flags().as_slice(), b"e");
     opts.errexit = false;
     opts.nounset = true;
-    assert!(opts.dash_flags().contains(&b'u'));
+    assert_eq!(opts.dash_flags().as_slice(), b"u");
+    // A default option turned *off* is reported by its absence, and only
+    // options with a single-letter spelling can appear at all.
+    opts.pipefail = true;
+    assert_eq!(opts.dash_flags().as_slice(), b"u");
 }
 
 // ---------------------------------------------------------------------------

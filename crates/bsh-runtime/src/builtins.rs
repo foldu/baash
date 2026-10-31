@@ -171,23 +171,22 @@ fn bi_shopt(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
     let mut on: Option<bool> = None;
     let mut quiet = false;
     let mut printable = false;
+    let mut set_options = false;
     let mut names: Vec<&[u8]> = Vec::new();
 
     for argument in &argv[1..] {
         match *argument {
-            b"-s" => on = Some(true),
-            b"-u" => on = Some(false),
-            b"-q" => quiet = true,
-            b"-p" => printable = true,
             b"--" => {}
             other if other.starts_with(b"-") && other.len() > 1 => {
-                // `-su` and friends.
+                // `-su` and friends. `o` selects the `set -o` table, which a
+                // bundle may combine with `p` (`shopt -po`).
                 for letter in &other[1..] {
                     match letter {
                         b's' => on = Some(true),
                         b'u' => on = Some(false),
                         b'q' => quiet = true,
                         b'p' => printable = true,
+                        b'o' => set_options = true,
                         _ => {
                             host.diagnose(&Diagnostic::error(
                                 codes::USAGE,
@@ -203,33 +202,73 @@ fn bi_shopt(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
         }
     }
 
+    let kind = if set_options {
+        OptionKind::SetO
+    } else {
+        OptionKind::Shopt
+    };
     let opts = &host.state().opts;
-    let known: Vec<&'static str> = opts.names(OptionKind::Shopt).collect();
+    let known: Vec<&'static str> = opts.names(kind).collect();
 
     if names.is_empty() {
         if quiet {
             return Status::SUCCESS;
         }
         let mut out = Vec::new();
-        for option in opts.options(OptionKind::Shopt) {
+        for option in opts.options(kind) {
             if printable {
-                out.extend_from_slice(b"shopt -");
-                out.push(if option.on { b's' } else { b'u' });
+                // `shopt -p` is the re-readable form of the `set ±o` table
+                // and the `shopt -s/-u` form of the shopt table.
+                out.extend_from_slice(if set_options { b"set " } else { b"shopt " });
+                out.push(if option.on { b'-' } else { b'+' });
+                out.push(b'o');
                 out.push(b' ');
                 out.extend_from_slice(option.name.as_bytes());
                 out.push(b'\n');
             } else {
                 out.extend_from_slice(option.name.as_bytes());
-                out.extend_from_slice(if option.on { b"\ton\n" } else { b"\toff\n" });
+                if !set_options {
+                    out.extend_from_slice(if option.on { b"\ton\n" } else { b"\toff\n" });
+                } else {
+                    out.push(b'\n');
+                }
             }
         }
         host.write_out(&out);
         return Status::SUCCESS;
     }
 
+    // A `shopt` name that is not known prints nothing at all (status 2);
+    // the `set -o` table is checked name by name, so `shopt -po errexit
+    // invalid` still prints `errexit` before failing.
+    // `-s`/`-u` apply the names they know and report the rest, which is what
+    // lets `shopt -s nullglob not_yet_implemented` still enable nullglob.
+    if on.is_none()
+        && !set_options
+        && names
+            .iter()
+            .any(|name| !known.iter().any(|known| known.as_bytes() == *name))
+    {
+        host.diagnose(&Diagnostic::error(
+            codes::USAGE,
+            0..0,
+            format!(
+                "shopt: {}: invalid shell option name",
+                String::from_utf8_lossy(
+                    names
+                        .iter()
+                        .find(|name| !known.iter().any(|known| known.as_bytes() == **name))
+                        .copied()
+                        .unwrap_or(b""),
+                )
+            ),
+        ));
+        return Status(2);
+    }
+
     let mut status = Status::SUCCESS;
     for name in names {
-        let Some(_option) = known.iter().find(|known| known.as_bytes() == name) else {
+        if !known.iter().any(|known| known.as_bytes() == name) {
             host.diagnose(&Diagnostic::error(
                 codes::USAGE,
                 0..0,
@@ -238,16 +277,15 @@ fn bi_shopt(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
                     String::from_utf8_lossy(name)
                 ),
             ));
-            status = Status::FAILURE;
+            status = Status(2);
+            if on.is_none() {
+                break;
+            }
             continue;
-        };
+        }
         match on {
             Some(value) => {
-                if let Err(error) = host
-                    .state()
-                    .opts
-                    .set_by_name_in(OptionKind::Shopt, name, value)
-                {
+                if let Err(error) = host.state().opts.set_by_name_in(kind, name, value) {
                     host.diagnose(&Diagnostic::error(
                         codes::USAGE,
                         0..0,
@@ -257,7 +295,6 @@ fn bi_shopt(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
                     continue;
                 }
                 if printable {
-                    // `-p` with `-s` prints the resulting state.
                     let mut out = b"shopt -".to_vec();
                     out.push(if value { b's' } else { b'u' });
                     out.push(b' ');
@@ -268,15 +305,30 @@ fn bi_shopt(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
             }
             None => {
                 let current = host.state().opts.get_by_name(name).unwrap_or(false);
-                if printable {
-                    let mut out = b"shopt -".to_vec();
-                    out.push(if current { b's' } else { b'u' });
+                if quiet {
+                    if !current {
+                        status = Status::FAILURE;
+                    }
+                } else if printable {
+                    let mut out = if set_options {
+                        b"set ".to_vec()
+                    } else {
+                        b"shopt -".to_vec()
+                    };
+                    if set_options {
+                        out.push(if current { b'-' } else { b'+' });
+                        out.push(b'o');
+                    } else {
+                        out.push(if current { b's' } else { b'u' });
+                    }
                     out.push(b' ');
                     out.extend_from_slice(name);
                     out.push(b'\n');
                     host.write_out(&out);
-                } else if quiet && !current {
-                    status = Status::FAILURE;
+                } else if !set_options {
+                    let mut out = name.to_vec();
+                    out.extend_from_slice(if current { b"\ton\n" } else { b"\toff\n" });
+                    host.write_out(&out);
                 }
             }
         }
@@ -522,6 +574,27 @@ fn quote_into(out: &mut Vec<u8>, bytes: &[u8]) {
     out.push(b'\'');
 }
 
+/// Write `bytes` inside `[...]` when a double-quoted spelling is needed, and
+/// bare when every byte is safe there.
+fn quote_double_if_needed(out: &mut Vec<u8>, bytes: &[u8]) {
+    let safe = bytes.iter().all(|&byte| {
+        byte.is_ascii_alphanumeric()
+            || matches!(byte, b'_' | b'-' | b'.' | b'@' | b'+' | b',' | b'/')
+    });
+    if safe {
+        out.extend_from_slice(bytes);
+        return;
+    }
+    out.push(b'"');
+    for &byte in bytes {
+        if matches!(byte, b'"' | b'\\') {
+            out.push(b'\\');
+        }
+        out.push(byte);
+    }
+    out.push(b'"');
+}
+
 fn push_assignment(
     out: &mut Vec<u8>,
     keyword: Option<&[u8]>,
@@ -544,26 +617,46 @@ fn push_assignment(
             quote_into(out, bytes);
         }
         crate::VarValue::Indexed(elements) => {
+            // A dense array prints as a plain list (`(1 2 '3 4')`), which is
+            // the form the reference shell uses and the one a user can retype.
+            // A sparse one keeps subscripts so the holes survive.
+            let dense = elements
+                .keys()
+                .copied()
+                .enumerate()
+                .all(|(position, index)| index == position as i64);
             out.extend_from_slice(b"=(");
             for (position, (index, element)) in elements.iter().enumerate() {
                 if position > 0 {
                     out.push(b' ');
                 }
-                out.extend_from_slice(format!("[{index}]=").as_bytes());
+                if !dense {
+                    out.extend_from_slice(format!("[{index}]=").as_bytes());
+                }
                 quote_into(out, element);
             }
             out.push(b')');
         }
         crate::VarValue::Assoc(pairs) => {
+            // Associative arrays keep the `[key]=value` shape; values are
+            // double-quoted so a value with spaces re-reads as one word.
             out.extend_from_slice(b"=(");
-            for (index, (key, value)) in pairs.iter().enumerate() {
-                if index > 0 {
-                    out.push(b' ');
-                }
+            for (key, value) in pairs {
                 out.push(b'[');
-                quote_into(out, key);
+                quote_double_if_needed(out, key);
                 out.extend_from_slice(b"]=");
-                quote_into(out, value);
+                out.push(b'"');
+                for &byte in value {
+                    match byte {
+                        b'"' | b'\\' => {
+                            out.push(b'\\');
+                            out.push(byte);
+                        }
+                        byte => out.push(byte),
+                    }
+                }
+                out.push(b'"');
+                out.push(b' ');
             }
             out.push(b')');
         }
