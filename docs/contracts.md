@@ -360,6 +360,38 @@ and the string a script gets cannot drift.
   nest. The renderer consumes `non_printing()`; a caller that only needs bytes
   uses `into_bytes()`.
 
+**The stock `PS1` renders as the fish-like default prompt.** The `PS1`
+*variable* keeps bash's `\s-\v\$ ` value — `${PS1@P}` and the conformance case
+that reads it still decode bash's prompt — but `Interp::render_prompt`
+substitutes `bsh_lang::prompt::fish_prompt` while the value is still that one.
+The rendered shape is
+
+```text
+~/src/bshell main !4 ?3 
+```
+
+`cwd` (a leading `$HOME` abbreviated to `~`, bytes unchanged), then the git
+branch, then `!N` background children when `N > 0`, then `?N` last status when
+non-zero, then one trailing space. A component's space is omitted with the
+component, so a repository with nothing to report is `~/src/bshell ` rather
+than a double space.
+
+The branch is `bsh_lang::prompt::git_branch`: walk up for `.git` (a directory,
+or a file whose `gitdir:` names the real one for a linked worktree or
+submodule), read `HEAD`, and show `refs/heads/<name>` as the branch. Any other
+symbolic ref is resolved through loose refs, `commondir` and `packed-refs` and
+shown as a seven-character commit id; a detached `HEAD` is a raw object id and
+is abbreviated directly. It is all file reads — no `git`, no fork. An
+unreadable or absent repository omits the branch, never guesses.
+
+The default is built directly from data, not decoded as a prompt template, so
+a directory or branch containing `$`, a backslash or a `\u`-looking sequence is
+painted once and cannot be expanded again. **A user-defined `PS1` always
+wins**: the environment, an rc file or an assignment at the prompt replaces
+the value and the normal template path renders exactly those bytes. The REPL's
+legacy `[branch]` segment is appended only to user-defined prompts, because the
+stock prompt already contains the branch inline.
+
 `expand_with_variables(template, context, shell) -> ExpandedPrompt` is the
 two-pass form: it decodes the escapes, then — when `context.prompt_vars` is set
 (`shopt promptvars`, bash's default) — expands the result as if it were
@@ -875,10 +907,24 @@ wall.
 the terminal cooked. Without job control that also means `Ctrl-Z` reaches the
 whole foreground process group, shell included.
 
-**Key semantics**: TAB and Enter accept a menu selection; Up/Down, Shift-Tab and
-Ctrl-P/Ctrl-N navigate; Esc cancels. One candidate is inserted through
-`Menu::apply` without opening a menu. Ghost text comes from history and is
-accepted with Right or End.
+**Key semantics**: the first TAB inserts the candidates' longest common prefix
+when it extends the typed word, and otherwise opens the menu; the second TAB
+opens the menu even when there was no further prefix to add. Inside the menu
+TAB and Shift-Tab cycle (so do Up/Down and Ctrl-P/Ctrl-N), Enter inserts the
+selection, and Esc closes. This supersedes the earlier "TAB accepts" rule: a
+pager whose Tab both advances and inserts is readline's menu-complete, not
+fish's behaviour. One candidate is inserted through `Menu::apply` without
+opening a menu at all. Ghost text comes from history and is accepted with Right
+or End; Esc dismisses it for the current line, and any edit brings it back.
+
+The menu is columnar: entries are packed into as many columns as the terminal
+width allows, descriptions start at one column across rows, and a narrow
+terminal degrades to one clipped column rather than wrapping. Its height is
+capped by the rows below the prompt plus the line, so it can never scroll the
+prompt away; scrolling is by row and keeps the selected cell visible. At a
+blank command word history contributes whole previous commands (newest first,
+fuzzy-ranked like every other source), which is the fzf-like history picker;
+once a command word exists only its words are candidates.
 
 **The editor paints a rendered prompt; it does not expand one.**
 `bsh_repl::Prompt` holds two `bsh_lang::prompt::ExpandedPrompt`s (built by the

@@ -124,6 +124,15 @@ delegates everything else: line editing to `bsh-repl`, execution to the
   (`\u \h \w \W \$ \! \# \j \l \d \t …`) read the shell's logical
   `PWD`, its background children (`\j`) and its history ring; `\!` is the
   number the line will get and `\#` bash's command number;
+* **the stock prompt is fish-like**: while `PS1` is still the built-in
+  `\s-\v\$ `, the rendered prompt is `~/src/bshell main !4 ?3 ` — the
+  abbreviated `$PWD`, the git branch (read from `.git/HEAD`, following a `.git`
+  file and `packed-refs` for worktrees), `!N` when background children exist,
+  `?N` when the last status is non-zero, and one trailing space. It is built
+  from bytes in one pass, so non-UTF-8 paths render exactly and nothing in the
+  prompt is expanded twice. The `PS1` *variable* keeps bash's value, so
+  `${PS1@P}` and the conformance `default PS1` case are unchanged. An explicit
+  `PS1` wins and is rendered by the ordinary escape expander;
 * **`promptvars`** (`shopt`, on by default): the decoded prompt is expanded a
   second time as if double-quoted, so `PS1='$PWD $ '` and
   `PS1='$(date +%H:%M) $ '` work and `$(…)` runs at prompt time; with the
@@ -138,7 +147,16 @@ delegates everything else: line editing to `bsh-repl`, execution to the
   command runs correctly after `done`;
 * entering commands, running programs, `$((…))`, `exit`;
 * syntax highlighting (raw mode, `bsh-highlight`, colour decided by fd 0);
-* **completion on `Tab`**, now bash-shaped rather than only `PATH`/paths:
+* **completion on `Tab`**, fish-like as well as bash-shaped:
+  * the first Tab inserts the candidates' longest common prefix when it
+    extends the typed word; the second opens the menu (a menu also opens on the
+    first Tab when there is no new prefix to add), and one candidate is
+    inserted directly without a menu;
+  * the menu is fuzzy (`nucleo-matcher`; typed prefixes always outrank fuzzy
+    matches), columnar with a description column, and degrades to one clipped
+    column on a narrow terminal. Tab/Shift-Tab (and Up/Down, `Ctrl-P`/`Ctrl-N`)
+    cycle, Enter inserts, Esc closes; its height is capped by the rows below
+    the prompt;
   * command position is the deduplicated union of aliases, functions,
     builtins, keywords, `PATH` executables and variables, so `ec<TAB>` has
     `exec` and `fo<TAB>` has `for` (once per name, in bash's order);
@@ -153,7 +171,12 @@ delegates everything else: line editing to `bsh-repl`, execution to the
     actions the engine can answer, `-P`/`-S`, and
     `-o nospace|default|bashdefault|dirnames|plusdirs`; `cd`-like commands
     complete directories;
-  * history words, and a navigable menu (Up/Down/BackTab/Ctrl-P);
+  * history: at a blank command word the menu lists whole previous commands,
+    newest first and fuzzy-ranked (the fzf-like picker); once a command word
+    exists, history contributes words rather than whole lines. Ghost text
+    offers the newest continuation of the line and is accepted with
+    Right/End, dismissed with Esc for the current line (typing brings it
+    back);
 * **history as a shell feature**: one ring shared by the editor and the
   `history` built-in (`bsh-history`), backed by an embedded Turso database;
   `history [n]`, `-c` and `-d`; `Up`/`Down` navigation and ghost text. Numbers
@@ -207,6 +230,15 @@ delegates everything else: line editing to `bsh-repl`, execution to the
 
 **Known prompt limitations** (measured or deliberately deferred):
 
+* The rendered stock prompt and the `PS1` variable differ on purpose: `$PS1`
+  and `${PS1@P}` still report bash's `\s-\v\$ `, because the conformance suite
+  reads that value, while the interactive renderer draws the fish-like
+  prompt. A script cannot see the rendered form through `$PS1`.
+* The default prompt's branch is the branch only: no dirty count, no
+  ahead/behind, and no colour. The legacy `GitSegment` (bracketed `[branch]`
+  with an optional `~N` dirty count from a worker-thread `git status`) is
+  appended only to user-defined prompts, so the stock prompt never runs a
+  subprocess.
 * `\s` is `bsh`, so the conformance case that greps for `bash|osh` still
   fails; `\v`/`\V` now report the crate version (`0.0` / `0.0.0`).
 * With `set -e`, a failing `PROMPT_COMMAND` exits bash and does not exit this
