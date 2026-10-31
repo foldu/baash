@@ -375,6 +375,29 @@ fn prompt_escapes_read_real_history_and_job_numbers() {
 }
 
 #[test]
+fn the_default_prompt_is_fish_like() {
+    let home = temp_dir("fish-home");
+    let work = home.join("src/bshell");
+    std::fs::create_dir_all(work.join(".git")).expect("create git directory");
+    std::fs::write(work.join(".git/HEAD"), b"ref: refs/heads/main\n").expect("write HEAD");
+
+    // No PS1 in the environment or an rc file: the stock prompt is rendered.
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.prompt("~/src/bshell main ");
+    // A failed command adds the status; a background child adds the job count
+    // and the successful `&` clears the status again.
+    session.send(b"false\n");
+    session.prompt("~/src/bshell main ?1 ");
+    session.send(b"sleep 1 &\n");
+    session.prompt("~/src/bshell main !1 ");
+    session.send(b"wait\n");
+    session.prompt("~/src/bshell main ");
+    session.send(b"exit\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
 fn ctrl_r_finds_an_earlier_command_and_enter_runs_it() {
     let home = temp_dir("search-home");
     let mut session = Session::spawn(&home, &home, &["--norc", "-i"], &[("PS1", "S> ")]);
