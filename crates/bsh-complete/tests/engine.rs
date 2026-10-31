@@ -52,6 +52,40 @@ fn command_position_lists_commands_and_builtins() {
 }
 
 #[test]
+fn an_empty_command_word_offers_whole_history_lines_newest_first() {
+    // fzf-style history: at a blank prompt Tab lists entire previous commands,
+    // not just their first word, and the newest comes first.
+    let engine = CompletionEngine::new()
+        .with_path_var(Vec::new())
+        .with_history(history(&[
+            b"git status --short",
+            b"cargo test --workspace",
+            b"git status --short",
+        ]));
+    let menu = engine.complete(b"", 0);
+    let inserts: Vec<&[u8]> = menu
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.kind == bsh_complete::CandKind::History)
+        .map(|candidate| candidate.insert.as_slice())
+        .collect();
+    assert_eq!(
+        inserts,
+        vec![
+            b"git status --short".as_slice(),
+            b"cargo test --workspace".as_slice()
+        ],
+        "newest first, one candidate per line"
+    );
+    assert!(
+        menu.candidates
+            .iter()
+            .filter(|candidate| candidate.kind == bsh_complete::CandKind::History)
+            .all(|candidate| candidate.insertion == bsh_complete::Insertion::Source)
+    );
+}
+
+#[test]
 fn a_typed_prefix_never_loses_to_a_fuzzy_match() {
     let tree = TempTree::new("tiers");
     tree.exe("bin/chunky");

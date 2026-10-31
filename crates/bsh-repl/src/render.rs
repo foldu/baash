@@ -16,6 +16,7 @@
 //! absolute screen coordinate.
 
 use std::io;
+use std::ops::Range;
 
 use bsh_highlight::{Style, Styled, Theme};
 use bsh_lang::prompt::ExpandedPrompt;
@@ -33,8 +34,15 @@ pub struct MenuRow {
     /// Plain text to paint, already flattened and prefixed with a selection
     /// marker. It may be truncated to the terminal width.
     pub text: String,
-    /// Whether this row is the current selection.
+    /// Whether this row contains the current selection.
     pub selected: bool,
+    /// The selected cell's byte range within [`MenuRow::text`].
+    ///
+    /// A columnar row holds several candidates, so reversing the whole row
+    /// would paint its neighbours as selected. The range is only painted
+    /// inverted when colour is on; without colour the `> ` marker is the
+    /// selection.
+    pub selection: Option<Range<usize>>,
 }
 
 /// The menu part of a frame.
@@ -131,13 +139,7 @@ impl Renderer {
         if let Some(menu) = frame.menu {
             for row in menu.rows {
                 canvas.newline();
-                if row.selected && color {
-                    canvas.raw(b"\x1b[7m");
-                }
-                canvas.row_text(&row.text);
-                if row.selected && color {
-                    canvas.raw(RESET);
-                }
+                paint_menu_row(&mut canvas, row, color);
             }
         }
 
@@ -258,9 +260,12 @@ impl Canvas {
         }
     }
 
-    /// Write one menu row, clipped so it can never wrap onto a second row.
+    /// Write menu text, clipped so it can never wrap onto a second row.
+    ///
+    /// The column starts at the current position, not at zero: one row may hold
+    /// several candidates side by side, with only the selected cell inverted.
     fn row_text(&mut self, text: &str) {
-        let mut width = 0usize;
+        let mut width = usize::from(self.col);
         for character in text.chars() {
             let cells = UnicodeWidthChar::width(character).unwrap_or(0);
             if width + cells > usize::from(self.columns) {
@@ -273,6 +278,40 @@ impl Canvas {
         }
         self.col = width.min(usize::from(self.columns)) as u16;
     }
+}
+
+/// Paint one menu row, inverting only the selected cell.
+///
+/// Without colour there is nothing to invert, and the `> ` marker alone says
+/// which cell is selected. Byte ranges are split on character boundaries built
+/// from `char_indices`, so slicing a multi-byte candidate cannot panic.
+fn paint_menu_row(canvas: &mut Canvas, row: &MenuRow, color: bool) {
+    let Some(range) = row.selection.as_ref().filter(|_| color) else {
+        canvas.row_text(&row.text);
+        return;
+    };
+    let start = floor_boundary(&row.text, range.start);
+    let end = floor_boundary(&row.text, range.end).max(start);
+    canvas.row_text(&row.text[..start]);
+    canvas.raw(b"\x1b[7m");
+    canvas.row_text(&row.text[start..end]);
+    canvas.raw(RESET);
+    canvas.row_text(&row.text[end..]);
+}
+
+/// The greatest character boundary at or below `at`.
+fn floor_boundary(text: &str, at: usize) -> usize {
+    if at >= text.len() {
+        return text.len();
+    }
+    let mut boundary = 0;
+    for (index, _) in text.char_indices() {
+        if index > at {
+            break;
+        }
+        boundary = index;
+    }
+    boundary
 }
 
 /// Paint a prompt: non-printing stretches are written without advancing the

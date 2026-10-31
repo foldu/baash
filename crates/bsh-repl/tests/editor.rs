@@ -526,11 +526,18 @@ fn several_candidates_open_a_menu_and_insert_the_selection() {
             editor.step(key).unwrap();
         }
         clear_output(&sink);
+        // The first Tab inserts the unambiguous prefix and opens nothing.
+        assert_eq!(editor.step(Key::Tab).unwrap(), Flow::Continue);
+        assert_eq!(editor.line().buffer(), b"ls alp");
+        assert!(
+            !output_text(&sink).contains("> alpha"),
+            "the first Tab must not paint the menu"
+        );
+        // The second opens it; Down moves the selection and Enter inserts.
         assert_eq!(editor.step(Key::Tab).unwrap(), Flow::Continue);
         let frame = output_text(&sink);
         assert!(frame.contains("> alpha"), "the menu is painted: {frame:?}");
         assert!(frame.contains("  alpine"));
-        // Down moves the selection; Enter inserts it.
         editor.step(Key::Down).unwrap();
         assert_eq!(editor.step(Key::Enter).unwrap(), Flow::Continue);
         assert_eq!(editor.line().buffer(), b"ls alpine");
@@ -543,7 +550,7 @@ fn several_candidates_open_a_menu_and_insert_the_selection() {
 fn tab_accepts_the_selected_candidate() {
     let completer = StubCompleter::words(&["alpha", "alpine"]);
     let (result, _) = run(
-        FakeTerminal::new(b"ls a\t\t\r"),
+        FakeTerminal::new(b"ls a\t\t\r\r"),
         &completer,
         &bsh_repl::NeverNeedsMore,
         plain_config(),
@@ -566,11 +573,14 @@ fn escape_cancels_the_menu_without_inserting() {
     ] {
         editor.step(key).unwrap();
     }
+    // Two Tabs: the prefix, then the menu. Escape closes the menu without
+    // inserting the selection; the prefix is already part of the word.
+    editor.step(Key::Tab).unwrap();
     editor.step(Key::Tab).unwrap();
     assert_eq!(editor.step(Key::Esc).unwrap(), Flow::Continue);
     clear_output(&sink);
     editor.step(Key::Char('!')).unwrap();
-    assert_eq!(editor.line().buffer(), b"ls a!");
+    assert_eq!(editor.line().buffer(), b"ls alp!");
     assert!(
         !output_text(&sink).contains("alpha"),
         "the menu is gone after Escape"
@@ -643,6 +653,66 @@ fn without_colour_there_is_no_ghost_text_to_accept() {
 }
 
 #[test]
+fn escape_dismisses_the_ghost_and_typing_brings_it_back() {
+    let mut history = History::new();
+    history.push(b"echo hello\n");
+    let mut term = FakeTerminal::new(b"");
+    let sink = term.output_handle();
+    let completer = StubCompleter::empty();
+    let config = Config {
+        color: true,
+        history,
+        ..plain_config()
+    };
+    let mut editor = Editor::with_config(&mut term, &completer, &bsh_repl::NeverNeedsMore, config);
+    for key in chars("echo h") {
+        editor.step(key).unwrap();
+    }
+    assert!(output_text(&sink).contains("\x1b[2mello\x1b[22m"));
+
+    // Escape removes it for this line; Right/End cannot accept text that is
+    // not painted.
+    clear_output(&sink);
+    editor.step(Key::Esc).unwrap();
+    assert!(
+        !output_text(&sink).contains("\x1b[2m"),
+        "the ghost is gone after Escape"
+    );
+    editor.step(Key::Right).unwrap();
+    assert_eq!(editor.line().buffer(), b"echo h");
+
+    // Typing refines the line and the suggestion returns.
+    editor.step(Key::Char('e')).unwrap();
+    assert_eq!(editor.line().buffer(), b"echo he");
+    assert!(
+        output_text(&sink).contains("\x1b[2mllo\x1b[22m"),
+        "typing after Escape re-enables the suggestion"
+    );
+    editor.step(Key::End).unwrap();
+    assert_eq!(editor.line().buffer(), b"echo hello");
+}
+
+#[test]
+fn a_whitespace_only_line_has_no_ghost_text() {
+    let mut history = History::new();
+    history.push(b"echo hello\n");
+    let mut term = FakeTerminal::new(b"");
+    let sink = term.output_handle();
+    let completer = StubCompleter::empty();
+    let config = Config {
+        color: true,
+        history,
+        ..plain_config()
+    };
+    let mut editor = Editor::with_config(&mut term, &completer, &bsh_repl::NeverNeedsMore, config);
+    clear_output(&sink);
+    for key in chars("   ") {
+        editor.step(key).unwrap();
+    }
+    assert!(!output_text(&sink).contains("\x1b[2m"));
+}
+
+#[test]
 fn a_candidate_display_is_flattened_in_the_menu() {
     let completer = StubCompleter::new(vec![
         Candidate::new(b"bad\nname".to_vec(), bsh_complete::CandKind::Path),
@@ -662,6 +732,100 @@ fn a_candidate_display_is_flattened_in_the_menu() {
         "a newline in a filename cannot break the menu: {frame:?}"
     );
     assert!(!frame.contains("bad\nname"));
+}
+
+#[test]
+fn the_menu_cycles_with_tab_and_inserts_with_enter() {
+    let completer = StubCompleter::words(&["alpha", "alpine"]);
+    let mut term = FakeTerminal::new(b"");
+    let mut editor = Editor::new(&mut term, &completer, &bsh_repl::NeverNeedsMore);
+    for key in chars("ls a") {
+        editor.step(key).unwrap();
+    }
+    // Tab: common prefix; Tab: menu; Tab: next candidate; Enter: insert it.
+    assert_eq!(editor.step(Key::Tab).unwrap(), Flow::Continue);
+    assert_eq!(editor.line().buffer(), b"ls alp");
+    assert_eq!(editor.step(Key::Tab).unwrap(), Flow::Continue);
+    assert_eq!(editor.step(Key::Tab).unwrap(), Flow::Continue);
+    assert_eq!(editor.step(Key::Enter).unwrap(), Flow::Continue);
+    assert_eq!(editor.line().buffer(), b"ls alpine");
+    // Shift-Tab walks backwards, wrapping to the same entry here.
+    assert_eq!(editor.step(Key::BackTab).unwrap(), Flow::Continue);
+    assert_eq!(editor.line().buffer(), b"ls alpine");
+}
+
+#[test]
+fn a_menu_description_column_is_painted() {
+    let completer = StubCompleter::new(vec![
+        Candidate::new(b"checkout".to_vec(), bsh_complete::CandKind::Command)
+            .with_desc("switch branches"),
+        Candidate::new(b"cherry-pick".to_vec(), bsh_complete::CandKind::Command)
+            .with_desc("apply a commit"),
+    ]);
+    let mut term = FakeTerminal::sized(b"", 80, 24);
+    let sink = term.output_handle();
+    let mut editor = Editor::new(&mut term, &completer, &bsh_repl::NeverNeedsMore);
+    for key in chars("git ch") {
+        editor.step(key).unwrap();
+    }
+    editor.step(Key::Tab).unwrap(); // common prefix `che`
+    clear_output(&sink);
+    editor.step(Key::Tab).unwrap(); // menu
+    let frame = output_text(&sink);
+    assert!(frame.contains("> checkout"), "{frame:?}");
+    assert!(
+        frame.contains("switch branches"),
+        "the description column is painted: {frame:?}"
+    );
+}
+
+#[test]
+fn a_non_utf8_candidate_is_inserted_byte_for_byte() {
+    let completer = StubCompleter::new(vec![
+        Candidate::new(b"caf\xe9".to_vec(), bsh_complete::CandKind::Path),
+        Candidate::new(b"cafe".to_vec(), bsh_complete::CandKind::Path),
+    ]);
+    let (result, term) = run(
+        FakeTerminal::new(b"ls caf\t\r\r"),
+        &completer,
+        &bsh_repl::NeverNeedsMore,
+        plain_config(),
+    );
+    assert_eq!(
+        result,
+        ReadResult::Line(b"ls caf\\\xe9\n".to_vec()),
+        "the inserted form is the quoted spelling of the original bytes"
+    );
+    // The display projection is UTF-8, so painting it cannot panic either.
+    assert!(term.text().contains("caf"));
+}
+
+#[test]
+fn the_menu_never_paints_more_rows_than_fit_below_the_prompt() {
+    let completer = StubCompleter::words(&[
+        "alpha",
+        "alpine",
+        "alt",
+        "alto",
+        "altoids",
+        "alphabet",
+        "alphanumeric",
+    ]);
+    let mut term = FakeTerminal::sized(b"", 20, 4);
+    let sink = term.output_handle();
+    let mut editor = Editor::new(&mut term, &completer, &bsh_repl::NeverNeedsMore);
+    for key in chars("ls a") {
+        editor.step(key).unwrap();
+    }
+    editor.step(Key::Tab).unwrap(); // prefix
+    clear_output(&sink);
+    editor.step(Key::Tab).unwrap(); // menu
+    let frame = output_text(&sink);
+    assert!(frame.contains("$ ls al"), "the prompt is still painted");
+    assert!(
+        frame.matches("\r\n").count() <= 2,
+        "a 4-row terminal leaves room for at most two menu rows: {frame:?}"
+    );
 }
 
 #[test]

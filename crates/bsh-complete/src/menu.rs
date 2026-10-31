@@ -58,6 +58,52 @@ impl Menu {
         }
     }
 
+    /// The longest prefix every candidate shares, when it continues what the
+    /// user typed.
+    ///
+    /// This is fish's first-Tab behaviour: complete the unambiguous part before
+    /// showing a menu, so `git ch<TAB>` becomes `git che<TAB>` when both
+    /// `checkout` and `cherry` are on offer. `None` means there is nothing
+    /// unambiguous to add — including the case where a fuzzy candidate does not
+    /// start with the typed bytes at all, where inserting a shared prefix could
+    /// delete text the user meant to keep.
+    pub fn common_prefix(&self) -> Option<Vec<u8>> {
+        let mut candidates = self.candidates.iter();
+        let mut common = candidates.next()?.insert.clone();
+        for candidate in candidates {
+            let shared = common
+                .iter()
+                .zip(&candidate.insert)
+                .take_while(|(left, right)| left == right)
+                .count();
+            common.truncate(shared);
+            if common.is_empty() {
+                return None;
+            }
+        }
+        (common.len() > self.prefix.len() && common.starts_with(&self.prefix)).then_some(common)
+    }
+
+    /// [`Menu::common_prefix`], quoted for the insertion context.
+    ///
+    /// Candidates whose bytes are shell source (`$FOO`, `${HOME}`, a keyword)
+    /// must not be escaped; the others go through the same
+    /// [`bsh_lang::quote`] path as a complete insertion. A mix is quoted: the
+    /// shared bytes are then literal text, which is what an ordinary word would
+    /// insert.
+    pub fn common_prefix_insertion(&self) -> Option<Vec<u8>> {
+        let common = self.common_prefix()?;
+        let all_source = self
+            .candidates
+            .iter()
+            .all(|candidate| candidate.insertion == Insertion::Source);
+        if all_source && self.quote != QuoteCtx::SingleQuoted {
+            Some(common)
+        } else {
+            Some(quote(&common, self.quote))
+        }
+    }
+
     /// The bytes to insert for candidate `index`, already quoted, plus the
     /// trailing `/` or space the candidate asked for.
     ///
@@ -99,5 +145,73 @@ impl Menu {
         let end = self.replace.end.min(line.len()).max(start);
         line.splice(start..end, text.iter().copied());
         Some(start..start + text.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bsh_syntax::ParseOpts;
+
+    use crate::candidate::CandKind;
+    use crate::context::context;
+
+    fn menu(line: &[u8], words: &[&[u8]]) -> Menu {
+        let ctx = context(line, line.len(), &ParseOpts::DEFAULT);
+        let candidates = words
+            .iter()
+            .map(|word| Candidate::new(*word, CandKind::Command))
+            .collect();
+        Menu::new(ctx, candidates)
+    }
+
+    #[test]
+    fn the_common_prefix_is_the_part_beyond_what_was_typed() {
+        let menu = menu(b"ls al", &[b"alpha", b"alpine"]);
+        assert_eq!(menu.common_prefix().as_deref(), Some(&b"alp"[..]));
+        assert_eq!(menu.common_prefix_insertion().as_deref(), Some(&b"alp"[..]));
+    }
+
+    #[test]
+    fn no_extension_means_no_prefix_insertion() {
+        // The candidates disagree at once: the typed `a` is all they share.
+        assert_eq!(menu(b"ls a", &[b"alpha", b"beta"]).common_prefix(), None);
+        // A fuzzy candidate that does not start with the typed bytes would
+        // make splicing a shared prefix destructive.
+        let mut menu = menu(b"ls a", &[b"alpha", b"switch"]);
+        menu.candidates[1].tier = 2;
+        assert_eq!(menu.common_prefix(), None);
+    }
+
+    #[test]
+    fn source_candidates_keep_their_syntax_and_literal_ones_are_quoted() {
+        let ctx = context(b"echo $HO", 8, &ParseOpts::DEFAULT);
+        let source = Menu::new(
+            ctx,
+            vec![
+                Candidate::source(b"$HOME".to_vec(), CandKind::Variable),
+                Candidate::source(b"$HOMEDIR".to_vec(), CandKind::Variable),
+            ],
+        );
+        assert_eq!(
+            source.common_prefix_insertion().as_deref(),
+            Some(&b"$HOME"[..]),
+            "a parameter expansion is source, not a word to escape"
+        );
+
+        let literal = menu(b"ls al", &[b"alpha", b"alpine"]);
+        assert_eq!(
+            literal.common_prefix_insertion().as_deref(),
+            Some(&b"alp"[..])
+        );
+    }
+
+    #[test]
+    fn a_common_prefix_can_be_applied_to_a_line() {
+        let menu = menu(b"ls al", &[b"alpha", b"alpine"]);
+        let mut line = b"ls al".to_vec();
+        let span = menu.apply(&mut line, 0).expect("a full insertion");
+        assert_eq!(line, b"ls alpha");
+        assert_eq!(span, 3..8);
     }
 }

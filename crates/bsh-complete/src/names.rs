@@ -229,6 +229,14 @@ impl Provider for HistoryProvider {
     }
 
     fn candidates(&self, ctx: &Ctx) -> Vec<Candidate> {
+        // At an empty command word there is no partial word to complete, so
+        // offering whole previous commands is safe (the replacement span is
+        // empty) and is what a fuzzy history picker does. Once a command word
+        // exists, only its name is a candidate: inserting a whole line into an
+        // argument slot would duplicate the command.
+        if ctx.prefix.is_empty() && ctx.command_name.is_none() && ctx.replace.start == 0 {
+            return self.whole_lines();
+        }
         let mut candidates = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for (rank, entry) in self
@@ -252,6 +260,30 @@ impl Provider for HistoryProvider {
             }
         }
         candidates
+    }
+}
+
+impl HistoryProvider {
+    /// Recent commands as whole lines, newest first.
+    ///
+    /// These are [`crate::Insertion::Source`] candidates: the line is shell
+    /// source the user already ran, so quoting it again would change it. The
+    /// menu flattens control bytes for display (`docs/contracts.md`), and
+    /// insertion stays byte-exact.
+    fn whole_lines(&self) -> Vec<Candidate> {
+        let mut seen = std::collections::HashSet::new();
+        self.history
+            .entries()
+            .into_iter()
+            .take(HISTORY_ENTRY_LIMIT)
+            .enumerate()
+            .filter(|(_, entry)| !entry.is_empty() && seen.insert(entry.clone()))
+            .map(|(rank, entry)| {
+                Candidate::source(entry, CandKind::History)
+                    .with_desc("history")
+                    .with_frecency(1.0 / (1.0 + rank as f32))
+            })
+            .collect()
     }
 }
 

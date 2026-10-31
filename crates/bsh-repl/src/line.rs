@@ -335,6 +335,29 @@ impl Line {
         self.cursor = span.end.min(self.buffer.len());
         true
     }
+
+    /// Insert the candidates' unambiguous common prefix, replacing the word.
+    ///
+    /// This is fish's first `Tab`: nothing is selected, so the bytes spliced in
+    /// are exactly the part every candidate agrees on. The quoting is
+    /// `bsh-complete`'s (`Menu::common_prefix_insertion`), for the same reason
+    /// [`Line::apply_menu`] uses `Menu::apply` rather than escaping here.
+    ///
+    /// Returns `false` when there is no prefix to add or the word starts in
+    /// submitted scrollback; the caller then opens the menu instead.
+    pub fn apply_menu_prefix(&mut self, menu: &Menu) -> bool {
+        if menu.replace.start < self.start || menu.replace.end > self.buffer.len() {
+            return false;
+        }
+        let Some(text) = menu.common_prefix_insertion() else {
+            return false;
+        };
+        let start = menu.replace.start;
+        let end = menu.replace.end.min(self.buffer.len()).max(start);
+        self.buffer.splice(start..end, text.iter().copied());
+        self.cursor = (start + text.len()).min(self.buffer.len());
+        true
+    }
 }
 
 /// Whether byte offset `at` starts a character.

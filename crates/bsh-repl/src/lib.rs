@@ -36,13 +36,12 @@
 //!   the renderer has no selection concept yet.
 //! * **`Ctrl-S` forward search.** `Ctrl-R` only walks backwards, which is also
 //!   what a terminal without `stty -ixon` can deliver.
-//! * **Cycling the completion menu with Tab.** Tab accepts the selection (as
-//!   does Enter); Up/Down, `Ctrl-P`/`Ctrl-N` and Shift-Tab move it. Readline's
-//!   menu-complete, where repeated Tab advances *and* inserts, is a different
-//!   interaction and is not implemented.
+//! * **Readline's menu-complete.** Tab cycles the menu (fish's pager) and
+//!   Enter inserts the selection; it does not insert on each repeated Tab.
 //! * **Vi mode and `set -o vi`.** No modal editing, no `bind`, no `inputrc`.
-//! * **Multi-column menus and the full-screen picker** (`DESIGN.md` §6.8). The
-//!   menu is a single column with a description, capped at a few rows.
+//! * **The full-screen picker** (`DESIGN.md` §6.8). The inline menu is
+//!   columnar, paged and has a description column, but there is no separate
+//!   screen with a preview pane.
 //! * **A `poll(2)`-based key timeout.** `bsh-sys` has no `poll` wrapper, so a
 //!   lone `Esc` is only decoded as `Esc` at end of input; on a real tty it is
 //!   indistinguishable from the start of `Alt-<key>`. Pressing `Esc` twice

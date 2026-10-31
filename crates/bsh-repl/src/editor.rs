@@ -177,6 +177,12 @@ pub struct Editor<'a> {
     initial: Option<Vec<u8>>,
     /// The reverse search in progress, if any.
     search: Option<Search>,
+    /// The last `Tab` inserted the candidates' common prefix, so the next one
+    /// is what opens the menu. Any other key clears it.
+    prefix_tab: bool,
+    /// `Esc` dismissed the history suggestion for the current line. Typing
+    /// clears it, so refining the line brings the suggestion back.
+    suggestion_dismissed: bool,
     secondary: bool,
     dirty: bool,
 }
@@ -214,6 +220,8 @@ impl<'a> Editor<'a> {
             menu: None,
             initial: None,
             search: None,
+            prefix_tab: false,
+            suggestion_dismissed: false,
             secondary: false,
             dirty: true,
         }
@@ -297,6 +305,8 @@ impl<'a> Editor<'a> {
         }
         self.menu = None;
         self.search = None;
+        self.prefix_tab = false;
+        self.suggestion_dismissed = false;
         self.history.reset_navigation();
         self.secondary = false;
         self.renderer.reset();
@@ -376,14 +386,35 @@ impl<'a> Editor<'a> {
         if !is_kill(&key) {
             self.line.kill_reset();
         }
+        if key != Key::Tab {
+            // The second `Tab` is only special immediately after a prefix
+            // completion; any other key starts a new completion sequence.
+            self.prefix_tab = false;
+        }
+        if edits_line(&key) {
+            // Editing the line refines the suggestion; a movement key does
+            // not, so it must not resurrect one Escape dismissed.
+            self.suggestion_dismissed = false;
+        }
         self.dirty = true;
         match key {
-            Key::Char(character) => self.line.insert_char(character),
-            Key::Byte(byte) => self.line.insert(&[byte]),
-            Key::Paste(bytes) => self.line.insert(&bytes),
+            Key::Char(character) => {
+                self.line.insert_char(character);
+            }
+            Key::Byte(byte) => {
+                self.line.insert(&[byte]);
+            }
+            Key::Paste(bytes) => {
+                self.line.insert(&bytes);
+            }
             Key::Enter => return Ok(Flow::Submit),
             Key::Tab => self.complete()?,
-            Key::BackTab | Key::Esc => {}
+            Key::Esc => {
+                // Dismiss the ghost text for this line. Typing refines the
+                // line and brings it back.
+                self.suggestion_dismissed = true;
+            }
+            Key::BackTab => {}
             Key::Backspace => {
                 self.line.backspace();
             }
@@ -469,31 +500,36 @@ impl<'a> Editor<'a> {
 
     fn handle_menu(&mut self, key: Key) -> io::Result<Flow> {
         match key {
-            Key::Up | Key::BackTab | Key::Ctrl(0x10) => {
-                if let Some(menu) = self.menu.as_mut() {
-                    menu.previous();
-                }
-                self.dirty = true;
-                Ok(Flow::Continue)
-            }
-            Key::Down | Key::Ctrl(0x0e) => {
+            // Tab and Shift-Tab cycle the menu (fish's pager behaviour), and
+            // Enter inserts the selection. Up/Down and Ctrl-P/Ctrl-N are the
+            // readline spellings of the same movement.
+            Key::Tab | Key::Down | Key::Ctrl(0x0e) => {
                 if let Some(menu) = self.menu.as_mut() {
                     menu.next();
                 }
                 self.dirty = true;
                 Ok(Flow::Continue)
             }
-            Key::Tab | Key::Enter => {
+            Key::BackTab | Key::Up | Key::Ctrl(0x10) => {
+                if let Some(menu) = self.menu.as_mut() {
+                    menu.previous();
+                }
+                self.dirty = true;
+                Ok(Flow::Continue)
+            }
+            Key::Enter => {
                 self.accept_selection();
                 Ok(Flow::Continue)
             }
             Key::Esc => {
                 self.menu = None;
+                self.prefix_tab = false;
                 self.dirty = true;
                 Ok(Flow::Continue)
             }
             other => {
                 self.menu = None;
+                self.prefix_tab = false;
                 self.dirty = true;
                 self.handle(other)
             }
@@ -520,12 +556,28 @@ impl<'a> Editor<'a> {
             .complete(self.line.buffer(), self.line.cursor());
         if menu.is_empty() {
             // No candidates: a bell, not a redraw that changes nothing.
+            self.prefix_tab = false;
             self.term.write_all(b"\x07")?;
             self.dirty = false;
             return Ok(());
         }
         if menu.candidates.len() == 1 {
+            self.prefix_tab = false;
             self.line.apply_menu(&menu, 0);
+            return Ok(());
+        }
+        if self.prefix_tab {
+            // The first Tab already inserted everything unambiguous; the
+            // second is the request to see the choices.
+            self.prefix_tab = false;
+            self.menu = Some(MenuState::new(menu));
+            return Ok(());
+        }
+        if self.line.apply_menu_prefix(&menu) {
+            // Fish's first Tab: extend the word to the common prefix and do
+            // not paint a menu. The next Tab opens it even when there is no
+            // further prefix to add, which is why `prefix_tab` exists.
+            self.prefix_tab = true;
             return Ok(());
         }
         self.menu = Some(MenuState::new(menu));
@@ -777,9 +829,14 @@ impl<'a> Editor<'a> {
     fn suggestion(&self) -> Option<Vec<u8>> {
         if !self.auto_suggest
             || !self.color
+            || self.suggestion_dismissed
             || self.line.in_continuation()
             || self.line.cursor() != self.line.buffer().len()
             || self.line.buffer().is_empty()
+            // Whitespace-only input is not a prefix of anything worth
+            // suggesting, and painting a whole command after three spaces is
+            // noise rather than help.
+            || self.line.buffer().iter().all(u8::is_ascii_whitespace)
         {
             return None;
         }
@@ -802,10 +859,15 @@ impl<'a> Editor<'a> {
             self.prompt.primary_text()
         };
         let columns = self.term.size().columns_or_fallback();
-        let rows = self
-            .menu
-            .as_mut()
-            .map(|menu| menu.rows(self.max_menu_rows, columns));
+        // A menu taller than the screen would scroll the prompt away, so the
+        // height is capped by the rows left below the prompt and the line. A
+        // terminal that reports no size falls back to the configured maximum.
+        let rows_available = match self.term.size().rows {
+            0 => self.max_menu_rows,
+            rows => usize::from(rows.saturating_sub(2)).max(1),
+        };
+        let max_rows = self.max_menu_rows.min(rows_available);
+        let rows = self.menu.as_mut().map(|menu| menu.rows(max_rows, columns));
         let menu = rows.as_deref().map(|rows| MenuView { rows });
         let ghost = if self.menu.is_some() || self.search.is_some() {
             None
@@ -840,4 +902,19 @@ fn contains(text: &[u8], query: &[u8]) -> bool {
 /// Whether `key` extends a kill sequence rather than ending one.
 fn is_kill(key: &Key) -> bool {
     matches!(key, Key::Ctrl(0x0b) | Key::Ctrl(0x15) | Key::Ctrl(0x17))
+}
+
+/// Whether `key` changes the line, and so may change the ghost text.
+fn edits_line(key: &Key) -> bool {
+    matches!(
+        key,
+        Key::Char(_)
+            | Key::Byte(_)
+            | Key::Paste(_)
+            | Key::Backspace
+            | Key::Delete
+            | Key::Up
+            | Key::Down
+            | Key::Ctrl(0x04 | 0x0b | 0x0e | 0x10 | 0x14 | 0x15 | 0x17 | 0x19)
+    )
 }
