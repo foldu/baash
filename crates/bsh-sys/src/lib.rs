@@ -232,6 +232,10 @@ pub const SIGCHLD: c_int = 17;
 /// `ECHILD`: the pid is not a child, i.e. `wait` has nothing to report for it.
 pub const ECHILD: c_int = libc::ECHILD;
 
+/// `ENOEXEC`: the file is executable but has no recognizable header (no
+/// `#!`). A shell is expected to interpret such a file itself.
+pub const ENOEXEC: i32 = libc::ENOEXEC;
+
 /// Whether `fd` refers to a terminal.
 ///
 /// Interactive behaviour (colour, the line editor, the terminal REPL) hangs

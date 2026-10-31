@@ -472,6 +472,12 @@ fn shell(interactive: bool, flags: &ShellFlags) -> Interp {
         std::process::exit(2);
     }
     shell.import_environment();
+    // `$0` is the shell's own name until a script or `-c` name replaces it;
+    // a shell reading stdin still has one, which is what makes `${@:0}`
+    // include it.
+    if let Some(name) = std::env::args_os().next() {
+        shell.set_arg0(bsh_sys::os::bytes_from_os(name));
+    }
     // A shell always has a `PATH`, even when the environment does not: a
     // script that runs with `env -i` must still find `/bin/sh` and friends.
     if shell.state().vars.scalar(b"PATH").is_none() {

@@ -1221,6 +1221,12 @@ impl Interp {
                     }
                 }
             }
+            Err(error) if error.raw_os_error() == Some(bsh_sys::ENOEXEC) => {
+                // A file with no `#!` is a shell script by convention. Every
+                // shell interprets it itself rather than failing; we already
+                // have an interpreter here, so no `/bin/sh` is spawned.
+                self.run_without_shebang(chunk, path, redirects, assigns, argv)
+            }
             Err(error) => {
                 let status = self.spawn_status(&error, path);
                 self.report(
@@ -1235,6 +1241,51 @@ impl Interp {
                 Unwind::Status(status)
             }
         }
+    }
+
+    /// Run an executable file that has no `#!` line as a shell script.
+    fn run_without_shebang(
+        &mut self,
+        chunk: &Arc<ParsedChunk>,
+        path: &[u8],
+        redirects: &[Redirect],
+        assigns: &[(&[u8], &[u8])],
+        argv: &[Vec<u8>],
+    ) -> Unwind {
+        let bytes = match std::fs::read(bsh_sys::os::path_from_bytes(path)) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.report(
+                    crate::codes::EXEC,
+                    0..0,
+                    format!("{}: {error}", String::from_utf8_lossy(path)),
+                );
+                return Unwind::Status(Status::NOT_EXECUTABLE);
+            }
+        };
+        let scope = self.open_scope();
+        let saved = match self.apply_redirects(chunk, redirects) {
+            Ok(saved) => saved,
+            Err(()) => {
+                self.close_scope(scope);
+                return Unwind::Status(Status::FAILURE);
+            }
+        };
+        let applied = self
+            .state
+            .vars
+            .apply_prefix_assignments(assigns, bsh_runtime::Tier::Regular)
+            .ok();
+        self.set_arg0(path.to_vec());
+        self.set_positional(argv[1..].to_vec());
+        let name = String::from_utf8_lossy(path).into_owned();
+        let status = self.run_named(&name, &bytes);
+        if let Some(applied) = applied {
+            let _ = self.state.vars.finish_prefix_assignments(applied);
+        }
+        self.restore_fds(saved);
+        self.close_scope(scope);
+        Unwind::Status(status)
     }
 
     /// `exec`: replace the process.
@@ -1497,6 +1548,13 @@ impl Interp {
     /// Resolve a command word for execution: the first candidate, and a
     /// `PATH` hit is remembered in the hash table.
     fn resolve(&mut self, name: &[u8]) -> Option<Resolution> {
+        // A name with a slash is a path, not a search: even when the file is
+        // not executable the shell has to *try* it, because the failure is
+        // EACCES (status 126) rather than "command not found" (127). The
+        // permission check `type`/`command -v` do still applies to them.
+        if name.contains(&b'/') && std::fs::metadata(bsh_sys::os::path_from_bytes(name)).is_ok() {
+            return Some(Resolution::External(name.to_vec()));
+        }
         let mut found = None;
         self.each_candidate(
             name,
