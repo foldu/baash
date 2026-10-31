@@ -17,14 +17,22 @@
 //! difference between them and a utility. `grep`, `sed`, `awk` and the rest of
 //! the non-coreutils toolbox are deliberately absent.
 //!
-//! Error text is uutils' translated message for the current locale; the
-//! catalogs are loaded from a `locales/` directory that an embedded call does
-//! not have, so a failure prints the key until that is wired up.
+//! Error text needs one more piece. uutils keeps the message catalog in a
+//! *thread-local* that is installed once, and it loads exactly one utility's
+//! strings, because a real `uu_*` binary is one utility per process. A shell is
+//! many in one process, so each utility gets a dedicated worker thread that
+//! installs its own catalog (see [`serve`]); the English strings are already
+//! compiled into the binary by uucore's build script, so no `locales/`
+//! directory is shipped or extracted.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+use std::collections::HashMap;
 use std::ffi::OsString;
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Mutex, OnceLock, PoisonError};
+use std::thread;
 
 /// One embedded utility: its name and the uutils entry point.
 type Entry = fn(Vec<OsString>) -> i32;
@@ -49,25 +57,119 @@ const UTILITIES: &[(&str, Entry)] = &[
     ("sleep", run_sleep),
 ];
 
+/// One call handed to a utility's worker thread.
+struct Job {
+    argv: Vec<OsString>,
+    reply: Sender<i32>,
+}
+
+/// The worker threads, one per utility, created on first use.
+///
+/// A pool of interchangeable workers would be wrong: the catalog `uucore`
+/// installs is per thread and set once, so a worker that ran `cat` and then
+/// `mkdir` would still be speaking `cat`. Keying by utility is what makes the
+/// reuse correct, and it costs one thread per utility actually used (bounded
+/// by the table above).
+fn workers() -> &'static Mutex<HashMap<&'static str, Sender<Job>>> {
+    static WORKERS: OnceLock<Mutex<HashMap<&'static str, Sender<Job>>>> = OnceLock::new();
+    WORKERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lock_workers() -> std::sync::MutexGuard<'static, HashMap<&'static str, Sender<Job>>> {
+    workers().lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The worker for `name`, started if this is the first call.
+fn worker(name: &'static str, entry: Entry) -> Option<Sender<Job>> {
+    let mut map = lock_workers();
+    if let Some(jobs) = map.get(name) {
+        return Some(jobs.clone());
+    }
+    let (jobs, incoming) = channel();
+    thread::Builder::new()
+        .name(format!("bsh-{name}"))
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || serve(name, entry, incoming))
+        .ok()?;
+    map.insert(name, jobs.clone());
+    Some(jobs)
+}
+
+/// Forget a worker whose channel is gone, so the next call starts a fresh one.
+fn forget(name: &'static str) {
+    lock_workers().remove(name);
+}
+
+/// A utility's thread: install its catalog once, then run jobs.
+fn serve(name: &'static str, entry: Entry, jobs: Receiver<Job>) {
+    // The English catalog is compiled into `uucore`'s build script; the path
+    // argument only names the utility whose strings to load. Nothing is read
+    // from disk, which is what keeps this a single binary.
+    let _ = uucore::locale::setup_localization(name);
+    while let Ok(job) = jobs.recv() {
+        let status = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry(job.argv)))
+            .unwrap_or(101);
+        // A utility's own binary flushes at exit; in-process the shell must, or
+        // `printf x > file` leaves the bytes in the buffer.
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+        if job.reply.send(status).is_err() {
+            break;
+        }
+    }
+}
+
 /// Run `argv` if `argv[0]` names an embedded utility.
 ///
 /// Returns `None` when the name is not embedded, so the caller keeps whatever
-/// diagnostic it would have produced.
+/// diagnostic it would have produced. Blocks until the utility finishes, like a
+/// built-in.
 pub fn run(argv: &[Vec<u8>]) -> Option<i32> {
-    let (name, _) = argv.split_first()?;
-    let name = std::str::from_utf8(name).ok()?;
-    let (_, entry) = UTILITIES.iter().find(|(entry, _)| *entry == name)?;
+    let (typed, _) = argv.split_first()?;
+    let typed = std::str::from_utf8(typed).ok()?;
+    let (name, entry) = *UTILITIES.iter().find(|(utility, _)| *utility == typed)?;
     let args: Vec<OsString> = argv
         .iter()
         .map(|arg| bsh_sys::os::os_from_bytes(arg))
         .collect();
-    let status = entry(args);
-    // A utility's own binary flushes these when the process exits; in-process
-    // the shell has to, or `printf x > file` leaves the bytes in the buffer
-    // and the file empty.
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-    let _ = std::io::Write::flush(&mut std::io::stderr());
-    Some(status)
+    match attempt(name, entry, args) {
+        Ok(status) => Some(status),
+        // The worker died with the job (it panics outside `catch_unwind` only
+        // if the shell's own dispatch is broken); try once on a fresh thread.
+        Err(args) if !args.is_empty() => match attempt(name, entry, args) {
+            Ok(status) => Some(status),
+            Err(_) => {
+                eprintln!("bsh: {name}: embedded utility failed");
+                Some(1)
+            }
+        },
+        Err(_) => {
+            eprintln!("bsh: {name}: embedded utility failed");
+            Some(1)
+        }
+    }
+}
+
+/// Hand one call to the worker, giving `argv` back when the worker died.
+fn attempt(name: &'static str, entry: Entry, args: Vec<OsString>) -> Result<i32, Vec<OsString>> {
+    let Some(jobs) = worker(name, entry) else {
+        return Err(args);
+    };
+    let (reply, answer) = channel();
+    let job = match jobs.send(Job { argv: args, reply }) {
+        Ok(()) => {
+            return match answer.recv() {
+                Ok(status) => Ok(status),
+                Err(_) => {
+                    forget(name);
+                    Err(Vec::new())
+                }
+            };
+        }
+        Err(std::sync::mpsc::SendError(job)) => job,
+    };
+    forget(name);
+    Err(job.argv)
 }
 
 /// Whether `name` is embedded.

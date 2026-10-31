@@ -476,7 +476,10 @@ Where the waves stand:
   (external utilities still win). Verified under Wine end to end. Cost:
   +3.7 MiB and 151 crates in that crate's tree; Linux release is thin LTO with
   16 codegen units (44 s), while `profile.windows` (fat LTO, one unit,
-  stripped, 16.4 MiB) is built by CI so the local loop stays fast.
+  stripped, 16.4 MiB) is built by CI so the local loop stays fast. Each
+  embedded utility runs on its own worker thread, because uutils' message
+  catalog is thread-local and single-utility: warm dispatch is 3.7 µs, and a
+  utility's first call costs 57–191 µs (thread plus catalog).
 
 ## 9. Open questions
 

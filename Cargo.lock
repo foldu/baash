@@ -415,6 +415,7 @@ dependencies = [
  "uu_test",
  "uu_tr",
  "uu_wc",
+ "uucore",
 ]
 
 [[package]]
