@@ -164,7 +164,9 @@ entry names the suite file that measures it.
       (13). Today `$-` is a fixed `Bhu`.
 - [ ] `umask`, numeric and symbolic — `builtin-umask` (21). One `bsh-sys`
       call plus bash's symbolic grammar.
-- [ ] `exec --`, `exec -a`, redirect-only `exec` — `builtin-process` (18).
+- [~] `exec --`, `exec -a`, redirect-only `exec` — `builtin-process` (18),
+      now 7/25 → 10/25; the rest of the file is `exec` failure modes and
+      dynamic-loader behaviour.
 - [ ] `pushd` / `popd` / `dirs` — `builtin-dirs` (16). Pure state.
 - [ ] Special variables initialised only when unset (`PATH`, `PWD`, `IFS`,
       `PS4`) — `vars-special` (22; `HISTFILE` is a deliberate divergence).

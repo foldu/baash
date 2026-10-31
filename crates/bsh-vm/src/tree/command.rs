@@ -1209,7 +1209,35 @@ impl Interp {
             }
         };
 
-        if argv.len() == 1 {
+        // `exec`'s own options end at `--` or the first word that is not one
+        // of them. `-a NAME` sets the child's `argv[0]` without changing which
+        // program is executed (bash's only exec option).
+        let mut index = 1;
+        let mut child_argv0: Option<Vec<u8>> = None;
+        while let Some(argument) = argv.get(index) {
+            match argument.as_slice() {
+                b"--" => {
+                    index += 1;
+                    break;
+                }
+                b"-a" => {
+                    let Some(name) = argv.get(index + 1) else {
+                        let _ = self.state.vars.finish_prefix_assignments(applied);
+                        let _ = self.write_err(b"bsh: exec: -a: option requires an argument\n");
+                        return Unwind::Status(Status::FAILURE);
+                    };
+                    child_argv0 = Some(name.clone());
+                    index += 2;
+                }
+                option if option.starts_with(b"-a") && option.len() > 2 => {
+                    child_argv0 = Some(option[2..].to_vec());
+                    index += 1;
+                }
+                _ => break,
+            }
+        }
+
+        if index >= argv.len() {
             let result = self.apply_redirects_committed(chunk, redirects);
             let _ = self.state.vars.finish_prefix_assignments(applied);
             return match result {
@@ -1218,10 +1246,10 @@ impl Interp {
             };
         }
 
-        let Some(program) = self.search_path(&argv[1]) else {
+        let Some(program) = self.search_path(&argv[index]) else {
             let _ = self.state.vars.finish_prefix_assignments(applied);
             let mut message = b"bsh: exec: ".to_vec();
-            message.extend_from_slice(&argv[1]);
+            message.extend_from_slice(&argv[index]);
             message.extend_from_slice(b": not found\n");
             let _ = self.write_err(&message);
             return Unwind::Status(Status::NOT_FOUND);
@@ -1237,15 +1265,20 @@ impl Interp {
         for entry in &applied.env {
             envp.push(entry.clone());
         }
-        let mut plan =
-            match SpawnPlan::new_with_env(&program, argv[1..].iter().map(Vec::as_slice), &envp) {
-                Ok(plan) => plan,
-                Err(error) => {
-                    let _ = self.state.vars.finish_prefix_assignments(applied);
-                    self.report(crate::codes::EXEC, 0..0, error.to_string());
-                    return Unwind::Status(Status::NOT_EXECUTABLE);
-                }
-            };
+        // The child's `argv[0]` is the program as written, unless `-a` named
+        // another; the rest of the words follow unchanged.
+        let mut child_argv: Vec<&[u8]> = argv[index..].iter().map(Vec::as_slice).collect();
+        if let Some(name) = &child_argv0 {
+            child_argv[0] = name;
+        }
+        let mut plan = match SpawnPlan::new_with_env(&program, child_argv.iter().copied(), &envp) {
+            Ok(plan) => plan,
+            Err(error) => {
+                let _ = self.state.vars.finish_prefix_assignments(applied);
+                self.report(crate::codes::EXEC, 0..0, error.to_string());
+                return Unwind::Status(Status::NOT_EXECUTABLE);
+            }
+        };
         plan.actions = actions;
         plan.sigmask = Some(bsh_sys::SignalSet::empty());
         plan.reset_signals = self.child_reset_signals();
