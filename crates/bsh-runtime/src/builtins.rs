@@ -221,10 +221,13 @@ fn bi_shopt(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
             if printable {
                 // `shopt -p` is the re-readable form of the `set ±o` table
                 // and the `shopt -s/-u` form of the shopt table.
-                out.extend_from_slice(if set_options { b"set " } else { b"shopt " });
-                out.push(if option.on { b'-' } else { b'+' });
-                out.push(b'o');
-                out.push(b' ');
+                if set_options {
+                    out.extend_from_slice(if option.on { b"set -o " } else { b"set +o " });
+                } else if option.on {
+                    out.extend_from_slice(b"shopt -s ");
+                } else {
+                    out.extend_from_slice(b"shopt -u ");
+                }
                 out.extend_from_slice(option.name.as_bytes());
                 out.push(b'\n');
             } else {
@@ -240,34 +243,11 @@ fn bi_shopt(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
         return Status::SUCCESS;
     }
 
-    // A `shopt` name that is not known prints nothing at all (status 2);
-    // the `set -o` table is checked name by name, so `shopt -po errexit
-    // invalid` still prints `errexit` before failing.
-    // `-s`/`-u` apply the names they know and report the rest, which is what
-    // lets `shopt -s nullglob not_yet_implemented` still enable nullglob.
-    if on.is_none()
-        && !set_options
-        && names
-            .iter()
-            .any(|name| !known.iter().any(|known| known.as_bytes() == *name))
-    {
-        host.diagnose(&Diagnostic::error(
-            codes::USAGE,
-            0..0,
-            format!(
-                "shopt: {}: invalid shell option name",
-                String::from_utf8_lossy(
-                    names
-                        .iter()
-                        .find(|name| !known.iter().any(|known| known.as_bytes() == **name))
-                        .copied()
-                        .unwrap_or(b""),
-                )
-            ),
-        ));
-        return Status(2);
-    }
-
+    // A `shopt` name that is not known is reported and the rest of the names
+    // are still processed: bash prints the known ones, warns about the unknown
+    // ones and fails with status 1. `-s`/`-u` apply the names they know, which
+    // is what lets `shopt -s nullglob not_yet_implemented` still enable
+    // nullglob.
     let mut status = Status::SUCCESS;
     for name in names {
         if !known.iter().any(|known| known.as_bytes() == name) {
@@ -279,10 +259,7 @@ fn bi_shopt(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
                     String::from_utf8_lossy(name)
                 ),
             ));
-            status = Status(2);
-            if on.is_none() {
-                break;
-            }
+            status = Status::FAILURE;
             continue;
         }
         match on {

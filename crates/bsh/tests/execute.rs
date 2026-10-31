@@ -810,6 +810,78 @@ fn an_exported_shellopts_turns_tracing_on_in_a_child() {
 }
 
 #[test]
+fn break_and_continue_outside_a_loop_warn_and_continue() {
+    // bash warns on stderr and keeps running; the status is zero.
+    assert_eq!(out("echo a; continue; echo b; echo st=$?"), "a\nb\nst=0\n");
+    assert_eq!(out("echo a; break; echo st=$?"), "a\nst=0\n");
+    assert_eq!(out("echo a; break 2; echo st=$?"), "a\nst=0\n");
+    // A `break` in a loop's condition leaves that loop rather than the script.
+    assert_eq!(out("while break; do echo x; done; echo done"), "done\n");
+    // Extra words are a usage error, not a count: `continue 1 2 3` used to
+    // loop forever.
+    let output = run("while true; do continue 1 2 3; done; echo unreached");
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "");
+}
+
+#[test]
+fn eval_and_source_control_flow_reaches_their_caller() {
+    // `eval` behaves as if its text appeared in place.
+    assert_eq!(
+        out("f() { for i in 1 2 3; do eval 'continue'; echo $i; done; }; f"),
+        ""
+    );
+    assert_eq!(
+        out("f() { for i in 1 2 3; do echo $i; [ $i = 2 ] && eval 'break'; done; }; f"),
+        "1\n2\n"
+    );
+    assert_eq!(
+        out("f() { eval 'return 7'; echo unreached; }; f; echo st=$?"),
+        "st=7\n"
+    );
+
+    // `source` propagates `break`/`continue` too, but `return` ends the file,
+    // not the caller's function.
+    let dir = TestDir::new("source-control");
+    std::fs::write(dir.path().join("break.sh"), "break\n").unwrap();
+    std::fs::write(
+        dir.path().join("return.sh"),
+        "echo one; return 3; echo two\n",
+    )
+    .unwrap();
+    assert_eq!(
+        out(&format!(
+            "for i in 1 2 3; do echo $i; [ $i = 2 ] && . '{}'; done",
+            dir.at("break.sh")
+        )),
+        "1\n2\n"
+    );
+    assert_eq!(
+        out(&format!(
+            "f() {{ . '{}'; echo after=$?; }}; f",
+            dir.at("return.sh")
+        )),
+        "one\nafter=3\n"
+    );
+}
+
+#[test]
+fn shopt_rejects_an_unknown_name_with_status_one() {
+    let output = run("shopt -s nosuch; echo st=$?");
+    assert_eq!(code(&output), 0);
+    assert_eq!(stdout(&output), "st=1\n");
+    assert!(stderr(&output).contains("invalid shell option name"));
+    // Known names around it are still processed, and `-p` keeps the readable
+    // form for both tables.
+    assert_eq!(
+        out("shopt -s nullglob nosuch; shopt -q nullglob; echo st=$?"),
+        "st=0\n"
+    );
+    assert_eq!(out("shopt -p nullglob"), "shopt -u nullglob\n");
+    assert_eq!(out("shopt -p -o errexit"), "set +o errexit\n");
+}
+
+#[test]
 fn break_and_continue_only_unwind_to_their_loop() {
     // A `break` inside a function unwinds outwards, as bash does.
     assert_eq!(

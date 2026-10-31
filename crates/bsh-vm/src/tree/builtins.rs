@@ -182,6 +182,23 @@ fn count(argv: &[Vec<u8>], index: usize) -> Option<u32> {
 }
 
 fn loop_control(interp: &mut Interp, argv: &[Vec<u8>], break_it: bool) -> Status {
+    if argv.len() > 2 {
+        // bash warns "too many arguments". Reading the extra words as a count
+        // made `continue 1 2 3` loop forever, so the extra arguments are a
+        // usage error for the built-in.
+        diagnose(
+            interp,
+            format!(
+                "{}: too many arguments",
+                program(argv, if break_it { "break" } else { "continue" })
+            ),
+        );
+        interp.state.record_error(ShellError::SpecialBuiltin {
+            status: Status(2),
+            via_command: false,
+        });
+        return Status(2);
+    }
     let requested = match argv.get(1) {
         None => 1,
         Some(_) => match count(argv, 1) {
@@ -260,7 +277,28 @@ fn bi_eval(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
         }
         source.extend_from_slice(argument);
     }
-    interp.run_named("<eval>", &source)
+    let unwind = interp.run_chunk_unwind("<eval>", &source);
+    propagate(interp, unwind, false)
+}
+
+/// Hand a nested chunk's unwind to its caller.
+///
+/// The command dispatcher takes `pending` right after a built-in returns, so
+/// setting it is how a `return` inside `eval` returns from the enclosing
+/// function and how `break`/`continue` reach the enclosing loop. `source`
+/// absorbs `return` itself (`absorb_return`): a `return` in a sourced file ends
+/// the file, not the caller's function.
+fn propagate(interp: &mut Interp, unwind: Unwind, absorb_return: bool) -> Status {
+    match unwind {
+        Unwind::Status(status) => status,
+        Unwind::Return(status) if absorb_return => status,
+        Unwind::Break(_) | Unwind::Continue(_) | Unwind::Return(_) => {
+            let status = unwind.status();
+            interp.pending = Some(unwind);
+            status
+        }
+        other => interp.absorb(other),
+    }
 }
 
 fn bi_source(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
@@ -285,17 +323,18 @@ fn bi_source(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
         }
     };
     let display = String::from_utf8_lossy(&path).into_owned();
-    let status = if argv.len() > 2 {
+    let unwind = if argv.len() > 2 {
         // `source file a b` gives the sourced file its own positional
         // parameters; a frame is the cheapest way to scope them.
         interp.state.vars.push_frame();
         interp.state.vars.set_positional(argv[2..].to_vec());
-        let status = interp.run_named(&display, &bytes);
+        let unwind = interp.run_chunk_unwind(&display, &bytes);
         let _ = interp.state.vars.pop_frame();
-        status
+        unwind
     } else {
-        interp.run_named(&display, &bytes)
+        interp.run_chunk_unwind(&display, &bytes)
     };
+    let status = propagate(interp, unwind, true);
     // `RETURN` runs when a script executed by `.`/`source` finishes; its status
     // does not replace the script's (bash keeps `return 42` as the status).
     if let Some(exit) = interp.run_return_trap() {

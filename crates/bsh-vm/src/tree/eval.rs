@@ -207,6 +207,13 @@ impl Interp {
             }
             match self.eval_node(chunk, item.node, ctx) {
                 Unwind::Status(status) => last = status,
+                // bash warns and keeps going: a `break`/`continue` with no
+                // enclosing loop is not an error, and the rest of the list
+                // still runs.
+                Unwind::Break(_) | Unwind::Continue(_) if self.loop_depth == 0 => {
+                    self.warn_control_flow("break/continue is only meaningful inside a loop");
+                    last = Status::SUCCESS;
+                }
                 other => return other,
             }
         }
@@ -478,6 +485,19 @@ impl Interp {
         Ok(statuses)
     }
 
+    /// Evaluate a loop's condition or body, marking the context as inside a
+    /// loop for `break`/`continue`.
+    ///
+    /// The bracket is what distinguishes "leave this loop" (the unwind
+    /// propagates to the loop and is consumed) from "there is no loop"
+    /// (`eval_list` warns and continues).
+    fn eval_in_loop(&mut self, chunk: &Arc<ParsedChunk>, node: NodeId, ctx: Ctx) -> Unwind {
+        self.loop_depth += 1;
+        let unwind = self.eval_node(chunk, node, ctx);
+        self.loop_depth -= 1;
+        unwind
+    }
+
     fn eval_for(
         &mut self,
         chunk: &Arc<ParsedChunk>,
@@ -509,7 +529,7 @@ impl Interp {
                 self.report(crate::codes::ASSIGNMENT, var.span.clone(), error.message());
                 return Unwind::Status(Status::FAILURE);
             }
-            match self.eval_node(chunk, body, ctx) {
+            match self.eval_in_loop(chunk, body, ctx) {
                 Unwind::Status(status) => last = status,
                 Unwind::Break(1) => return Unwind::Status(Status::SUCCESS),
                 Unwind::Break(count) => return Unwind::Break(count - 1),
@@ -562,7 +582,7 @@ impl Interp {
                     }
                 }
             }
-            match self.eval_node(chunk, body, ctx) {
+            match self.eval_in_loop(chunk, body, ctx) {
                 Unwind::Status(status) => last = status,
                 Unwind::Break(1) => return Unwind::Status(Status::SUCCESS),
                 Unwind::Break(count) => return Unwind::Break(count - 1),
@@ -593,19 +613,28 @@ impl Interp {
     ) -> Unwind {
         let mut last = Status::SUCCESS;
         loop {
-            let result = self.eval_node(chunk, condition, ignored());
-            if result.is_unwinding() {
-                return result;
-            }
-            let truth = if until {
-                !result.status().is_success()
-            } else {
-                result.status().is_success()
+            // The condition is inside the loop: `while break; do …; done` leaves
+            // the loop, exactly as bash does, instead of reporting a stray
+            // `break`.
+            let result = self.eval_in_loop(chunk, condition, ignored());
+            let truth = match result {
+                Unwind::Status(status) => {
+                    if until {
+                        !status.is_success()
+                    } else {
+                        status.is_success()
+                    }
+                }
+                Unwind::Break(1) => return Unwind::Status(Status::SUCCESS),
+                Unwind::Break(count) => return Unwind::Break(count - 1),
+                Unwind::Continue(1) => continue,
+                Unwind::Continue(count) => return Unwind::Continue(count - 1),
+                other => return other,
             };
             if !truth {
                 break;
             }
-            match self.eval_node(chunk, body, ctx) {
+            match self.eval_in_loop(chunk, body, ctx) {
                 Unwind::Status(status) => last = status,
                 Unwind::Break(1) => return Unwind::Status(Status::SUCCESS),
                 Unwind::Break(count) => return Unwind::Break(count - 1),

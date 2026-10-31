@@ -322,6 +322,14 @@ pub struct Interp {
     /// waited for normally — inside a stage, `$?` after an external command is
     /// that command's status, as in a subshell.
     defer_next_spawn: bool,
+    /// How many loops enclose the code being evaluated.
+    ///
+    /// `break` and `continue` that reach a list with no enclosing loop are a
+    /// warning in bash, not an unwind: the list keeps running and the status
+    /// is zero. `eval.rs` brackets each loop's condition and body with
+    /// [`Interp::eval_in_loop`], which is what keeps a `break` inside a loop
+    /// propagating while a top-level one is absorbed.
+    loop_depth: usize,
     /// How many subshell scopes are open around the command being run.
     ///
     /// Zero at the top level. A committed redirection is journalled only while
@@ -467,6 +475,7 @@ impl Interp {
             background_spawn: false,
             err_trap_suppressed: 0,
             defer_next_spawn: false,
+            loop_depth: 0,
             scope_depth: 0,
             committed: Vec::new(),
             exit_trap_status: None,
@@ -736,6 +745,22 @@ impl Interp {
     }
 
     fn run_named_inner(&mut self, name: &str, src: &[u8]) -> Status {
+        let unwind = self.run_chunk_unwind(name, src);
+        let status = self.absorb(unwind);
+        self.set_status(status);
+        // Leave the cached specials agreeing with the final state, so a caller
+        // that reads `$?` after `run_named` sees this chunk's status.
+        self.sync_specials();
+        status
+    }
+
+    /// Parse and evaluate one chunk, returning the unwind *unabsorbed*.
+    ///
+    /// `eval` and `source` need the raw unwind: their text behaves as if it
+    /// appeared at the call site, so a `return` in `eval` returns from the
+    /// enclosing function and a `break` in either leaves the caller's loop.
+    /// Only the top-level entry point absorbs.
+    pub(crate) fn run_chunk_unwind(&mut self, name: &str, src: &[u8]) -> Unwind {
         let source = Arc::new(SourceFile::new(name, src));
         let opts = self.parse_opts();
         let chunk = match parse_with(&source, &opts) {
@@ -752,7 +777,7 @@ impl Interp {
                 ));
                 self.current = previous;
                 self.set_status(Status(2));
-                return Status(2);
+                return Unwind::Status(Status(2));
             }
             ParseOutcome::Failed(diagnostics) => {
                 let previous = std::mem::replace(&mut self.current, source);
@@ -761,19 +786,14 @@ impl Interp {
                 }
                 self.current = previous;
                 self.set_status(Status(2));
-                return Status(2);
+                return Unwind::Status(Status(2));
             }
         };
 
         let previous = std::mem::replace(&mut self.current, source);
         let unwind = self.eval_node(&chunk, chunk.ast.root, Ctx::default());
         self.current = previous;
-        let status = self.absorb(unwind);
-        self.set_status(status);
-        // Leave the cached specials agreeing with the final state, so a caller
-        // that reads `$?` after `run_named` sees this chunk's status.
-        self.sync_specials();
-        status
+        unwind
     }
 
     /// Turn a top-level unwind into an exit status.
@@ -782,7 +802,7 @@ impl Interp {
     /// converted: `eval 'exit 3'` and `source` run a nested chunk, and the
     /// outer command sequence must still see the exit request. Without this,
     /// `exit` inside `eval` would only end the `eval`.
-    fn absorb(&mut self, unwind: Unwind) -> Status {
+    pub(crate) fn absorb(&mut self, unwind: Unwind) -> Status {
         match unwind {
             Unwind::Status(status) => status,
             Unwind::Exit(status) => {
@@ -793,11 +813,8 @@ impl Interp {
             // script, which is what bash does for a script's top level.
             Unwind::Return(status) => status,
             Unwind::Break(_) | Unwind::Continue(_) => {
-                self.diagnose(&Diagnostic::error(
-                    crate::codes::CONTROL_FLOW,
-                    0..0,
-                    "break/continue is only meaningful inside a loop",
-                ));
+                // A warning, not an error: bash prints one and carries on.
+                self.warn_control_flow("break/continue is only meaningful inside a loop");
                 Status::SUCCESS
             }
             Unwind::Trap(_) => Status::SUCCESS,
@@ -943,6 +960,19 @@ impl Interp {
         message: impl Into<String>,
     ) {
         self.diagnose(&Diagnostic::error(code, span, message.into()));
+    }
+
+    /// Print a non-fatal control-flow warning.
+    ///
+    /// bash warns, with a `bash: line N:` prefix, when `break`/`continue`
+    /// leaves no loop or `return` leaves no function or sourced file; the
+    /// command itself is not an error.
+    pub(crate) fn warn_control_flow(&mut self, message: &str) {
+        self.diagnose(&Diagnostic::warning(
+            crate::codes::CONTROL_FLOW,
+            0..0,
+            message.to_owned(),
+        ));
     }
 
     /// The POSIX §2.8.1 table, applied. Returns the unwind the caller must
