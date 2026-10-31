@@ -1201,6 +1201,10 @@ fn apply_declaration_attrs(
         } else {
             interp.state.vars.unmark_exported(variable)?;
         }
+    } else if interp.state.opts.allexport {
+        // `set -a` exports everything assigned, including `local` and
+        // `declare` variables; an explicit `+x` above still wins.
+        interp.state.vars.mark_exported(variable)?;
     }
     if let Some(readonly) = flags.readonly {
         if readonly {

@@ -172,6 +172,13 @@ pub enum Unwind {
     /// command boundaries, so nothing constructs this today; the variant is
     /// kept so the enum does not have to change shape later.
     Trap(TrapKind),
+    /// Abandon the rest of the current input line.
+    ///
+    /// An interactive shell does not exit on an expansion error (`set -u`,
+    /// `${x:?}`); it abandons the line and reads the next one. Only
+    /// `eval_list` handles this, by skipping the items that begin on the line
+    /// that failed.
+    Discard(Status),
 }
 
 impl Unwind {
@@ -179,7 +186,10 @@ impl Unwind {
     /// already decided to absorb it.
     pub fn status(self) -> Status {
         match self {
-            Unwind::Status(status) | Unwind::Return(status) | Unwind::Exit(status) => status,
+            Unwind::Status(status)
+            | Unwind::Return(status)
+            | Unwind::Exit(status)
+            | Unwind::Discard(status) => status,
             Unwind::Break(_) | Unwind::Continue(_) | Unwind::Trap(_) => Status::SUCCESS,
         }
     }
@@ -817,7 +827,7 @@ impl Interp {
                 self.warn_control_flow("break/continue is only meaningful inside a loop");
                 Status::SUCCESS
             }
-            Unwind::Trap(_) => Status::SUCCESS,
+            Unwind::Trap(_) | Unwind::Discard(_) => Status::SUCCESS,
         }
     }
 
@@ -999,6 +1009,13 @@ impl Interp {
         self.diagnose(&error.diagnostic());
         if matches!(error.kind, bsh_lang::ErrorKind::GlobNoMatch { .. }) {
             return Unwind::Status(Status(1));
+        }
+        if self.interactive {
+            // bash does not exit an interactive shell on an expansion error: it
+            // abandons the line (`set -u; echo a; echo $x; echo b` prints `a`
+            // and runs the *next* line) and keeps the status of the failure.
+            self.state.clear_error();
+            return Unwind::Discard(Status(1));
         }
         self.apply_consequence(bsh_runtime::ShellError::Expansion, Status(1))
     }

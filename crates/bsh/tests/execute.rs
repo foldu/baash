@@ -810,6 +810,43 @@ fn an_exported_shellopts_turns_tracing_on_in_a_child() {
 }
 
 #[test]
+fn set_option_parsing_matches_bash() {
+    // A lone `-` ends option processing (turning off -v/-x) and the words after
+    // it are positional; a lone `+` is ignored and parsing continues.
+    assert_eq!(out("set a b; set - a b; echo \"$@\""), "a b\n");
+    assert_eq!(out("set - -; echo \"$@\""), "-\n");
+    assert_eq!(out("set -- --; echo \"$@\""), "--\n");
+    assert_eq!(
+        out("set -x - -v; case $- in *v*) echo v;; esac; echo argv \"$@\""),
+        "argv -v\n"
+    );
+    assert_eq!(out("set a b; set +; echo \"$@\""), "a b\n");
+    assert_eq!(out("set -x + -v x y; echo \"$@\""), "x y\n");
+    assert_eq!(out("set - +; echo \"$@\""), "+\n");
+    assert_eq!(out("set + -; echo \"$@\""), "\n");
+    // An invalid name is status 2 but not fatal, even in a non-interactive
+    // script (bash's behavior; POSIX would exit).
+    assert_eq!(out("set -o STRICT; echo st=$?"), "st=2\n");
+}
+
+#[test]
+fn set_a_exports_declaration_builtin_variables_and_set_quotes_values() {
+    assert_eq!(
+        out("set -a; f() { local z=zzz; declare -p z | grep -q -- '-x' && echo exported; }; f"),
+        "exported\n"
+    );
+    assert_eq!(
+        out("set -a; declare q=qux; declare -p q | grep -q -- '-x' && echo exported"),
+        "exported\n"
+    );
+    // `set` prints values re-input-safe: a value with a newline uses `$'…'`
+    // so it stays on one line. Control bytes are spelled `\u000a`, the form
+    // `declare -p` uses; either spelling re-reads as the same value.
+    assert_eq!(out("x='a b'; set | grep '^x='"), "x='a b'\n");
+    assert_eq!(out("x=$'a\nb'; set | grep '^x='"), "x=$'a\\u000ab'\n");
+}
+
+#[test]
 fn break_and_continue_outside_a_loop_warn_and_continue() {
     // bash warns on stderr and keeps running; the status is zero.
     assert_eq!(out("echo a; continue; echo b; echo st=$?"), "a\nb\nst=0\n");

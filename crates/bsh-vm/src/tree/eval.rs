@@ -175,7 +175,10 @@ impl Interp {
         ctx: Ctx,
     ) -> Unwind {
         let mut last = Status::SUCCESS;
-        for item in items {
+        let mut index = 0;
+        while index < items.len() {
+            let item = &items[index];
+            index += 1;
             // `set -n` stops execution from here on. The rest of the input is
             // still parsed (the parse happened before evaluation), it is just
             // not run — and `set +n` later in the file cannot run either,
@@ -207,6 +210,25 @@ impl Interp {
             }
             match self.eval_node(chunk, item.node, ctx) {
                 Unwind::Status(status) => last = status,
+                // An interactive shell abandons the rest of the line after an
+                // expansion error; skip the items that begin on that line and
+                // keep reading (the status of the failure is kept).
+                Unwind::Discard(status) => {
+                    last = status;
+                    let line = chunk
+                        .source
+                        .line_col(chunk.ast.node(item.node).span.start)
+                        .0;
+                    while index < items.len()
+                        && chunk
+                            .source
+                            .line_col(chunk.ast.node(items[index].node).span.start)
+                            .0
+                            == line
+                    {
+                        index += 1;
+                    }
+                }
                 // bash warns and keeps going: a `break`/`continue` with no
                 // enclosing loop is not an error, and the rest of the list
                 // still runs.

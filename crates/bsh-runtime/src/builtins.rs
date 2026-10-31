@@ -593,7 +593,11 @@ fn push_assignment(
         }
         crate::VarValue::Str(bytes) => {
             out.push(b'=');
-            quote_into(out, bytes);
+            // Re-input-safe: a value with a newline or a quote has to stay on
+            // one line and read back as itself, which single quotes alone
+            // cannot do for a control byte (`set` output is re-sourced by the
+            // Oils round-trip test).
+            crate::declare::quote_value(out, bytes);
         }
         crate::VarValue::Indexed(elements) => {
             // A dense array prints as a plain list (`(1 2 '3 4')`), which is
@@ -612,7 +616,7 @@ fn push_assignment(
                 if !dense {
                     out.extend_from_slice(format!("[{index}]=").as_bytes());
                 }
-                quote_into(out, element);
+                crate::declare::quote_value(out, element);
             }
             out.push(b')');
         }
@@ -1301,15 +1305,28 @@ fn bi_set(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
             positional = Some(argv[index..].iter().map(|word| word.to_vec()).collect());
             break;
         }
+        if argument == b"+" {
+            // A lone `+` is ignored: it is neither an option nor an argument,
+            // and option parsing continues after it (`set -x + -v x y` turns on
+            // both flags and leaves `x y` as the positional parameters).
+            index += 1;
+            continue;
+        }
         if argument == b"-" {
-            // Historical: `set -` turns off -v and -x.
+            // A lone `-` ends option processing like `--`, and turns the
+            // verbose and xtrace flags off; the words after it are the
+            // positional parameters (`set - -` leaves the single word `-`).
+            // With nothing after it the parameters are left alone.
             {
                 let opts = &mut host.state().opts;
                 opts.verbose = false;
                 opts.xtrace = false;
             }
             index += 1;
-            continue;
+            if index < argv.len() {
+                positional = Some(argv[index..].iter().map(|word| word.to_vec()).collect());
+            }
+            break;
         }
         let is_flag = matches!(argument.first(), Some(b'-' | b'+')) && argument.len() > 1;
         if !is_flag {
@@ -1329,6 +1346,13 @@ fn bi_set(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
                     let result = host.state().opts.set_by_name_in(OptionKind::SetO, name, on);
                     if let Err(error) = result {
                         let _ = report_error(host, argv, &error);
+                        // A usage error is status 2 but not fatal: bash reports
+                        // it and carries on, and recording a utility class is
+                        // what keeps the §2.8.1 table from exiting.
+                        host.state().record_error(crate::ShellError::Utility {
+                            status: Status(2),
+                            redirection: false,
+                        });
                         status = Status(2);
                     }
                     index += 2;
@@ -1347,6 +1371,10 @@ fn bi_set(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
             }
             if let Err(error) = host.state().opts.set_by_short(flag, on) {
                 let _ = report_error(host, argv, &error);
+                host.state().record_error(crate::ShellError::Utility {
+                    status: Status(2),
+                    redirection: false,
+                });
                 status = Status(2);
             }
         }
