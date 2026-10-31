@@ -307,15 +307,17 @@ fn propagate(interp: &mut Interp, unwind: Unwind, absorb_return: bool) -> Status
 
 fn bi_source(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
     let name = program(argv, "source");
-    let Some(file) = argv.get(1).cloned() else {
+    // `source -- file`: bash runs its built-ins through a getopt pass, so a
+    // `--` ends the (empty) option list and is not a filename.
+    let mut first = 1;
+    if argv.get(first).map(Vec::as_slice) == Some(b"--") {
+        first += 1;
+    }
+    let Some(file) = argv.get(first).cloned() else {
         diagnose(interp, format!("{name}: filename argument required"));
         return Status(2);
     };
-    let path = if file.contains(&b'/') {
-        file.clone()
-    } else {
-        interp.search_path(&file).unwrap_or_else(|| file.clone())
-    };
+    let path = source_path(interp, &file).unwrap_or(file.clone());
     let bytes = match std::fs::read(bsh_sys::os::path_from_bytes(&path)) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -327,11 +329,15 @@ fn bi_source(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
         }
     };
     let display = String::from_utf8_lossy(&path).into_owned();
-    let unwind = if argv.len() > 2 {
+    // A sourced file is a stack frame named `source`, and `BASH_LINENO`
+    // records where the `.` command ran (`Locations when sourcing`).
+    let line = interp.line_number().max(0) as usize;
+    interp.push_call(b"source", &path, line);
+    let unwind = if argv.len() > first + 1 {
         // `source file a b` gives the sourced file its own positional
         // parameters; a frame is the cheapest way to scope them.
         interp.state.vars.push_frame();
-        interp.state.vars.set_positional(argv[2..].to_vec());
+        interp.state.vars.set_positional(argv[first + 1..].to_vec());
         let unwind = interp.run_chunk_unwind(&display, &bytes);
         let _ = interp.state.vars.pop_frame();
         unwind
@@ -339,12 +345,45 @@ fn bi_source(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
         interp.run_chunk_unwind(&display, &bytes)
     };
     let status = propagate(interp, unwind, true);
+    interp.pop_call();
     // `RETURN` runs when a script executed by `.`/`source` finishes; its status
     // does not replace the script's (bash keeps `return 42` as the status).
     if let Some(exit) = interp.run_return_trap() {
         interp.state.request_exit(exit);
     }
     status
+}
+
+/// The file `.`/`source` reads for `file`.
+///
+/// POSIX XCU 2.14.1: a name containing a slash is used as it stands, and
+/// otherwise `PATH` is searched in order. A `PATH` element is a *directory*,
+/// so an entry that happens to be a directory (`_tmp/dir/hello.sh` in the
+/// suite) does not count as the file, and the empty element is the current
+/// directory. bash then tries the current directory itself outside posix mode,
+/// which is why `. cmd` finds `./cmd` when `PATH` has no match.
+fn source_path(interp: &Interp, file: &[u8]) -> Option<Vec<u8>> {
+    if file.contains(&b'/') {
+        return regular_file(file).then(|| file.to_vec());
+    }
+    if let Some(path) = interp.state.vars.scalar(b"PATH") {
+        for element in path.split(|&byte| byte == b':') {
+            let mut candidate = element.to_vec();
+            if !element.is_empty() {
+                candidate.push(b'/');
+            }
+            candidate.extend_from_slice(file);
+            if regular_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    regular_file(file).then(|| file.to_vec())
+}
+
+/// Whether `path` names a readable regular file (never a directory).
+fn regular_file(path: &[u8]) -> bool {
+    std::fs::metadata(bsh_sys::os::path_from_bytes(path)).is_ok_and(|meta| meta.is_file())
 }
 
 /// `echo`, with bash's `-n`/`-e`/`-E` handling.

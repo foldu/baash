@@ -207,6 +207,23 @@ pub(crate) struct ParsedChunk {
     pub(crate) source: Arc<SourceFile>,
 }
 
+/// One frame of bash's call stack.
+///
+/// `FUNCNAME[i]` is the *name* of frame `i` (`main` for a script file,
+/// `source` for a sourced file), `BASH_SOURCE[i]` is the file that frame came
+/// from, and `BASH_LINENO[i]` is the line in the caller that started it. The
+/// three arrays are emitted innermost-first, which is why the stack is stored
+/// the other way round.
+#[derive(Clone, Debug)]
+pub(crate) struct CallFrame {
+    /// `FUNCNAME[i]`: the function name, `source` or `main`.
+    pub(crate) name: Vec<u8>,
+    /// `BASH_SOURCE[i]`: the file the frame runs from.
+    pub(crate) source: Vec<u8>,
+    /// `BASH_LINENO[i]`: the caller's line that started this frame.
+    pub(crate) line: usize,
+}
+
 /// A defined shell function: the chunk it was parsed from plus its body node.
 #[derive(Clone, Debug)]
 struct Function {
@@ -331,6 +348,9 @@ pub struct Interp {
     /// waited for normally — inside a stage, `$?` after an external command is
     /// that command's status, as in a subshell.
     defer_next_spawn: bool,
+    /// bash's call stack, which `FUNCNAME`, `BASH_SOURCE` and `BASH_LINENO`
+    /// report (see [`CallFrame`]); innermost last.
+    pub(crate) calls: Vec<CallFrame>,
     /// How many loops enclose the code being evaluated.
     ///
     /// `break` and `continue` that reach a list with no enclosing loop are a
@@ -470,6 +490,7 @@ impl Interp {
             last_cmdsub: None,
             pending: None,
             depth: 0,
+            calls: Vec::new(),
             array_literals: Vec::new(),
             nameref_cycle: std::cell::Cell::new(false),
             random: std::cell::Cell::new(0x9E37_79B9_7F4A_7C15),
@@ -761,6 +782,62 @@ impl Interp {
         // that reads `$?` after `run_named` sees this chunk's status.
         self.sync_specials();
         status
+    }
+
+    /// Push one call frame and republish the introspection arrays.
+    ///
+    /// `FUNCNAME`/`BASH_SOURCE`/`BASH_LINENO` are ordinary indexed arrays in
+    /// bash (writable, and *unset* at top level, which is why `set -u` makes
+    /// `${FUNCNAME}` an error there), so they are rewritten from the stack
+    /// rather than answered through a hook: `Vars::get` returns a borrow and
+    /// these values are synthesised.
+    pub fn push_call(&mut self, name: &[u8], source: &[u8], line: usize) {
+        self.calls.push(CallFrame {
+            name: name.to_vec(),
+            source: source.to_vec(),
+            line,
+        });
+        self.refresh_call_vars();
+    }
+
+    /// Drop the innermost frame.
+    pub fn pop_call(&mut self) {
+        self.calls.pop();
+        self.refresh_call_vars();
+    }
+
+    fn refresh_call_vars(&mut self) {
+        if self.calls.is_empty() {
+            for name in [b"FUNCNAME".as_slice(), b"BASH_SOURCE", b"BASH_LINENO"] {
+                let _ = self.state.vars.unset(name);
+            }
+            return;
+        }
+        let mut names: Vec<Vec<u8>> = Vec::with_capacity(self.calls.len());
+        let mut sources: Vec<Vec<u8>> = Vec::with_capacity(self.calls.len());
+        let mut lines: Vec<Vec<u8>> = Vec::with_capacity(self.calls.len());
+        for frame in self.calls.iter().rev() {
+            names.push(frame.name.clone());
+            sources.push(frame.source.clone());
+            lines.push(frame.line.to_string().into_bytes());
+        }
+        for (name, values) in [
+            (b"FUNCNAME".as_slice(), &names),
+            (b"BASH_SOURCE", &sources),
+            (b"BASH_LINENO", &lines),
+        ] {
+            let _ = self
+                .state
+                .vars
+                .declare_shape(name, bsh_runtime::ArrayShape::Indexed);
+            let _ = self
+                .state
+                .vars
+                .clear_array(name, bsh_runtime::ArrayShape::Indexed);
+            for (index, value) in values.iter().enumerate() {
+                let _ = self.state.vars.set_indexed(name, index as i64, value);
+            }
+        }
     }
 
     /// Parse and evaluate one chunk, returning the unwind *unabsorbed*.

@@ -1091,10 +1091,17 @@ impl Interp {
         self.state.vars.push_frame();
         self.state.vars.set_positional(argv[1..].to_vec());
         self.depth += 1;
+        // `BASH_SOURCE` is the *definition* file, `BASH_LINENO` the caller's
+        // line (bash: "BASH_SOURCE is about the definition, FUNCNAME and
+        // BASH_LINENO are about the call").
+        let definition = function.chunk.source.name().as_bytes().to_vec();
+        let line = self.line_number().max(0) as usize;
+        self.push_call(&function.name, &definition, line);
         let result = self.eval_node(&function.chunk, function.body, ctx);
         // `RETURN` runs with the function's frame still in scope.
         if let Some(exit) = self.run_return_trap() {
             self.depth -= 1;
+            self.pop_call();
             let _ = self.state.vars.pop_frame();
             self.restore_function_traps(inherited);
             let _ = self.state.vars.finish_prefix_assignments(applied);
@@ -1102,6 +1109,7 @@ impl Interp {
             return Unwind::Exit(exit);
         }
         self.depth -= 1;
+        self.pop_call();
         let frame = self.state.vars.pop_frame();
         self.restore_function_traps(inherited);
         let _ = self.state.vars.finish_prefix_assignments(applied);

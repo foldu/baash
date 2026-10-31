@@ -1,9 +1,9 @@
 # Roadmap: the 397-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2257/2787** (2204 strict). bash passes 2577/2787 on the same run and
-388 of the cases we fail are ones bash passes (we pass 68 it fails), so the net
-gap is 320 cases.
+now **2273/2787** (2220 strict). bash passes 2577/2787 on the same run and
+373 of the cases we fail are ones bash passes (we pass 69 it fails), so the net
+gap is 304 cases.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
 queue. Interactive usability now outranks script conformance; see
@@ -235,9 +235,9 @@ around 2170.**
 
 ## Tranche 5 — the remaining bash gap (active goal)
 
-Re-measured with `--json --compare bash` after items 1–10 below:
-**2257/2787 total, 2204 strict**. 530 failures, of which **388 are cases bash
-passes** (the real queue) and 142 are cases bash fails too (osh-only
+Re-measured with `--json --compare bash` after items 1–12 below:
+**2273/2787 total, 2220 strict**. 514 failures, of which **373 are cases bash
+passes** (the real queue) and 141 are cases bash fails too (osh-only
 expectations, older-bash behaviour, environment). The plan is to work these in
 order, cheapest first, re-measuring after each commit:
 
@@ -281,11 +281,16 @@ it is not re-litigated.
     *value* word (`"${u-'a b'}"` keeps the quotes) but still groups in a
     pattern or subscript, and `$'…'` stays ANSI-C — `var-op-slice` (4) +
     `var-op-test` (4) + `var-sub-quote` (6) + `word-eval` (1).
-11. **[open]** `break`/`continue`/`return` through `eval`/`source`/subshells
-    (the unwinding part is done), and alias expansion producing syntax across
-    lines — `loop` (8) + `alias` (8).
-12. **[open]** `FUNCNAME`, `BASH_SOURCE`, `BASH_LINENO` from the frame stack —
-    `introspect` (10), part of `var-ref`.
+11. **[done]** Control flow through `eval`/`source`, and `source` itself:
+    it accepts a bare `--`, searches `PATH` in order while skipping directory
+    entries, and falls back to the current directory — `builtin-eval-source`
+    (4, now better than bash on 2). `loop`'s two remaining cases are osh-only
+    (a subshell `continue` that bash also mishandles); the alias cases that
+    need re-lexing across lines stay open below 19.
+12. **[done]** `FUNCNAME`, `BASH_SOURCE`, `BASH_LINENO`: a call stack of
+    `main`/`source`/function frames, republished as the three arrays with the
+    innermost frame first (and *unset* at top level, so `set -u` errors like
+    bash) — `introspect` (10).
 13. **[open]** `${!x}` indirection edges: `$?`, array/assoc subscripts, bad
     references, strict-array cases — `var-ref` (rest).
 14. **[open]** DEBUG/ERR trap exactness: `$?`, `LINENO`, `||`/`!`/pipeline

@@ -1474,3 +1474,88 @@ fn pwd_ignores_operands_and_honours_l_and_p() {
     let output = run("pwd -Z");
     assert_eq!(code(&output), 2);
 }
+
+#[test]
+fn source_searches_path_and_accepts_a_bare_double_dash() {
+    let dir = TestDir::new("source-path");
+    std::fs::create_dir_all(dir.path().join("first")).expect("create first");
+    std::fs::create_dir_all(dir.path().join("second")).expect("create second");
+    std::fs::write(dir.path().join("first/lib.sh"), "echo from-first\n").expect("write");
+    std::fs::write(dir.path().join("second/lib.sh"), "echo from-second\n").expect("write");
+    std::fs::write(dir.path().join("lib.sh"), "echo from-current\n").expect("write");
+    // A PATH entry that names a directory must not shadow the real file.
+    std::fs::create_dir_all(dir.path().join("third/lib.sh")).expect("create decoy");
+
+    // `PATH` order wins over the current directory.
+    let script = format!(
+        "PATH={first}:{second}:{third}:$PATH; . lib.sh; . -- lib.sh",
+        first = dir.at("first"),
+        second = dir.at("second"),
+        third = dir.at("third")
+    );
+    let output = run(&script);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "from-first\nfrom-first\n");
+
+    // The directory entry is skipped, so the second element supplies it.
+    let script = format!(
+        "cd {}; PATH={}:{}:$PATH; . lib.sh",
+        dir.path().display(),
+        dir.at("third"),
+        dir.at("second")
+    );
+    assert_eq!(out(&script), "from-second\n");
+
+    // A `PATH` with no match falls back to the current directory, and an
+    // absolute name is never searched for.
+    let script = format!(
+        "cd {}; PATH=/nonexistent; . lib.sh; . {}/second/lib.sh",
+        dir.path().display(),
+        dir.path().display()
+    );
+    assert_eq!(out(&script), "from-current\nfrom-second\n");
+}
+
+#[test]
+fn funcname_and_bash_source_describe_the_call_stack() {
+    let dir = TestDir::new("introspect");
+    std::fs::write(
+        dir.path().join("lib.sh"),
+        "g() {\n  echo \"g:${FUNCNAME[*]}:$(printf '%s,' \"${BASH_SOURCE[@]}\")\"\n}\n",
+    )
+    .expect("write lib.sh");
+    std::fs::write(
+        dir.path().join("main.sh"),
+        format!(
+            ". {lib}\nf() {{\n  echo \"f:${{FUNCNAME[*]}}\"\n  g\n  echo \"f-lines:${{BASH_LINENO[*]}}\"\n}}\nf\n",
+            lib = dir.at("lib.sh")
+        ),
+    )
+    .expect("write main.sh");
+
+    let output = bsh()
+        .arg(dir.path().join("main.sh"))
+        .output()
+        .expect("spawn bsh");
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    let text = stdout(&output);
+    let lines: Vec<&str> = text.lines().collect();
+    // The script file is bash's `main` frame, so the stack runs innermost
+    // first; BASH_SOURCE[0] is the file that *defined* `g`.
+    assert_eq!(lines[0], "f:f main");
+    assert_eq!(
+        lines[1],
+        format!(
+            "g:g f main:{0}/lib.sh,{0}/main.sh,{0}/main.sh,",
+            dir.path().display()
+        )
+    );
+    // Inside `f` the stack is two frames deep: this function, called on line
+    // 7, and `main` at line 0. (`g`'s frame would add the call line 4.)
+    assert_eq!(lines[2], "f-lines:7 0");
+
+    // At top level the three are unset, which `set -u` turns into an error.
+    let output = run("set -u; echo \"$FUNCNAME\"; echo unreached");
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "");
+}

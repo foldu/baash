@@ -541,14 +541,30 @@ fn same_directory(pwd: &[u8], directory: &std::path::Path) -> bool {
 fn execute(shell: &mut Interp, source: Source) -> ExitCode {
     match source {
         Source::Stdin => run_stdin(shell),
-        other => match read_source(shell, other) {
-            Ok((name, bytes)) => {
-                let display = String::from_utf8_lossy(&name).into_owned();
-                let status = shell.run_named(&display, &bytes);
-                ExitCode::from(status.exit_code() as u8)
+        other => {
+            // A script *file* is bash's `main` frame: `${FUNCNAME[@]}` in it is
+            // `main`, while a `-c` string or stdin has no frame at all (which
+            // is why `set -u` makes `$FUNCNAME` an error there).
+            let script = match &other {
+                Source::File(path, _) => Some(path.clone()),
+                _ => None,
+            };
+            match read_source(shell, other) {
+                Ok((name, bytes)) => {
+                    let display = String::from_utf8_lossy(&name).into_owned();
+                    let framed = script.is_some();
+                    if let Some(path) = &script {
+                        shell.push_call(b"main", path, 0);
+                    }
+                    let status = shell.run_named(&display, &bytes);
+                    if framed {
+                        shell.pop_call();
+                    }
+                    ExitCode::from(status.exit_code() as u8)
+                }
+                Err(code) => code,
             }
-            Err(code) => code,
-        },
+        }
     }
 }
 
