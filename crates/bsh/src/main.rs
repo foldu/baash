@@ -472,6 +472,15 @@ fn shell(interactive: bool, flags: &ShellFlags) -> Interp {
         std::process::exit(2);
     }
     shell.import_environment();
+    // A shell always has a `PATH`, even when the environment does not: a
+    // script that runs with `env -i` must still find `/bin/sh` and friends.
+    if shell.state().vars.scalar(b"PATH").is_none() {
+        let _ = shell.state().vars.assign_scalar(
+            b"PATH",
+            b"/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin",
+        );
+        let _ = shell.state().vars.mark_exported(b"PATH");
+    }
     // `PWD` is an *assertion* about the process's directory, and an inherited
     // one can be stale (`su`, a chroot, a wrapper script). bash replaces it
     // with the real path in that case; otherwise `$PWD`, `cd ..` and `\w` all

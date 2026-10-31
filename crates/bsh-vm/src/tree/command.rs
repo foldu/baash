@@ -394,7 +394,7 @@ impl Interp {
         }
 
         self.array_literals = array_literals;
-        match self.resolve(&name) {
+        let unwind = match self.resolve(&name) {
             Some(resolution) => self.invoke(
                 Invocation {
                     chunk,
@@ -411,11 +411,21 @@ impl Interp {
                 if let Some(unwind) =
                     self.run_embedded(chunk, &command.redirects, &assign_views, &argv)
                 {
-                    return unwind;
+                    unwind
+                } else {
+                    self.command_not_found(&name)
                 }
+                #[cfg(not(feature = "builtin-utils"))]
                 self.command_not_found(&name)
             }
+        };
+        // `$_` is the last argument of the command that just ran. Expansion
+        // has already happened, so a `$_` inside the command saw the previous
+        // value; only later commands see this one.
+        if let Some(last) = argv.last() {
+            let _ = self.state.vars.assign_scalar(b"_", last);
         }
+        unwind
     }
 
     /// Run an embedded coreutils implementation because resolution found

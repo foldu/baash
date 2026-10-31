@@ -1,7 +1,7 @@
-# Roadmap: the 489-case gap
+# Roadmap: the 473-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2085/2787** (2034 strict). bash passes 2574/2787 on the same run, so 489
+now **2101/2787** (2050 strict). bash passes 2574/2787 on the same run, so 473
 cases are things bash does and we do not.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
@@ -150,8 +150,8 @@ its keep, `zsh` emulation.
 
 ## Tranche 4 — the measured queue (after indirect expansion)
 
-Measured with `bsh-spec --json` on the current tree: 2085/2787 total, 2034
-strict, 702 failures, of which 489 are cases bash passes and 213 are cases
+Measured with `bsh-spec --json` on the current tree: 2101/2787 total, 2050
+strict, 686 failures, of which 473 are cases bash passes and 213 are cases
 bash fails too (not worth chasing). Ordered by cases per unit of work; every
 entry names the suite file that measures it.
 
@@ -160,9 +160,10 @@ entry names the suite file that measures it.
 - [x] `${!prefix@}` / `${!prefix*}` and `${x@a}` — `var-op-bash` 15/26 -> 22/26.
       `names()` and `attributes()` on the `Vars` seam; arrays repeat the
       attribute per element.
-- [ ] `$-` reflects the *active* options, and `sh` invocation flags
-      (`+c`, `--`, flags after the script) — `sh-options` (19) + `sh-usage`
-      (13). Today `$-` is a fixed `Bhu`.
+- [x] `$-` and invocation flags — `sh-options` 20/39 -> 29/39, `sh-usage`
+      11/24 -> 23/24. `$-` lists only options that differ from the profile,
+      `i` comes from the interactive path, and `shopt` gained the `set -o`
+      table (`-o`, `-p -o`, `-q`).
 - [x] `umask`, numeric and symbolic — `builtin-umask` (21), now 24/24. The
       symbolic grammar follows `osh`, including `X`, `s`/`t`, permission copies
       and the mask truncation bash rejects.
@@ -172,8 +173,9 @@ entry names the suite file that measures it.
 - [x] `pushd` / `popd` / `dirs` — `builtin-dirs` (16), now 18/18. The stack
       lives in `ShellState` so a subshell cannot leak it; `cd` rewrites element
       0, and paths stay lexical so a symlink keeps the name typed.
-- [ ] Special variables initialised only when unset (`PATH`, `PWD`, `IFS`,
-      `PS4`) — `vars-special` (22; `HISTFILE` is a deliberate divergence).
+- [~] Special variables — `vars-special` 20/42 -> 35/42. `PATH`, `IFS`,
+      `PS4`, `SECONDS`, `_`, `RANDOM`, `UID`/`EUID`, `PPID`, `OSTYPE` and
+      `HOSTNAME`; `HISTFILE` stays a deliberate divergence.
 - [x] `GLOBIGNORE` — `globignore`, 2/18 -> 17/18. A match filter with a
       bracket-aware colon split; it implies `dotglob`, and an entry without `/`
       only hides files in the directory being expanded.

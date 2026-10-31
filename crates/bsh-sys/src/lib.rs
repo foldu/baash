@@ -241,6 +241,28 @@ pub fn is_tty(fd: i32) -> bool {
     unsafe { libc::isatty(fd) == 1 }
 }
 
+/// The machine's hostname, without a trailing newline.
+#[cfg(target_os = "linux")]
+pub fn hostname() -> Vec<u8> {
+    let bytes = std::fs::read("/proc/sys/kernel/hostname").unwrap_or_default();
+    match bytes
+        .iter()
+        .rposition(|&byte| byte != b'\n' && byte != b'\r')
+    {
+        Some(end) => bytes[..=end].to_vec(),
+        None => Vec::new(),
+    }
+}
+
+/// The hostname from the environment; Windows sets `COMPUTERNAME`.
+#[cfg(not(target_os = "linux"))]
+pub fn hostname() -> Vec<u8> {
+    std::env::var_os("COMPUTERNAME")
+        .or_else(|| std::env::var_os("HOSTNAME"))
+        .map(|value| os::bytes_from_os(value))
+        .unwrap_or_default()
+}
+
 /// Sets the process mask to `mask`, returning the previous value.
 ///
 /// The mask is process-wide, so the `umask` built-in is the only caller and it

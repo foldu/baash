@@ -487,7 +487,7 @@ fn pipelines_connect_stages() {
     assert_eq!(out("set -o pipefail; false | true; echo $?"), "1\n");
     assert_eq!(
         out("set -o pipefail; sh -c 'exit 3' | sh -c 'exit 4' | true; echo $?"),
-        "3\n"
+        "4\n"
     );
 }
 

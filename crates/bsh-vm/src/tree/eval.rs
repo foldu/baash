@@ -176,6 +176,13 @@ impl Interp {
     ) -> Unwind {
         let mut last = Status::SUCCESS;
         for item in items {
+            // `set -n` stops execution from here on. The rest of the input is
+            // still parsed (the parse happened before evaluation), it is just
+            // not run — and `set +n` later in the file cannot run either,
+            // which is why bash's own test only expects the first command.
+            if self.state.opts.noexec {
+                continue;
+            }
             if item.sep == Some(Separator::Amp) {
                 // `cmd &` starts a process and returns; running shell code
                 // "in the background" would need a second interpreter on this
@@ -769,6 +776,7 @@ fn combine_pipeline(statuses: &[Status], pipefail: bool) -> Status {
     }
     statuses
         .iter()
+        .rev()
         .copied()
         .find(|status| !status.is_success())
         .unwrap_or(Status::SUCCESS)

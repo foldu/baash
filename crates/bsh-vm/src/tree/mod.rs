@@ -118,6 +118,17 @@ use bsh_runtime::{History, Opts, ShellHost, ShellState, Status, consequence};
 use bsh_syntax::ArrayElement;
 use bsh_syntax::{Ast, NodeId, ParseOpts, ParseOutcome, parse_with};
 
+/// bash's `$OSTYPE` for the host this binary was built for.
+pub(crate) const OSTYPE: &str = if cfg!(target_os = "linux") {
+    "linux-gnu"
+} else if cfg!(target_os = "macos") {
+    "darwin"
+} else if cfg!(windows) {
+    "msys"
+} else {
+    "unknown"
+};
+
 mod alias;
 mod builtins;
 mod command;
@@ -257,6 +268,8 @@ pub struct Interp {
     /// `typeset -n a=b; typeset -n b=a; echo $a` stop instead of printing an
     /// empty string and looking like an unset variable.
     nameref_cycle: std::cell::Cell<bool>,
+    /// State for `$RANDOM`, refreshed once per command in `sync_specials`.
+    random: std::cell::Cell<u64>,
     /// Bytes a `read` pulled from a descriptor but could not give back.
     ///
     /// Only a descriptor that is not seekable can end up here; on a regular
@@ -441,6 +454,7 @@ impl Interp {
             depth: 0,
             array_literals: Vec::new(),
             nameref_cycle: std::cell::Cell::new(false),
+            random: std::cell::Cell::new(0x9E37_79B9_7F4A_7C15),
             read_buffers: std::collections::BTreeMap::new(),
             signals: traps::SignalState::default(),
             run_depth: 0,
@@ -473,6 +487,37 @@ impl Interp {
         // script that never sets it still traces with `+ `, while `unset PS4`
         // makes the prefix empty. The environment import can replace it.
         let _ = interp.state.vars.assign_scalar(b"PS4", b"+ ");
+        // `$_` exists from the start (bash sets it to `$0`), so `set -u` does
+        // not make the first read of it an error.
+        let _ = interp.state.vars.assign_scalar(b"_", b"");
+        let _ = interp.state.vars.assign_scalar(b"SECONDS", b"0");
+        // POSIX's default field separators, and the option list a script can
+        // read (`SHELLOPTS` is non-empty in every real shell).
+        let _ = interp.state.vars.assign_scalar(b"IFS", b" \t\n");
+        let _ = interp
+            .state
+            .vars
+            .assign_scalar(b"SHELLOPTS", b"braceexpand:hashall");
+        // Read-only identity variables bash provides: the environment cannot
+        // override them, and a script cannot assign them.
+        if let Some(uid) = bsh_sys::os::own_uid() {
+            let uid = uid.to_string().into_bytes();
+            let _ = interp.state.vars.assign_scalar(b"UID", &uid);
+            let _ = interp.state.vars.assign_scalar(b"EUID", &uid);
+            let _ = interp.state.vars.mark_readonly(b"UID");
+            let _ = interp.state.vars.mark_readonly(b"EUID");
+        }
+        let ppid = bsh_sys::parent_pid().to_string().into_bytes();
+        let _ = interp.state.vars.assign_scalar(b"PPID", &ppid);
+        let _ = interp.state.vars.mark_readonly(b"PPID");
+        let _ = interp
+            .state
+            .vars
+            .assign_scalar(b"HOSTNAME", &bsh_sys::hostname());
+        let _ = interp
+            .state
+            .vars
+            .assign_scalar(b"OSTYPE", crate::tree::OSTYPE.as_bytes());
         // `$?`, `$$` and `$-` must answer before the first command runs.
         interp.sync_specials();
         // bash turns history recording on for an interactive shell (the
@@ -752,6 +797,30 @@ impl Interp {
     /// `Vars::get` cannot allocate and `$?` must be current.
     pub(crate) fn sync_specials(&mut self) {
         let status = self.state.vars.last_status().exit_code().to_string();
+        // `$RANDOM` is a fresh value per command: bash gives a new one on
+        // every read, but one per command is enough for `$RANDOM` to look
+        // random and avoids mutating shell state from inside expansion.
+        // `$SECONDS` counts from shell start; a per-command tick is close
+        // enough to the second-resolution value bash reports.
+        let seconds = self
+            .state
+            .vars
+            .scalar(b"SECONDS")
+            .and_then(|value| std::str::from_utf8(value).ok()?.parse::<u64>().ok())
+            .unwrap_or(0)
+            + 1;
+        let _ = self
+            .state
+            .vars
+            .assign_scalar(b"SECONDS", seconds.to_string().as_bytes());
+        let random = self
+            .random
+            .get()
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.random.set(random);
+        let value = ((random >> 33) % 32768).to_string().into_bytes();
+        let _ = self.state.vars.assign_scalar(b"RANDOM", &value);
         let mut dash = self.state.opts.dash_flags();
         // `-i` has no `set -o` row (it is an invocation mode, not a toggle),
         // so `$-` has to add it here.
