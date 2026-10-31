@@ -1619,3 +1619,40 @@ fn a_regex_operand_may_hold_spaces_inside_a_group() {
     // A `)` that is not part of a group closes the conditional instead.
     assert_eq!(out("if [[ (foo =~ fo) ]]; then echo yes; fi"), "yes\n");
 }
+
+#[test]
+fn rcdir_loads_every_file_in_order_and_norc_skips_it() {
+    let dir = TestDir::new("rcdir");
+    let rc = dir.path().join("rc");
+    let rcdir = dir.path().join("startup");
+    std::fs::create_dir_all(&rcdir).expect("create rcdir");
+    std::fs::write(&rc, "echo rcfile\n").expect("write rc");
+    std::fs::write(rcdir.join("b"), "echo second\n").expect("write b");
+    std::fs::write(rcdir.join("a"), "echo first\n").expect("write a");
+    std::fs::create_dir_all(rcdir.join("subdir")).expect("create subdir");
+
+    let run_with = |extra: &[&str]| {
+        let mut command = bsh();
+        command.arg("--rcfile").arg(&rc).arg("--rcdir").arg(&rcdir);
+        for argument in extra {
+            command.arg(argument);
+        }
+        command
+            .args(["-i", "-c", "echo command"])
+            .output()
+            .expect("spawn bsh")
+    };
+
+    // Name order, not directory order, and the files run after `--rcfile`.
+    assert_eq!(stdout(&run_with(&[])), "rcfile\nfirst\nsecond\ncommand\n");
+    // `--norc` skips both, and a directory that does not exist is ignored.
+    assert_eq!(stdout(&run_with(&["--norc"])), "command\n");
+    let output = bsh()
+        .arg("--rcdir")
+        .arg(dir.path().join("missing"))
+        .args(["-i", "-c", "echo hi"])
+        .output()
+        .expect("spawn bsh");
+    assert_eq!(code(&output), 0);
+    assert_eq!(stdout(&output), "hi\n");
+}

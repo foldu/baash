@@ -74,6 +74,9 @@ struct ShellFlags {
     shopt_clear: Vec<Vec<u8>>,
     /// `--rcfile FILE`: the startup file to read instead of `~/.bashrc`.
     rcfile: Option<std::path::PathBuf>,
+    /// `--rcdir DIR`: a directory of startup files, read in name order after
+    /// `--rcfile` (an osh extension; bash has no equivalent).
+    rcdir: Option<std::path::PathBuf>,
     /// `--norc`: read no startup file at all.
     norc: bool,
     /// `--eval FILE`: run these files, in order, before the command or script.
@@ -202,6 +205,13 @@ fn parse_args(args: &[OsString]) -> Result<(Mode, bool, ShellFlags), String> {
                     return Err("--rcfile requires a path".to_string());
                 };
                 flags.rcfile = Some(std::path::PathBuf::from(path));
+            }
+            b"--rcdir" => {
+                index += 1;
+                let Some(path) = args.get(index) else {
+                    return Err("--rcdir requires a path".to_string());
+                };
+                flags.rcdir = Some(std::path::PathBuf::from(path));
             }
             b"--norc" => flags.norc = true,
             b"--eval" => {
@@ -422,6 +432,42 @@ fn read_startup_file(shell: &mut Interp, flags: &ShellFlags) {
     if flags.norc {
         return;
     }
+    read_rc_files(shell, flags);
+    read_rcdir(shell, flags);
+}
+
+/// The startup files the flags name: `--rcfile`, or the default.
+fn read_rc_files(shell: &mut Interp, flags: &ShellFlags) {
+    read_rc_file(shell, flags);
+}
+
+/// `--rcdir DIR`: every regular file in the directory, in name order.
+///
+/// A missing or unreadable directory is ignored, exactly like a missing
+/// `--rcfile`: a wrapper script that points at a directory this machine does
+/// not have must not stop the shell from starting.
+fn read_rcdir(shell: &mut Interp, flags: &ShellFlags) {
+    let Some(dir) = &flags.rcdir else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut paths: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect();
+    paths.sort();
+    for path in paths {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        shell.run_named(&path.to_string_lossy(), &bytes);
+    }
+}
+
+fn read_rc_file(shell: &mut Interp, flags: &ShellFlags) {
     let path = match &flags.rcfile {
         Some(path) => path.clone(),
         None => {

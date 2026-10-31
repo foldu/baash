@@ -1,9 +1,9 @@
 # Roadmap: the 397-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2306/2787** (2251 strict). bash passes 2577/2787 on the same run and
-340 of the cases we fail are ones bash passes (we pass 69 it fails), so the net
-gap is 271 cases.
+now **2309/2787** (2254 strict). bash passes 2577/2787 on the same run and
+339 of the cases we fail are ones bash passes (we pass 71 it fails), so the net
+gap is 268 cases.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
 queue. Interactive usability now outranks script conformance; see
@@ -235,9 +235,9 @@ around 2170.**
 
 ## Tranche 5 — the remaining bash gap (active goal)
 
-Re-measured with `--json --compare bash` after items 1–16 below:
-**2306/2787 total, 2251 strict**. 481 failures, of which **340 are cases bash
-passes** (the real queue) and 141 are cases bash fails too (osh-only
+Re-measured with `--json --compare bash` after items 1–18 below:
+**2309/2787 total, 2254 strict**. 478 failures, of which **339 are cases bash
+passes** (the real queue) and 139 are cases bash fails too (osh-only
 expectations, older-bash behaviour, environment). The plan is to work these in
 order, cheapest first, re-measuring after each commit:
 
@@ -311,13 +311,41 @@ it is not re-litigated.
     error; a `)` with no opener closes the conditional — `regex` (11 of 12,
     the remaining three are osh-only strictness).
 17. **[open]** NUL bytes through expansion and the quoting edge cases —
-    `nul-bytes` (8) + `var-sub-quote` (7) + `command-sub` (4).
-18. **[open]** Interactive `PROMPT_COMMAND` (four cases) and `--rcdir`/`--norc`
-    (`interactive`, minus the excluded `HISTFILE` half).
-19. **[decision]** Background shell code (`{ …; } &`, `for … &`) and process
-    substitution (`<(…)`/`>(…)`): the only remaining architectural question.
-    Either a worker-thread subinterpreter or a documented rejection —
-    `background` (15) + `process-sub` (6).
+    `nul-bytes` (8) + `var-sub-quote` (7) + `command-sub` (4). The bytes
+    themselves already survive (`printf 'a\0b'` writes the NUL and `${#x}`
+    counts it); what is missing is bash's *dropping* of NULs from command
+    substitution with a warning, and the `$'…'`/IFS forms the suite builds on
+    it.
+18. **[done]** Interactive startup: `--rcdir DIR` loads every regular file in a
+    directory in name order after `--rcfile`, `--norc` skips both, a missing
+    directory is ignored, and a piped `-i` shell runs `PROMPT_COMMAND` once per
+    prompt like a terminal one — `interactive` (3). The five `PROMPT_COMMAND`
+    cases left are guarded by `case $SH in *bash|*osh)`, so they cannot run at
+    all under this shell's name, and the `HISTFILE` half stays out of scope.
+19. **[decision: reject for now]** Background shell code (`{ …; } &`,
+    `for … &`) and process substitution (`<(…)`/`>(…)`).
+
+    The pivot that started this tranche ("absolutely no forking, use
+    subinterpreters") makes these the only constructs that need real
+    concurrency between shell code and the shell. `( … )` is in-process
+    because it is *sequential*: a scope is cloned, run, and restored. `&` is
+    not — the parent must keep evaluating while the child runs, and both write
+    the same descriptors.
+
+    A worker thread carrying a cloned `Interp` would model bash's subshell
+    closely (the clone already exists for `( … )`), but it needs three things
+    this shell deliberately lacks: `Interp: Send` with the descriptor table
+    shared rather than duplicated, a job table keyed by thread instead of pid
+    (`$!`, `wait`, `kill` all read it), and process substitution on top of it
+    (`<(…)` must also hand back a `/dev/fd/N` path whose reader outlives the
+    command). That is a wave of its own, not a step of this one.
+
+    So the behaviour stays a diagnostic — "`&`: only an external command can
+    run in the background; a compound command would need a subshell process" —
+    and the cost is the 15 `background` and 6 `process-sub` cases. External
+    commands with `&` **do** work, which is what scripts actually use; the
+    missing half is shell *code* after `&`. Recorded here so the next wave
+    starts from the design rather than re-deriving it.
 
 Still out of scope (decisions, not gaps): `HISTFILE`/`history -w/-r/-n`
 (~19), readline `bind` (9), job control/jobspecs (~8), the ysh dialect, and
