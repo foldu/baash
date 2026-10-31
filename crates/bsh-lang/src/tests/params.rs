@@ -211,9 +211,7 @@ fn case_conversion_is_ascii() {
 #[test]
 fn unsupported_operators_fail_instead_of_guessing() {
     let cases = [
-        // Still unimplemented: `@E` needs escape decoding, `${!x}` needs to
-        // re-parse a value as a name.
-        ("${!x}", UnsupportedOp::Indirect),
+        // Still unimplemented: `@E` needs escape decoding.
         ("${x@E}", UnsupportedOp::Transform),
     ];
     for (source, expected) in cases {

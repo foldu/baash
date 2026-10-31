@@ -2554,15 +2554,15 @@ impl<'a> Parser<'a, '_> {
                 span,
             };
         }
-        if indirect {
-            let op = if i >= text.len() {
-                match &name {
-                    ParamName::Elements { .. } => ParamOp::Indices,
-                    ParamName::Element { .. } | ParamName::Var(_) => ParamOp::Indirect,
-                    _ => ParamOp::Unsupported(UnsupportedOp::Indirect),
-                }
-            } else {
-                ParamOp::Unsupported(UnsupportedOp::Indirect)
+        // `${!…}` with nothing after the name: indices for an array, indirect
+        // value otherwise. With an operator after it the operator applies to
+        // the *indirect* target, so parsing continues below and the result is
+        // wrapped once the operator is known.
+        if indirect && i >= text.len() {
+            let op = match &name {
+                ParamName::Elements { .. } => ParamOp::Indices,
+                ParamName::Element { .. } | ParamName::Var(_) => ParamOp::Indirect,
+                _ => ParamOp::Unsupported(UnsupportedOp::Indirect),
             };
             return ParamExp { name, op, span };
         }
@@ -2667,6 +2667,11 @@ impl<'a> Parser<'a, '_> {
             }
         } else {
             ParamOp::Unsupported(UnsupportedOp::Other)
+        };
+        let op = if indirect {
+            ParamOp::IndirectWith(Box::new(op))
+        } else {
+            op
         };
         ParamExp { name, op, span }
     }

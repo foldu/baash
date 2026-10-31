@@ -723,6 +723,105 @@ impl<S: Shell> Ctx<'_, S> {
 /// which behaves like a one-element indexed array) evaluates them
 /// arithmetically. The arithmetic callback is the same one `$((…))` uses, so
 /// `${a[i+1]}` and `$((i+1))` cannot disagree.
+/// The parameter `${!name}` points at.
+///
+/// The value is not evaluated: it is parsed as a parameter name, which is all
+/// bash's indirect expansion does. An unset source yields no name (the
+/// expansion is empty); a value that cannot be a name is an error, because
+/// silently expanding nothing would hide a bug in the script.
+fn indirect_target<S: Shell>(
+    name: &ParamName,
+    ctx: &mut Ctx<'_, S>,
+    span: &Span,
+    required: bool,
+) -> Result<ParamName, Error> {
+    let value = match name {
+        ParamName::Element { name, subscript } => read_element(ctx, name, subscript),
+        ParamName::Elements { .. } => None,
+        other => ctx.value(other),
+    };
+    let Some(value) = value else {
+        // `${!x}` of an unset source is empty; an operator on it is bash's
+        // "invalid indirect expansion", because there is no name to apply it
+        // to.
+        if required {
+            return Err(Error::new(
+                ErrorKind::Host {
+                    message: format!(
+                        "{}: invalid indirect expansion",
+                        String::from_utf8_lossy(&name.display_bytes())
+                    ),
+                },
+                span.clone(),
+            ));
+        }
+        return Ok(ParamName::Var(Vec::new()));
+    };
+    parse_indirect_name(&value).ok_or_else(|| {
+        Error::new(
+            ErrorKind::Host {
+                message: format!("{}: invalid variable name", String::from_utf8_lossy(&value)),
+            },
+            span.clone(),
+        )
+    })
+}
+
+/// Parse an indirect expansion's value as a parameter name.
+///
+/// Accepted: a name, `name[@]`/`name[*]`/`name[subscript]` (the subscript is
+/// text, evaluated later like any other subscript), a positional number, and
+/// the single-character special parameters. Empty means "no name" and expands
+/// to nothing, which is what bash does for an unset source.
+fn parse_indirect_name(bytes: &[u8]) -> Option<ParamName> {
+    if bytes.is_empty() {
+        return Some(ParamName::Var(Vec::new()));
+    }
+    match bytes {
+        b"@" => return Some(ParamName::At),
+        b"*" => return Some(ParamName::Star),
+        b"#" => return Some(ParamName::Count),
+        [single] if matches!(single, b'?' | b'-' | b'$' | b'!') => {
+            return Some(ParamName::Var(vec![*single]));
+        }
+        _ => {}
+    }
+    if bytes.iter().all(u8::is_ascii_digit) {
+        let index: usize = std::str::from_utf8(bytes).ok()?.parse().ok()?;
+        return Some(if index == 0 {
+            ParamName::Var(b"0".to_vec())
+        } else {
+            ParamName::Positional(index)
+        });
+    }
+    let (name, subscript) = match bytes.iter().position(|&byte| byte == b'[') {
+        Some(open) => {
+            if bytes.last() != Some(&b']') || open + 1 >= bytes.len() {
+                return None;
+            }
+            (&bytes[..open], Some(&bytes[open + 1..bytes.len() - 1]))
+        }
+        None => (bytes, None),
+    };
+    if !is_name(name) {
+        return None;
+    }
+    Some(match subscript {
+        None => ParamName::Var(name.to_vec()),
+        Some(b"@") => ParamName::elements(name.to_vec(), false),
+        Some(b"*") => ParamName::elements(name.to_vec(), true),
+        Some(subscript) => ParamName::element(name.to_vec(), Word::lit(subscript.to_vec())),
+    })
+}
+
+/// Whether `name` is a variable name (`[A-Za-z_][A-Za-z0-9_]*`).
+fn is_name(name: &[u8]) -> bool {
+    !name.is_empty()
+        && name.iter().enumerate().all(|(index, &byte)| {
+            byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
+        })
+}
+
 fn read_element<S: Shell>(ctx: &mut Ctx<'_, S>, name: &[u8], subscript: &Word) -> Option<Vec<u8>> {
     let kind = ctx.shell.array(name).map(|array| array.kind());
     let text = expand_word_to_scalar(subscript, false, ctx).ok()?;
@@ -871,20 +970,32 @@ fn expand_param<S: Shell>(
             Ok(())
         }
         ParamOp::Indirect => {
-            let target = match &exp.name {
-                ParamName::Element { name, subscript } => {
-                    read_element(ctx, name, subscript).unwrap_or_default()
-                }
-                // `${!a}` on an array is `${!a[0]}`; on a plain variable it
-                // would re-parse the value as a name, which stays out of
-                // scope.
-                ParamName::Var(name) if ctx.shell.array(name).is_some() => {
-                    ctx.value(&exp.name).unwrap_or_default()
-                }
-                _ => return Err(Error::unsupported(UnsupportedOp::Indirect, span)),
-            };
-            substitute(&ParamName::Var(target), quoted, ctx, out);
-            Ok(())
+            let target = indirect_target(&exp.name, ctx, &span, false)?;
+            expand_param(
+                &ParamExp {
+                    name: target,
+                    op: ParamOp::Value,
+                    span: span.clone(),
+                },
+                quoted,
+                ctx,
+                out,
+            )
+        }
+        // `${!x<op>}`: resolve the name first, then run the operator on it,
+        // with the same rules as if it had been written directly.
+        ParamOp::IndirectWith(inner) => {
+            let target = indirect_target(&exp.name, ctx, &span, true)?;
+            expand_param(
+                &ParamExp {
+                    name: target,
+                    op: (**inner).clone(),
+                    span: span.clone(),
+                },
+                quoted,
+                ctx,
+                out,
+            )
         }
         ParamOp::ArraySlice { offset, length } => {
             if let ParamName::Elements { name, star } = &exp.name {

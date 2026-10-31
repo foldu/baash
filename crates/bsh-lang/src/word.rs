@@ -560,12 +560,14 @@ pub enum ParamOp {
     /// [`crate::Vars::array`] reports them. `${!x}` on a plain variable stays
     /// [`ParamOp::Unsupported`] with [`UnsupportedOp::Indirect`].
     Indices,
-    /// `${!a[subscript]}`: the element's value is a variable *name*, which is
-    /// then expanded (`v=hello; a=(v); ${!a[0]}` is `hello`).
-    ///
-    /// Only the element form is implemented: `${!x}` would re-parse arbitrary
-    /// data as a name, which stays [`ParamOp::Unsupported`].
+    /// `${!x}`: the parameter's *value* is a parameter name, expanded in its
+    /// place (`a=b; b=c; ${!a}` is `c`). The value may be a plain name, a
+    /// positional (`1`), a special parameter (`?`, `@`, `#`) or a subscripted
+    /// name (`a[1]`, `a[key]`), which is what bash accepts.
     Indirect,
+    /// `${!x<op>}`: the operator applies to the name the value produced
+    /// (`a=b; ${!a:-d}` is `$b`, or `d` when `b` is unset).
+    IndirectWith(Box<ParamOp>),
     /// `${x@P}`: expand the value as a prompt string.
     ///
     /// The front end classifies every `@` transformation generically as
@@ -587,6 +589,7 @@ impl ParamOp {
             | ParamOp::UseAlternate { word, .. }
             | ParamOp::AssignDefault { word, .. } => Some(word),
             ParamOp::Error { word, .. } => word.as_ref(),
+            ParamOp::IndirectWith(inner) => inner.word(),
             _ => None,
         }
     }
@@ -598,6 +601,7 @@ impl ParamOp {
             | ParamOp::UseAlternate { word, .. }
             | ParamOp::AssignDefault { word, .. } => Some(word),
             ParamOp::Error { word, .. } => word.as_mut(),
+            ParamOp::IndirectWith(inner) => inner.word_mut(),
             _ => None,
         }
     }
