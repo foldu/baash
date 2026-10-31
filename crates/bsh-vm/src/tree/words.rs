@@ -14,6 +14,7 @@
 //! Instrumentation is byte-oriented throughout: nothing decodes to `str`.
 
 use bsh_lang::{Field, Mode, Word, expand_parameters, expand_tilde, expand_word_with};
+use bsh_runtime::ShellHost;
 
 use super::Interp;
 
@@ -50,6 +51,28 @@ impl Interp {
                 .and_then(|assign| assign.index.clone()),
             _ => None,
         })
+    }
+
+    /// Expand an array subscript the way an element assignment does.
+    ///
+    /// `a[1 + 2]` is one assignment subscript but several lexer tokens, which
+    /// is why the assignment grammar is the fallback parser (the same rule
+    /// `unset 'a[…]'` uses).
+    pub(crate) fn expand_subscript(&mut self, subscript: &[u8]) -> Result<Vec<u8>, ()> {
+        let word = match bsh_syntax::parse_word(subscript, &self.parse_opts()) {
+            Ok(word) => word,
+            Err(_) => match self.parse_subscript_word(subscript) {
+                Some(word) => word,
+                None => return Err(()),
+            },
+        };
+        match bsh_lang::expand_assignment(&word, self) {
+            Ok(text) => Ok(text),
+            Err(error) => {
+                self.diagnose(&error.diagnostic());
+                Err(())
+            }
+        }
     }
 
     /// Expand a fragment as a scalar (tilde + parameter + quote removal, with

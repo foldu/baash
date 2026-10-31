@@ -15,8 +15,6 @@ uucore = "0.8"
 # with an `uumain(args) -> i32` entry point, and only the ones that are listed
 # here are linked. The set is chosen for what a script actually needs on a
 # system without a userland — not accreted.
-uu_printf = "0.8"
-uu_test = "0.8"
 uu_cat = "0.8"
 uu_mkdir = "0.8"
 uu_rm = "0.8"

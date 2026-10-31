@@ -54,6 +54,7 @@
 // instead of relying on review.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+pub mod access;
 pub mod bytes;
 #[cfg(unix)]
 pub mod fd;
@@ -68,11 +69,13 @@ pub mod signal;
 pub mod spawn;
 #[cfg(unix)]
 pub mod term;
+pub mod time;
 #[cfg(unix)]
 pub mod wait;
 #[cfg(windows)]
 pub mod windows;
 
+pub use access::{Access, access};
 pub use bytes::{NulByte, cstring, cstrings};
 #[cfg(unix)]
 pub use fd::{
@@ -99,6 +102,7 @@ pub use spawn::{Child, FdAction, SpawnPlan, exec, fork_child_status, spawn};
 pub use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 #[cfg(unix)]
 pub use term::{NoEcho, RawMode, parent_pid, pid, window_size, window_size_fd};
+pub use time::strftime_local;
 #[cfg(unix)]
 pub use wait::{wait_any_nohang, wait_pid};
 
@@ -469,6 +473,34 @@ pub mod os {
     /// The owner of `path`; Windows has no uid.
     #[cfg(windows)]
     pub fn owner_uid(_path: &std::path::Path) -> Option<u32> {
+        None
+    }
+
+    /// This user's group id, when the platform has one.
+    #[cfg(unix)]
+    pub fn own_gid() -> Option<u32> {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata("/proc/self")
+            .ok()
+            .map(|metadata| metadata.gid())
+    }
+
+    /// This user's group id; Windows has no gid.
+    #[cfg(windows)]
+    pub fn own_gid() -> Option<u32> {
+        None
+    }
+
+    /// The group of `path`, when the platform has one.
+    #[cfg(unix)]
+    pub fn owner_gid(path: &std::path::Path) -> Option<u32> {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).ok().map(|metadata| metadata.gid())
+    }
+
+    /// The group of `path`; Windows has no gid.
+    #[cfg(windows)]
+    pub fn owner_gid(_path: &std::path::Path) -> Option<u32> {
         None
     }
 }

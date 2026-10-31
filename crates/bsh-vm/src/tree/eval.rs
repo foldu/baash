@@ -713,6 +713,16 @@ impl Interp {
 
         let capture = bsh_sys::create_unlinked_temp(0)
             .map_err(|error| format!("cannot create a capture file: {error}"))?;
+        // A command substitution is a fresh output context: it must capture the
+        // body's output even when the whole substitution is part of a pipeline
+        // stage, whose buffering would otherwise re-point descriptor 1 at the
+        // stage's temporary file on the body's first built-in.
+        let outer_buffer = self.pipeline_buffer.take();
+        // The stage this substitution belongs to may be arming its external
+        // command for overlap with the next stage; the body's commands must
+        // finish before the capture is read, so the substitution runs them
+        // synchronously and puts the flag back afterwards.
+        let deferred = std::mem::replace(&mut self.defer_next_spawn, false);
         let scope = self.open_scope();
         // The body writes to the file through descriptor 1, exactly as it would
         // through a pipe: built-ins write with `write_fd`, and an external
@@ -720,10 +730,14 @@ impl Interp {
         let saved_stdout = bsh_sys::dup(1).ok();
         if let Err(error) = bsh_sys::dup2(capture.as_raw_fd(), 1) {
             self.close_scope(scope);
+            self.pipeline_buffer = outer_buffer;
+            self.defer_next_spawn = deferred;
             return Err(format!("cannot redirect a command substitution: {error}"));
         }
         let unwind = self.eval_node(&chunk, chunk.ast.root, Ctx::default());
         let status = unwind.status();
+        self.pipeline_buffer = outer_buffer;
+        self.defer_next_spawn = deferred;
         match saved_stdout {
             Some(saved) => {
                 let _ = bsh_sys::dup2(saved.as_raw_fd(), 1);

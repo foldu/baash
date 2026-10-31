@@ -13,3 +13,7 @@ bsh-diag.workspace = true
 # costs this crate one call and no new seam.
 bsh-pattern.workspace = true
 bsh-history.workspace = true
+# `printf %T` needs `strftime` with the shell's exported `TZ`, and `test`
+# needs `access(2)` and the effective ids; both are syscall questions, so they
+# stay behind this crate's boundary rather than pulling `libc` in here.
+bsh-sys.workspace = true

@@ -41,38 +41,37 @@ fn executable(path: &std::path::Path) {
 }
 
 #[test]
-fn printf_runs_when_path_finds_nothing() {
-    let dir = temp_dir("printf");
+fn an_embedded_utility_runs_when_path_finds_nothing() {
+    let dir = temp_dir("tr");
+    let input = dir.join("in");
     let out = dir.join("out");
+    std::fs::write(&input, "abc").unwrap();
     let mut interp = shell();
     assert!(run(&mut interp, "PATH=''").is_success());
     let status = run(
         &mut interp,
-        &format!("printf '%s-%s' a b > '{}'", out.display()),
+        &format!("tr a-z A-Z < '{}' > '{}'", input.display(), out.display()),
     );
-    assert!(status.is_success(), "printf failed: {status:?}");
-    assert_eq!(std::fs::read_to_string(&out).unwrap(), "a-b");
+    assert!(status.is_success(), "tr failed: {status:?}");
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "ABC");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_utility_in_path_still_wins() {
     let dir = temp_dir("ordering");
-    let external = dir.join("printf");
+    let external = dir.join("tr");
     std::fs::write(&external, "#!/bin/sh\nprintf external\n").unwrap();
     executable(&external);
     let out = dir.join("out");
     let mut interp = shell();
     assert!(run(&mut interp, &format!("PATH='{}'", dir.display())).is_success());
-    let status = run(
-        &mut interp,
-        &format!("printf ignored > '{}'", out.display()),
-    );
-    assert!(status.is_success(), "printf failed: {status:?}");
+    let status = run(&mut interp, &format!("tr a-z A-Z > '{}'", out.display()));
+    assert!(status.is_success(), "tr failed: {status:?}");
     assert_eq!(
         std::fs::read_to_string(&out).unwrap(),
         "external",
-        "the embedded printf must not shadow a PATH utility"
+        "the embedded utility must not shadow a PATH utility"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

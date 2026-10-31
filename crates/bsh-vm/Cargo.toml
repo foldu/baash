@@ -7,9 +7,9 @@ license.workspace = true
 description = "The execution engine: the tree-walking evaluator"
 
 [features]
-# Run `printf` (and, as the wave grows, the rest of the standard utilities)
-# in-process when `PATH` resolution finds nothing. On by default on Windows in
-# the binary crate; opt-in elsewhere.
+# Run the standard utilities that are not shell built-ins in-process when
+# `PATH` resolution finds nothing (`cat`, `ls`, `wc`, `tr`, …). On by default
+# on Windows in the binary crate; opt-in elsewhere.
 builtin-utils = ["dep:bsh-utils"]
 
 [dependencies]

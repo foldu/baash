@@ -526,6 +526,11 @@ impl Interp {
         // can turn it off. A non-interactive shell records nothing either way.
         if interactive {
             interp.state.opts.history = true;
+            // bash starts an interactive shell in emacs editing mode, and the
+            // startup file can change it (`set -o vi`). The option is what
+            // `test -o emacs` and `set -o` report, so it is set here rather
+            // than implied by the line editor.
+            interp.state.opts.emacs = true;
             // An interactive bash also has default prompt variables, before the
             // environment and the startup file can replace them: measured
             // against 5.3.20, `declare -p PS1` in `bash -i` is
@@ -1463,6 +1468,72 @@ impl ShellHost for Interp {
                 Status(1)
             }
         })
+    }
+
+    fn assign_variable_element(
+        &mut self,
+        name: &[u8],
+        subscript: &[u8],
+        value: &[u8],
+    ) -> Result<(), String> {
+        // `printf -v 'a[subscript]'` assigns like `a[subscript]=value`: the
+        // subscript is expanded as an assignment word and then resolved by the
+        // element-assignment path, which knows about shapes and namerefs.
+        let text = self
+            .expand_subscript(subscript)
+            .map_err(|()| format!("{}: bad array subscript", String::from_utf8_lossy(name)))?;
+        self.assign_element(name, &text, false, value)
+    }
+
+    fn variable_is_set(&mut self, operand: &[u8]) -> Option<bool> {
+        // `test -v name` / `test -v 'name[subscript]'`. A bare name follows
+        // bash's array rules: an indexed array asks about element 0, an
+        // associative array about key "0".
+        let Some(open) = operand.iter().position(|&byte| byte == b'[') else {
+            let shape = self.state.vars.shape(operand);
+            return Some(match shape {
+                Some(bsh_runtime::ArrayShape::Indexed) => {
+                    self.state.vars.element_indexed(operand, 0).is_some()
+                }
+                Some(bsh_runtime::ArrayShape::Associative) => {
+                    self.state.vars.element_assoc(operand, b"0").is_some()
+                }
+                None => self.state.vars.is_set(operand),
+            });
+        };
+        if !operand.ends_with(b"]") {
+            return Some(false);
+        }
+        let name = &operand[..open];
+        let subscript = &operand[open + 1..operand.len() - 1];
+        if subscript.is_empty() {
+            return Some(false);
+        }
+        let text = match self.expand_subscript(subscript) {
+            Ok(text) => text,
+            Err(()) => return Some(false),
+        };
+        let all = text.as_slice() == b"@" || text.as_slice() == b"*";
+        match self.state.vars.shape(name) {
+            Some(bsh_runtime::ArrayShape::Associative) => {
+                // bash answers false for `h[@]`/`h[*]` on an associative array
+                // unless the key is literally `@`/`*`, which this spelling does
+                // not ask for.
+                if all {
+                    return Some(false);
+                }
+                Some(self.state.vars.element_assoc(name, &text).is_some())
+            }
+            _ => {
+                if all {
+                    return Some(self.state.vars.array_len(name) > 0);
+                }
+                match crate::arith::eval(&text, self) {
+                    Ok(index) => Some(self.state.vars.element_indexed(name, index).is_some()),
+                    Err(_) => Some(false),
+                }
+            }
+        }
     }
 
     fn apply_array_literal_operand(

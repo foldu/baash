@@ -22,6 +22,8 @@ mod complete;
 mod getopts;
 mod history;
 mod meta;
+mod printf;
+mod test;
 use crate::opts::OptionKind;
 use crate::vars::{ArrayShape, CreateScope, Vars};
 use crate::{Opts, ShellHost, Status};
@@ -372,12 +374,12 @@ pub const BUILTINS: &[BuiltinDef] = &[
     def("unalias", Tier::Intrinsic, Some(meta::bi_unalias)),
     def("wait", Tier::Intrinsic, None),
     // Standard utilities that must remain exec-able, so never intrinsic.
-    def("[", Tier::Regular, None),
+    def("[", Tier::Regular, Some(test::bi_bracket)),
     def("echo", Tier::Regular, None),
     def("false", Tier::Regular, Some(bi_false)),
-    def("printf", Tier::Regular, None),
+    def("printf", Tier::Regular, Some(printf::bi_printf)),
     def("pwd", Tier::Regular, None),
-    def("test", Tier::Regular, None),
+    def("test", Tier::Regular, Some(test::bi_test)),
     def("true", Tier::Regular, Some(bi_true)),
     // Bash extensions (DESIGN.md §3.4); registered so search order and
     // "command not found" diagnostics can distinguish them.

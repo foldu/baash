@@ -216,6 +216,23 @@ binary size delta, build-time delta, and per-call cost against spawning the same
 uutils binary. If it is ~5 ms saved and +1 MB, expand; if clap costs 8 MB and
 40 s of compile per utility, embed the hot set and ship the multicall binary.
 
+### Built-in gaps on Windows
+
+The shell's own bodies (`printf`, `test`/`[`, `cd`, `read`, `ulimit`, …) are
+written against `std` and `bsh-sys`, so they build and run on Windows without a
+separate code path. Two of them necessarily approximate a Unix answer there:
+
+* `printf '%(…)T'` has no IANA timezone database behind the Windows C library.
+  The common `strftime` specifiers are formatted in UTC and `TZ` is ignored;
+  `%Z`/`%z` report `UTC`/`+0000`.
+* `test -x` reports existence (Windows has no execute bit), `-w` follows the
+  read-only attribute, and `-O`/`-G`, `-u`/`-g`/`-k`, `-nt`/`-ot`/`-ef` and the
+  socket/character/block/FIFO tests answer false because the metadata is not
+  there to inspect.
+
+Both are deliberate approximations, not silent wrongness: a script that needs
+the Unix answer gets a different value rather than a misleading success.
+
 ## 7. What this is not
 
 * **Not Cygwin-style fork emulation.** Replaying a process image to fake `fork`

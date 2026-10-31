@@ -42,6 +42,9 @@ pub mod codes {
     pub const USAGE: ErrCode = ErrCode::new(510);
     /// `type`/`command -v`/`hash` could not find the name.
     pub const NOT_FOUND: ErrCode = ErrCode::new(511);
+    /// A utility rejected an operand, a conversion or an assignment target:
+    /// `printf`'s format and `-v` target, `test`'s operators.
+    pub const OPERAND: ErrCode = ErrCode::new(512);
 }
 
 /// A failed shell-state operation.

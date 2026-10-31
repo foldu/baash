@@ -1,7 +1,7 @@
-# Roadmap: the 438-case gap
+# Roadmap: the 394-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2136/2787** (2085 strict). bash passes 2574/2787 on the same run, so 438
+now **2180/2787** (2127 strict). bash passes 2574/2787 on the same run, so 394
 cases are things bash does and we do not.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
@@ -150,8 +150,8 @@ its keep, `zsh` emulation.
 
 ## Tranche 4 — the measured queue (after indirect expansion)
 
-Measured with `bsh-spec --json` on the current tree: 2136/2787 total, 2085
-strict, 651 failures, of which 438 are cases bash passes and 213 are cases
+Measured with `bsh-spec --json` on the current tree: 2180/2787 total, 2127
+strict, 607 failures, of which 394 are cases bash passes and 213 are cases
 bash fails too (not worth chasing). Ordered by cases per unit of work; every
 entry names the suite file that measures it.
 
@@ -196,10 +196,14 @@ entry names the suite file that measures it.
 
 - [ ] `DEBUG`/`ERR` trap refinements (`$?`, `LINENO`, `errexit` interplay) —
       `builtin-trap-bash` (19) + `builtin-trap-err` (17).
-- [ ] `printf -v`, `%q`, no-arg usage — `builtin-printf` (19). **Needs a
-      decision**: `printf` is deliberately external; only bash's builtin has
-      `-v`. Either add a VM body with PATH-first kept for plain calls, or drop
-      this cluster.
+- [x] `printf` as a real built-in (`-v`, `%q`, `%(…)T`, `\u` escapes, the
+      full POSIX format grammar and bash's argument-count and error rules) and
+      `test`/`[` ported from bash's `test.c` (`-v`, `-R`, `-o`, `-a`/`-o`
+      ambiguity and all) — `builtin-printf` 42/61 -> **60/61** (the remaining
+      case's primary expectation is an older bash's status) and the
+      `test`/`[` clusters (`builtin-bracket`, `blog2`) now pass in full. Both
+      bodies live in `bsh-runtime`, where `Vars`, `Opts` and the array
+      subscripts already are.
 - [ ] `set -x` / `PS4` / `set -v` — `xtrace` (16).
 - [ ] `FUNCNAME` / `BASH_SOURCE` / `BASH_LINENO` — `introspect` (12), and the
       two remaining `var-ref` cases.
@@ -214,7 +218,7 @@ entry names the suite file that measures it.
 
 ### Tier C — cheap only in the strict column
 
-54 cases pass today *only* because a per-shell `## OK …` alternative matched.
+53 cases pass today *only* because a per-shell `## OK …` alternative matched.
 Matching the primary expectation on them raises strict by up to 54 without
 changing behaviour; work through `--list-failures` on a full run and compare
 each case's primary output with the alternative we accept.

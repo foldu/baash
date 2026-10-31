@@ -1,21 +1,22 @@
 //! Embedded coreutils.
 //!
-//! `printf`, `test`/`[` and the rest of the standard utilities are regular
-//! builtins that deliberately fall through to `PATH` (`DESIGN.md` §2), so an
-//! external binary always wins. That works on Unix and is useless on Windows,
-//! where a `PATH` has no coreutils at all. This crate is the fallback: when
-//! resolution finds nothing, the executor runs the uutils implementation in
-//! this process instead of reporting "command not found".
+//! The standard utilities are regular builtins that deliberately fall through
+//! to `PATH` (`DESIGN.md` §2), so an external binary always wins. That works on
+//! Unix and is useless on Windows, where a `PATH` has no coreutils at all. This
+//! crate is the fallback: when resolution finds nothing, the executor runs the
+//! uutils implementation in this process instead of reporting "command not
+//! found".
 //!
 //! Only the utilities that are actually embedded are linked: each `uu_*` crate
 //! is a library with one entry point, and the table below is the whole
-//! surface. The set is chosen, not accreted: `printf`, `test`/`[`, `cat`,
-//! `mkdir`, `rm`, `ls`, `wc`, `head`, `tail`, `tr`, `seq`, `sleep`.
+//! surface. The set is chosen, not accreted: `cat`, `mkdir`, `rm`, `ls`, `wc`,
+//! `head`, `tail`, `tr`, `seq`, `sleep`.
 //!
-//! `true`, `false`, `echo` and `pwd` stay the VM's own bodies — they are
-//! cheaper in-process and bash-shaped, and a script must not notice the
-//! difference between them and a utility. `grep`, `sed`, `awk` and the rest of
-//! the non-coreutils toolbox are deliberately absent.
+//! `printf`, `test`/`[`, `true`, `false`, `echo` and `pwd` are the shell's own
+//! bodies — they need the format language, the expression grammar, the shell
+//! state or the descriptor table, and a script must not notice the difference
+//! between them and a utility. `grep`, `sed`, `awk` and the rest of the
+//! non-coreutils toolbox are deliberately absent.
 //!
 //! Error text needs one more piece. uutils keeps the message catalog in a
 //! *thread-local* that is installed once, and it loads exactly one utility's
@@ -42,9 +43,6 @@ type Entry = fn(Vec<OsString>) -> i32;
 /// The first argument passed to [`run`] is the name itself, because that is
 /// what `argv[0]` would be and what clap parses.
 const UTILITIES: &[(&str, Entry)] = &[
-    ("printf", run_printf),
-    ("test", run_test),
-    ("[", run_bracket),
     ("cat", run_cat),
     ("mkdir", run_mkdir),
     ("rm", run_rm),
@@ -179,14 +177,6 @@ pub fn contains(name: &[u8]) -> bool {
         .is_some_and(|name| UTILITIES.iter().any(|(utility, _)| *utility == name))
 }
 
-fn run_printf(args: Vec<OsString>) -> i32 {
-    uu_printf::uumain(args.into_iter())
-}
-
-fn run_test(args: Vec<OsString>) -> i32 {
-    uu_test::uumain(args.into_iter())
-}
-
 fn run_cat(args: Vec<OsString>) -> i32 {
     uu_cat::uumain(args.into_iter())
 }
@@ -227,44 +217,12 @@ fn run_sleep(args: Vec<OsString>) -> i32 {
     uu_sleep::uumain(args.into_iter())
 }
 
-/// `[ … ]` is `test …` with a closing bracket.
-///
-/// `uu_test` decides bracket mode from the *process* name
-/// (`uucore::util_name()`), which is `bsh` here, so an embedded call would see
-/// the `]` as an operand and report "extra argument". The bracket is therefore
-/// removed here and the utility is entered as `test`, which is the definition.
-fn run_bracket(mut args: Vec<OsString>) -> i32 {
-    if args.last().is_some_and(|last| last == "]") {
-        args.pop();
-    } else if args.len() > 1 {
-        eprintln!("bsh: [: missing `]'");
-        return 2;
-    }
-    if let Some(first) = args.first_mut() {
-        *first = OsString::from("test");
-    }
-    uu_test::uumain(args.into_iter())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn argv(items: &[&str]) -> Vec<Vec<u8>> {
         items.iter().map(|item| item.as_bytes().to_vec()).collect()
-    }
-
-    #[test]
-    fn test_is_embedded_and_returns_its_status() {
-        assert_eq!(run(&argv(&["test", "1", "=", "1"])), Some(0));
-        assert_eq!(run(&argv(&["test", "1", "=", "2"])), Some(1));
-    }
-
-    #[test]
-    fn bracket_is_test_with_the_closing_bracket_removed() {
-        assert_eq!(run(&argv(&["[", "1", "=", "1", "]"])), Some(0));
-        assert_eq!(run(&argv(&["[", "1", "=", "2", "]"])), Some(1));
-        assert_eq!(run(&argv(&["[", "1", "=", "1"])), Some(2));
     }
 
     #[test]
@@ -275,8 +233,12 @@ mod tests {
     }
 
     #[test]
-    fn printf_is_embedded() {
-        assert!(contains(b"printf"));
-        assert_eq!(run(&argv(&["printf", "%s", "x"])), Some(0));
+    fn the_shell_owns_printf_and_test() {
+        // Both are native built-ins now, so the embedded fallback must not
+        // shadow them (and its uutils copies are not linked).
+        assert!(!contains(b"printf"));
+        assert!(!contains(b"test"));
+        assert!(!contains(b"["));
+        assert!(contains(b"cat"));
     }
 }

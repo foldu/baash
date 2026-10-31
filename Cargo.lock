@@ -366,6 +366,7 @@ dependencies = [
  "bsh-history",
  "bsh-lang",
  "bsh-pattern",
+ "bsh-sys",
 ]
 
 [[package]]
@@ -410,12 +411,10 @@ dependencies = [
  "uu_head",
  "uu_ls",
  "uu_mkdir",
- "uu_printf",
  "uu_rm",
  "uu_seq",
  "uu_sleep",
  "uu_tail",
- "uu_test",
  "uu_tr",
  "uu_wc",
  "uucore",
@@ -3402,17 +3401,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "uu_printf"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3065df614305639340699637729c7af9d793a5a6fe423e5144ef4c9c38bf4ce3"
-dependencies = [
- "clap",
- "fluent",
- "uucore",
-]
-
-[[package]]
 name = "uu_rm"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3468,19 +3456,6 @@ dependencies = [
  "same-file",
  "uucore",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "uu_test"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd87ca6ccd3d84b6c1dbb2633fe8b93a6bb5aee3a20e3923f3c4b88985e67a75"
-dependencies = [
- "clap",
- "fluent",
- "libc",
- "thiserror",
- "uucore",
 ]
 
 [[package]]

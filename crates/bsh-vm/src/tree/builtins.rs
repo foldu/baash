@@ -27,10 +27,11 @@
 //! buffer that `read` already owns). Their registry entries stay stubs, which
 //! is the documented mechanism for "this body belongs to the executor".
 //!
-//! Deliberately *not* here: `printf`, `test`, `[` and `pwd` are regular
-//! utilities in POSIX terms — they must remain exec-able, their program forms
-//! are correct, and they are `bsh-runtime`'s bodies to write. Until it writes
-//! them, the `PATH` position serves them, which is exactly where POSIX puts a
+//! `printf` and `test`/`[` are *not* here: they are regular built-ins in POSIX
+//! terms, so they stay exec-able, and their bodies live in `bsh-runtime`
+//! (`builtins/printf.rs`, `builtins/test.rs`), which owns the format language,
+//! the expression grammar and the shell state they read. `pwd` is still
+//! unwritten, so the `PATH` position serves it — exactly where POSIX puts a
 //! regular built-in.
 
 use bsh_diag::Diagnostic;

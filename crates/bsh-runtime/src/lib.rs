@@ -285,6 +285,34 @@ pub trait ShellHost {
         None
     }
 
+    /// Assign `value` to `name[subscript]` for `printf -v`.
+    ///
+    /// The subscript is an assignment word: it is expanded as one, and an
+    /// indexed array evaluates the result arithmetically while an associative
+    /// array uses it as a key. Both are VM work (expansion and arithmetic), so
+    /// the subscript arrives as written. `Err` carries the diagnostic message.
+    fn assign_variable_element(
+        &mut self,
+        name: &[u8],
+        subscript: &[u8],
+        value: &[u8],
+    ) -> Result<(), String> {
+        let _ = (name, subscript, value);
+        Err("array elements are not supported by this host".to_owned())
+    }
+
+    /// Whether `operand` names a set variable or a set array element, for
+    /// `test -v`.
+    ///
+    /// The operand is the raw argument: `name` or `name[subscript]`, where the
+    /// subscript may itself contain expansion (`test -v 'a[$i]'`) and is
+    /// evaluated like an element assignment's. `None` means the host cannot
+    /// answer, and the built-in then reports the variable as unset.
+    fn variable_is_set(&mut self, operand: &[u8]) -> Option<bool> {
+        let _ = operand;
+        None
+    }
+
     /// Apply a structured array-literal operand (`name=(…)`) of a declaration
     /// builtin, e.g. `readonly -a a=(1 2)`.
     ///
