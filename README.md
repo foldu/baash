@@ -8,19 +8,30 @@ lives in [DESIGN.md](DESIGN.md); the current direction is
 and `bsh` with no arguments gives you an interactive editor with syntax
 highlighting, bash-style TAB completion and history.
 
-**1989 of 2787 comparable cases pass** in the vendored Oils suite (71.4%; 1184
-cases skipped as out of scope), of which **1934 (69.4%) also pass strictly** —
-that is, matching only a case's primary expectation rather than any
-`## OK <shell>` alternative. Both numbers are recorded in
-`crates/bsh-spec/baseline.txt` and CI fails if either drops.
+Conformance is measured against the vendored Oils suite: 3971 cases, of which
+1184 are skipped as out of scope (mostly the `ysh` dialect), leaving 2787
+comparable.
 
-For scale, bash passes 2574/2787 (92.4%) on the same run, so 585 cases are
-things bash does and we do not yet — 62% of that gap is closed. Conformance is
-measured but no longer the priority: interactive use comes first, and
-[`docs/state.md`](docs/state.md) is the resume document (what exists, what is
-proven, what is next). `docs/roadmap.md` is the conformance queue. Run it
-yourself with
-`cargo run -p bsh-spec -- --shell target/debug/bsh --compare bash`.
+| | passing | of 2787 |
+| --- | ---: | ---: |
+| `bsh`, any `## OK <shell>` alternative | **1962** | 70.4% |
+| `bsh`, strict (primary expectation only) | **1908** | 68.5% |
+| bash 5.3.20, on the same run | 2574 | 92.4% |
+
+54 of the passing cases pass only because a per-shell `## OK …` alternative
+matched, which is the difference between the two `bsh` rows. bash passes 612
+cases we do not, so we pass 76.2% of what bash passes. Both numbers live in
+`crates/bsh-spec/baseline.txt`, and CI fails if either drops below it.
+
+Conformance is measured but no longer the priority: interactive use comes
+first, and [`docs/state.md`](docs/state.md) is the resume document (what
+exists, what is proven, what is next). `docs/roadmap.md` is the conformance
+queue. Reproduce the numbers with:
+
+```
+cargo run -p bsh-spec -- --shell target/debug/bsh --compare bash
+cargo run -p bsh-spec -- --shell target/debug/bsh --ratchet --strict
+```
 
 Do not read the unit-test count as conformance: it is a different number
 measuring a different thing.
@@ -33,8 +44,8 @@ substitution, arithmetic, `[[ ]]` including `=~`, globbing with
 `typeset`/`readonly`/`export` with bash's own `-p` layout, the pattern
 operators (`${x#pat}`, `${x%pat}`, `${x//a/b}`, `${x@Q}`), traps, `set -e` and
 `set -u`, `break`/`continue`/`return`/`exit`, `exec`, background `&` with
-`$!`/`wait`/`kill` by pid, history (`history`, `fc`, the `HIST*` knobs;
-persisted to `~/.bsh_history` by default),
+`$!`/`wait`/`kill` by pid, history (`history` only — entries are numbered by a global database id in a
+Turso database, cleared per session, with no `HIST*` knobs),
 history expansion (`!!`, `!n`, `!-n`, `!string`, `!?string?`, `!#`, the word
 designators and modifiers, `^old^new^`), and the built-ins listed in
 `docs/contracts.md`.
