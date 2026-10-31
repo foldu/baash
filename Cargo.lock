@@ -371,6 +371,9 @@ dependencies = [
 [[package]]
 name = "bsh-spec"
 version = "0.0.0"
+dependencies = [
+ "bsh-sys",
+]
 
 [[package]]
 name = "bsh-syntax"

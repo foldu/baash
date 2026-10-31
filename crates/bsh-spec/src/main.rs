@@ -44,6 +44,10 @@ in the YSH suite are skipped (out of scope), never counted as passes.
 ";
 
 fn main() -> std::process::ExitCode {
+    // The reference runner starts every case under a `022` mask, so a case
+    // that only prints the mask must print `0022` rather than inheriting
+    // whatever the developer's terminal had (usually `077`).
+    let _ = bsh_sys::umask(0o022);
     let started = Instant::now();
     match run(started) {
         Ok(code) => code,

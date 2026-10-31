@@ -7,3 +7,4 @@ license.workspace = true
 description = "Conformance harness for the Oils spec-test suite"
 
 [dependencies]
+bsh-sys = { workspace = true }

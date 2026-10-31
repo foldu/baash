@@ -1,7 +1,7 @@
-# Roadmap: the 640-case gap
+# Roadmap: the 571-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **1979/2787** (1925 strict). bash passes 2574/2787 on the same run, so 595
+now **2003/2787** (1949 strict). bash passes 2574/2787 on the same run, so 571
 cases are things bash does and we do not.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
@@ -150,8 +150,8 @@ its keep, `zsh` emulation.
 
 ## Tranche 4 — the measured queue (after indirect expansion)
 
-Measured with `bsh-spec --json` on the current tree: 1979/2787 total, 1925
-strict, 808 failures, of which 657 are cases bash passes and 151 are cases
+Measured with `bsh-spec --json` on the current tree: 2003/2787 total, 1949
+strict, 784 failures, of which 633 are cases bash passes and 151 are cases
 bash fails too (not worth chasing). Ordered by cases per unit of work; every
 entry names the suite file that measures it.
 
@@ -162,8 +162,9 @@ entry names the suite file that measures it.
 - [ ] `$-` reflects the *active* options, and `sh` invocation flags
       (`+c`, `--`, flags after the script) — `sh-options` (19) + `sh-usage`
       (13). Today `$-` is a fixed `Bhu`.
-- [ ] `umask`, numeric and symbolic — `builtin-umask` (21). One `bsh-sys`
-      call plus bash's symbolic grammar.
+- [x] `umask`, numeric and symbolic — `builtin-umask` (21), now 24/24. The
+      symbolic grammar follows `osh`, including `X`, `s`/`t`, permission copies
+      and the mask truncation bash rejects.
 - [~] `exec --`, `exec -a`, redirect-only `exec` — `builtin-process` (18),
       now 7/25 → 10/25; the rest of the file is `exec` failure modes and
       dynamic-loader behaviour.

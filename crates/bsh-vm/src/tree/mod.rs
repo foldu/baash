@@ -130,6 +130,7 @@ mod read;
 mod redir;
 mod scope;
 mod traps;
+mod umask;
 mod words;
 
 pub use eval::TrapKind;

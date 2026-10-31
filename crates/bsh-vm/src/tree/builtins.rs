@@ -128,6 +128,10 @@ static VM_BUILTINS: &[VmBuiltin] = &[
         run: bi_hash,
     },
     VmBuiltin {
+        name: b"umask",
+        run: super::umask::bi_umask,
+    },
+    VmBuiltin {
         name: b"mapfile",
         run: super::mapfile::bi_mapfile,
     },

@@ -241,6 +241,25 @@ pub fn is_tty(fd: i32) -> bool {
     unsafe { libc::isatty(fd) == 1 }
 }
 
+/// Sets the process mask to `mask`, returning the previous value.
+///
+/// The mask is process-wide, so the `umask` built-in is the only caller and it
+/// passes permission bits only. `None` means the platform has no mask
+/// (Windows); the built-in reports that as unsupported rather than pretending
+/// the call succeeded.
+#[cfg(unix)]
+pub fn umask(mask: u32) -> Option<u32> {
+    // SAFETY: `umask` ignores every bit above the permission bits and takes no
+    // pointers, so no argument can make the call unsound.
+    unsafe { Some(libc::umask(mask as libc::mode_t) as u32) }
+}
+
+/// Sets the process mask; Windows has none. See the Unix `umask`.
+#[cfg(windows)]
+pub fn umask(_mask: u32) -> Option<u32> {
+    None
+}
+
 /// Paths and OS strings in shell bytes.
 ///
 /// Shell strings are bytes; `OsStr` is only bytes on Unix. Every crate that
