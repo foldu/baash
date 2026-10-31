@@ -800,10 +800,53 @@ impl Interp {
             }
         };
 
+        // bash rejects a malformed `[[ … ]]` while parsing, before any command
+        // in the chunk runs; the evaluator parses conditionals lazily, so the
+        // pass is done here, at the one entry point every chunk goes through.
+        if let Some((span, message)) = self.validate_conditionals(&chunk) {
+            self.report(crate::codes::CONDITIONAL, span, message);
+            self.set_status(Status(2));
+            return Unwind::Status(Status(2));
+        }
         let previous = std::mem::replace(&mut self.current, source);
         let unwind = self.eval_node(&chunk, chunk.ast.root, Ctx::default());
         self.current = previous;
         unwind
+    }
+
+    /// Parse every `[[ … ]]` body in `chunk`, returning the first failure.
+    ///
+    /// `extglob` is tried both ways: the chunk can turn it on or off before the
+    /// conditional runs, and this pass cannot know which. Accepting either
+    /// setting keeps a valid conditional from being rejected; only a body that
+    /// fails under both is a syntactic error.
+    fn validate_conditionals(
+        &mut self,
+        chunk: &Arc<ParsedChunk>,
+    ) -> Option<(bsh_diag::Span, String)> {
+        let extglob = self.state.opts.extglob;
+        let mut stack = vec![chunk.ast.root];
+        while let Some(id) = stack.pop() {
+            if let bsh_syntax::NodeKind::TestCommand { body } = &chunk.ast.node(id).kind {
+                let body = body.clone();
+                let mut last = None;
+                let mut accepted = false;
+                for attempt in [extglob, !extglob] {
+                    match cond::validate(self, chunk, body.clone(), attempt) {
+                        Ok(()) => {
+                            accepted = true;
+                            break;
+                        }
+                        Err(error) => last = Some(error),
+                    }
+                }
+                if !accepted {
+                    return last;
+                }
+            }
+            stack.extend(chunk.ast.children(id));
+        }
+        None
     }
 
     /// Turn a top-level unwind into an exit status.

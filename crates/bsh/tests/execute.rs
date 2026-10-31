@@ -810,6 +810,29 @@ fn an_exported_shellopts_turns_tracing_on_in_a_child() {
 }
 
 #[test]
+fn a_malformed_conditional_is_rejected_before_the_chunk_runs() {
+    // bash's parser rejects the whole line: `echo a` does not run.
+    let output = run("echo a; [[ ]]; echo b");
+    assert_eq!(code(&output), 2);
+    assert_eq!(stdout(&output), "");
+    for body in ["[[ -z ]]", "[[ && ]]", "[[ ) ]]", "[[ ( ]]", "[[ -f < ]]"] {
+        let output = run(&format!("echo a; {body}; echo b"));
+        assert_eq!(code(&output), 2, "{body} must be a syntax error");
+        assert_eq!(stdout(&output), "", "{body}");
+    }
+    // Operands that *look* like operators are words, as in bash.
+    assert_eq!(out("[[ = ]] && echo t"), "t\n");
+    assert_eq!(out("[[ == ]] && echo t"), "t\n");
+    assert_eq!(out("[[ '!' == ! ]] && echo t"), "t\n");
+    assert_eq!(out("[[ -f == ]]; echo st=$?"), "st=1\n");
+    // Control operators split words inside a conditional; `!` does not.
+    assert_eq!(out("[[ ''||! (1 == 2)&&(2 == 2)]] && echo true"), "true\n");
+    assert_eq!(out("[[ a!b == a!b ]] && echo t"), "t\n");
+    let output = run("[[ a|b ]]");
+    assert_eq!(code(&output), 2);
+}
+
+#[test]
 fn set_option_parsing_matches_bash() {
     // A lone `-` ends option processing (turning off -v/-x) and the words after
     // it are positional; a lone `+` is ignored and parsing continues.

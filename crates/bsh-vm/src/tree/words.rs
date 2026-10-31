@@ -397,23 +397,27 @@ pub(crate) fn conditional_tokens(body: &[u8], extglob: bool) -> Vec<CondToken> {
         } else if rest.starts_with(b"||") {
             two(CondToken::Or)
         } else if rest.starts_with(b"==") {
-            two(CondToken::Eq)
+            two(CondToken::Eq(index..index + 2))
         } else if rest.starts_with(b"=~") {
-            two(CondToken::Match)
+            two(CondToken::Match(index..index + 2))
         } else if rest.starts_with(b"!=") {
-            two(CondToken::Ne)
+            two(CondToken::Ne(index..index + 2))
         } else if rest.starts_with(b"=") {
-            (CondToken::Eq, 1)
+            (CondToken::Eq(index..index + 1), 1)
         } else if rest.starts_with(b"!") {
-            (CondToken::Bang, 1)
+            (CondToken::Bang(index..index + 1), 1)
         } else if rest.starts_with(b"(") {
             (CondToken::LParen, 1)
         } else if rest.starts_with(b")") {
             (CondToken::RParen, 1)
         } else if rest.starts_with(b"<") {
-            (CondToken::Lt, 1)
+            (CondToken::Lt(index..index + 1), 1)
         } else if rest.starts_with(b">") {
-            (CondToken::Gt, 1)
+            (CondToken::Gt(index..index + 1), 1)
+        } else if rest.starts_with(b"|") || rest.starts_with(b"&") || rest.starts_with(b";") {
+            tokens.push(CondToken::Unexpected(index..index + 1));
+            index += 1;
+            continue;
         } else {
             let length = word_end(body, index, pattern_context);
             tokens.push(CondToken::Word(index..index + length));
@@ -421,8 +425,8 @@ pub(crate) fn conditional_tokens(body: &[u8], extglob: bool) -> Vec<CondToken> {
             pattern_context = false;
             continue;
         };
-        pattern_context = matches!(token, CondToken::Eq | CondToken::Ne);
-        regex_operand = matches!(token, CondToken::Match);
+        pattern_context = matches!(token, CondToken::Eq(_) | CondToken::Ne(_));
+        regex_operand = matches!(token, CondToken::Match(_));
         tokens.push(token);
         index += length;
     }
@@ -565,18 +569,26 @@ pub(crate) enum CondToken {
     Word(std::ops::Range<usize>),
     And,
     Or,
-    Bang,
+    Bang(std::ops::Range<usize>),
     LParen,
     RParen,
-    Eq,
-    Ne,
-    Match,
-    Lt,
-    Gt,
+    // The comparison tokens keep their range because they are *operands* when
+    // they appear in operand position: `[[ = ]]` is the non-empty word `=`,
+    // and `[[ -f == ]]` tests the file named `==`.
+    Eq(std::ops::Range<usize>),
+    Ne(std::ops::Range<usize>),
+    Match(std::ops::Range<usize>),
+    Lt(std::ops::Range<usize>),
+    Gt(std::ops::Range<usize>),
+    /// A control operator that has no meaning inside a conditional (`|`, `&`,
+    /// `;` on its own). It is kept as a token rather than part of a word so the
+    /// grammar reports it, as bash does.
+    Unexpected(std::ops::Range<usize>),
 }
 
-/// The end of a conditional word: whitespace, parentheses and the comparison
-/// operators end it; quotes, substitutions and escapes are skipped whole.
+/// The end of a conditional word: whitespace, parentheses, the comparison
+/// operators and the control operators end it; quotes, substitutions and
+/// escapes are skipped whole.
 ///
 /// With `extglob`, a `X(…)` group is part of the word: `[[ x == a@(b|c) ]]`
 /// is one operand, not `a@` followed by a group.
@@ -595,7 +607,9 @@ fn word_end(body: &[u8], start: usize, extglob: bool) -> usize {
             {
                 index = extglob_end(body, index + 1);
             }
-            byte if byte.is_ascii_whitespace() || matches!(byte, b'(' | b')' | b'<' | b'>') => {
+            byte if byte.is_ascii_whitespace()
+                || matches!(byte, b'(' | b')' | b'<' | b'>' | b'|' | b'&' | b';') =>
+            {
                 break;
             }
             _ => index += 1,

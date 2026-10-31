@@ -25,6 +25,50 @@ use bsh_runtime::{ShellHost, Status};
 use super::words::{CondToken, binary_operator, conditional_tokens, unary_operator};
 use super::{Interp, ParsedChunk};
 
+/// Parse a `[[ … ]]` body without expanding or evaluating anything.
+///
+/// A malformed conditional is a *parse* error in bash: the whole chunk is
+/// rejected before any command runs. The evaluator parses lazily, so the chunk
+/// entry point asks for this validation pass first; it shares the grammar and
+/// the token tables with [`evaluate`] and skips only expansion and side
+/// effects.
+///
+/// `extglob` is ambiguous here for the same reason bash's parser tracks it line
+/// by line and this pass cannot: a `shopt -s extglob` earlier in the same chunk
+/// changes how `@(…)` tokenizes. The caller therefore tries both settings and
+/// accepts the conditional if either accepts it, so the pass never rejects
+/// valid input.
+pub(crate) fn validate(
+    interp: &mut Interp,
+    chunk: &Arc<ParsedChunk>,
+    body: Range<usize>,
+    extglob: bool,
+) -> Result<(), (Range<usize>, String)> {
+    let text = &chunk.source.bytes()[body.clone()];
+    let tokens = conditional_tokens(text, extglob);
+    let mut parser = Parser {
+        interp,
+        text,
+        tokens,
+        pos: 0,
+        span: body,
+        validate: true,
+    };
+    let result = parser.or_expr();
+    match result {
+        Ok(_) if parser.pos >= parser.tokens.len() => Ok(()),
+        Ok(_) => Err((parser.span.clone(), "unexpected token".to_owned())),
+        Err(message) => Err((
+            parser.span.clone(),
+            if message.is_empty() {
+                "syntax error in a conditional expression".to_owned()
+            } else {
+                message
+            },
+        )),
+    }
+}
+
 /// Evaluate a `[[ … ]]` body.
 pub(crate) fn evaluate(
     interp: &mut Interp,
@@ -43,6 +87,7 @@ pub(crate) fn evaluate(
         tokens,
         pos: 0,
         span: body,
+        validate: false,
     };
     let result = parser.or_expr();
     match result {
@@ -72,6 +117,11 @@ struct Parser<'a> {
     tokens: Vec<CondToken>,
     pos: usize,
     span: Range<usize>,
+    /// Parse the grammar without expanding operands or evaluating anything.
+    ///
+    /// The chunk-level validator uses this to reject a malformed conditional
+    /// before any command in the chunk runs, which is what bash's parser does.
+    validate: bool,
 }
 
 /// Split `name[subscript]` into its parts, when the operand ends with `]`.
@@ -85,6 +135,9 @@ fn split_subscript(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
 
 impl Parser<'_> {
     fn report(&mut self, message: &str) {
+        if self.validate {
+            return;
+        }
         self.interp
             .report(crate::codes::CONDITIONAL, self.span.clone(), message);
     }
@@ -102,13 +155,20 @@ impl Parser<'_> {
     }
 
     fn take_word(&mut self) -> Option<Range<usize>> {
-        match self.peek()?.clone() {
-            CondToken::Word(range) => {
-                self.pos += 1;
-                Some(range)
-            }
-            _ => None,
-        }
+        // A comparison token in operand position is a word: bash accepts
+        // `[[ = ]]`, `[[ == ]]` and `[[ -f == ]]` (a file test on `==`).
+        let range = match self.peek()? {
+            CondToken::Word(range)
+            | CondToken::Eq(range)
+            | CondToken::Ne(range)
+            | CondToken::Match(range)
+            | CondToken::Bang(range) => range.clone(),
+            // `<` and `>` are never operands in bash: `[[ < ]]`,
+            // `[[ -f < ]]` and `[[ a == < ]]` are all syntax errors.
+            _ => return None,
+        };
+        self.pos += 1;
+        Some(range)
     }
 
     fn or_expr(&mut self) -> Result<bool, String> {
@@ -130,7 +190,8 @@ impl Parser<'_> {
     }
 
     fn unary(&mut self) -> Result<bool, String> {
-        if self.eat(&CondToken::Bang) {
+        if matches!(self.peek(), Some(CondToken::Bang(_))) {
+            self.pos += 1;
             return Ok(!self.unary()?);
         }
         self.primary()
@@ -172,11 +233,11 @@ impl Parser<'_> {
         // (`==`, `!=`, `=~`, `<`, `>`) or with an operator word (`-eq`, …).
         if let Some(operator) = self.peek().cloned() {
             let comparison = match operator {
-                CondToken::Eq => Some(b"==".to_vec()),
-                CondToken::Ne => Some(b"!=".to_vec()),
-                CondToken::Match => Some(b"=~".to_vec()),
-                CondToken::Lt => Some(b"<".to_vec()),
-                CondToken::Gt => Some(b">".to_vec()),
+                CondToken::Eq(_) => Some(b"==".to_vec()),
+                CondToken::Ne(_) => Some(b"!=".to_vec()),
+                CondToken::Match(_) => Some(b"=~".to_vec()),
+                CondToken::Lt(_) => Some(b"<".to_vec()),
+                CondToken::Gt(_) => Some(b">".to_vec()),
                 CondToken::Word(inner) if binary_operator(&self.text[inner.clone()]) => {
                     Some(self.text[inner].to_vec())
                 }
@@ -210,6 +271,9 @@ impl Parser<'_> {
 
     /// Expand a `=~` right-hand side, keeping parens and braces as regex text.
     fn expand_regex(&mut self, range: &Range<usize>) -> Result<Field, String> {
+        if self.validate {
+            return Ok(Field::plain(Vec::new()));
+        }
         let text = &self.text[range.clone()];
         match self.interp.expand_regex_fragment(text) {
             Ok(field) => Ok(field),
@@ -221,6 +285,9 @@ impl Parser<'_> {
     }
 
     fn expand(&mut self, range: &Range<usize>) -> Result<Field, String> {
+        if self.validate {
+            return Ok(Field::plain(Vec::new()));
+        }
         let text = &self.text[range.clone()];
         match self.interp.expand_fragment(text) {
             Ok(field) => Ok(field),
@@ -234,6 +301,9 @@ impl Parser<'_> {
     /// Expand a right-hand operand of `==`/`!=`, keeping extglob punctuation
     /// active.
     fn expand_pattern(&mut self, range: &Range<usize>) -> Result<Field, String> {
+        if self.validate {
+            return Ok(Field::plain(Vec::new()));
+        }
         let text = &self.text[range.clone()];
         match self.interp.expand_pattern_fragment(text) {
             Ok(field) => Ok(field),
@@ -245,6 +315,9 @@ impl Parser<'_> {
     }
 
     fn compare(&mut self, operator: &[u8], left: &Field, right: &Field) -> Result<bool, String> {
+        if self.validate {
+            return Ok(true);
+        }
         match operator {
             b"==" | b"=" | b"!=" => {
                 // bash matches the right-hand side with extglob semantics even
@@ -292,6 +365,9 @@ impl Parser<'_> {
     /// `\b` loses it, a variable's `\b` keeps it, `"a.b"` is literal). The
     /// quoting mask from expansion is exactly the information needed.
     fn regex_match(&mut self, text: &Field, pattern: &Field) -> Result<bool, String> {
+        if self.validate {
+            return Ok(true);
+        }
         let source = regex_source(pattern);
         let case_insensitive = self.interp.pattern_flags().nocasematch;
         let compiled = if case_insensitive {
