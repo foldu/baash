@@ -1366,3 +1366,111 @@ fn a_bad_array_subscript_is_an_expansion_error() {
         "3 y\n"
     );
 }
+
+#[test]
+fn cd_tracks_the_logical_directory_and_pwd_reports_it() {
+    let dir = TestDir::new("cd-logical");
+    std::fs::create_dir_all(dir.path().join("target/sub")).expect("create target");
+    std::fs::create_dir_all(dir.path().join("other")).expect("create other");
+    let link = dir.at("link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.at("target"), &link).expect("symlink");
+    #[cfg(not(unix))]
+    let link = dir.at("target");
+
+    let script = format!(
+        r#"cd {link}
+pwd
+cd ..
+pwd
+cd {link}/sub
+pwd
+cd -L ..
+pwd
+cd -P {link}
+pwd -P
+pwd"#
+    );
+    let output = run(&script);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "{link}\n{root}\n{link}/sub\n{link}\n{root}/target\n{root}/target\n",
+            root = dir.path().display()
+        )
+    );
+}
+
+#[test]
+fn cd_checks_named_components_of_a_logical_path() {
+    let dir = TestDir::new("cd-components");
+    std::fs::create_dir_all(dir.path().join("a/b")).expect("create a/b");
+    std::fs::create_dir_all(dir.path().join("c")).expect("create c");
+    let root = dir.path().display();
+
+    // `..` is resolved textually, but every component bash names must exist.
+    let output = run(&format!("cd {root}/a/b/..; pwd"));
+    assert_eq!(stdout(&output), format!("{root}/a\n"));
+    let output = run(&format!("cd {root}; cd nonexistent/..; echo status=$?"));
+    assert_eq!(stdout(&output), "status=1\n");
+    assert_eq!(code(&output), 0);
+    let output = run(&format!("cd {root}; cd a/nonexistent/..; echo status=$?"));
+    assert_eq!(stdout(&output), "status=1\n");
+
+    // Two operands are a usage error with bash's status 2.
+    let output = run(&format!("cd {root}; cd a c"));
+    assert_eq!(code(&output), 2);
+    assert!(stderr(&output).contains("too many arguments"));
+}
+
+#[test]
+fn cdpath_searches_a_bare_relative_name() {
+    let dir = TestDir::new("cdpath");
+    std::fs::create_dir_all(dir.path().join("first/target")).expect("create first");
+    std::fs::create_dir_all(dir.path().join("second/target")).expect("create second");
+
+    // The first match wins, and cd prints the directory it found because the
+    // search path — not the current directory — supplied it.
+    let script = format!(
+        "CDPATH={first}:{second}; cd target; echo status=$?; pwd",
+        first = dir.at("first"),
+        second = dir.at("second")
+    );
+    let output = run(&script);
+    assert_eq!(code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "{0}/first/target\nstatus=0\n{0}/first/target\n",
+            dir.path().display()
+        )
+    );
+
+    // An empty element means the current directory, and then nothing is
+    // printed; an absolute path never searches CDPATH at all.
+    std::fs::create_dir_all(dir.path().join("here/name")).expect("create here");
+    let script = format!(
+        "cd {root}/here; CDPATH=:{first}; cd name; echo status=$?; pwd",
+        root = dir.path().display(),
+        first = dir.at("first")
+    );
+    let output = run(&script);
+    assert_eq!(
+        stdout(&output),
+        format!("status=0\n{0}/here/name\n", dir.path().display())
+    );
+}
+
+#[test]
+fn pwd_ignores_operands_and_honours_l_and_p() {
+    let dir = TestDir::new("pwd-flags");
+    let root = dir.path().display().to_string();
+
+    assert_eq!(out(&format!("cd {root}; pwd /")), format!("{root}\n"));
+    assert_eq!(out(&format!("cd {root}; pwd -L")), format!("{root}\n"));
+    assert_eq!(out(&format!("cd {root}; pwd -P")), format!("{root}\n"));
+    // An unknown flag is a usage error, not a silent success.
+    let output = run("pwd -Z");
+    assert_eq!(code(&output), 2);
+}

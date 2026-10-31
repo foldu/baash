@@ -1,9 +1,9 @@
 # Roadmap: the 397-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2235/2787** (2180 strict). bash passes 2577/2787 on the same run and
-410 of the cases we fail are ones bash passes (we pass 68 it fails), so the net
-gap is 342 cases.
+now **2240/2787** (2187 strict). bash passes 2577/2787 on the same run and
+405 of the cases we fail are ones bash passes (we pass 68 it fails), so the net
+gap is 337 cases.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
 queue. Interactive usability now outranks script conformance; see
@@ -235,8 +235,8 @@ around 2170.**
 
 ## Tranche 5 — the remaining bash gap (active goal)
 
-Re-measured with `--json --compare bash` after items 1–8 below:
-**2235/2787 total, 2180 strict**. 552 failures, of which **410 are cases bash
+Re-measured with `--json --compare bash` after items 1–9 below:
+**2240/2787 total, 2187 strict**. 547 failures, of which **405 are cases bash
 passes** (the real queue) and 142 are cases bash fails too (osh-only
 expectations, older-bash behaviour, environment). The plan is to work these in
 order, cheapest first, re-measuring after each commit:
@@ -265,8 +265,12 @@ it is not re-litigated.
    Also made a malformed array subscript an *expansion* error in every context
    (`${a[~+]}`, `a[~+]=1`, `declare -i n; n=1+`), which bash fails the same
    way: `var-ref` "Bizarre tilde expansion in array index".
-9. **[open]** `cd -L`/`-P`, `CDPATH`, and `pwd` through symlinks —
-   `builtin-cd` (5–7).
+9. **[done]** `cd -L`/`-P` and a real `pwd` builtin: `PWD` is the logical
+   name (the target appended to it and collapsed textually, with every named
+   component checked, so `cd nonexistent/..` still fails), `-P` asks the
+   kernel, `CDPATH` searches bare relative names — `builtin-cd` (7). Left
+   alone: `chdir` (an ash synonym bash does not have) and the osh-only
+   `strict_arg_parse` cases.
 10. **[open]** `${x:offset:length}` slices (arithmetic, negative starts,
     invalid UTF-8) and `${a[@]}`/`${a[*]}` `-`/`=`/`+` alternates with
     `set -u` — `var-op-slice` + `var-op-test` (16).

@@ -20,12 +20,28 @@ use super::Interp;
 ///
 /// Shared with `cd` so the two built-ins cannot disagree about what `PWD`
 /// means; the caller decides what to print and which status a failure has.
-pub(super) fn enter(interp: &mut Interp, target: &[u8]) -> std::io::Result<Vec<u8>> {
-    bsh_sys::chdir(target)?;
+///
+/// `physical` selects bash's `-P` over the default `-L`. `-L` (logical) tracks
+/// the name the user spelled: the target is appended to the *logical* `PWD`
+/// and collapsed textually, and that string is both what is chdir'ed to and
+/// what `PWD` records — which is why `cd symlink` keeps the symlink's name and
+/// `cd ..` leaves it by name. `-P` asks the kernel and `getcwd()` instead.
+pub(super) fn enter(
+    interp: &mut Interp,
+    target: &[u8],
+    physical: bool,
+) -> std::io::Result<Vec<u8>> {
     let previous = interp.state.vars.scalar(b"PWD").map(<[u8]>::to_vec);
-    let current = std::env::current_dir()
-        .map(bsh_sys::os::bytes_from_os)
-        .unwrap_or_else(|_| target.to_vec());
+    let current = if physical {
+        bsh_sys::chdir(target)?;
+        std::env::current_dir()
+            .map(bsh_sys::os::bytes_from_os)
+            .unwrap_or_else(|_| target.to_vec())
+    } else {
+        let logical = resolve(&current(interp), target);
+        bsh_sys::chdir(&logical)?;
+        logical
+    };
     if let Some(previous) = previous {
         let _ = interp.state.vars.assign_scalar(b"OLDPWD", &previous);
         let _ = interp.state.vars.mark_exported(b"OLDPWD");
@@ -33,6 +49,60 @@ pub(super) fn enter(interp: &mut Interp, target: &[u8]) -> std::io::Result<Vec<u
     let _ = interp.state.vars.assign_scalar(b"PWD", &current);
     let _ = interp.state.vars.mark_exported(b"PWD");
     Ok(current)
+}
+
+/// Walk `target` the way a logical `cd` does, failing when a component it
+/// names is not a directory.
+///
+/// bash's `-L` resolves `..` textually but still reports a path whose named
+/// component does not exist: `cd nonexistent/..` fails while `cd a/b/..`
+/// succeeds, and `cd symlink/../c` ends up in the textual parent's `c`. The
+/// check is therefore per *named* component, against the textual prefix built
+/// so far — never against the raw path, whose `..` the kernel would resolve
+/// through the symlink.
+pub(super) fn check_components(interp: &Interp, target: &[u8]) -> std::io::Result<()> {
+    let mut parts: Vec<Vec<u8>> = Vec::new();
+    if target.first() != Some(&b'/') {
+        for component in current(interp).split(|&byte| byte == b'/') {
+            match component {
+                b"" | b"." => {}
+                b".." => {
+                    parts.pop();
+                }
+                other => parts.push(other.to_vec()),
+            }
+        }
+    }
+    for component in target.split(|&byte| byte == b'/') {
+        match component {
+            b"" | b"." => continue,
+            b".." => {
+                parts.pop();
+            }
+            name => {
+                parts.push(name.to_vec());
+                let path = spell_path(&parts);
+                let metadata = std::fs::metadata(bsh_sys::os::path_from_bytes(&path))?;
+                if !metadata.is_dir() {
+                    return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Join absolute path components, root included.
+fn spell_path(parts: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for component in parts {
+        out.push(b'/');
+        out.extend_from_slice(component);
+    }
+    if out.is_empty() {
+        out.push(b'/');
+    }
+    out
 }
 
 /// The current directory as the shell spells it.
@@ -63,6 +133,73 @@ fn store(interp: &mut Interp, stack: Vec<Vec<u8>>) {
 pub(super) fn sync(interp: &mut Interp, current: &[u8]) {
     if let Some(first) = interp.state.dirs.first_mut() {
         *first = current.to_vec();
+    }
+}
+
+/// `pwd`: the logical directory (`-L`, the default) or the kernel's answer
+/// (`-P`).
+///
+/// The logical answer is `$PWD`, but only when it still names the current
+/// directory: a stale `PWD` (a script that `cd`s behind the shell's back, or a
+/// directory that was removed) falls back to `getcwd()`, which is bash's
+/// check.
+pub(crate) fn bi_pwd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
+    let name = super::builtins::program(argv, "pwd");
+    let mut physical = false;
+    for argument in &argv[1..] {
+        match argument.as_slice() {
+            b"-L" => physical = false,
+            b"-P" => physical = true,
+            b"--" => {}
+            other if other.first() == Some(&b'-') && other.len() > 1 => {
+                let text = String::from_utf8_lossy(other).into_owned();
+                return fail(interp, &name, &format!("{text}: invalid option"), Status(2));
+            }
+            // bash ignores operands (`pwd /` prints the directory).
+            _ => {}
+        }
+    }
+    let mut out = if !physical
+        && let Some(pwd) = interp.state.vars.scalar(b"PWD")
+        && names_current_directory(pwd)
+    {
+        pwd.to_vec()
+    } else {
+        std::env::current_dir()
+            .map(bsh_sys::os::bytes_from_os)
+            .unwrap_or_else(|_| current(interp))
+    };
+    out.push(b'\n');
+    interp.write_out(&out)
+}
+
+/// Whether `path` is an absolute name for the directory the process is in.
+///
+/// This is the test bash applies before trusting `PWD`: stat the two and
+/// compare identity, so `PWD=/tmp; cd /var` (typed by something other than the
+/// shell) is not believed.
+fn names_current_directory(path: &[u8]) -> bool {
+    if path.first() != Some(&b'/') {
+        return false;
+    }
+    let probe = bsh_sys::os::path_from_bytes(path);
+    same_file(&probe, std::path::Path::new("."))
+}
+
+#[cfg(unix)]
+fn same_file(left: &std::path::Path, right: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(left), std::fs::metadata(right)) {
+        (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_file(left: &std::path::Path, right: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
     }
 }
 
@@ -266,7 +403,7 @@ pub(crate) fn bi_pushd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
         }
         entries.swap(0, 1);
         let target = entries[0].clone();
-        if !no_chdir && let Err(error) = enter(interp, &target) {
+        if !no_chdir && let Err(error) = enter(interp, &target, false) {
             return fail(
                 interp,
                 name,
@@ -292,7 +429,7 @@ pub(crate) fn bi_pushd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
         };
         entries.rotate_left(index);
         let target = entries[0].clone();
-        if !no_chdir && let Err(error) = enter(interp, &target) {
+        if !no_chdir && let Err(error) = enter(interp, &target, false) {
             return fail(
                 interp,
                 name,
@@ -307,7 +444,7 @@ pub(crate) fn bi_pushd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
     let cwd = current(interp);
     let target = resolve(&cwd, &operand);
     if !no_chdir {
-        if let Err(error) = enter(interp, &target) {
+        if let Err(error) = enter(interp, &target, false) {
             return fail(
                 interp,
                 name,
@@ -381,7 +518,7 @@ pub(crate) fn bi_popd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
     }
     entries.remove(remove);
     let target = entries[0].clone();
-    if !no_chdir && let Err(error) = enter(interp, &target) {
+    if !no_chdir && let Err(error) = enter(interp, &target, false) {
         return fail(
             interp,
             name,

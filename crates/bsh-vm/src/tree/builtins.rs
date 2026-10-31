@@ -57,6 +57,10 @@ static VM_BUILTINS: &[VmBuiltin] = &[
         run: bi_break,
     },
     VmBuiltin {
+        name: b"pwd",
+        run: super::dirs::bi_pwd,
+    },
+    VmBuiltin {
         name: b"continue",
         run: bi_continue,
     },
@@ -166,7 +170,7 @@ fn diagnose(interp: &mut Interp, message: impl Into<String>) {
     ));
 }
 
-fn program(argv: &[Vec<u8>], fallback: &str) -> String {
+pub(super) fn program(argv: &[Vec<u8>], fallback: &str) -> String {
     argv.first()
         .map(|name| String::from_utf8_lossy(name).into_owned())
         .unwrap_or_else(|| fallback.to_owned())
@@ -504,9 +508,15 @@ fn interpret_escapes(bytes: &[u8], out: &mut Vec<u8>) -> bool {
 fn bi_cd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
     let name = program(argv, "cd");
     let mut target: Option<Vec<u8>> = None;
+    let mut physical = false;
     for argument in &argv[1..] {
         match argument.as_slice() {
-            b"-L" | b"-P" | b"--" => {}
+            b"-L" => physical = false,
+            b"-P" => physical = true,
+            // bash's `-e` (and `-@`) only matter with `-P`, where they forbid
+            // falling back to a guess when `getcwd()` fails; they are accepted
+            // so a script using them does not stop here.
+            b"-e" | b"-@" | b"--" => {}
             b"-" => target = Some(b"-".to_vec()),
             other if other.first() == Some(&b'-') && other.len() > 1 => {
                 diagnose(interp, format!("{name}: {other:?}: invalid option"));
@@ -514,15 +524,16 @@ fn bi_cd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
             }
             other => {
                 if target.is_some() {
+                    // bash reports a usage error, not a failure of the change.
                     diagnose(interp, format!("{name}: too many arguments"));
-                    return Status::FAILURE;
+                    return Status(2);
                 }
                 target = Some(other.to_vec());
             }
         }
     }
     let mut print = false;
-    let target = match target {
+    let mut target = match target {
         None => match interp.state.vars.scalar(b"HOME") {
             Some(home) => home.to_vec(),
             None => {
@@ -543,7 +554,30 @@ fn bi_cd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
         Some(path) => path,
     };
 
-    let current = match super::dirs::enter(interp, &target) {
+    // `CDPATH` is a search path for a bare relative name: bash tries each
+    // element in order, and prints the new directory when the match came from
+    // a non-empty element (the empty one is the current directory, which the
+    // user already sees).
+    if let Some((found, from_search)) = search_cdpath(interp, &target) {
+        target = found;
+        print |= from_search;
+    }
+
+    // A logical `cd` validates the components it names before entering them;
+    // `-P` leaves that to the kernel's own path walk.
+    if !physical {
+        match super::dirs::check_components(interp, &target) {
+            Ok(()) => {}
+            Err(error) => {
+                diagnose(
+                    interp,
+                    format!("{name}: {}: {error}", String::from_utf8_lossy(&target)),
+                );
+                return Status::FAILURE;
+            }
+        }
+    }
+    let current = match super::dirs::enter(interp, &target, physical) {
         Ok(current) => current,
         Err(error) => {
             diagnose(
@@ -562,6 +596,35 @@ fn bi_cd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
         let _ = interp.write_out(&out);
     }
     Status::SUCCESS
+}
+
+/// The `CDPATH` match for `target`, and whether it came from a non-empty
+/// element (which is what makes `cd` print the new directory).
+///
+/// bash only searches for a name that is neither absolute nor anchored to the
+/// current directory (`./`/`../`), and falls back to the original operand when
+/// nothing matches.
+fn search_cdpath(interp: &Interp, target: &[u8]) -> Option<(Vec<u8>, bool)> {
+    if target.first() == Some(&b'/') || target.starts_with(b"./") || target.starts_with(b"../") {
+        return None;
+    }
+    let path = interp.state.vars.scalar(b"CDPATH")?;
+    if path.is_empty() {
+        return None;
+    }
+    for element in path.split(|&byte| byte == b':') {
+        let mut candidate = Vec::with_capacity(element.len() + target.len() + 1);
+        candidate.extend_from_slice(element);
+        if !element.is_empty() {
+            candidate.push(b'/');
+        }
+        candidate.extend_from_slice(target);
+        let probe = bsh_sys::os::path_from_bytes(&candidate);
+        if probe.is_dir() {
+            return Some((candidate, !element.is_empty()));
+        }
+    }
+    None
 }
 
 /// Split `name=value` / `name+=value` into its parts.

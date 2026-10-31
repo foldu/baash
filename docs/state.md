@@ -47,27 +47,27 @@ a stale brief has already cost two wrong scopes (arrays: 54 vs real; namerefs:
 
 | measure | value |
 |---|---|
-| comparable cases | **2235 / 2787 = 80.2 %** |
-| strict (primary expectation only) | 2180 / 2787 = 78.2 % |
-| failing | 552 |
+| comparable cases | **2240 / 2787 = 80.4 %** |
+| strict (primary expectation only) | 2187 / 2787 = 78.5 % |
+| failing | 547 |
 | timeouts | 0 |
 | of the whole suite (3971 cases) | 56.3 % |
-| as a fraction of bash's score | 2235 / 2577 = 86.7 % |
-| share of the bash gap closed since 1013 | 1222 / 1564 = 78.1 % |
-| our test count | 1253 |
+| as a fraction of bash's score | 2240 / 2577 = 86.9 % |
+| share of the bash gap closed since 1013 | 1227 / 1564 = 78.5 % |
+| our test count | 1257 |
 
 Measured with `bash 5.3.20` as the comparison shell, harness forced to
 `LC_ALL=C` (bash scores *worse* under `C.UTF-8`: 2574 → 2435, so the C locale
-is the fair denominator). We pass 68 cases bash fails; bash passes 410 we fail.
+is the fair denominator). We pass 68 cases bash fails; bash passes 405 we fail.
 
 **1184 skipped** cases: 745 from the ysh-only suite files, 417 marked
 `our_shell: ysh`, 22 needing a `python2` helper we do not provide. 100 % is not
-a meaningful target: bash itself scores 92.4 %, and 55 of our passes come from
+a meaningful target: bash itself scores 92.4 %, and 53 of our passes come from
 `## OK <shell>` alternatives rather than the primary expectation — which is
-exactly the 78.2 % vs 80.2 % split, and why both numbers are ratcheted.
+exactly the 78.5 % vs 80.4 % split, and why both numbers are ratcheted.
 
-Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 2235`,
-`strict = 2180`). `--ratchet` exits 1 below either, 2 if it cannot measure.
+Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 2240`,
+`strict = 2187`). `--ratchet` exits 1 below either, 2 if it cannot measure.
 
 **The W1 drop is expected.** Removing job control failed seven Oils cases that
 exercise `%` specifications, `jobs -p` and `kill %job` (one trap case improved
