@@ -232,3 +232,60 @@ and the 151 cases bash fails too. These are decisions, not gaps.
 
 **Target if Tier A and B land: +250–290 → about 2230/2787 (80%), strict
 around 2170.**
+
+## Tranche 5 — the remaining bash gap (active goal)
+
+Re-measured with `--json --compare bash` after the `printf`/`test` work:
+**2180/2787 total, 2127 strict**. 607 failures, of which **464 are cases bash
+passes** (the real queue) and 143 are cases bash fails too (osh-only
+expectations, older-bash behaviour, environment). The plan is to work these in
+order, cheapest first, re-measuring after each commit:
+
+1. `errexit` in command substitution: bash resets `-e` inside `$( )` unless
+   `shopt -s inherit_errexit`; we inherit it unconditionally — `errexit-osh`
+   (19 regress) + `errexit` (4).
+2. `SHELLOPTS`/`BASHOPTS` computed from the live option table, readonly, and
+   exported `SHELLOPTS` driving xtrace in children — `sh-options-bash` (6).
+3. `shopt` unknown-name status 1 (bash's, not 2), permissive top-level
+   `break`/`continue`, `shopt -p` no-ops — `strict-options` (9) +
+   `sh-options` (6).
+4. `set` parsing (`set -`, `set +`, `set - -`, `set - +`) and `set -a`
+   exporting `local`/`declare` variables — `builtin-set` (10).
+5. Malformed `[[ … ]]` rejected by the parser, as a syntax error for the whole
+   line, not by the runtime conditional — `dbracket` (10).
+6. `echo -e` `\uHHHH`/`\UHHHHHHHH`, including incomplete escapes —
+   `builtin-echo` (4); reuse printf's decoder.
+7. Brace ranges with zero, negative or wrong-sign steps are diagnostics —
+   `brace-expansion` (7).
+8. `cd -L`/`-P`, `CDPATH`, and `pwd` through symlinks — `builtin-cd` (5–7).
+9. `${x:offset:length}` slices (arithmetic, negative starts, invalid UTF-8)
+   and `${a[@]}`/`${a[*]}` `-`/`=`/`+` alternates with `set -u` —
+   `var-op-slice` + `var-op-test` (16).
+10. `break`/`continue`/`return` through `eval`/`source`/subshells, and alias
+    expansion producing syntax across lines — `loop` (8) + `alias` (8).
+11. `FUNCNAME`, `BASH_SOURCE`, `BASH_LINENO` from the frame stack —
+    `introspect` (10), part of `var-ref` (15).
+12. `${!x}` indirection edges: `$?`, array/assoc subscripts, bad references,
+    strict-array cases — `var-ref` (rest).
+13. DEBUG/ERR trap exactness: `$?`, `LINENO`, `||`/`!`/pipeline exclusion,
+    `errtrace` — `builtin-trap-bash` (19) + `builtin-trap-err` (16).
+14. Arithmetic contexts: `${…}`, quoted constants and backticks inside
+    `$(( ))`, `nounset` — `arith` (13) + `arith-context` (7).
+15. `[[ =~ ]]` right-hand-side parsing: unquoted `(`/`)`/`{`, spaces, `;`/`&`
+    — `regex` (12).
+16. NUL bytes through expansion and the quoting edge cases —
+    `nul-bytes` (8) + `var-sub-quote` (7) + `command-sub` (4).
+17. Interactive `PROMPT_COMMAND` (four cases) and `--rcdir`/`--norc`
+    (`interactive`, minus the excluded `HISTFILE` half).
+18. Background shell code (`{ …; } &`, `for … &`) and process substitution
+    (`<(…)`/`>(…)`): the only remaining architectural question. Either a
+    worker-thread subinterpreter or a documented rejection — `background` (15)
+    + `process-sub` (6).
+
+Still out of scope (decisions, not gaps): `HISTFILE`/`history -w/-r/-n`
+(~19), readline `bind` (9), job control/jobspecs (~8), the ysh dialect, and
+the 143 cases bash fails too.
+
+**Target: ≥2300 total / ≥2250 strict, then the background/process-sub
+decision. Each step lands as its own commit with fmt, clippy, workspace tests
+and the spec ratchet green.**
