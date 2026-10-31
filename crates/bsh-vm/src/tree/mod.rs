@@ -917,6 +917,32 @@ impl bsh_lang::Vars for Interp {
         }
     }
 
+    fn attributes(&self, name: &[u8]) -> Vec<u8> {
+        let Some(var) = self.state.vars.lookup(name) else {
+            return Vec::new();
+        };
+        let mut letters = Vec::new();
+        match &var.value {
+            bsh_runtime::VarValue::Indexed(_) => letters.push(b'a'),
+            bsh_runtime::VarValue::Assoc(_) => letters.push(b'A'),
+            _ => {}
+        }
+        if var.attrs.exported {
+            letters.push(b'x');
+        }
+        if var.attrs.readonly {
+            letters.push(b'r');
+        }
+        if var.attrs.integer {
+            letters.push(b'i');
+        }
+        if var.attrs.nameref {
+            letters.push(b'n');
+        }
+        letters.sort();
+        letters
+    }
+
     fn names(&self) -> Vec<Vec<u8>> {
         self.state
             .vars
@@ -1510,6 +1536,32 @@ fn locale_is_utf8(locale: Option<&std::ffi::OsStr>) -> bool {
     text.contains("utf-8") || text.contains("utf8")
 }
 
+/// Split `GLOBIGNORE` on `:`, but not on a colon inside a bracket expression
+/// (`[[:alnum:]]` is one pattern, not three).
+fn split_globignore(value: &[u8]) -> Vec<Vec<u8>> {
+    let mut patterns = Vec::new();
+    let mut current = Vec::new();
+    let mut depth = 0usize;
+    for &byte in value {
+        match byte {
+            b'[' => depth += 1,
+            b']' => depth = depth.saturating_sub(1),
+            b':' if depth == 0 => {
+                if !current.is_empty() {
+                    patterns.push(std::mem::take(&mut current));
+                }
+                continue;
+            }
+            _ => {}
+        }
+        current.push(byte);
+    }
+    if !current.is_empty() {
+        patterns.push(current);
+    }
+    patterns
+}
+
 #[cfg(test)]
 mod locale_tests {
     use super::locale_is_utf8;
@@ -1537,30 +1589,4 @@ mod locale_tests {
         }
         assert!(!locale_is_utf8(None), "an unset locale means bytes");
     }
-}
-
-/// Split `GLOBIGNORE` on `:`, but not on a colon inside a bracket expression
-/// (`[[:alnum:]]` is one pattern, not three).
-fn split_globignore(value: &[u8]) -> Vec<Vec<u8>> {
-    let mut patterns = Vec::new();
-    let mut current = Vec::new();
-    let mut depth = 0usize;
-    for &byte in value {
-        match byte {
-            b'[' => depth += 1,
-            b']' => depth = depth.saturating_sub(1),
-            b':' if depth == 0 => {
-                if !current.is_empty() {
-                    patterns.push(std::mem::take(&mut current));
-                }
-                continue;
-            }
-            _ => {}
-        }
-        current.push(byte);
-    }
-    if !current.is_empty() {
-        patterns.push(current);
-    }
-    patterns
 }

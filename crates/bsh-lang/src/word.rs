@@ -702,6 +702,8 @@ pub enum Transform {
     Lower,
     /// `${x@l}`: lower-case the first character.
     LowerFirst,
+    /// `${x@a}`: the variable's attributes, as sorted letters.
+    Attributes,
 }
 
 impl Transform {
@@ -714,6 +716,7 @@ impl Transform {
             Transform::UpperFirst => b'u',
             Transform::Lower => b'L',
             Transform::LowerFirst => b'l',
+            Transform::Attributes => b'a',
         }
     }
 
@@ -726,6 +729,7 @@ impl Transform {
             b'u' => Some(Transform::UpperFirst),
             b'L' => Some(Transform::Lower),
             b'l' => Some(Transform::LowerFirst),
+            b'a' => Some(Transform::Attributes),
             _ => None,
         }
     }

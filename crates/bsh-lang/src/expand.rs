@@ -1370,8 +1370,42 @@ fn expand_transform<S: Shell>(
     ctx: &mut Ctx<'_, S>,
     out: &mut Expanded,
 ) -> Result<(), Error> {
+    if transform == Transform::Attributes {
+        // `${?@a}` and `${@@a}` have no attributes to report, and an unset
+        // name expands to no word at all rather than an empty one. An array
+        // form reports the attribute once per element, which is what makes
+        // `"${a[*]@a}"` a joined list.
+        let (letters, star) = match name {
+            ParamName::Var(name) | ParamName::Element { name, .. } => {
+                (ctx.shell.attributes(name), false)
+            }
+            ParamName::Elements { name, star } => {
+                let letters = ctx.shell.attributes(name);
+                if letters.is_empty() {
+                    return Ok(());
+                }
+                let count = ctx.shell.array(name).map_or(1, |array| array.len());
+                if count == 0 {
+                    // bash reports one empty word for an empty array, the
+                    // same shape `${a[@]}` itself has.
+                    emit_values(ctx, &[Vec::new()], *star, quoted, out);
+                } else {
+                    emit_values(ctx, &vec![letters; count], *star, quoted, out);
+                }
+                return Ok(());
+            }
+            _ => return Ok(()),
+        };
+        if letters.is_empty() {
+            return Ok(());
+        }
+        emit_values(ctx, &[letters], star, quoted, out);
+        return Ok(());
+    }
     let prompt = ctx.shell.prompt_context();
     match transform {
+        // Handled above, where it needs the attribute table.
+        Transform::Attributes => Ok(()),
         Transform::Prompt => {
             let (values, star) = match name {
                 ParamName::At => (ctx.shell.positional().to_vec(), false),
@@ -1463,8 +1497,9 @@ fn apply_transform(value: Vec<u8>, transform: Transform) -> Vec<u8> {
             }
             out
         }
-        // `@P` is handled above, where it needs the prompt context.
-        Transform::Prompt => value,
+        // `@P` and `@a` are handled above: they need the prompt context and
+        // the attribute table, not just the value.
+        Transform::Prompt | Transform::Attributes => value,
     }
 }
 

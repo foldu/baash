@@ -87,6 +87,14 @@ pub trait Vars {
     fn names(&self) -> Vec<Vec<u8>> {
         Vec::new()
     }
+
+    /// The letters `${x@a}` reports for `name`: `a` indexed array, `A`
+    /// associative array, `x` exported, `r` readonly, `i` integer, `n`
+    /// nameref. Sorted, and empty for a name with no attributes or no value.
+    fn attributes(&self, name: &[u8]) -> Vec<u8> {
+        let _ = name;
+        Vec::new()
+    }
 }
 
 /// Why [`Vars::set`] refused an assignment.
