@@ -810,6 +810,24 @@ fn an_exported_shellopts_turns_tracing_on_in_a_child() {
 }
 
 #[test]
+fn echo_e_understands_unicode_escapes() {
+    assert_eq!(out("echo -e 'abcd\\u0065f'"), "abcdef\n");
+    assert_eq!(out("echo -e 'abcd\\U00000065f'"), "abcdef\n");
+    // An incomplete escape is the character itself.
+    assert_eq!(
+        out("echo -en 'abcd\\u006' | od -An -c | tr -s ' '"),
+        " a b c d 006\n"
+    );
+    // A surrogate or an out-of-range value stays literal, as does an escape
+    // with no digits at all.
+    assert_eq!(out("echo -e 'a\\uD800'"), "a\\uD800\n");
+    assert_eq!(out("echo -e 'a\\U00110000'"), "a\\U00110000\n");
+    assert_eq!(out("echo -e 'a\\u'"), "a\\u\n");
+    // Eight digits take at most eight: the ninth is text.
+    assert_eq!(out("echo -e 'a\\U000000651'"), "ae1\n");
+}
+
+#[test]
 fn a_malformed_conditional_is_rejected_before_the_chunk_runs() {
     // bash's parser rejects the whole line: `echo a` does not run.
     let output = run("echo a; [[ ]]; echo b");

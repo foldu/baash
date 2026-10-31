@@ -458,6 +458,39 @@ fn interpret_escapes(bytes: &[u8], out: &mut Vec<u8>) -> bool {
                     out.push((value & 0xff) as u8);
                 }
             }
+            // `\uHHHH` and `\UHHHHHHHH`: up to four or eight hex digits,
+            // encoded as UTF-8. A value that is not a Unicode scalar (a
+            // surrogate, or past `U+10FFFF`) and an escape with no digits both
+            // stay literal, as in bash.
+            b'u' | b'U' => {
+                let max = if bytes[index] == b'u' { 4 } else { 8 };
+                let start = index + 1;
+                let limit = (start + max).min(bytes.len());
+                let mut end = start;
+                while end < limit && bytes[end].is_ascii_hexdigit() {
+                    end += 1;
+                }
+                let value = if end == start {
+                    None
+                } else {
+                    std::str::from_utf8(&bytes[start..end])
+                        .ok()
+                        .and_then(|digits| u32::from_str_radix(digits, 16).ok())
+                        .and_then(char::from_u32)
+                };
+                match value {
+                    Some(character) => {
+                        let mut buffer = [0u8; 4];
+                        out.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+                        index = end;
+                    }
+                    None => {
+                        out.push(b'\\');
+                        out.push(bytes[index]);
+                        index += 1;
+                    }
+                }
+            }
             other => {
                 out.push(b'\\');
                 out.push(other);
