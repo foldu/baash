@@ -78,6 +78,15 @@ pub trait Vars {
         let _ = name;
         None
     }
+
+    /// Every visible variable name, for `${!prefix@}` and `${!prefix*}`.
+    ///
+    /// The caller sorts and filters; the default is empty, which is the right
+    /// answer for a read-only view that has no name inventory (completion) and
+    /// for the passthrough stub.
+    fn names(&self) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
 }
 
 /// Why [`Vars::set`] refused an assignment.

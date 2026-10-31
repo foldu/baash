@@ -917,6 +917,15 @@ impl bsh_lang::Vars for Interp {
         }
     }
 
+    fn names(&self) -> Vec<Vec<u8>> {
+        self.state
+            .vars
+            .visible()
+            .into_iter()
+            .map(|(name, _)| name.to_vec())
+            .collect()
+    }
+
     fn array(&self, name: &[u8]) -> Option<bsh_lang::ArrayValue<'_>> {
         if name == b"PIPESTATUS" {
             return Some(bsh_lang::ArrayValue::Indexed(&self.pipeline_status));

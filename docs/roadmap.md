@@ -1,7 +1,7 @@
-# Roadmap: the 526-case gap
+# Roadmap: the 522-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2048/2787** (1994 strict). bash passes 2574/2787 on the same run, so 526
+now **2052/2787** (1998 strict). bash passes 2574/2787 on the same run, so 522
 cases are things bash does and we do not.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
@@ -150,15 +150,16 @@ its keep, `zsh` emulation.
 
 ## Tranche 4 — the measured queue (after indirect expansion)
 
-Measured with `bsh-spec --json` on the current tree: 2048/2787 total, 1994
-strict, 739 failures, of which 526 are cases bash passes and 213 are cases
+Measured with `bsh-spec --json` on the current tree: 2052/2787 total, 1998
+strict, 735 failures, of which 522 are cases bash passes and 213 are cases
 bash fails too (not worth chasing). Ordered by cases per unit of work; every
 entry names the suite file that measures it.
 
 ### Tier A — cheap, and the design already supports them (~140 cases)
 
-- [ ] `${!prefix@}` / `${!prefix*}` and `${x@Q}`/`${x@E}` — `var-op-bash` (14).
-      Needs a name listing on the `Vars` seam for the prefix forms.
+- [~] `${!prefix@}` / `${!prefix*}` — `var-op-bash`, 15/26. A `names()` seam
+      lists visible variables. `${x@a}` attributes (8 cases) still need a flag
+      query on the same seam.
 - [ ] `$-` reflects the *active* options, and `sh` invocation flags
       (`+c`, `--`, flags after the script) — `sh-options` (19) + `sh-usage`
       (13). Today `$-` is a fixed `Bhu`.

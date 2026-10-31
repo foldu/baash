@@ -2576,6 +2576,15 @@ impl<'a> Parser<'a, '_> {
 
         let rest = &text[i..];
         let op_start = inner.start + i;
+        // `${!prefix@}` / `${!prefix*}`: a name listing, not an operator on a
+        // variable called `prefix`. Array forms (`${!a[@]}`) ended above.
+        if indirect && (rest == b"@" || rest == b"*") {
+            return ParamExp {
+                name,
+                op: ParamOp::NamesPrefix { star: rest == b"*" },
+                span,
+            };
+        }
         let list_param = matches!(name, ParamName::At | ParamName::Star);
         let array_param = matches!(name, ParamName::Elements { .. });
 

@@ -568,6 +568,12 @@ pub enum ParamOp {
     /// `${!x<op>}`: the operator applies to the name the value produced
     /// (`a=b; ${!a:-d}` is `$b`, or `d` when `b` is unset).
     IndirectWith(Box<ParamOp>),
+    /// `${!prefix@}` / `${!prefix*}`: the sorted names that start with
+    /// `prefix`. `star` joins them into one word with the first `IFS` byte.
+    NamesPrefix {
+        /// `${!prefix*}` (true) versus `${!prefix@}` (false).
+        star: bool,
+    },
     /// `${x@P}`: expand the value as a prompt string.
     ///
     /// The front end classifies every `@` transformation generically as

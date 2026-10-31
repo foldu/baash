@@ -1099,6 +1099,21 @@ fn expand_param<S: Shell>(
             substitute(&exp.name, quoted, ctx, out);
             Ok(())
         }
+        ParamOp::NamesPrefix { star } => {
+            let prefix: &[u8] = match &exp.name {
+                ParamName::Var(name) => name,
+                _ => b"",
+            };
+            let mut names: Vec<Vec<u8>> = ctx
+                .shell
+                .names()
+                .into_iter()
+                .filter(|name| name.starts_with(prefix))
+                .collect();
+            names.sort();
+            emit_values(ctx, &names, *star, quoted, out);
+            Ok(())
+        }
         ParamOp::UseDefault { word, colon } => {
             let use_word = !ctx.is_set(&exp.name) || (*colon && !ctx.is_nonnull(&exp.name));
             if use_word {
