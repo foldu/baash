@@ -1583,3 +1583,39 @@ fn the_err_trap_sees_the_failing_line_and_its_status() {
     assert_eq!(code(&output), 1);
     assert_eq!(stdout(&output), "trap\n");
 }
+
+#[test]
+fn a_bad_substitution_fails_the_command_and_the_script_continues() {
+    // bash does not end a script on a malformed `${…}`: the command fails and
+    // the next one runs.
+    assert_eq!(
+        out("a='bad var name'; echo ref ${!a}; echo status=$?"),
+        "status=1\n"
+    );
+    assert_eq!(out("echo ${undefined:}; echo status=$?"), "status=1\n");
+    assert_eq!(out("s=123; echo ${s:}; echo status=$?"), "status=1\n");
+    // A *valid* but odd offset still works: `${x: }` is arithmetic zero.
+    assert_eq!(out("s=123; echo \"[${s: }]\""), "[123]\n");
+}
+
+#[test]
+fn arithmetic_expands_its_text_before_evaluating() {
+    assert_eq!(out("echo $(( ${j:-5} + 1 ))"), "6\n");
+    assert_eq!(out("echo $((1 + $(echo 1)${undefined:-3}))"), "14\n");
+    assert_eq!(out("echo $((1 + $((2 + 3)) + 4))"), "10\n");
+    assert_eq!(out("echo $((`echo 1` + 2))"), "3\n");
+    // No `$` means no expansion pass at all, so a variable name stays a name.
+    assert_eq!(out("x=2; echo $(( x * 3 ))"), "6\n");
+}
+
+#[test]
+fn a_regex_operand_may_hold_spaces_inside_a_group() {
+    assert_eq!(out(r#"[[ 'a  b' =~ (a  b) ]] && echo one"#), "one\n");
+    assert_eq!(out(r#"[[ 'a b' =~ (a b|c) ]] && echo two"#), "two\n");
+    assert_eq!(out(r#"[[ ';' =~ (;) ]] && echo semi"#), "semi\n");
+    // Outside a group the space ends the operand, which is a syntax error.
+    let output = run(r#"[[ 'a  b' =~ a  b ]]"#);
+    assert_eq!(code(&output), 2);
+    // A `)` that is not part of a group closes the conditional instead.
+    assert_eq!(out("if [[ (foo =~ fo) ]]; then echo yes; fi"), "yes\n");
+}

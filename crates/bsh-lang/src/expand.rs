@@ -72,6 +72,9 @@ pub mod codes {
     pub const GLOB_NO_MATCH: ErrCode = ErrCode::new(307);
     /// `${x:?word}` on a null parameter.
     pub const PARAMETER_NULL: ErrCode = ErrCode::new(308);
+    /// A word bash reports as "bad substitution": malformed, and fatal only
+    /// for the command that contains it.
+    pub const BAD_SUBSTITUTION: ErrCode = ErrCode::new(309);
 }
 
 /// An expansion failure.
@@ -119,6 +122,17 @@ pub enum ErrorKind {
         /// The length expression bash reports in its message.
         value: i64,
     },
+    /// bash's "bad substitution": the *word* is malformed (`${!x}` where `x`
+    /// does not name a parameter, `${x:}` with no offset).
+    ///
+    /// Distinct from [`ErrorKind::Host`] because the shell must not exit on
+    /// it: bash fails the command, prints the diagnostic, and a script
+    /// continues — `a='bad name'; echo ${!a}; echo status=$?` prints
+    /// `status=1`.
+    BadSubstitution {
+        /// The text bash quotes back (`bad name`, `${x:}`).
+        detail: Vec<u8>,
+    },
     /// A glob with `shopt -s failglob` matched nothing.
     ///
     /// Distinct from [`ErrorKind::Host`] because the shell must not exit on it:
@@ -160,6 +174,7 @@ impl Error {
             ErrorKind::SubstringRange { .. } => codes::SUBSTRING_RANGE,
             // A glob that matched nothing under `failglob` is its own code:
             // the shell reports it and fails the command, rather than exiting.
+            ErrorKind::BadSubstitution { .. } => codes::BAD_SUBSTITUTION,
             ErrorKind::GlobNoMatch { .. } => codes::GLOB_NO_MATCH,
             ErrorKind::Host { .. } => codes::HOST,
         }
@@ -197,6 +212,9 @@ impl fmt::Display for Error {
             }
             ErrorKind::SubstringRange { value } => {
                 write!(f, "{value}: substring expression < 0")
+            }
+            ErrorKind::BadSubstitution { detail } => {
+                write!(f, "${{{}}}: bad substitution", text(detail))
             }
             ErrorKind::GlobNoMatch { pattern } => {
                 write!(f, "no match: {}", text(pattern))
@@ -776,11 +794,8 @@ fn indirect_target<S: Shell>(
         // to.
         if required {
             return Err(Error::new(
-                ErrorKind::Host {
-                    message: format!(
-                        "{}: invalid indirect expansion",
-                        String::from_utf8_lossy(&name.display_bytes())
-                    ),
+                ErrorKind::BadSubstitution {
+                    detail: name.display_bytes(),
                 },
                 span.clone(),
             ));
@@ -789,8 +804,8 @@ fn indirect_target<S: Shell>(
     };
     parse_indirect_name(&value).ok_or_else(|| {
         Error::new(
-            ErrorKind::Host {
-                message: format!("{}: invalid variable name", String::from_utf8_lossy(&value)),
+            ErrorKind::BadSubstitution {
+                detail: value.clone(),
             },
             span.clone(),
         )
@@ -1259,8 +1274,10 @@ fn slice_bounds<S: Shell>(
     // (`${x: }` is the whole string).
     if offset.parts.is_empty() {
         let Some(length) = length else {
-            return Err(Error::unsupported(
-                UnsupportedOp::Other,
+            return Err(Error::new(
+                ErrorKind::BadSubstitution {
+                    detail: b":".to_vec(),
+                },
                 offset.span.clone(),
             ));
         };

@@ -1147,7 +1147,13 @@ impl Interp {
     /// kind here is what keeps those two apart.
     pub(crate) fn expansion_failed(&mut self, error: bsh_lang::Error) -> Unwind {
         self.diagnose(&error.diagnostic());
-        if matches!(error.kind, bsh_lang::ErrorKind::GlobNoMatch { .. }) {
+        // bash fails the *command* for these, and a script continues: `a='bad
+        // name'; echo ${!a}; echo status=$?` prints `status=1` rather than
+        // ending the shell, and so does `${x:}`.
+        if matches!(
+            error.kind,
+            bsh_lang::ErrorKind::GlobNoMatch { .. } | bsh_lang::ErrorKind::BadSubstitution { .. }
+        ) {
             return Unwind::Status(Status(1));
         }
         self.abort_expansion()
@@ -1393,7 +1399,8 @@ impl bsh_lang::Shell for Interp {
     }
 
     fn arithmetic(&mut self, expr: &bsh_lang::Arithmetic) -> Result<Vec<u8>, bsh_lang::Error> {
-        match crate::arith::eval(&expr.source, self) {
+        let source = self.expand_arithmetic(&expr.source, &expr.span)?;
+        match crate::arith::eval(&source, self) {
             Ok(value) => Ok(value.to_string().into_bytes()),
             Err(message) => Err(bsh_lang::Error::new(
                 bsh_lang::ErrorKind::Host { message },
@@ -1499,6 +1506,45 @@ impl bsh_lang::Shell for Interp {
             )),
             None => Ok(None),
         }
+    }
+}
+
+impl Interp {
+    /// Expand the text between `$((` and `))` before evaluating it.
+    ///
+    /// bash runs the ordinary word stages over that text first (parameter
+    /// expansion, command substitution, backticks, quote removal), which is
+    /// what makes `$(( ${j:-5} + 1 ))`, `$(( $(echo 1) + 2 ))`,
+    /// `$((1 + $((2 + 3)) + 4))` and `` $((`echo 1` + 2)) `` work. The text is
+    /// re-read as one double-quoted word, so a space never splits it and the
+    /// same [`bsh_lang`] pipeline does the expansion. `'1'` therefore stays a
+    /// syntax error, as bash reports it.
+    fn expand_arithmetic(
+        &mut self,
+        source: &[u8],
+        span: &bsh_diag::Span,
+    ) -> Result<Vec<u8>, bsh_lang::Error> {
+        if !source.iter().any(|&byte| byte == b'$' || byte == b'`') {
+            return Ok(source.to_vec());
+        }
+        let mut quoted = Vec::with_capacity(source.len() + 4);
+        quoted.push(b'"');
+        for &byte in source {
+            if byte == b'"' {
+                quoted.push(b'\\');
+            }
+            quoted.push(byte);
+        }
+        quoted.push(b'"');
+        let opts = bsh_syntax::ParseOpts::default();
+        let Ok(word) = bsh_syntax::parse_word(&quoted, &opts) else {
+            // A text the word parser rejects is left alone: arithmetic will
+            // report the syntax error itself.
+            return Ok(source.to_vec());
+        };
+        let expanded = bsh_lang::expand_assignment(&word, self)?;
+        let _ = span;
+        Ok(expanded)
     }
 }
 

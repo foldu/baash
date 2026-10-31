@@ -1,9 +1,9 @@
 # Roadmap: the 397-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2292/2787** (2237 strict). bash passes 2577/2787 on the same run and
-354 of the cases we fail are ones bash passes (we pass 69 it fails), so the net
-gap is 285 cases.
+now **2306/2787** (2251 strict). bash passes 2577/2787 on the same run and
+340 of the cases we fail are ones bash passes (we pass 69 it fails), so the net
+gap is 271 cases.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
 queue. Interactive usability now outranks script conformance; see
@@ -235,8 +235,8 @@ around 2170.**
 
 ## Tranche 5 — the remaining bash gap (active goal)
 
-Re-measured with `--json --compare bash` after items 1–14 below:
-**2292/2787 total, 2237 strict**. 495 failures, of which **354 are cases bash
+Re-measured with `--json --compare bash` after items 1–16 below:
+**2306/2787 total, 2251 strict**. 481 failures, of which **340 are cases bash
 passes** (the real queue) and 141 are cases bash fails too (osh-only
 expectations, older-bash behaviour, environment). The plan is to work these in
 order, cheapest first, re-measuring after each commit:
@@ -301,10 +301,15 @@ it is not re-litigated.
     `for ((…))` condition/update — but not for `if`/`while` headers or brace
     groups, which is what bash does — `builtin-trap-bash` 19 → 6,
     `builtin-trap-err` 16 → 10 remaining.
-15. **[open]** Arithmetic contexts: `${…}`, quoted constants and backticks
-    inside `$(( ))`, `nounset` — `arith` (13) + `arith-context` (7).
-16. **[open]** `[[ =~ ]]` right-hand-side parsing: unquoted `(`/`)`/`{`,
-    spaces, `;`/`&` — `regex` (12).
+15. **[done, mostly]** Arithmetic contexts: the text between `$((` and `))` is
+    expanded as a quoted word before evaluation, so `${j:-5}`, `$( )`,
+    backticks and nested `$(( ))` all work; `nounset` and bad-LValue
+    diagnostics inside arithmetic are still open — `arith` (5 of 13).
+16. **[done, mostly]** `[[ =~ ]]` right-hand-side parsing: the operand now ends
+    only at whitespace, `)`, `;` or `&` *outside* a `( … )` group, so
+    `(a  b)`, `(a b|c)` and `(;)` are patterns while `a  b` stays a syntax
+    error; a `)` with no opener closes the conditional — `regex` (11 of 12,
+    the remaining three are osh-only strictness).
 17. **[open]** NUL bytes through expansion and the quoting edge cases —
     `nul-bytes` (8) + `var-sub-quote` (7) + `command-sub` (4).
 18. **[open]** Interactive `PROMPT_COMMAND` (four cases) and `--rcdir`/`--norc`

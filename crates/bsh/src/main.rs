@@ -1112,6 +1112,16 @@ fn run_stdin(shell: &mut Interp) -> ExitCode {
     let stdin = std::io::stdin();
     let mut stdin = stdin.lock();
     loop {
+        // An interactive shell runs `PROMPT_COMMAND` once per prompt, and a
+        // piped stdin gets the same treatment: the prompt itself is not
+        // painted (there is no terminal), but its command still runs. The
+        // first iteration is a no-op unless the environment set it.
+        if shell.is_interactive() {
+            run_prompt_command(shell);
+            if shell.state().take_exit_request().is_some() {
+                break;
+            }
+        }
         let mut line = Vec::new();
         let read = stdin.read_until(b'\n', &mut line);
         match read {

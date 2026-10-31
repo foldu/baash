@@ -433,15 +433,43 @@ pub(crate) fn conditional_tokens(body: &[u8], extglob: bool) -> Vec<CondToken> {
     tokens
 }
 
-/// End of a `=~` right-hand side: everything to the next unquoted whitespace.
+/// End of a `=~` right-hand side: everything to the next unquoted whitespace
+/// that is not inside a parenthesised group.
 ///
 /// Quotes, escapes and substitutions are skipped whole so a space inside them
-/// does not end the operand, and parentheses are ordinary bytes here.
+/// does not end the operand, and bash's `( … )` groups are the one place an
+/// unquoted space belongs to the regex: `[[ "a  b" =~ (a  b) ]]` is valid
+/// while `[[ "a  b" =~ a  b ]]` is a syntax error, and `[a  b]` is not a
+/// group either (a bracket expression has no spaces in it).
 fn regex_word_end(body: &[u8], start: usize) -> usize {
     let mut index = start;
+    let mut depth = 0usize;
     while index < body.len() {
         match body[index] {
-            byte if byte.is_ascii_whitespace() => break,
+            byte if byte.is_ascii_whitespace() => {
+                if depth == 0 {
+                    break;
+                }
+                index += 1;
+                continue;
+            }
+            // A group opens a region where spaces are part of the pattern; a
+            // `)` at the top level is just a byte, and `a{1,2}` stays whole.
+            b'(' => {
+                depth += 1;
+                index += 1;
+                continue;
+            }
+            b')' if depth == 0 => break,
+            b')' => {
+                depth -= 1;
+                index += 1;
+                continue;
+            }
+            // `;` and `&` are conditional operators outside a group, so they
+            // end the operand there (`[[ ';' =~ ; ]]` is a syntax error) but
+            // belong to the pattern inside one (`[[ ';' =~ (;) ]]`).
+            b';' | b'&' if depth == 0 => break,
             b'\\' => index += 2,
             b'\'' => match body[index + 1..].iter().position(|&byte| byte == b'\'') {
                 Some(offset) => index += offset + 2,
