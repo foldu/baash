@@ -1063,22 +1063,80 @@ impl bsh_lang::Shell for Interp {
         // when it is set, `.` and `..` are always ignored. Full `GLOBIGNORE`
         // filtering is not implemented, but honouring that rule keeps
         // `shopt -u globskipdots` from reporting them when the variable is set.
-        let globignore = self
+        let globignore: Vec<Vec<u8>> = self
             .state
             .vars
             .scalar(b"GLOBIGNORE")
-            .is_some_and(|value| !value.is_empty());
-        let options = crate::glob::Options {
-            flags: bsh_pattern::Flags {
-                nocasematch: self.state.opts.nocaseglob,
-                ..self.pattern_flags()
-            },
-            dotglob: self.state.opts.dotglob,
-            globstar: self.state.opts.globstar,
-            globskipdots: self.state.opts.globskipdots || globignore,
+            .map(split_globignore)
+            .unwrap_or_default();
+        let ignore_set = !globignore.is_empty();
+        let flags = bsh_pattern::Flags {
+            nocasematch: self.state.opts.nocaseglob,
+            ..self.pattern_flags()
         };
-        match crate::glob::expand(&pattern.bytes, &pattern.quoted, &options) {
-            Some(matches) => Ok(Some(matches)),
+        let options = crate::glob::Options {
+            flags,
+            // Setting `GLOBIGNORE` implies `dotglob` in bash: a leading dot
+            // stops hiding a file from `*`, while `.`/`..` stay skipped.
+            dotglob: self.state.opts.dotglob || ignore_set,
+            globstar: self.state.opts.globstar,
+            globskipdots: self.state.opts.globskipdots || ignore_set,
+        };
+        let expand = |pattern: &bsh_lang::Field| {
+            crate::glob::expand(&pattern.bytes, &pattern.quoted, &options)
+        };
+        // `GLOBIGNORE` is a match filter, not another pattern: a file is kept
+        // only when no list entry matches it. Every entry is matched against
+        // the whole generated pathname with `fnmatch` (no `FNM_PATHNAME`, but
+        // `*` still stops at `/`), so `*.txt` hides `one.txt` and leaves
+        // `foo/two.txt` alone while `src/*` can hide a file in a directory.
+        let kept = |matches: Vec<Vec<u8>>| -> Vec<Vec<u8>> {
+            if globignore.is_empty() {
+                return matches;
+            }
+            // An entry without `/` only hides a match in the directory being
+            // expanded, so `*.txt` cannot hide `foo/two.txt`; an entry that
+            // names a directory (`src/*`) is matched against the whole path.
+            let compiled: Vec<_> = globignore
+                .iter()
+                .map(|pattern| {
+                    (
+                        bsh_pattern::compiled(pattern, flags),
+                        !pattern.contains(&b'/'),
+                    )
+                })
+                .collect();
+            matches
+                .into_iter()
+                .filter(|path| {
+                    let nested = path.contains(&b'/');
+                    !compiled.iter().any(|(pattern, name_only)| {
+                        !(*name_only && nested) && pattern.matches(path)
+                    })
+                })
+                .collect()
+        };
+        match expand(pattern) {
+            Some(matches) => {
+                let matches = kept(matches);
+                if matches.is_empty() && ignore_set {
+                    // Every candidate was ignored: this is a non-match, not a
+                    // word with no fields.
+                    return if self.state.opts.nullglob {
+                        Ok(Some(Vec::new()))
+                    } else if self.state.opts.failglob {
+                        Err(bsh_lang::Error::new(
+                            bsh_lang::ErrorKind::GlobNoMatch {
+                                pattern: pattern.bytes.clone(),
+                            },
+                            0..0,
+                        ))
+                    } else {
+                        Ok(None)
+                    };
+                }
+                Ok(Some(matches))
+            }
             None if self.state.opts.nullglob => Ok(Some(Vec::new())),
             None if self.state.opts.failglob => Err(bsh_lang::Error::new(
                 bsh_lang::ErrorKind::GlobNoMatch {
@@ -1479,4 +1537,30 @@ mod locale_tests {
         }
         assert!(!locale_is_utf8(None), "an unset locale means bytes");
     }
+}
+
+/// Split `GLOBIGNORE` on `:`, but not on a colon inside a bracket expression
+/// (`[[:alnum:]]` is one pattern, not three).
+fn split_globignore(value: &[u8]) -> Vec<Vec<u8>> {
+    let mut patterns = Vec::new();
+    let mut current = Vec::new();
+    let mut depth = 0usize;
+    for &byte in value {
+        match byte {
+            b'[' => depth += 1,
+            b']' => depth = depth.saturating_sub(1),
+            b':' if depth == 0 => {
+                if !current.is_empty() {
+                    patterns.push(std::mem::take(&mut current));
+                }
+                continue;
+            }
+            _ => {}
+        }
+        current.push(byte);
+    }
+    if !current.is_empty() {
+        patterns.push(current);
+    }
+    patterns
 }

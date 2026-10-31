@@ -1,7 +1,7 @@
-# Roadmap: the 522-case gap
+# Roadmap: the 507-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2052/2787** (1998 strict). bash passes 2574/2787 on the same run, so 522
+now **2067/2787** (2013 strict). bash passes 2574/2787 on the same run, so 507
 cases are things bash does and we do not.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
@@ -150,8 +150,8 @@ its keep, `zsh` emulation.
 
 ## Tranche 4 — the measured queue (after indirect expansion)
 
-Measured with `bsh-spec --json` on the current tree: 2052/2787 total, 1998
-strict, 735 failures, of which 522 are cases bash passes and 213 are cases
+Measured with `bsh-spec --json` on the current tree: 2067/2787 total, 2013
+strict, 720 failures, of which 507 are cases bash passes and 213 are cases
 bash fails too (not worth chasing). Ordered by cases per unit of work; every
 entry names the suite file that measures it.
 
@@ -174,7 +174,9 @@ entry names the suite file that measures it.
       0, and paths stay lexical so a symlink keeps the name typed.
 - [ ] Special variables initialised only when unset (`PATH`, `PWD`, `IFS`,
       `PS4`) — `vars-special` (22; `HISTFILE` is a deliberate divergence).
-- [ ] `GLOBIGNORE` — `globignore` (16). One rule in the glob layer.
+- [x] `GLOBIGNORE` — `globignore`, 2/18 -> 17/18. A match filter with a
+      bracket-aware colon split; it implies `dotglob`, and an entry without `/`
+      only hides files in the directory being expanded.
 - [ ] `${x:o:l}` unicode/negative slices, `${x@}` case folding — `var-op-slice`
       (14) + `var-op-bash` (part of 14).
 
