@@ -1,9 +1,9 @@
 # Roadmap: the 397-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2322/2787** (2269 strict). bash passes 2577/2787 on the same run and
-326 of the cases we fail are ones bash passes (we pass 71 it fails), so the net
-gap is 255 cases.
+now **2325/2787** (2272 strict). bash passes 2577/2787 on the same run and
+323 of the cases we fail are ones bash passes (we pass 71 it fails), so the net
+gap is 252 cases.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
 queue. Interactive usability now outranks script conformance; see
@@ -236,7 +236,7 @@ around 2170.**
 ## Tranche 5 — the remaining bash gap (active goal)
 
 Re-measured with `--json --compare bash` after items 1–18 below:
-**2322/2787 total, 2269 strict**. 465 failures, of which **326 are cases bash
+**2325/2787 total, 2272 strict**. 462 failures, of which **323 are cases bash
 passes** (the real queue) and 139 are cases bash fails too (osh-only
 expectations, older-bash behaviour, environment). The plan is to work these in
 order, cheapest first, re-measuring after each commit:
@@ -318,8 +318,10 @@ it is not re-litigated.
     handlers that run other handlers.
 15. **[done, mostly]** Arithmetic contexts: the text between `$((` and `))` is
     expanded as a quoted word before evaluation, so `${j:-5}`, `$( )`,
-    backticks and nested `$(( ))` all work; `nounset` and bad-LValue
-    diagnostics inside arithmetic are still open — `arith` (5 of 13).
+    backticks and nested `$(( ))` all work, and a `nounset` read is bash's
+    fatal "unbound variable" in every arithmetic entry point (`$(( ))`,
+    `(( ))`, `for (( ))`, slice bounds). Still open: bash's obsolete `$[ ]`
+    synonym, bad-LValue diagnostics and `strict_arith` — `arith` (6 of 13).
 16. **[done, mostly]** `[[ =~ ]]` right-hand-side parsing: the operand now ends
     only at whitespace, `)`, `;` or `&` *outside* a `( … )` group, so
     `(a  b)`, `(a b|c)` and `(;)` are patterns while `a  b` stays a syntax

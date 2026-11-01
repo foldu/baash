@@ -1734,3 +1734,25 @@ fn an_action_named_like_a_signal_is_an_action() {
     assert_eq!(out("trap 'echo F' EXIT\ntrap EXIT\nexit 0\n"), "");
     assert_eq!(out("trap 'echo F' USR1\ntrap 2 EXIT\nexit 0\n"), "");
 }
+
+#[test]
+fn nounset_reads_in_arithmetic_are_fatal() {
+    // bash's "unbound variable" in a `$(( ))` word, a `(( ))` command and an
+    // array element: the script ends with status 1 and nothing after runs.
+    let output = run("set -u\nx=$(( y + 5 ))\necho unreached\n");
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).contains("unbound variable"));
+
+    let output = run("set -o nounset\n(( undef1++ ))\necho unreached\n");
+    assert_eq!(code(&output), 1);
+    assert_eq!(stdout(&output), "");
+
+    let output = run("set -u\necho $(( undef[0] + 1 ))\necho unreached\n");
+    assert_eq!(code(&output), 1);
+
+    // A name being *assigned* is not a read, and without `nounset` an unset
+    // name is zero (POSIX XCU 2.6.4).
+    assert_eq!(out("unset x; (( x = 5 )); echo $x"), "5\n");
+    assert_eq!(out("unset y; echo $(( y + 1 ))"), "1\n");
+}

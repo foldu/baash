@@ -68,6 +68,9 @@ pub mod codes {
     pub const ASSIGNMENT: ErrCode = ErrCode::new(207);
     /// `break`/`continue`/`return` used where there is nothing to unwind to.
     pub const CONTROL_FLOW: ErrCode = ErrCode::new(208);
+    /// An unset variable was read in a `nounset` context (bash's "unbound
+    /// variable"), which is fatal for a non-interactive shell.
+    pub const UNBOUND: ErrCode = ErrCode::new(209);
     /// An internal invariant was violated; always a bug in this crate.
     pub const INTERNAL: ErrCode = ErrCode::new(299);
 }

@@ -394,6 +394,13 @@ pub struct Interp {
     /// The pending exit status while the `EXIT` trap runs, so a bare `exit`
     /// inside it keeps that status (bash's rule).
     exit_trap_status: Option<Status>,
+    /// Set when arithmetic read an unset variable under `nounset`.
+    ///
+    /// Arithmetic reads have no error channel of their own (an unset name is
+    /// zero, POSIX XCU 2.6.4), so the read records the name here and the entry
+    /// point that started the evaluation turns it into bash's "unbound
+    /// variable" failure — fatal for a non-interactive shell.
+    nounset_arith: Option<Vec<u8>>,
     /// `PATH` hits remembered by command name: bash's hash table.
     ///
     /// `hash` lists and edits it, `hash -r` empties it, and a remembered path
@@ -511,6 +518,7 @@ impl Interp {
             line_base: None,
             err_trap_reported: false,
             debug_suppressed: 0,
+            nounset_arith: None,
             debug_exit_request: None,
             array_literals: Vec::new(),
             nameref_cycle: std::cell::Cell::new(false),
@@ -1110,6 +1118,25 @@ impl Interp {
         i64::from(self.line_number)
     }
 
+    /// Note an unset arithmetic read, when `nounset` is on.
+    fn note_nounset(&mut self, name: &[u8]) {
+        if self.state.opts.nounset && self.nounset_arith.is_none() {
+            self.nounset_arith = Some(name.to_vec());
+        }
+    }
+
+    /// Turn a recorded `nounset` read into bash's fatal "unbound variable".
+    ///
+    /// A non-interactive shell exits 1 (`set -u; (( x++ ))` ends the script),
+    /// an interactive one abandons the line.
+    pub(crate) fn arith_nounset(&mut self) -> Option<Unwind> {
+        let name = self.nounset_arith.take()?;
+        let message = format!("{}: unbound variable", String::from_utf8_lossy(&name));
+        let len = message.len();
+        self.report(crate::codes::UNBOUND, len - 17..len, message);
+        Some(self.abort_expansion())
+    }
+
     /// Record one pipeline's per-stage statuses for `$PIPESTATUS`.
     pub(crate) fn set_pipeline_status(&mut self, statuses: &[Status]) {
         self.pipeline_status.clear();
@@ -1419,7 +1446,18 @@ impl bsh_lang::Shell for Interp {
 
     fn arithmetic(&mut self, expr: &bsh_lang::Arithmetic) -> Result<Vec<u8>, bsh_lang::Error> {
         let source = self.expand_arithmetic(&expr.source, &expr.span)?;
-        match crate::arith::eval(&source, self) {
+        let outcome = crate::arith::eval(&source, self);
+        if let Some(name) = self.nounset_arith.take() {
+            // bash's "unbound variable": the expansion error path makes it
+            // fatal for a script, `exit 1`.
+            return Err(bsh_lang::Error::new(
+                bsh_lang::ErrorKind::Host {
+                    message: format!("{}: unbound variable", String::from_utf8_lossy(&name)),
+                },
+                expr.span.clone(),
+            ));
+        }
+        match outcome {
             Ok(value) => Ok(value.to_string().into_bytes()),
             Err(message) => Err(bsh_lang::Error::new(
                 bsh_lang::ErrorKind::Host { message },
@@ -1600,7 +1638,13 @@ impl crate::arith::IntVars for Interp {
                 .map(|(_, value)| value.as_slice()),
             _ => self.state.vars.scalar(name),
         };
-        bytes.and_then(crate::arith::parse_int).unwrap_or(0)
+        match bytes {
+            Some(bytes) => crate::arith::parse_int(bytes).unwrap_or(0),
+            None => {
+                self.note_nounset(name);
+                0
+            }
+        }
     }
 
     fn set(&mut self, name: &[u8], value: i64) -> Result<(), String> {
@@ -1647,7 +1691,13 @@ impl crate::arith::IntVars for Interp {
                 .element_assoc(name, index.to_string().as_bytes()),
             _ => self.state.vars.element_indexed(name, index),
         };
-        value.and_then(crate::arith::parse_int).unwrap_or(0)
+        match value {
+            Some(value) => crate::arith::parse_int(value).unwrap_or(0),
+            None => {
+                self.note_nounset(name);
+                0
+            }
+        }
     }
 
     fn set_index(&mut self, name: &[u8], index: i64, value: i64) -> Result<(), String> {

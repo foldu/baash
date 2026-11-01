@@ -154,8 +154,13 @@ impl Interp {
                     return Unwind::Exit(exit);
                 }
                 self.sync_specials();
-                let text = &chunk.source.bytes()[expr.clone()];
-                match crate::arith::eval(text, self) {
+                let text = chunk.source.bytes()[expr.clone()].to_vec();
+                let outcome = crate::arith::eval(&text, self);
+                // `set -u; (( x++ ))` ends the script, as bash does.
+                if let Some(unwind) = self.arith_nounset() {
+                    return unwind;
+                }
+                match outcome {
                     Ok(0) => Unwind::Status(Status::FAILURE),
                     Ok(_) => Unwind::Status(Status::SUCCESS),
                     Err(message) => {
@@ -625,7 +630,11 @@ impl Interp {
         let init = parts.first().copied().unwrap_or_default();
         let condition = parts.get(1).copied().unwrap_or_default();
         let update = parts.get(2).copied().unwrap_or_default();
-        if let Err(message) = crate::arith::eval(init, self) {
+        let init_outcome = crate::arith::eval(init, self);
+        if let Some(unwind) = self.arith_nounset() {
+            return unwind;
+        }
+        if let Err(message) = init_outcome {
             self.report(
                 crate::codes::ARITHMETIC,
                 header.clone(),
@@ -644,7 +653,11 @@ impl Interp {
                 if let Some(exit) = self.run_debug_trap() {
                     return Unwind::Exit(exit);
                 }
-                match crate::arith::eval(condition, self) {
+                let outcome = crate::arith::eval(condition, self);
+                if let Some(unwind) = self.arith_nounset() {
+                    return unwind;
+                }
+                match outcome {
                     Ok(0) => break,
                     Ok(_) => {}
                     Err(message) => {
@@ -671,7 +684,11 @@ impl Interp {
             {
                 return Unwind::Exit(exit);
             }
-            if let Err(message) = crate::arith::eval(update, self) {
+            let update_outcome = crate::arith::eval(update, self);
+            if let Some(unwind) = self.arith_nounset() {
+                return unwind;
+            }
+            if let Err(message) = update_outcome {
                 self.report(
                     crate::codes::ARITHMETIC,
                     header.clone(),
