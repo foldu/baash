@@ -789,9 +789,10 @@ fn indirect_target<S: Shell>(
         other => ctx.value(other),
     };
     let Some(value) = value else {
-        // `${!x}` of an unset source is empty; an operator on it is bash's
-        // "invalid indirect expansion", because there is no name to apply it
-        // to.
+        // A bare `${!x}` of an unset source is empty. With an *operator* on it
+        // bash reports "invalid indirect expansion" and fails the command
+        // (`${!undef-'default'}` prints nothing and exits 1), so this is a
+        // bad-substitution error: reported, non-fatal.
         if required {
             return Err(Error::new(
                 ErrorKind::BadSubstitution {

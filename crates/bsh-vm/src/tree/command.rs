@@ -1246,10 +1246,23 @@ impl Interp {
                 }
             }
             Err(error) if error.raw_os_error() == Some(bsh_sys::ENOEXEC) => {
-                // A file with no `#!` is a shell script by convention. Every
-                // shell interprets it itself rather than failing; we already
-                // have an interpreter here, so no `/bin/sh` is spawned.
-                self.run_without_shebang(chunk, path, redirects, assigns, argv)
+                // A file with no `#!` is a shell script by convention. bash
+                // re-executes it with itself in a *new* process, which is
+                // observable: `X=1; ./script` does not pass `X` to the script
+                // because the variable is not exported. Run it the same way —
+                // with this shell, as a child — rather than interpreting it in
+                // place and leaking the parent's variables.
+                match std::env::current_exe() {
+                    Ok(executable) => {
+                        let executable = bsh_sys::os::bytes_from_os(executable);
+                        let mut child_argv = Vec::with_capacity(argv.len() + 1);
+                        child_argv.push(executable.clone());
+                        child_argv.push(path.to_vec());
+                        child_argv.extend_from_slice(&argv[1..]);
+                        self.run_external(chunk, &executable, redirects, assigns, &child_argv)
+                    }
+                    Err(_) => self.run_without_shebang(chunk, path, redirects, assigns, argv),
+                }
             }
             Err(error) => {
                 let status = self.spawn_status(&error, path);
@@ -1420,6 +1433,39 @@ impl Interp {
         // reference.
         let error = bsh_sys::exec(plan);
         drop(keep);
+        // A file with no `#!` is a shell script by convention: bash's `exec`
+        // re-executes it *with itself*, so do the same instead of reporting
+        // the kernel's ENOEXEC. The redirects are composed again because the
+        // first attempt already consumed its descriptors.
+        if error.raw_os_error() == Some(bsh_sys::ENOEXEC)
+            && let Ok(executable) = std::env::current_exe()
+        {
+            let executable = bsh_sys::os::bytes_from_os(executable);
+            let mut script_argv: Vec<Vec<u8>> = Vec::with_capacity(argv.len() - index + 1);
+            script_argv.push(executable.clone());
+            script_argv.push(program.clone());
+            script_argv.extend(child_argv.iter().skip(1).map(|word| word.to_vec()));
+            if let Ok((actions, retry_keep)) = self.compose_actions(chunk, redirects) {
+                let views: Vec<&[u8]> = script_argv.iter().map(Vec::as_slice).collect();
+                if let Ok(mut retry) =
+                    SpawnPlan::new_with_env(&executable, views.iter().copied(), &envp)
+                {
+                    retry.actions = actions;
+                    retry.sigmask = Some(bsh_sys::SignalSet::empty());
+                    retry.reset_signals = self.child_reset_signals();
+                    let error = bsh_sys::exec(retry);
+                    drop(retry_keep);
+                    let _ = self.state.vars.finish_prefix_assignments(applied);
+                    let status = self.spawn_status(&error, &program);
+                    self.report(
+                        crate::codes::EXEC,
+                        0..0,
+                        format!("{}: {error}", String::from_utf8_lossy(&program)),
+                    );
+                    return Unwind::Exit(status);
+                }
+            }
+        }
         let _ = self.state.vars.finish_prefix_assignments(applied);
         let status = self.spawn_status(&error, &program);
         self.report(

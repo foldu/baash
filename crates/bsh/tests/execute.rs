@@ -1656,3 +1656,45 @@ fn rcdir_loads_every_file_in_order_and_norc_skips_it() {
     assert_eq!(code(&output), 0);
     assert_eq!(stdout(&output), "hi\n");
 }
+
+#[test]
+fn indirection_through_a_positional_parameter() {
+    // `${!1}` re-reads the *value* of `$1` as a parameter name, subscripts and
+    // all; bash supports it for every indirected name, not only variables.
+    let script =
+        "f() { echo \"${!1}\"; }\narray=(x y z)\nf 'array[0]'\nf 'array[1+1]'\nf 'array[@]'\n";
+    assert_eq!(out(script), "x\nz\nx y z\n");
+
+    // An operator on an unset indirection is bash's "invalid indirect
+    // expansion": the command fails, the script continues.
+    assert_eq!(out("echo undef=${!undef}; echo s=$?"), "undef=\ns=0\n");
+    assert_eq!(out("echo undef=${!undef-word}; echo s=$?"), "s=1\n");
+}
+
+#[test]
+fn a_script_without_a_shebang_runs_in_a_child_shell() {
+    let dir = TestDir::new("noshebang");
+    let script = dir.path().join("snork");
+    std::fs::write(&script, "echo hello $BLAH\n").expect("write script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+    }
+    let snork = dir.at("snork");
+
+    // bash re-executes the file with itself, so a plain shell variable is not
+    // visible to it, while a prefix assignment and `exec` both pass it on.
+    assert_eq!(out(&format!("BLAH=123; {snork}")), "hello\n");
+    assert_eq!(out(&format!("BLAH=123 {snork}")), "hello 123\n");
+    assert_eq!(out(&format!("BLAH=123; exec {snork}")), "hello\n");
+    assert_eq!(out(&format!("BLAH=123 exec {snork}")), "hello 123\n");
+}
+
+#[test]
+fn a_for_header_may_put_its_word_list_on_the_next_line() {
+    assert_eq!(out("for i\nin one two\ndo echo $i\ndone\n"), "one\ntwo\n");
+    // With no `in` at all the positional parameters are used.
+    assert_eq!(out("for i\ndo echo $i\ndone\n"), "");
+}

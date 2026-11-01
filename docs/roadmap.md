@@ -1,9 +1,9 @@
 # Roadmap: the 397-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2309/2787** (2254 strict). bash passes 2577/2787 on the same run and
-339 of the cases we fail are ones bash passes (we pass 71 it fails), so the net
-gap is 268 cases.
+now **2313/2787** (2258 strict). bash passes 2577/2787 on the same run and
+335 of the cases we fail are ones bash passes (we pass 71 it fails), so the net
+gap is 264 cases.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
 queue. Interactive usability now outranks script conformance; see
@@ -236,7 +236,7 @@ around 2170.**
 ## Tranche 5 — the remaining bash gap (active goal)
 
 Re-measured with `--json --compare bash` after items 1–18 below:
-**2309/2787 total, 2254 strict**. 478 failures, of which **339 are cases bash
+**2313/2787 total, 2258 strict**. 474 failures, of which **335 are cases bash
 passes** (the real queue) and 139 are cases bash fails too (osh-only
 expectations, older-bash behaviour, environment). The plan is to work these in
 order, cheapest first, re-measuring after each commit:
@@ -291,8 +291,12 @@ it is not re-litigated.
     `main`/`source`/function frames, republished as the three arrays with the
     innermost frame first (and *unset* at top level, so `set -u` errors like
     bash) — `introspect` (10).
-13. **[open]** `${!x}` indirection edges: `$?`, array/assoc subscripts, bad
-    references, strict-array cases — `var-ref` (rest).
+13. **[done, mostly]** `${!x}` indirection: `${!1}` and `${!@}` now indirect
+    through a positional parameter like any other name, an operator on an unset
+    indirection is bash's "invalid indirect expansion" (reported, non-fatal), and
+    a value that is not a name is a bad substitution rather than a fatal error —
+    `var-ref` 12 → 9 remaining (assoc subscripts and `${!a[@]}` with operators
+    stay open).
 14. **[done, mostly]** Trap exactness. A handler is its own chunk but bash
     reports the *trapped command's* line inside it, which one line-base rule
     now does for every trap kind (`$LINENO` in DEBUG/ERR/EXIT), and the shell's

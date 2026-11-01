@@ -839,6 +839,32 @@ impl<'a> Parser<'a, '_> {
     /// position. A few grammar slots take a reserved word right after an
     /// ordinary word (`for name in …`, `case word in …`), where the lexer
     /// cannot know; those slots use this predicate.
+    /// Whether `word` is the next token once line breaks are skipped.
+    ///
+    /// A `for` header may put `in` on the line after the variable
+    /// (`for i⏎in a b`), and only a lookahead can tell that apart from a
+    /// header with no word list (`for i⏎do …`), where the newline is the
+    /// separator the grammar wants.
+    fn keyword_after_newlines(&mut self, word: &[u8]) -> bool {
+        let mut pos = self.pos;
+        let mut saw_newline = false;
+        while let Some(token) = self.toks.get(pos) {
+            if is_ignorable(token.kind) {
+                pos += 1;
+                continue;
+            }
+            if token.kind == TokenKind::Newline {
+                saw_newline = true;
+                pos += 1;
+                continue;
+            }
+            return saw_newline
+                && matches!(token.kind, TokenKind::Keyword | TokenKind::Word)
+                && self.text_of_span(&token.span) == word;
+        }
+        false
+    }
+
     fn is_text_keyword(&mut self, word: &[u8]) -> bool {
         match self.peek_sig() {
             Some(t) => {
@@ -2594,7 +2620,13 @@ impl<'a> Parser<'a, '_> {
         if indirect && i >= text.len() {
             let op = match &name {
                 ParamName::Elements { .. } => ParamOp::Indices,
-                ParamName::Element { .. } | ParamName::Var(_) => ParamOp::Indirect,
+                // `${!1}` and `${!@}`: the parameter's *value* names another
+                // parameter, exactly as with a variable.
+                ParamName::Element { .. }
+                | ParamName::Var(_)
+                | ParamName::Positional(_)
+                | ParamName::At
+                | ParamName::Star => ParamOp::Indirect,
                 _ => ParamOp::Unsupported(UnsupportedOp::Indirect),
             };
             return ParamExp { name, op, span };
@@ -3057,6 +3089,14 @@ impl<'a> Parser<'a, '_> {
         }
 
         self.skip_trivia();
+        // `for i⏎in a b` — a line break before `in` is allowed, and the word
+        // list belongs to this header.
+        if self.keyword_after_newlines(b"in") {
+            while self.peek_kind() == Some(TokenKind::Newline) {
+                self.advance_exact();
+            }
+            self.skip_trivia();
+        }
         let mut in_list = None;
         let mut eof_in_list = false;
         if self.is_text_keyword(b"in") {
