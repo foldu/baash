@@ -221,6 +221,21 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+/// The marker the stock prompt ends with: `#` for root, `$` otherwise.
+///
+/// The renderer follows bash's `\$`, and a CI container runs the tests as
+/// root, so the expectation has to be built from the same answer the shell
+/// reaches rather than written down as `$`.
+fn user_marker() -> &'static str {
+    match std::process::Command::new(env!("CARGO_BIN_EXE_baash"))
+        .args(["-c", "test \"$EUID\" -eq 0"])
+        .status()
+    {
+        Ok(status) if status.success() => "#",
+        _ => "$",
+    }
+}
+
 fn temp_dir(tag: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("baash-pty-prompt-{}-{tag}", std::process::id()));
     let _ = std::fs::remove_dir_all(&path);
@@ -245,8 +260,9 @@ fn a_coloured_prompt_with_a_variable_and_a_substitution_keeps_the_cursor_right()
     let home = temp_dir("colour-home");
     let work = temp_dir("colour-work");
     let prompt = "\\[\\e[1;32m\\]\\u@\\h\\[\\e[0m\\] \\w$(printf sub)\\$ ";
+    let marker = user_marker();
     let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[("PS1", prompt)]);
-    session.prompt("sub$ ");
+    session.prompt(&format!("sub{marker} "));
 
     let output = session.output.clone();
     // The coloured prefix is the identity, then the plain suffix.
@@ -261,7 +277,7 @@ fn a_coloured_prompt_with_a_variable_and_a_substitution_keeps_the_cursor_right()
     let work_text = work.as_os_str().as_encoded_bytes();
     let mut suffix = vec![b' '];
     suffix.extend_from_slice(work_text);
-    suffix.extend_from_slice(b"sub$ ");
+    suffix.extend_from_slice(format!("sub{marker} ").as_bytes());
     assert!(
         find(&output[reset..], &suffix).is_some(),
         "the prompt text after the colour is {:?}\noutput: {:?}",
@@ -283,7 +299,7 @@ fn a_coloured_prompt_with_a_variable_and_a_substitution_keeps_the_cursor_right()
     );
 
     // And the line edits and runs normally at that column.
-    session.line("echo ok", "sub$ ");
+    session.line("echo ok", &format!("sub{marker} "));
     session.expect(b"ok", Duration::from_secs(10));
     session.send(b"exit\n");
     session.wait_child();
@@ -382,17 +398,18 @@ fn the_default_prompt_is_fish_like() {
     std::fs::write(work.join(".git/HEAD"), b"ref: refs/heads/main\n").expect("write HEAD");
 
     // No PS1 in the environment or an rc file: the stock prompt is rendered,
-    // ending in `$` (or `#` for root) like a `\$` in a template would.
+    // ending in `$`, or `#` for root, like a `\$` in a template would.
+    let marker = user_marker();
     let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
-    session.prompt("~/src/bshell main$ ");
+    session.prompt(&format!("~/src/bshell main{marker} "));
     // A failed command adds the status; a background child adds the job count
     // and the successful `&` clears the status again.
     session.send(b"false\n");
-    session.prompt("~/src/bshell main ?1$ ");
+    session.prompt(&format!("~/src/bshell main ?1{marker} "));
     session.send(b"sleep 1 &\n");
-    session.prompt("~/src/bshell main !1$ ");
+    session.prompt(&format!("~/src/bshell main !1{marker} "));
     session.send(b"wait\n");
-    session.prompt("~/src/bshell main$ ");
+    session.prompt(&format!("~/src/bshell main{marker} "));
     session.send(b"exit\n");
     session.wait_child();
     let _ = std::fs::remove_dir_all(&home);
