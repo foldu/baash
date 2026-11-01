@@ -60,6 +60,25 @@ fn control_keys_edit_the_buffer() {
 }
 
 #[test]
+fn alt_keys_kill_words_and_move_by_them() {
+    // Alt-Backspace is `backward-kill-word`: word characters only, so the
+    // dash stops it where Ctrl-W would have taken `foo-bar` whole.
+    let mut keys = chars("foo-bar");
+    keys.push(Key::AltBackspace);
+    assert_eq!(apply_keys(&keys).0, b"foo-");
+
+    // Alt-D kills forward from the cursor to the end of the next word, and two
+    // presses accumulate into one kill that a single yank puts back.
+    let mut keys = chars("one two three");
+    keys.extend([Key::Home, Key::Alt('f')]);
+    assert_eq!(apply_keys(&keys).0, b"one two three");
+    keys.extend([Key::Alt('d'), Key::Alt('d')]);
+    assert_eq!(apply_keys(&keys).0, b"one");
+    keys.push(Key::Ctrl(0x19));
+    assert_eq!(apply_keys(&keys).0, b"one two three");
+}
+
+#[test]
 fn kill_and_yank_round_trip_through_the_editor() {
     let mut keys = chars("one two");
     keys.push(Key::Ctrl(0x17));

@@ -51,6 +51,10 @@ pub enum Key {
     /// Alt plus a printable ASCII character, which is what the terminal sends as
     /// `ESC <char>`.
     Alt(char),
+    /// Alt-Backspace: `ESC DEL` (0x7f) or `ESC BS` (0x08), readline's
+    /// `backward-kill-word`. Terminals differ in which of the two they send, so
+    /// both decode to this.
+    AltBackspace,
     /// A paste payload, inserted verbatim.
     Paste(Vec<u8>),
     /// A sequence the decoder does not understand. It is ignored whole: its
@@ -150,6 +154,7 @@ impl Decoder {
             b'O' => self.decode_ss3(term),
             0x1b => Ok(Key::Esc),
             byte if byte.is_ascii_graphic() || byte == b' ' => Ok(Key::Alt(char::from(byte))),
+            0x7f | 0x08 => Ok(Key::AltBackspace),
             byte => Ok(Key::Unknown(vec![0x1b, byte])),
         }
     }
@@ -334,7 +339,20 @@ mod tests {
 
     #[test]
     fn alt_letters() {
-        assert_eq!(keys(b"\x1bb\x1bf"), vec![Key::Alt('b'), Key::Alt('f')]);
+        assert_eq!(
+            keys(b"\x1bb\x1bf\x1bd"),
+            vec![Key::Alt('b'), Key::Alt('f'), Key::Alt('d')]
+        );
+    }
+
+    #[test]
+    fn alt_backspace_is_either_del_or_bs() {
+        // Terminals disagree: xterm sends `ESC DEL`, some send `ESC BS`. Both
+        // are readline's `backward-kill-word`, so both decode to one key.
+        assert_eq!(
+            keys(b"\x1b\x7f\x1b\x08"),
+            vec![Key::AltBackspace, Key::AltBackspace]
+        );
     }
 
     #[test]

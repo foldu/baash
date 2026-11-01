@@ -493,6 +493,12 @@ impl<'a> Editor<'a> {
             Key::Alt('f') => {
                 self.line.move_word_right();
             }
+            Key::Alt('d') => {
+                self.line.kill_word_forward();
+            }
+            Key::AltBackspace => {
+                self.line.kill_word_backward();
+            }
             _ => self.dirty = false,
         }
         Ok(Flow::Continue)
@@ -914,7 +920,10 @@ fn contains(text: &[u8], query: &[u8]) -> bool {
 
 /// Whether `key` extends a kill sequence rather than ending one.
 fn is_kill(key: &Key) -> bool {
-    matches!(key, Key::Ctrl(0x0b) | Key::Ctrl(0x15) | Key::Ctrl(0x17))
+    matches!(
+        key,
+        Key::Ctrl(0x0b) | Key::Ctrl(0x15) | Key::Ctrl(0x17) | Key::Alt('d') | Key::AltBackspace
+    )
 }
 
 /// Whether `key` changes the line, and so may change the ghost text.
@@ -925,6 +934,8 @@ fn edits_line(key: &Key) -> bool {
             | Key::Byte(_)
             | Key::Paste(_)
             | Key::Backspace
+            | Key::AltBackspace
+            | Key::Alt('d')
             | Key::Delete
             | Key::Up
             | Key::Down

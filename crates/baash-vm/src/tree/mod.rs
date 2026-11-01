@@ -676,7 +676,8 @@ impl Interp {
     /// 5.3.20 with `PS1='$(false)$ '`).
     ///
     /// The stock `PS1` is the one exception: it renders as the fish-like
-    /// [`baash_lang::prompt::fish_prompt`] instead of bash's `baash-0.0$ `. That
+    /// [`baash_lang::prompt::fish_prompt`] instead of bash's `baash-0.0$ ` —
+    /// `~/src/bshell main !4 ?3$ ` rather than `baash-0.0$ `. That
     /// prompt is built from data rather than decoded from a template, so a
     /// directory or branch containing `$`, a backslash or an escape-looking
     /// sequence is painted literally and cannot be expanded twice. The
@@ -693,6 +694,7 @@ impl Interp {
                 branch.as_deref(),
                 context.job_count,
                 status.0,
+                context.root,
             )
         } else {
             baash_lang::prompt::expand_with_variables(template, &context, self)

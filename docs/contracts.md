@@ -367,14 +367,15 @@ substitutes `baash_lang::prompt::fish_prompt` while the value is still that one.
 The rendered shape is
 
 ```text
-~/src/bshell main !4 ?3 
+~/src/bshell main !4 ?3$ 
 ```
 
 `cwd` (a leading `$HOME` abbreviated to `~`, bytes unchanged), then the git
 branch, then `!N` background children when `N > 0`, then `?N` last status when
-non-zero, then one trailing space. A component's space is omitted with the
-component, so a repository with nothing to report is `~/src/bshell ` rather
-than a double space.
+non-zero, then `$` (or `#` for root) and one space. A component's space is
+omitted with the component, so a repository with nothing to report is
+`~/src/bshell$ ` rather than a double space, and the prompt always ends with
+the marker `\$` would have produced.
 
 The branch is `baash_lang::prompt::git_branch`: walk up for `.git` (a directory,
 or a file whose `gitdir:` names the real one for a linked worktree or

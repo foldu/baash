@@ -989,7 +989,7 @@ fn short_host(host: &[u8]) -> &[u8] {
 /// unmodified `PS1` is this instead:
 ///
 /// ```text
-/// ~/src/bshell main !4 ?3
+/// ~/src/bshell main !4 ?3$
 /// ```
 ///
 /// in this order, with a component's leading space omitted together with the
@@ -1001,17 +1001,21 @@ fn short_host(host: &[u8]) -> &[u8] {
 /// * the git branch from [`git_branch`], plain and unbracketed.
 /// * `!N` for `job_count` background children, only when `N > 0`.
 /// * `?N` for a non-zero `last_status`.
+/// * `$`, or `#` for a root user, then one space: the prompt has to say where
+///   the command starts and who the shell thinks you are, which is what `\$`
+///   does in a template. It is the last thing before the cursor, so a prompt
+///   never runs into the text being typed.
 ///
-/// The result ends with one space, so typing starts after the prompt rather
-/// than against it. It is built directly rather than through `PS1` escapes:
-/// the paths and branch names are data, and the escape decoder (or the
-/// `promptvars` second pass) would reinterpret them.
+/// It is built directly rather than through `PS1` escapes: the paths and
+/// branch names are data, and the escape decoder (or the `promptvars` second
+/// pass) would reinterpret them.
 pub fn fish_prompt(
     cwd: &[u8],
     home: &[u8],
     branch: Option<&[u8]>,
     job_count: u32,
     last_status: i32,
+    root: bool,
 ) -> ExpandedPrompt {
     let mut bytes = abbreviate_home(cwd, home);
     if let Some(branch) = branch {
@@ -1024,6 +1028,7 @@ pub fn fish_prompt(
     if last_status != 0 {
         bytes.extend_from_slice(format!(" ?{last_status}").as_bytes());
     }
+    bytes.push(if root { b'#' } else { b'$' });
     bytes.push(b' ');
     ExpandedPrompt::from_bytes(bytes)
 }
@@ -2052,18 +2057,34 @@ mod tests {
     }
 
     fn render(cwd: &[u8], home: &[u8], branch: Option<&[u8]>, jobs: u32, status: i32) -> Vec<u8> {
-        fish_prompt(cwd, home, branch, jobs, status).into_bytes()
+        fish_prompt(cwd, home, branch, jobs, status, false).into_bytes()
     }
 
     #[test]
     fn the_default_prompt_abbreviates_home_and_orders_the_segments() {
         assert_eq!(
             render(b"/home/ada/src/bshell", b"/home/ada", Some(b"main"), 4, 3),
-            b"~/src/bshell main !4 ?3 "
+            b"~/src/bshell main !4 ?3$ "
         );
         assert_eq!(
             render(b"/home/ada", b"/home/ada", Some(b"main"), 0, 0),
-            b"~ main "
+            b"~ main$ "
+        );
+    }
+
+    #[test]
+    fn the_prompt_ends_with_the_user_s_marker() {
+        // `$` for an ordinary user, `#` for root: the same distinction `\$`
+        // makes in a template, and the last thing before the cursor.
+        assert_eq!(render(b"/x", b"/h", None, 0, 0), b"/x$ ");
+        assert_eq!(
+            fish_prompt(b"/x", b"/h", None, 0, 0, true).into_bytes(),
+            b"/x# "
+        );
+        // The marker follows the counters rather than replacing them.
+        assert_eq!(
+            fish_prompt(b"/x", b"/h", Some(b"main"), 2, 1, true).into_bytes(),
+            b"/x main !2 ?1# "
         );
     }
 
@@ -2071,12 +2092,12 @@ mod tests {
     fn a_path_outside_home_stays_absolute() {
         assert_eq!(
             render(b"/opt/bshell", b"/home/ada", None, 0, 0),
-            b"/opt/bshell "
+            b"/opt/bshell$ "
         );
         // A `$HOME` prefix that is not at a path boundary is not abbreviated.
         assert_eq!(
             render(b"/home/adam/x", b"/home/ada", None, 0, 0),
-            b"/home/adam/x "
+            b"/home/adam/x$ "
         );
     }
 
@@ -2084,10 +2105,10 @@ mod tests {
     fn counters_appear_only_when_non_zero() {
         // Each component carries its own space, so no component leaves a
         // double space behind.
-        assert_eq!(render(b"/x", b"/h", None, 2, 0), b"/x !2 ");
-        assert_eq!(render(b"/x", b"/h", None, 0, 1), b"/x ?1 ");
-        assert_eq!(render(b"/x", b"/h", Some(b"dev"), 0, 0), b"/x dev ");
-        assert_eq!(render(b"/x", b"/h", None, 0, 0), b"/x ");
+        assert_eq!(render(b"/x", b"/h", None, 2, 0), b"/x !2$ ");
+        assert_eq!(render(b"/x", b"/h", None, 0, 1), b"/x ?1$ ");
+        assert_eq!(render(b"/x", b"/h", Some(b"dev"), 0, 0), b"/x dev$ ");
+        assert_eq!(render(b"/x", b"/h", None, 0, 0), b"/x$ ");
     }
 
     #[test]
@@ -2095,10 +2116,10 @@ mod tests {
         // Paths are bytes. Nothing in the default prompt decodes them, so an
         // undecodable byte survives exactly and cannot become U+FFFD.
         let cwd = b"/tmp/caf\xe9/\xff";
-        assert_eq!(render(cwd, b"/tmp", None, 0, 0), b"~/caf\xe9/\xff ");
+        assert_eq!(render(cwd, b"/tmp", None, 0, 0), b"~/caf\xe9/\xff$ ");
         assert_eq!(
             render(b"/home/ada/\xff", b"/home/ada", Some(b"ma\xefn"), 0, 0),
-            b"~/\xff ma\xefn "
+            b"~/\xff ma\xefn$ "
         );
     }
 
@@ -2159,7 +2180,7 @@ mod tests {
         assert_eq!(git_branch(&as_bytes(&root)), None);
         assert_eq!(render(&as_bytes(&root), b"/h", None, 0, 0), {
             let mut expected = as_bytes(&root);
-            expected.push(b' ');
+            expected.extend_from_slice(b"$ ");
             expected
         });
     }

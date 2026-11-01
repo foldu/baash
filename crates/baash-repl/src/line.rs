@@ -281,6 +281,51 @@ impl Line {
         true
     }
 
+    /// Kill from the cursor to the end of the next word (Alt-D).
+    ///
+    /// Readline's `kill-word`, whose word boundaries are `forward-word`'s —
+    /// the ones [`Line::move_word_right`] uses — so it differs from Ctrl-W on
+    /// punctuation: `foo-bar|` kills `bar`, while Ctrl-W would take the whole
+    /// `foo-bar`.
+    pub fn kill_word_forward(&mut self) -> bool {
+        let length = self.buffer.len();
+        let mut at = self.cursor;
+        while at < length && !is_word(self.buffer[at]) {
+            at += 1;
+        }
+        while at < length && is_word(self.buffer[at]) {
+            at += 1;
+        }
+        if at == self.cursor {
+            return false;
+        }
+        let killed: Vec<u8> = self.buffer.drain(self.cursor..at).collect();
+        self.kill.kill(killed, KillDirection::Forward);
+        true
+    }
+
+    /// Kill back to the start of the word before the cursor
+    /// (Alt-Backspace).
+    ///
+    /// Readline's `backward-kill-word`: the mirror of
+    /// [`Line::kill_word_forward`], not of Ctrl-W.
+    pub fn kill_word_backward(&mut self) -> bool {
+        if self.cursor <= self.start {
+            return false;
+        }
+        let mut at = self.cursor;
+        while at > self.start && !is_word(self.buffer[at - 1]) {
+            at -= 1;
+        }
+        while at > self.start && is_word(self.buffer[at - 1]) {
+            at -= 1;
+        }
+        let killed: Vec<u8> = self.buffer.drain(at..self.cursor).collect();
+        self.cursor = at;
+        self.kill.kill(killed, KillDirection::Backward);
+        true
+    }
+
     /// Insert the most recently killed text (Ctrl-Y).
     pub fn yank(&mut self) -> bool {
         if self.kill.text.is_empty() {
@@ -467,6 +512,43 @@ mod tests {
         line.kill_word();
         line.yank();
         assert_eq!(line.buffer(), b"a b c");
+    }
+
+    #[test]
+    fn word_kills_stop_at_punctuation_and_kill_forwards_too() {
+        // Alt-Backspace is `backward-kill-word`: word characters only, so it
+        // stops at the dash. Ctrl-W, tested above, takes `foo-bar` whole.
+        let mut line = Line::new();
+        line.insert(b"foo-bar");
+        assert!(line.kill_word_backward());
+        assert_eq!(line.buffer(), b"foo-");
+        line.yank();
+        assert_eq!(line.buffer(), b"foo-bar");
+
+        // Alt-D kills forward to the end of the next word, including the
+        // whitespace it steps over to get there.
+        let mut line = Line::new();
+        line.insert(b"one two three");
+        line.set_cursor(3);
+        assert!(line.kill_word_forward());
+        assert_eq!(line.buffer(), b"one three");
+        assert_eq!(line.cursor(), 3);
+
+        // Consecutive forward kills accumulate in order, so one yank puts the
+        // whole span back.
+        assert!(line.kill_word_forward());
+        assert_eq!(line.buffer(), b"one");
+        line.yank();
+        assert_eq!(line.buffer(), b"one two three");
+    }
+
+    #[test]
+    fn a_word_kill_with_nothing_to_kill_reports_it() {
+        let mut line = Line::new();
+        line.insert(b"abc");
+        assert!(!line.kill_word_forward(), "the cursor is at the end");
+        line.set_cursor(0);
+        assert!(!line.kill_word_backward(), "the cursor is at the start");
     }
 
     #[test]

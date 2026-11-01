@@ -54,7 +54,7 @@ a stale brief has already cost two wrong scopes (arrays: 54 vs real; namerefs:
 | of the whole suite (3971 cases) | 56.3 % |
 | as a fraction of bash's score | 2344 / 2577 = 91.0 % |
 | share of the bash gap closed since 1013 | 1331 / 1564 = 85.1 % |
-| our test count | 1284 |
+| our test count | 1289 |
 
 Measured with `bash 5.3.20` as the comparison shell, harness forced to
 `LC_ALL=C` (bash scores *worse* under `C.UTF-8`: 2574 → 2435, so the C locale
@@ -126,12 +126,14 @@ delegates everything else: line editing to `baash-repl`, execution to the
   `PWD`, its background children (`\j`) and its history ring; `\!` is the
   number the line will get and `\#` bash's command number;
 * **the stock prompt is fish-like**: while `PS1` is still the built-in
-  `\s-\v\$ `, the rendered prompt is `~/src/bshell main !4 ?3 ` — the
+  `\s-\v\$ `, the rendered prompt is `~/src/bshell main !4 ?3$ ` — the
   abbreviated `$PWD`, the git branch (read from `.git/HEAD`, following a `.git`
   file and `packed-refs` for worktrees), `!N` when background children exist,
-  `?N` when the last status is non-zero, and one trailing space. It is built
-  from bytes in one pass, so non-UTF-8 paths render exactly and nothing in the
-  prompt is expanded twice. The `PS1` *variable* keeps bash's value, so
+  `?N` when the last status is non-zero, then `$` (`#` for root) and one space.
+  The marker is the same distinction `\$` draws in a template, and it is the
+  last cell before the cursor, so the prompt never runs into typed text. It is
+  built from bytes in one pass, so non-UTF-8 paths render exactly and nothing in
+  the prompt is expanded twice. The `PS1` *variable* keeps bash's value, so
   `${PS1@P}` and the conformance `default PS1` case are unchanged. An explicit
   `PS1` wins and is rendered by the ordinary escape expander;
 * **`promptvars`** (`shopt`, on by default): the decoded prompt is expanded a
@@ -227,9 +229,9 @@ delegates everything else: line editing to `baash-repl`, execution to the
    `printf`, `pwd`, `test`, `[` are served from `PATH` — exec-able by design,
    but that means no `printf -v` and no `%q` portability, and `pwd` ignores
    `-P`/`-L` semantics.
-3. **Editor depth.** No undo, no `vi` mode (`set -o vi` sets a shopt today but
-   the editor ignores it), no word-level kill/yank verification, no `Ctrl-L`. Bracketed paste appears in the key decoder (`Paste` in
-   `key.rs`) but is unverified.
+3. **Editor depth.** No undo and no `vi` mode (`set -o vi` sets a shopt today
+   but the editor ignores it). Bracketed paste appears in the key decoder
+   (`Paste` in `key.rs`) but is unverified.
 4. **Search depth.** `Ctrl-R` does not highlight the matched bytes (the cursor
    sits on their first byte), and there is no `Ctrl-S` forward search.
 

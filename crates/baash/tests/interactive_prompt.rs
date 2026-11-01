@@ -381,17 +381,18 @@ fn the_default_prompt_is_fish_like() {
     std::fs::create_dir_all(work.join(".git")).expect("create git directory");
     std::fs::write(work.join(".git/HEAD"), b"ref: refs/heads/main\n").expect("write HEAD");
 
-    // No PS1 in the environment or an rc file: the stock prompt is rendered.
+    // No PS1 in the environment or an rc file: the stock prompt is rendered,
+    // ending in `$` (or `#` for root) like a `\$` in a template would.
     let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
-    session.prompt("~/src/bshell main ");
+    session.prompt("~/src/bshell main$ ");
     // A failed command adds the status; a background child adds the job count
     // and the successful `&` clears the status again.
     session.send(b"false\n");
-    session.prompt("~/src/bshell main ?1 ");
+    session.prompt("~/src/bshell main ?1$ ");
     session.send(b"sleep 1 &\n");
-    session.prompt("~/src/bshell main !1 ");
+    session.prompt("~/src/bshell main !1$ ");
     session.send(b"wait\n");
-    session.prompt("~/src/bshell main ");
+    session.prompt("~/src/bshell main$ ");
     session.send(b"exit\n");
     session.wait_child();
     let _ = std::fs::remove_dir_all(&home);
