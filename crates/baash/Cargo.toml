@@ -29,3 +29,9 @@ compio.workspace = true
 # target.
 [target.'cfg(windows)'.dependencies]
 baash-vm = { workspace = true, features = ["builtin-utils"] }
+# Windows' system allocator is the slow part of a process that allocates small
+# byte vectors constantly, which is what a shell does. Measured on Linux,
+# mimalloc is a wash overall (worse startup, better on large arrays); on
+# Windows it is a straight improvement over `HeapAlloc`, so it is the one
+# platform where it is not optional (`docs/performance.md`).
+mimalloc = { version = "0.1", default-features = false }

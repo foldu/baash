@@ -1,9 +1,9 @@
 //! Cross-cutting tests: the tier table, option round-tripping, scope
 //! behavior, environment construction and the builtins that are implemented.
 
+use crate::vars::IndexedArray;
 use crate::*;
 use baash_diag::Diagnostic;
-use std::collections::BTreeMap;
 
 /// A host that records everything, so builtins can be tested without a VM.
 pub(crate) struct TestHost {
@@ -631,7 +631,7 @@ fn whole_value_assignment_and_append() {
     let mut vars = Vars::default();
     vars.assign(
         b"a",
-        VarValue::Indexed(std::collections::BTreeMap::from([(0, b"x".to_vec())])),
+        VarValue::Indexed(IndexedArray::from([(0, b"x".to_vec())])),
     )
     .unwrap();
     assert_eq!(vars.element_indexed(b"a", 0), Some(b"x".as_slice()));
@@ -709,7 +709,7 @@ fn envp_exports_only_the_right_things() {
     vars.mark_exported(b"e").unwrap();
     vars.assign(
         b"arr",
-        VarValue::Indexed(std::collections::BTreeMap::from([(0, b"x".to_vec())])),
+        VarValue::Indexed(IndexedArray::from([(0, b"x".to_vec())])),
     )
     .unwrap();
     vars.mark_exported(b"arr").unwrap();
@@ -1316,7 +1316,7 @@ fn negative_subscripts_wrap_like_bash_intmax() {
     vars.set_indexed(b"a", -1, b"y").unwrap();
     assert_eq!(
         vars.value(b"a"),
-        Some(&VarValue::Indexed(BTreeMap::from([(
+        Some(&VarValue::Indexed(IndexedArray::from([(
             i64::MAX,
             b"y".to_vec()
         )])))
@@ -1342,7 +1342,7 @@ fn unset_all_elements_keeps_the_shape_and_refuses_a_scalar() {
     vars.unset_all_elements(b"a").unwrap();
     assert_eq!(
         vars.value(b"a"),
-        Some(&VarValue::Indexed(BTreeMap::new())),
+        Some(&VarValue::Indexed(IndexedArray::new())),
         "the indexed array becomes empty but stays an array"
     );
     assert_eq!(vars.shape(b"a"), Some(ArrayShape::Indexed));

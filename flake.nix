@@ -123,6 +123,18 @@
                 pkgs.llvmPackages.clang
                 pkgs.coreutils
               ];
+              # `libmimalloc-sys` builds C, and mimalloc's `options.c` prints
+              # its build date with `__DATE__`. Nix's cc wrapper makes that an
+              # error for reproducibility, which is the right default for Nix's
+              # own packages but not for a vendored allocator whose output is
+              # never compared: the flag is relaxed for the C dependency only.
+              env = {
+                NIX_CFLAGS_COMPILE = "-Wno-error=date-time";
+                # cc-rs appends these after its own flags, so the relaxed
+                # warning wins over the `-Werror=date-time` the wrapper adds.
+                CFLAGS_x86_64_pc_windows_gnu = "-Wno-error=date-time";
+                CFLAGS_x86_64-pc-windows-gnu = "-Wno-error=date-time";
+              };
               buildPhaseCargoCommand = ''
                 mkdir -p target/x86_64-pc-windows-gnu
                 cp --no-preserve=mode ${./ci/windres} target/windres

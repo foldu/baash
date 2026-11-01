@@ -284,8 +284,7 @@ fn utf8_char_len(bytes: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vars::Attrs;
-    use std::collections::BTreeMap;
+    use crate::vars::{Attrs, IndexedArray};
 
     fn render(var: &Var, name: &[u8]) -> String {
         let mut out = Vec::new();
@@ -328,7 +327,7 @@ mod tests {
     #[test]
     fn contiguous_indexed_array_prints_subscripts_and_quotes() {
         let var = Var {
-            value: VarValue::Indexed(BTreeMap::from([
+            value: VarValue::Indexed(IndexedArray::from([
                 (0, b"1".to_vec()),
                 (1, b"2".to_vec()),
                 (2, b"3".to_vec()),
@@ -344,7 +343,10 @@ mod tests {
     #[test]
     fn sparse_indexed_array_prints_subscripts() {
         let var = Var {
-            value: VarValue::Indexed(BTreeMap::from([(3, b"".to_vec()), (4, b"foo".to_vec())])),
+            value: VarValue::Indexed(IndexedArray::from([
+                (3, b"".to_vec()),
+                (4, b"foo".to_vec()),
+            ])),
             attrs: Attrs::default(),
         };
         assert_eq!(render(&var, b"a"), "declare -a a=([3]=\"\" [4]=\"foo\")\n");

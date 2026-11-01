@@ -37,7 +37,7 @@ lookup fast paths below. Same machine, same method, best of 3.
 | pipeline, 200 | 124 ms | 92.2 ms (0.7×) |
 | command substitution, 1000 | 176 ms | 7.6 ms (0.04×) |
 | subshell, 1000 (`( : )`) | 145 ms | 4.3 ms (0.03×) |
-| subshell 200, 20k-element array | 50.6 ms | 65.5 ms (1.3×) |
+| subshell 200, 20k-element array | 50.6 ms | 5.2 ms (**0.1×**) |
 
 Three changes, each measured with `perf stat -e instructions:u` and callgrind
 rather than guessed at:
@@ -55,6 +55,30 @@ rather than guessed at:
   validated by name. A 20k loop reads the same handful of names, and every miss
   walked the whole table comparing names: that walk was the largest single line
   in the profile.
+
+The last row was 65.5 ms and is now 5.2 ms, because an indexed array is
+*shared* until written: a subshell is a clone of the shell state, and cloning a
+20k-element `BTreeMap` two hundred times was the whole cost. `IndexedArray` is
+an `Arc` now and the first write copies it (`Arc::make_mut`), so
+`arr=( $(seq 20000) ); while …; do ( : ); done` stopped copying 4M nodes while
+`( arr[0]=x )` still pays for its own copy and cannot touch the parent's array.
+
+### Allocator: mimalloc on Windows
+
+Measured both ways on Linux, mimalloc trades one kind of work for another:
+startup 0.66 → 0.80 ms, small-string loops 5–8% slower, `$( )`/subshells ~18%
+faster and the 20k-array case 2.1× faster — because that case was 4M
+allocations and mimalloc is better at them. With the array shared, the
+allocation pressure that motivated it is gone, so Linux keeps the system
+allocator.
+
+Windows is the exception: `HeapAlloc` is the slow part of a process that
+allocates small byte vectors constantly, so Windows builds use mimalloc
+unconditionally (`[target.'cfg(windows)'.dependencies]` in
+`crates/baash/Cargo.toml`, and a `#[cfg(windows)]` `#[global_allocator]`). It
+needs one build flag: mimalloc's `options.c` prints its build date with
+`__DATE__`, which Nix's cc wrapper rejects as unreproducible, so the Windows
+derivation relaxes `-Wdate-time` for that C dependency only.
 
 Function calls are the one case still behind the 2026-10-28 build (38.7 ms now,
 33.1 ms then, 31.4 ms in bash). The remaining cost is the same table walk for

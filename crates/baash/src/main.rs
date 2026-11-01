@@ -11,6 +11,17 @@
 
 #![forbid(unsafe_code)]
 
+/// Windows builds use mimalloc instead of the system heap.
+///
+/// A shell allocates small byte vectors constantly — every word, every variable
+/// value, every argument — and `HeapAlloc` is the slow part of that on Windows.
+/// The Unix builds keep the system allocator: measured against it, mimalloc
+/// trades startup and small loops for large-array throughput, which is not a
+/// trade a shell should make by default (`docs/performance.md`).
+#[cfg(windows)]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::ffi::OsString;
 use std::io::{BufRead, Read, Write};
 use std::process::ExitCode;

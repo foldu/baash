@@ -19,6 +19,7 @@ use crate::builtins::{AssignPersistence, Tier};
 use crate::errors::{Error, display};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// Variable attributes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -37,6 +38,92 @@ pub struct Attrs {
     /// attribute-changing builtins see the cell itself. See
     /// [`Vars::resolve_chain`].
     pub nameref: bool,
+}
+
+/// An indexed array: subscript → element, shared until written.
+///
+/// The map is behind an `Arc` because a subshell is a *clone of the shell
+/// state* (`docs/direction.md` §2): `arr=( $(seq 20000) )` followed by two
+/// hundred `( : )` was 65 ms, almost all of it deep-copying the array two
+/// hundred times. Sharing makes the copy a refcount bump, and the first write
+/// in the subshell copies it (`Arc::make_mut`), so the parent can never see an
+/// element it did not put there.
+#[derive(Clone, Debug, Default)]
+pub struct IndexedArray(Arc<BTreeMap<i64, Vec<u8>>>);
+
+impl IndexedArray {
+    /// An empty array.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// An array from a map that is already built.
+    #[must_use]
+    pub fn from_map(elements: BTreeMap<i64, Vec<u8>>) -> Self {
+        Self(Arc::new(elements))
+    }
+
+    /// The map, copied if it is shared.
+    fn write(&mut self) -> &mut BTreeMap<i64, Vec<u8>> {
+        Arc::make_mut(&mut self.0)
+    }
+
+    /// One element.
+    #[must_use]
+    pub fn get(&self, index: &i64) -> Option<&Vec<u8>> {
+        self.0.get(index)
+    }
+
+    /// Store one element.
+    pub fn insert(&mut self, index: i64, value: Vec<u8>) -> Option<Vec<u8>> {
+        self.write().insert(index, value)
+    }
+
+    /// Store one element through the entry API, for `a+=` on element zero.
+    pub fn entry(&mut self, index: i64) -> std::collections::btree_map::Entry<'_, i64, Vec<u8>> {
+        self.write().entry(index)
+    }
+
+    /// Remove one element.
+    pub fn remove(&mut self, index: &i64) -> Option<Vec<u8>> {
+        self.write().remove(index)
+    }
+
+    /// Drop every element.
+    pub fn clear(&mut self) {
+        self.write().clear();
+    }
+}
+
+impl std::ops::Deref for IndexedArray {
+    type Target = BTreeMap<i64, Vec<u8>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl PartialEq for IndexedArray {
+    fn eq(&self, other: &Self) -> bool {
+        // Value equality, not identity: `declare -p a` after a subshell must
+        // print the same element for the same subscript.
+        self.0 == other.0
+    }
+}
+
+impl Eq for IndexedArray {}
+
+impl From<BTreeMap<i64, Vec<u8>>> for IndexedArray {
+    fn from(elements: BTreeMap<i64, Vec<u8>>) -> Self {
+        Self::from_map(elements)
+    }
+}
+
+impl<const N: usize> From<[(i64, Vec<u8>); N]> for IndexedArray {
+    fn from(elements: [(i64, Vec<u8>); N]) -> Self {
+        Self::from_map(BTreeMap::from(elements))
+    }
 }
 
 /// A variable's value. Bash arrays are extensions, hence the extra shapes.
@@ -61,7 +148,7 @@ pub enum VarValue {
     /// The key is `i64`, not a narrower integer: bash subscripts are machine
     /// integers, and the conformance suite exercises `a[0x7FFFFFFFFFFFFFFF]`.
     /// Negative subscripts are resolved against the array before storage.
-    Indexed(BTreeMap<i64, Vec<u8>>),
+    Indexed(IndexedArray),
     /// An associative array, kept as insertion-ordered pairs.
     Assoc(Vec<(Vec<u8>, Vec<u8>)>),
 }
@@ -118,7 +205,7 @@ pub enum ArrayShape {
 impl ArrayShape {
     fn empty(self) -> VarValue {
         match self {
-            ArrayShape::Indexed => VarValue::Indexed(BTreeMap::new()),
+            ArrayShape::Indexed => VarValue::Indexed(IndexedArray::new()),
             ArrayShape::Associative => VarValue::Assoc(Vec::new()),
         }
     }
@@ -748,7 +835,7 @@ impl Vars {
             VarValue::Str(bytes) => {
                 let bytes = bytes.clone();
                 var.value = match shape {
-                    ArrayShape::Indexed => VarValue::Indexed(BTreeMap::from([(0, bytes)])),
+                    ArrayShape::Indexed => VarValue::Indexed(IndexedArray::from([(0, bytes)])),
                     ArrayShape::Associative => VarValue::Assoc(vec![(b"0".to_vec(), bytes)]),
                 };
                 Ok(())
@@ -964,8 +1051,8 @@ impl Vars {
         // Promote a scalar (keeping it at element zero) or create the array.
         let old = std::mem::take(&mut var.value);
         let mut elements = match &old {
-            VarValue::Str(element) => BTreeMap::from([(0, element.clone())]),
-            _ => BTreeMap::new(),
+            VarValue::Str(element) => IndexedArray::from([(0, element.clone())]),
+            _ => IndexedArray::new(),
         };
         let resolved = match resolve_write_index(&elements, index, name) {
             Ok(resolved) => resolved,

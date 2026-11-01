@@ -435,3 +435,27 @@ fn unsetting_a_scalar_through_at_is_an_error() {
     assert!(!status.is_success());
     assert_eq!(Vars::get(&interp, b"s"), Some(b"scalar".as_slice()));
 }
+
+/// A subshell sees the parent's array without a deep copy, and cannot change
+/// it.
+///
+/// The array is shared (`IndexedArray` is an `Arc`), so this is the test that
+/// the sharing is copy-on-write: the parent's elements must be untouched after
+/// the subshell wrote one of them, and the subshell must see the parent's.
+#[test]
+fn a_subshell_arrays_are_shared_until_written() {
+    let mut interp = Interp::new(false);
+    run(
+        &mut interp,
+        "arr=(1 2 3); v=\"${arr[0]}:${#arr[@]}\"; ( arr[0]=x ); w=\"${arr[0]}:${#arr[@]}\"",
+    );
+    assert_eq!(text(&interp, b"v"), "1:3");
+    assert_eq!(text(&interp, b"w"), "1:3");
+    // The subshell's own view does see the write.
+    run(
+        &mut interp,
+        "s=$( ( arr[0]=x; echo \"${arr[0]}\" ) ); t=${arr[0]}",
+    );
+    assert_eq!(text(&interp, b"s"), "x");
+    assert_eq!(text(&interp, b"t"), "1");
+}
