@@ -65,6 +65,10 @@
             # is absent. dash is the reference for --compare.
             python3
             dash
+            # `crates/baash/tests/interactive_zoxide.rs` drives the real
+            # `zoxide init bash` script against a pty, so the integration is
+            # tested against the file a user would source and not a copy of it.
+            zoxide
           ];
 
           shellHook = ''

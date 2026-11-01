@@ -54,7 +54,7 @@ a stale brief has already cost two wrong scopes (arrays: 54 vs real; namerefs:
 | of the whole suite (3971 cases) | 56.3 % |
 | as a fraction of bash's score | 2344 / 2577 = 91.0 % |
 | share of the bash gap closed since 1013 | 1331 / 1564 = 85.1 % |
-| our test count | 1293 |
+| our test count | 1294 |
 
 Measured with `bash 5.3.20` as the comparison shell, harness forced to
 `LC_ALL=C` (bash scores *worse* under `C.UTF-8`: 2574 → 2435, so the C locale
@@ -341,9 +341,13 @@ events, and the expanded ring contents at a real prompt), `crates/baash/tests/in
 prompt, `PROMPT_COMMAND`, prompt escapes, `PS1` from an rc file and from a
 command, `Ctrl-R` end to end), `crates/baash/tests/interactive_complete.rs`
 (variable, keyword, function, `complete -W`, directory, `-o default`, history
-and quoted-filename completion at a real prompt) and
-`crates/baash-repl/tests/editor.rs` (scripted keystrokes against a fake terminal,
-including the search states).
+and quoted-filename completion at a real prompt),
+`crates/baash/tests/interactive_zoxide.rs` (the script `zoxide init bash` prints
+for the *installed* zoxide, driven through a prompt: the hook records the
+directories visited, `z <keyword>` jumps, `z -` comes back — the dev shell
+installs `zoxide` for it, and the test reports the skip rather than failing when
+it is missing) and `crates/baash-repl/tests/editor.rs` (scripted keystrokes
+against a fake terminal, including the search states).
 
 ## 5. Builtin inventory
 
