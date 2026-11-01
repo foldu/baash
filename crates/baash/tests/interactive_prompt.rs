@@ -44,6 +44,11 @@ const SCRUBBED: &[&[u8]] = &[
     b"HISTFILESIZE",
     b"HISTIGNORE",
     b"BAASH_HISTORY_DB",
+    // A remote session is a prompt *feature*, so the tests must opt in rather
+    // than inherit it from whatever runs them.
+    b"SSH_TTY",
+    b"SSH_CONNECTION",
+    b"SSH_CLIENT",
     b"LC_ALL",
     b"NO_COLOR",
     // A stale inherited `PWD` would win over the directory the test chdirs to,
@@ -276,6 +281,47 @@ fn cursor_right_after(output: &[u8], from: usize) -> Option<usize> {
         .ok()?
         .parse()
         .ok()
+}
+
+/// An `ssh` session says which machine the command will run on.
+///
+/// `sshd` sets one of these for every session, including the nested shells and
+/// tmux that inherit it, so the marker is what decides — not `$TERM`, and not
+/// whether the terminal is local.
+#[test]
+fn an_ssh_session_shows_user_and_host() {
+    let home = temp_dir("ssh-home");
+    let work = temp_dir("ssh-work");
+    let marker = user_marker();
+    let mut session = Session::spawn(
+        &home,
+        &work,
+        &["--norc", "-i"],
+        &[("SSH_TTY", "/dev/pts/0")],
+    );
+    // `user@host`, then the path, then the marker: `@` can only come from the
+    // remote segment, which the local test below proves by its absence.
+    session.expect(b"@", Duration::from_secs(10));
+    session.prompt(&format!(" {marker} "));
+    session.send(b"exit\n");
+    session.wait_child();
+}
+
+/// Without a marker the prompt stays local.
+#[test]
+fn a_local_session_shows_no_user_or_host() {
+    let home = temp_dir("local-home");
+    let work = temp_dir("local-work");
+    let marker = user_marker();
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.prompt(&format!(" {marker} "));
+    assert!(
+        !session.output.contains(&b'@'),
+        "no `user@host` without an SSH marker: {:?}",
+        String::from_utf8_lossy(&session.output)
+    );
+    session.send(b"exit\n");
+    session.wait_child();
 }
 
 /// A change in the working tree repaints the prompt without a keystroke.

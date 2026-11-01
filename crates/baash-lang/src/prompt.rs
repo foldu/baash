@@ -1021,18 +1021,20 @@ pub fn fish_prompt(
     home: &[u8],
     branch: Option<&[u8]>,
     git: Option<GitStatus>,
+    ssh: Option<(&[u8], &[u8])>,
     root: bool,
     color: bool,
 ) -> ExpandedPrompt {
     // The palette, in SGR terms: cyan for the path, brighter cyan for the
     // component you are in, green for the repository and the marker, blue for
-    // what git does not track yet.
+    // what git does not track yet, yellow for `user@host` on a remote session.
     const RESET: &[u8] = b"\x1b[0m";
     const PATH: &[u8] = b"\x1b[36m";
     const HERE: &[u8] = b"\x1b[96m";
     const CLEAN: &[u8] = b"\x1b[92m";
     const UNTRACKED: &[u8] = b"\x1b[94m";
     const ROOT: &[u8] = b"\x1b[91m";
+    const REMOTE: &[u8] = b"\x1b[33m";
 
     fn sgr(bytes: &mut Vec<u8>, color: bool, code: &[u8]) {
         if color {
@@ -1051,6 +1053,17 @@ pub fn fish_prompt(
     };
 
     let mut bytes = Vec::with_capacity(path.len() + 48);
+    // `user@host`, for a session that came in over `ssh` and is not sitting at
+    // this machine: the prompt is the only place that says which box the next
+    // command will run on.
+    if let Some((user, host)) = ssh {
+        sgr(&mut bytes, color, REMOTE);
+        bytes.extend_from_slice(user);
+        bytes.push(b'@');
+        bytes.extend_from_slice(host);
+        sgr(&mut bytes, color, RESET);
+        bytes.push(b' ');
+    }
     sgr(&mut bytes, color, PATH);
     bytes.extend_from_slice(prefix);
     if !here.is_empty() {
@@ -1087,6 +1100,26 @@ pub fn fish_prompt(
     sgr(&mut bytes, color, RESET);
     bytes.push(b' ');
     ExpandedPrompt::from_bytes(bytes)
+}
+
+/// The `user@host` a remote session shows, or `None` for a local one.
+///
+/// `sshd` sets `SSH_TTY` for an interactive login and `SSH_CONNECTION` for
+/// every session — including a tmux or a nested shell that inherited it — so
+/// any of them means the keyboard is not at this machine's console. The host is
+/// cut at the first dot: a prompt does not need the FQDN, and `\u@\h` does not
+/// print one either.
+#[must_use]
+pub fn ssh_context(user: &[u8], host: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    const MARKERS: [&str; 3] = ["SSH_TTY", "SSH_CONNECTION", "SSH_CLIENT"];
+    if !MARKERS
+        .iter()
+        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+    {
+        return None;
+    }
+    let host = host.split(|&byte| byte == b'.').next().unwrap_or_default();
+    Some((user.to_vec(), host.to_vec()))
 }
 
 /// What the default prompt's git segment counts.
@@ -2167,7 +2200,7 @@ mod tests {
     }
 
     fn render(cwd: &[u8], home: &[u8], branch: Option<&[u8]>, git: Option<GitStatus>) -> Vec<u8> {
-        fish_prompt(cwd, home, branch, git, false, false).into_bytes()
+        fish_prompt(cwd, home, branch, git, None, false, false).into_bytes()
     }
 
     fn dirty(modified: u32, untracked: u32) -> Option<GitStatus> {
@@ -2204,6 +2237,7 @@ mod tests {
                 b"/home/ada",
                 Some(b"main"),
                 dirty(2, 5),
+                None,
                 false,
                 true
             )
@@ -2213,15 +2247,47 @@ mod tests {
         );
         // Root keeps its distinction, and the escape covers the marker only.
         assert_eq!(
-            fish_prompt(b"/x", b"/h", None, None, true, true).into_bytes(),
+            fish_prompt(b"/x", b"/h", None, None, None, true, true).into_bytes(),
             b"\x1b[36m/x\x1b[0m \x1b[91m#\x1b[0m "
+        );
+    }
+
+    #[test]
+    fn a_remote_session_puts_user_at_host_in_front() {
+        // On `ssh`, the prompt has to say which machine the command will run
+        // on; the marker stays last, and the segment is one ANSI colour.
+        assert_eq!(
+            fish_prompt(
+                b"/home/ada/src/bshell",
+                b"/home/ada",
+                Some(b"main"),
+                dirty(1, 0),
+                Some((b"ada", b"jupiter")),
+                false,
+                false
+            )
+            .into_bytes(),
+            b"ada@jupiter ~/src/bshell main !1 $ "
+        );
+        assert_eq!(
+            fish_prompt(
+                b"/x",
+                b"/h",
+                None,
+                None,
+                Some((b"ada", b"jupiter")),
+                true,
+                true
+            )
+            .into_bytes(),
+            b"\x1b[33mada@jupiter\x1b[0m \x1b[36m/x\x1b[0m \x1b[91m#\x1b[0m "
         );
     }
 
     #[test]
     fn a_bare_home_is_not_split_into_a_component() {
         assert_eq!(
-            fish_prompt(b"/home/ada", b"/home/ada", None, None, false, true).into_bytes(),
+            fish_prompt(b"/home/ada", b"/home/ada", None, None, None, false, true).into_bytes(),
             b"\x1b[36m~\x1b[0m \x1b[92m$\x1b[0m "
         );
     }
@@ -2232,12 +2298,12 @@ mod tests {
         // makes in a template, and the last thing before the cursor.
         assert_eq!(render(b"/x", b"/h", None, None), b"/x $ ");
         assert_eq!(
-            fish_prompt(b"/x", b"/h", None, None, true, false).into_bytes(),
+            fish_prompt(b"/x", b"/h", None, None, None, true, false).into_bytes(),
             b"/x # "
         );
         // The marker follows the counters rather than replacing them.
         assert_eq!(
-            fish_prompt(b"/x", b"/h", Some(b"main"), dirty(2, 1), true, false).into_bytes(),
+            fish_prompt(b"/x", b"/h", Some(b"main"), dirty(2, 1), None, true, false).into_bytes(),
             b"/x main !2 ?1 # "
         );
     }

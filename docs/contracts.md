@@ -380,6 +380,21 @@ The rendered shape is
 ~/src/bshell main !2 ?5 $
 ```
 
+In a session that came in over `ssh`, `user@host` comes first:
+
+```text
+barnabas@jupiter ~/src/bshell main !2 ?5 $
+```
+
+The marker is any of `SSH_TTY`, `SSH_CONNECTION` or `SSH_CLIENT` being set and
+non-empty — `sshd` sets the first for an interactive login and the second for
+every session, and a nested shell or tmux inherits them, so all three mean the
+keyboard is not at this machine's console. The host is cut at the first dot
+(a prompt does not need the FQDN, and `\h` does not print one). Nothing else
+decides it: not `$TERM`, and not whether the terminal is local. The segment is
+one ANSI colour, yellow, and it is captured once per line, so a session cannot
+change remotely halfway through one.
+
 `cwd` (a leading `$HOME` abbreviated to `~`, bytes unchanged), then the git
 branch, then `!N` tracked files that differ from `HEAD` or the index when
 `N > 0`, then `?N` untracked files when `N > 0`, then `$` (or `#` for root),
@@ -396,7 +411,7 @@ one dirty file rather than two. Nothing here forks a `git status`.
 On a terminal the prompt is painted in ANSI SGR colours only — never 24-bit
 values — so it follows the terminal's palette: cyan for the path, bright cyan
 for the last component, green for the branch, `!N` and the marker, blue for
-`?N`, red for `#`. `NO_COLOR` or a non-terminal gets the same text with no
+`?N`, red for `#`, yellow for `user@host`. `NO_COLOR` or a non-terminal gets the same text with no
 escapes.
 
 The branch is `baash_lang::prompt::git_branch`: walk up for `.git` (a directory,

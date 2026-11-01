@@ -872,6 +872,9 @@ struct LiveGit {
     home: Vec<u8>,
     root: bool,
     color: bool,
+    /// `user@host` when the session is remote, captured when the prompt was
+    /// armed: an SSH session does not become local halfway through a line.
+    ssh: Option<(Vec<u8>, Vec<u8>)>,
     /// `PS2`, which a git change never alters but a [`baash_repl::Prompt`] has
     /// to carry anyway.
     secondary: Vec<u8>,
@@ -891,6 +894,7 @@ impl LiveGit {
             home: Vec::new(),
             root: false,
             color: false,
+            ssh: None,
             secondary: Vec::new(),
             watcher: None,
             armed_for: None,
@@ -907,6 +911,7 @@ impl LiveGit {
         self.home.clone_from(&context.home);
         self.root = context.root;
         self.color = color;
+        self.ssh = baash_lang::prompt::ssh_context(&context.user, &context.host);
         if self.armed_for.as_deref() == Some(context.cwd.as_slice()) {
             return;
         }
@@ -958,11 +963,16 @@ impl baash_repl::LivePrompt for LiveGit {
         }
         let branch = baash_lang::prompt::git_branch(&self.cwd);
         let git = baash_lang::prompt::git_status(&self.cwd);
+        let ssh = self
+            .ssh
+            .as_ref()
+            .map(|(user, host)| (user.as_slice(), host.as_slice()));
         let primary = baash_lang::prompt::fish_prompt(
             &self.cwd,
             &self.home,
             branch.as_deref(),
             git,
+            ssh,
             self.root,
             self.color,
         );

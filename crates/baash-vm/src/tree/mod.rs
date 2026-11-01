@@ -752,6 +752,10 @@ impl Interp {
         let rendered = if template == DEFAULT_PS1 {
             let branch = baash_lang::prompt::git_branch(&context.cwd);
             let git = baash_lang::prompt::git_status(&context.cwd);
+            let ssh = baash_lang::prompt::ssh_context(&context.user, &context.host);
+            let ssh = ssh
+                .as_ref()
+                .map(|(user, host)| (user.as_slice(), host.as_slice()));
             // ANSI only where the terminal will read it: `NO_COLOR` wins, and a
             // prompt going to a pipe (a recorded session, a test) stays plain.
             let color = std::env::var_os("NO_COLOR").is_none() && baash_sys::is_tty(0);
@@ -760,6 +764,7 @@ impl Interp {
                 &context.home,
                 branch.as_deref(),
                 git,
+                ssh,
                 context.root,
                 color,
             )
