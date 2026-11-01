@@ -41,7 +41,7 @@ use crate::key::{Decoder, Key};
 use crate::line::Line;
 use crate::prompt::{ExpandedPrompt, Prompt};
 use crate::render::{Frame, MenuView, Renderer};
-use crate::term::Terminal;
+use crate::term::{Input, Terminal};
 
 /// What a single key did to the editing session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +76,28 @@ pub enum ReadResult {
 pub trait Syntax {
     /// Whether `buffer` is unfinished — an open quote, `if`, here-doc, `$(`.
     fn needs_more_input(&self, buffer: &[u8]) -> bool;
+}
+
+/// A prompt that can change while a line is being edited.
+///
+/// The editor owns the screen, not the shell, so a prompt that updates while
+/// the user is thinking enters as this: the caller answers with a fresh
+/// [`Prompt`] when something changed, and `None` when nothing did. The
+/// recompute runs between keystrokes, never in the middle of one, so a slow
+/// answer delays the repaint and not the typing.
+pub trait LivePrompt {
+    /// The prompt to paint now, or `None` if it is unchanged.
+    fn refresh(&mut self) -> Option<Prompt>;
+}
+
+/// A [`LivePrompt`] that never changes anything.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NeverRefreshes;
+
+impl LivePrompt for NeverRefreshes {
+    fn refresh(&mut self) -> Option<Prompt> {
+        None
+    }
 }
 
 /// A [`Syntax`] for which every buffer is complete.
@@ -277,11 +299,31 @@ impl<'a> Editor<'a> {
     ///
     /// Raw mode is held only for the duration of this call.
     pub fn read_line(&mut self) -> io::Result<ReadResult> {
+        self.read_line_with(&mut NeverRefreshes)
+    }
+
+    /// Read one complete logical command, keeping the prompt live.
+    ///
+    /// `live` is asked for a new prompt whenever the terminal reports that the
+    /// watched directory changed, and its answer is painted immediately. The
+    /// terminal has to be armed for that to happen
+    /// ([`Terminal::set_watch`]); with no watch, this is [`Editor::read_line`].
+    pub fn read_line_with(&mut self, live: &mut dyn LivePrompt) -> io::Result<ReadResult> {
         self.begin();
         self.term.enter_raw()?;
-        let result = self.read_line_loop();
+        let result = self.read_line_loop(live);
         let _ = self.term.leave_raw();
         result
+    }
+
+    /// Hand the terminal a directory watch to await with the keyboard.
+    ///
+    /// The editor does not create it (the prompt's git segment is the shell's
+    /// business, not the editor's) and does not drain it: whoever owns the
+    /// watch answers for it in [`LivePrompt::refresh`].
+    #[cfg(unix)]
+    pub fn set_watch(&mut self, fd: Option<std::os::fd::OwnedFd>) {
+        self.term.set_watch(fd);
     }
 
     /// Apply one decoded key; returns what the caller should do next.
@@ -313,9 +355,20 @@ impl<'a> Editor<'a> {
         self.dirty = true;
     }
 
-    fn read_line_loop(&mut self) -> io::Result<ReadResult> {
+    fn read_line_loop(&mut self, live: &mut dyn LivePrompt) -> io::Result<ReadResult> {
         self.draw()?;
         loop {
+            if self.term.await_input()? == Input::Watch {
+                // No key was consumed and the line is untouched: the watched
+                // directory changed, so the prompt is repainted in place and
+                // the wait resumes. A refresh that finds nothing to say leaves
+                // the frame alone.
+                if let Some(prompt) = live.refresh() {
+                    self.set_prompt(prompt);
+                    self.draw()?;
+                }
+                continue;
+            }
             let Some(key) = self.decoder.next(self.term)? else {
                 return self.finish_eof();
             };

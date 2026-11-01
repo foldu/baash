@@ -110,6 +110,8 @@ pub struct Watcher {
     /// Events are read into this; sized for a burst rather than one event so a
     /// `git checkout` that touches a thousand files is one read.
     buf: Vec<std::mem::MaybeUninit<u8>>,
+    /// Directories the kernel accepted a watch for.
+    watched: usize,
 }
 
 /// Watch `root` (a working tree) and its git directory.
@@ -192,19 +194,31 @@ pub fn watch_worktree(root: &Path, limits: Limits) -> Result<Watcher, Why> {
 
     let fd =
         inotify::init(CreateFlags::NONBLOCK | CreateFlags::CLOEXEC).map_err(|_| Why::Refused)?;
+    let mut watched = 0;
     for dir in &dirs {
         // `EACCES` on one directory (a `~/.cache` style tree with a mode the
         // user cannot read) should not throw away the watches that did work.
-        let _ = inotify::add_watch(&fd, dir, mask());
+        if inotify::add_watch(&fd, dir, mask()).is_ok() {
+            watched += 1;
+        }
+    }
+    if watched == 0 {
+        return Err(Why::Refused);
     }
 
     Ok(Watcher {
         fd,
         buf: vec![std::mem::MaybeUninit::uninit(); 4096],
+        watched,
     })
 }
 
 impl Watcher {
+    /// Directories the kernel accepted a watch for.
+    pub fn watched_dirs(&self) -> usize {
+        self.watched
+    }
+
     /// The descriptor to await for readability.
     pub fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
         use std::os::fd::AsFd;

@@ -62,6 +62,16 @@ impl Default for Size {
     }
 }
 
+/// What [`Terminal::await_input`] was woken by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Input {
+    /// A byte is available; `read_byte` will not block.
+    Key,
+    /// The watched path changed, or the terminal's backstop says it is time to
+    /// ask. No input was consumed, so the editor can repaint and wait again.
+    Watch,
+}
+
 /// The byte and terminal-state interface the editor owns.
 ///
 /// Reads are one byte at a time because that is what the key decoder needs and
@@ -89,6 +99,23 @@ pub trait Terminal {
 
     /// Restore the terminal mode saved by [`Terminal::enter_raw`].
     fn leave_raw(&mut self) -> io::Result<()>;
+
+    /// Watch `fd` alongside the keyboard, taking ownership of it.
+    ///
+    /// `None` stops watching. The default ignores it, which is what a terminal
+    /// with no waitable directory does: the editor then never reports
+    /// [`Input::Watch`] and the prompt only changes between lines.
+    #[cfg(unix)]
+    fn set_watch(&mut self, _fd: Option<std::os::fd::OwnedFd>) {}
+
+    /// Wait until there is a keystroke or a watched change.
+    ///
+    /// [`Input::Key`] promises the next `read_byte` will not block; it consumes
+    /// nothing. The default blocks on the keyboard, so a fake is unaffected by
+    /// this method existing.
+    fn await_input(&mut self) -> io::Result<Input> {
+        Ok(Input::Key)
+    }
 }
 
 /// The real terminal: `baash-sys` for termios and the window size, stdio or the
@@ -116,6 +143,9 @@ pub struct RealTerminal {
     /// terminal, and keeping them ordered with `flush` is simpler than a second
     /// async writer.
     read_source: Option<compio::runtime::fd::PollFd<std::os::fd::OwnedFd>>,
+    /// The directory watch the prompt refreshes from, when one is armed
+    /// (`docs/prompt-watch.md`).
+    watch: Option<compio::runtime::fd::PollFd<std::os::fd::OwnedFd>>,
 }
 
 #[cfg(unix)]
@@ -129,12 +159,14 @@ impl RealTerminal {
                 tty: Some(tty),
                 raw: None,
                 read_source: None,
+                watch: None,
             },
             Err(_) => Self {
                 tty: None,
                 fd: 0,
                 raw: None,
                 read_source: None,
+                watch: None,
             },
         }
     }
@@ -189,26 +221,110 @@ impl Terminal for RealTerminal {
     }
 }
 
+/// Await two readiness futures, reporting whether the second finished first.
+///
+/// `compio` has no `select!`: `PollFd` submits one `PollOnce`
+/// (`IORING_OP_POLL_ADD`) per descriptor, so combining two of them is a
+/// `poll_fn` over the pair, and that is the whole combinator. The loser is
+/// dropped mid-poll, and what it drops is a readiness registration rather than
+/// a read, so there is no half-finished operation to unwind.
 #[cfg(unix)]
-impl Terminal for RealTerminal {
-    fn read_byte(&mut self) -> io::Result<Option<u8>> {
-        use std::os::fd::AsFd;
+async fn which_ready<A, B>(first: A, second: B) -> io::Result<bool>
+where
+    A: std::future::Future<Output = io::Result<()>>,
+    B: std::future::Future<Output = io::Result<()>>,
+{
+    use std::future::poll_fn;
+    use std::task::Poll;
 
-        // Readiness comes from the runtime; the read itself is one byte from a
-        // descriptor already known to be ready. A keystroke must not park the
-        // thread that also has to answer a scan or reap a child
-        // (`docs/direction.md` §2), and `Runtime::current()` is set by `baash`
-        // around the loop, so this needs no runtime of its own.
-        let runtime = compio::runtime::Runtime::current();
+    let mut first = std::pin::pin!(first);
+    let mut second = std::pin::pin!(second);
+    poll_fn(|cx| {
+        if let Poll::Ready(result) = first.as_mut().poll(cx) {
+            return Poll::Ready(result.map(|()| false));
+        }
+        if let Poll::Ready(result) = second.as_mut().poll(cx) {
+            return Poll::Ready(result.map(|()| true));
+        }
+        Poll::Pending
+    })
+    .await
+}
+
+#[cfg(unix)]
+impl RealTerminal {
+    /// Open the private read handle for the keyboard, once.
+    ///
+    /// A private handle, so the poll registration cannot disturb the descriptor
+    /// the editor writes through.
+    fn prepare_read_source(&mut self) -> io::Result<()> {
+        use std::os::fd::AsFd;
         if self.read_source.is_none() {
-            // A private handle, so the poll registration cannot disturb the
-            // descriptor the editor writes through.
             let owned = match self.tty.as_ref() {
                 Some(tty) => tty.try_clone()?.into(),
                 None => std::io::stdin().as_fd().try_clone_to_owned()?,
             };
             self.read_source = Some(compio::runtime::fd::PollFd::new(owned)?);
         }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Terminal for RealTerminal {
+    fn set_watch(&mut self, fd: Option<std::os::fd::OwnedFd>) {
+        // A registration failure is not worth failing the prompt over: the
+        // editor keeps waiting on the keyboard alone, which is the behaviour
+        // before there was a watcher.
+        self.watch = fd.and_then(|fd| compio::runtime::fd::PollFd::new(fd).ok());
+    }
+
+    fn await_input(&mut self) -> io::Result<Input> {
+        let runtime = compio::runtime::Runtime::current();
+        self.prepare_read_source()?;
+        let source = self.read_source.as_ref().expect("prepared just above");
+        let Some(watch) = self.watch.as_ref() else {
+            runtime.block_on(async { source.read_ready().await })?;
+            return Ok(Input::Key);
+        };
+        // The keyboard and the watch are awaited together. The pair is raced
+        // against the runtime's timer as a backstop: a completion-based poll is
+        // only as good as the kernel's willingness to complete it for this file
+        // type, and a watcher that silently stopped being awaited would leave
+        // the prompt frozen until the next keystroke. A backstop that finds
+        // nothing changed reads the watch and paints nothing.
+        //
+        // Keyboard readiness is re-checked rather than believed: a character
+        // device can answer a readiness poll with no byte behind it, and taking
+        // that for a keystroke parks the editor inside a read.
+        const BACKSTOP: std::time::Duration = std::time::Duration::from_secs(1);
+        loop {
+            let watched = match runtime.block_on(compio::time::timeout(
+                BACKSTOP,
+                which_ready(source.read_ready(), watch.read_ready()),
+            )) {
+                Ok(Ok(watched)) => watched,
+                Ok(Err(error)) => return Err(error),
+                // The backstop: a chance to refresh, not an event.
+                Err(_elapsed) => return Ok(Input::Watch),
+            };
+            if watched {
+                return Ok(Input::Watch);
+            }
+            if baash_sys::bytes_available(self.fd) > 0 {
+                return Ok(Input::Key);
+            }
+        }
+    }
+
+    fn read_byte(&mut self) -> io::Result<Option<u8>> {
+        // Readiness comes from the runtime; the read itself is one byte from a
+        // descriptor already known to be ready. A keystroke must not park the
+        // thread that also has to answer a scan or reap a child
+        // (`docs/direction.md` §2), and `Runtime::current()` is set by `baash`
+        // around the loop, so this needs no runtime of its own.
+        let runtime = compio::runtime::Runtime::current();
+        self.prepare_read_source()?;
         let source = self.read_source.as_ref().expect("prepared just above");
         runtime.block_on(async { source.read_ready().await })?;
 

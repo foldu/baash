@@ -104,6 +104,19 @@ fn open_flags(flags: libc::c_int) -> io::Result<OFlags> {
 ///
 /// `mode` is only used when `flags` contains `O_CREAT`/`O_TMPFILE`, as for
 /// `open(2)`. An embedded NUL in `path` is rejected rather than truncated.
+/// Bytes the kernel has queued for `fd`, or zero if it will not say.
+///
+/// The line editor asks this to decide whether a readiness report is backed by
+/// data: a character device may answer a poll without input queued, and acting
+/// on that would leave the editor waiting for a keystroke that never comes.
+pub fn bytes_available(fd: RawFd) -> usize {
+    // SAFETY: `fd` is an open descriptor the caller owns; the borrow does not
+    // outlive this call and `ioctl_fionread` only reads the queue length.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    usize::try_from(rustix::io::ioctl_fionread(borrowed).unwrap_or(0)).unwrap_or(0)
+}
+
+/// `open` with `O_CLOEXEC` set.
 pub fn open_cloexec(path: &[u8], flags: libc::c_int, mode: libc::mode_t) -> io::Result<OwnedFd> {
     let path = cstring(path)?;
     let flags = open_flags(flags)? | OFlags::CLOEXEC;

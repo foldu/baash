@@ -278,6 +278,31 @@ fn cursor_right_after(output: &[u8], from: usize) -> Option<usize> {
         .ok()
 }
 
+/// A change in the working tree repaints the prompt without a keystroke.
+///
+/// This is the whole point of the watcher (`docs/prompt-watch.md`): the counts
+/// are not a snapshot taken when the line began, so a file created by another
+/// program appears in front of the user while they are still thinking.
+#[test]
+fn the_prompt_updates_while_the_line_is_idle() {
+    let home = temp_dir("live-home");
+    let work = temp_dir("live-work");
+    let initialized = std::process::Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .arg(&work)
+        .status()
+        .expect("run git init");
+    assert!(initialized.success(), "git init failed");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    // The stock prompt: path, branch, counters.
+    session.prompt("main $ ");
+    // Nothing was typed, so only the watcher can have noticed this.
+    std::fs::write(work.join("new.txt"), "x").expect("create an untracked file");
+    session.expect(b"?1", Duration::from_secs(10));
+    session.send(b"exit\n");
+    session.wait_child();
+}
+
 #[test]
 fn a_coloured_prompt_with_a_variable_and_a_substitution_keeps_the_cursor_right() {
     let home = temp_dir("colour-home");

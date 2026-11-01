@@ -86,8 +86,9 @@ pub use access::{Access, access};
 pub use bytes::{NulByte, cstring, cstrings};
 #[cfg(unix)]
 pub use fd::{
-    Pipe, chdir, close, create_unlinked_temp, dup, dup_above, dup2, fd_is_cloexec, fd_is_open,
-    lseek, open_cloexec, poll_readable, read_all, read_fd, seek, set_cloexec, write_all, write_fd,
+    Pipe, bytes_available, chdir, close, create_unlinked_temp, dup, dup_above, dup2, fd_is_cloexec,
+    fd_is_open, lseek, open_cloexec, poll_readable, read_all, read_fd, seek, set_cloexec,
+    write_all, write_fd,
 };
 pub use outcome::WaitOutcome;
 #[cfg(unix)]

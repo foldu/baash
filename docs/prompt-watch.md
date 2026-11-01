@@ -49,15 +49,32 @@ the decoder still uses. The loop above is the *shape*, not the implementation.
 
 The shell is on compio (io_uring) already, and a hand-rolled `poll` would be a
 second wait mechanism beside the reactor that drives the rest of the loop. So
-the watch descriptor is submitted as `compio_driver::op::PollOnce` with
-`Interest::READABLE` — `IORING_OP_POLL_ADD` on an arbitrary fd — and the
-reactor that wakes the keystroke wakes the watcher through the same completion
-queue. That is why [`baash_sys::watch`] hands back a non-blocking descriptor and
-never reads on its own: `pending()` drains what the kernel has already queued,
-and something else owns the waiting.
+the watch descriptor is awaited as a `PollOnce` op — `IORING_OP_POLL_ADD` on an
+arbitrary fd — and the reactor that wakes the keystroke wakes the watcher through
+the same completion queue. Measured latency from "another program created a
+file" to "the prompt shows the new count" is about a millisecond.
+
+There is no `select!` in compio 0.19. `compio::runtime::fd::PollFd` submits one
+`PollOnce` per descriptor, so combining two of them is a `poll_fn` over the pair
+(`which_ready` in `crates/baash-repl/src/term.rs`) and that is the whole
+combinator: poll the first, poll the second, `Pending` if neither is ready. The
+loser of a race is dropped mid-poll, and what it drops is a readiness
+registration rather than a read, so nothing is half-done.
+
+Two details that are easy to get wrong, both measured:
+
+* **The keyboard's readiness is not believed.** A character device can answer a
+  readiness poll with no byte behind it, and taking that for a keystroke parks
+  the editor inside a read — where the watch is no longer awaited. Readiness is
+  confirmed with `FIONREAD` (`baash_sys::bytes_available`) before it counts.
+* **The pair is raced against a timer.** A completion-based poll is only as good
+  as the kernel's willingness to complete it, and on a network filesystem
+  `inotify` delivers nothing at all. A one-second backstop reports "ask the
+  prompt whether anything changed"; when nothing did, that is one `read` on the
+  watch and no frame.
 
 The multi-fd `poll` helper is therefore **not** needed for the watcher; it stays
-useful only for the `Esc`/`Alt` decoding fix in §7 step 2.
+useful only for the `Esc`/`Alt` decoding fix in §7.
 
 ## 2. Watching: cheap events continuously, expensive check only when idle
 
@@ -191,14 +208,16 @@ slow is not.
    branch ref, the depth cap, the budget, symlinked directories and the
    `.git`-file of a linked worktree. `git_dir()` is here too, so the prompt and
    the watcher agree about which repository is being shown.
-2. **Next** — `baash-repl`: the editor loop awaits `[tty, watch_fd]`; a
-   `Watcher` trait with a fake for tests; `Esc` decoding improves as a side
-   effect.
-3. Segment rendering + `shopt prompt_watch` + the debounce/abandon rules. The
-   parts of the old steps 3–4 that assumed a `git status` subprocess are gone:
-   the segment is computed in process by `gix` and the branch by the
-   hand-rolled `.git` reader, so nothing spawns and there is nothing to set
-   `GIT_OPTIONAL_LOCKS` for (`docs/contracts.md` §3).
+2. **Done** — `baash-repl`: `Terminal::await_input` waits for the keyboard or
+   the watch, and `Editor::read_line_with` repaints the prompt from a
+   `LivePrompt` when it wakes. `baash` supplies one that recomputes the stock
+   prompt's git segment from the filesystem, so nothing in this path borrows the
+   interpreter and a user-defined `PS1` (which would mean running shell code
+   between keystrokes) keeps the worker-fed `[branch]` segment instead.
+3. **Partly done** — the segment is the stock prompt's own, recomputed on a
+   change; `shopt prompt_watch` and the abandon-on-keystroke rules are not
+   needed in this shape, because the recompute happens between keystrokes and
+   is a `gix` walk in process, not a subprocess (`docs/contracts.md` §3).
 4. Optional: shell hook; Windows (`ReadDirectoryChangesW` awaited the same way
    as the inotify descriptor).
 

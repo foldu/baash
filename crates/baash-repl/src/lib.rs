@@ -95,12 +95,14 @@ mod term;
 pub use baash_highlight::Theme;
 
 pub use baash_runtime::History;
-pub use editor::{Config, Editor, Flow, NeverNeedsMore, ReadResult, Syntax};
+pub use editor::{
+    Config, Editor, Flow, LivePrompt, NeverNeedsMore, NeverRefreshes, ReadResult, Syntax,
+};
 pub use key::{Decoder, Key};
 pub use line::Line;
 pub use prompt::{ExpandedPrompt, Prompt, PromptState, expand, is_root};
 pub use render::{Frame, MenuRow, MenuView, Renderer};
-pub use term::{RealTerminal, Size, Terminal};
+pub use term::{Input, RealTerminal, Size, Terminal};
 
 /// Paint `line` for display.
 ///
