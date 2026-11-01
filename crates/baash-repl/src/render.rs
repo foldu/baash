@@ -468,16 +468,25 @@ fn style_at(spans: &[Styled], index: &mut usize, position: usize) -> Style {
     }
 }
 
-/// Paint history ghost text dimly. Without colour it would be
+/// Paint history ghost text in bright black. Without colour it would be
 /// indistinguishable from text the user typed, so it is not painted at all.
+///
+/// The attribute for this is `2` (faint), which is what this used: it is the
+/// obvious choice and the wrong one, because a terminal is free to ignore it or
+/// to render it as the same colour as the text — and then a suggestion reads as
+/// something the user typed. Bright black is a *colour*, so the palette always
+/// has one and the terminal always draws it, and it is the grey fish and
+/// zsh-syntax-highlighting use for the same job. It is restored with `39`
+/// (default foreground) rather than a full reset, so whatever was painted
+/// before the ghost keeps its style.
 fn paint_ghost(canvas: &mut Canvas, ghost: &[u8], color: bool) {
     if !color {
         return;
     }
-    canvas.raw(b"\x1b[2m");
+    canvas.raw(b"\x1b[90m");
     let expanded = Expanded::new(ghost);
     for segment in expanded.segments() {
         canvas.cell(&expanded.bytes()[segment.display.clone()], segment.width);
     }
-    canvas.raw(b"\x1b[22m");
+    canvas.raw(b"\x1b[39m");
 }
