@@ -527,6 +527,15 @@ impl Opts {
         Flag::lookup(name).map(|flag| self.get_flag(flag))
     }
 
+    /// Value of a `set -o` option by name, for `[[ -o name ]]`.
+    ///
+    /// Only the `set -o` table answers: `shopt` names such as `extglob` are not
+    /// options as far as `[[ -o ]]` is concerned, which is what bash reports.
+    pub fn get_set_option(&self, name: &[u8]) -> Option<bool> {
+        let flag = Flag::lookup(name)?;
+        flag.in_kind(OptionKind::SetO).then(|| self.get_flag(flag))
+    }
+
     /// Enable or disable a single-letter `set` option (`-e`, `+x`, …).
     pub fn set_by_short(&mut self, short: u8, on: bool) -> Result<(), Error> {
         let flag = Flag::from_short(short).ok_or_else(|| Error::UnknownOption {

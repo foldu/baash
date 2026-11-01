@@ -1172,6 +1172,32 @@ fn aliases(home: &Path, config: &Path, system: &Path, args: &[&str]) -> (String,
 }
 
 #[test]
+fn a_malformed_conditional_names_the_file_and_line() {
+    let dir = TestDir::new("cond-diag");
+    let script = dir.path().join("cond.sh");
+    std::fs::write(&script, "echo hi\n[[ a b ]]\n").expect("write script");
+    let output = baash().arg(&script).output().expect("spawn baash");
+    assert_eq!(code(&output), 2);
+    let message = stderr(&output);
+    assert!(
+        message.contains("cond.sh:2:6"),
+        "the file, line and column of the stray token: {message}"
+    );
+    assert!(
+        !message.contains("<none>"),
+        "a diagnostic must name a real source: {message}"
+    );
+
+    // `-c` has no file, so the shell names itself rather than a placeholder.
+    let output = baash()
+        .args(["-c", "echo hi; [[ a b ]]"])
+        .output()
+        .expect("spawn baash");
+    let message = stderr(&output);
+    assert!(message.contains("baash:1:15"), "{message}");
+}
+
+#[test]
 fn the_built_in_config_is_read_first_and_the_user_file_overrides_it() {
     let dir = TestDir::new("builtin-config");
     let home = dir.path().join("home");

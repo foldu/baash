@@ -5,6 +5,11 @@
 //! over that span: `!`, `&&`, `||`, `( … )` with the C-like precedence bash
 //! uses, plus the unary and binary operators below.
 //!
+//! `-o name` is the one operator that reads shell state: it answers whether an
+//! option `set -o` knows is on, which is how a startup file asks "is this shell
+//! interactive enough to record anything?" (zoxide's hook does exactly that).
+//! An unknown name is false rather than an error, as bash has it.
+//!
 //! Inside `[[ ]]` the operands undergo tilde, parameter, command and arithmetic
 //! expansion and quote removal, but **no field splitting and no pathname
 //! expansion** (POSIX XCU 2.13, bash's documented behaviour); that is why every
@@ -23,7 +28,7 @@ use baash_lang::Shell as _;
 use baash_runtime::{ShellHost, Status};
 
 use super::words::{CondToken, binary_operator, conditional_tokens, unary_operator};
-use super::{Interp, ParsedChunk};
+use super::{Interp, ParsedChunk, SourceFile};
 
 /// Parse a `[[ … ]]` body without expanding or evaluating anything.
 ///
@@ -48,16 +53,18 @@ pub(crate) fn validate(
     let tokens = conditional_tokens(text, extglob);
     let mut parser = Parser {
         interp,
+        source: &chunk.source,
         text,
         tokens,
         pos: 0,
-        span: body,
+        span: body.clone(),
+        base: body.start,
         validate: true,
     };
     let result = parser.or_expr();
     match result {
         Ok(_) if parser.pos >= parser.tokens.len() => Ok(()),
-        Ok(_) => Err((parser.span.clone(), "unexpected token".to_owned())),
+        Ok(_) => Err((parser.peek_span(), "unexpected token".to_owned())),
         Err(message) => Err((
             parser.span.clone(),
             if message.is_empty() {
@@ -83,10 +90,12 @@ pub(crate) fn evaluate(
     let tokens = conditional_tokens(text, extglob);
     let mut parser = Parser {
         interp,
+        source: &chunk.source,
         text,
         tokens,
         pos: 0,
-        span: body,
+        span: body.clone(),
+        base: body.start,
         validate: false,
     };
     let result = parser.or_expr();
@@ -113,10 +122,16 @@ pub(crate) fn evaluate(
 
 struct Parser<'a> {
     interp: &'a mut Interp,
+    /// The chunk whose bytes `text` is a slice of: diagnostics are rendered
+    /// against it, because nothing else knows which file a span belongs to.
+    source: &'a Arc<SourceFile>,
     text: &'a [u8],
     tokens: Vec<CondToken>,
     pos: usize,
     span: Range<usize>,
+    /// Where `text` starts inside the chunk: token ranges are relative to the
+    /// body, spans in a diagnostic are relative to the chunk.
+    base: usize,
     /// Parse the grammar without expanding operands or evaluating anything.
     ///
     /// The chunk-level validator uses this to reject a malformed conditional
@@ -138,8 +153,12 @@ impl Parser<'_> {
         if self.validate {
             return;
         }
-        self.interp
-            .report(crate::codes::CONDITIONAL, self.span.clone(), message);
+        self.interp.report_in(
+            self.source,
+            crate::codes::CONDITIONAL,
+            self.span.clone(),
+            message,
+        );
     }
 
     fn peek(&self) -> Option<&CondToken> {
@@ -152,6 +171,29 @@ impl Parser<'_> {
             return true;
         }
         false
+    }
+
+    /// The token at the cursor, as a span in the chunk, for a diagnostic.
+    ///
+    /// Tokens carry ranges into the conditional's body; a diagnostic wants the
+    /// same bytes counted from the start of the chunk, which is what `base`
+    /// shifts them by. The bare operators (`&&`, `||`, `(`, `)`) have no range
+    /// of their own and fall back to the span the parser was handed.
+    fn peek_span(&self) -> Range<usize> {
+        let range = match self.peek() {
+            Some(
+                CondToken::Word(range)
+                | CondToken::Bang(range)
+                | CondToken::Eq(range)
+                | CondToken::Ne(range)
+                | CondToken::Match(range)
+                | CondToken::Lt(range)
+                | CondToken::Gt(range)
+                | CondToken::Unexpected(range),
+            ) => range.clone(),
+            _ => return self.span.clone(),
+        };
+        self.base + range.start..self.base + range.end
     }
 
     fn take_word(&mut self) -> Option<Range<usize>> {
@@ -168,6 +210,7 @@ impl Parser<'_> {
             _ => return None,
         };
         self.pos += 1;
+        self.span = self.base + range.start..self.base + range.end;
         Some(range)
     }
 
@@ -244,6 +287,7 @@ impl Parser<'_> {
                 _ => None,
             };
             if let Some(operator) = comparison {
+                self.span = self.peek_span();
                 self.pos += 1;
                 let Some(right) = self.take_word() else {
                     return Err(format!(
@@ -484,6 +528,16 @@ impl Parser<'_> {
                     metadata().is_ok()
                 }
             }
+            // `[[ -o name ]]`: a shell option by the name `set -o` takes.
+            // bash answers false for an unknown one instead of failing, so a
+            // typo in a startup file cannot make a conditional a syntax error,
+            // and `shopt` names are not options here.
+            b"-o" => self
+                .interp
+                .state
+                .opts
+                .get_set_option(&operand.bytes)
+                .unwrap_or(false),
             b"-v" => {
                 // `-v name[subscript]` asks whether one element is set; a bare
                 // name asks whether the variable exists at all (an array

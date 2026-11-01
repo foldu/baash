@@ -719,5 +719,6 @@ pub(crate) fn unary_operator(word: &[u8]) -> bool {
             | b"-x"
             | b"-z"
             | b"-n"
+            | b"-o"
     )
 }

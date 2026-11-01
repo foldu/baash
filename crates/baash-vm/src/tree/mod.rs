@@ -911,7 +911,10 @@ impl Interp {
         // in the chunk runs; the evaluator parses conditionals lazily, so the
         // pass is done here, at the one entry point every chunk goes through.
         if let Some((span, message)) = self.validate_conditionals(&chunk) {
-            self.report(crate::codes::CONDITIONAL, span, message);
+            // The chunk's own source: `self.current` is only switched to it
+            // below, and a diagnostic rendered against the previous file has
+            // no line to point at.
+            self.report_in(&chunk.source, crate::codes::CONDITIONAL, span, message);
             self.set_status(Status(2));
             return Unwind::Status(Status(2));
         }
@@ -1156,6 +1159,34 @@ impl Interp {
         message: impl Into<String>,
     ) {
         self.diagnose(&Diagnostic::error(code, span, message.into()));
+    }
+
+    /// Report a diagnostic against an explicit source, with a span into it.
+    pub(crate) fn report_in(
+        &mut self,
+        source: &Arc<SourceFile>,
+        code: baash_diag::ErrCode,
+        span: baash_diag::Span,
+        message: impl Into<String>,
+    ) {
+        self.diagnose_in(source, &Diagnostic::error(code, span, message.into()));
+    }
+
+    /// Render and print a diagnostic against an explicit source.
+    ///
+    /// `[[ … ]]` runs its own sub-parser over a chunk's bytes while
+    /// `self.current` may still be some other file, and an error reported
+    /// against the wrong source has no line to point at: the caller that knows
+    /// which file a span belongs to names it here.
+    pub(crate) fn diagnose_in(&mut self, source: &Arc<SourceFile>, diagnostic: &Diagnostic) {
+        let rendered = if self.interactive {
+            baash_diag::render_compact(diagnostic, source)
+        } else {
+            diagnostic.render_line_with_help(source)
+        };
+        let mut line = rendered.into_bytes();
+        line.push(b'\n');
+        let _ = self.write_err(&line);
     }
 
     /// Print a non-fatal control-flow warning.
@@ -1939,14 +1970,7 @@ impl ShellHost for Interp {
 
     fn diagnose(&mut self, diagnostic: &Diagnostic) {
         let source = self.current.clone();
-        let rendered = if self.interactive {
-            baash_diag::render_compact(diagnostic, &source)
-        } else {
-            diagnostic.render_line_with_help(&source)
-        };
-        let mut line = rendered.into_bytes();
-        line.push(b'\n');
-        let _ = self.write_err(&line);
+        self.diagnose_in(&source, diagnostic);
     }
 
     fn resolve_command(
