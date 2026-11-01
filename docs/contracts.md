@@ -1211,6 +1211,15 @@ primary expectations are byte-calibrated: measured, bash falls from 2574 to
 2435 under `C.UTF-8`, while counting characters gains us 15. UTF-8 is therefore
 a diagnostic mode, not the baseline.
 
+**The helpers name their interpreter by absolute path.** `spec/oils/bin/*.py`
+start with `#!/usr/bin/env python2`; when the harness substitutes its Python 3
+equivalents it writes the shebang itself, from the `python3` it found on `PATH`.
+`#!/usr/bin/env` assumes `/usr/bin/env` exists, which a minimal container and a
+nix build sandbox both lack — the shims then exit 127 and every case that uses
+`argv.py` fails for a reason that has nothing to do with the shell (357 cases,
+measured). The same substitution runs whenever `python3` exists, even if
+`python2` does too, so the vendored helpers' `env` shebang is never used.
+
 ### The binary's REPL loop (`crates/baash/src/main.rs`)
 
 Before each `editor.read_line()` the loop, in order: swaps the history ring into

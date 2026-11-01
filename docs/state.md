@@ -54,7 +54,7 @@ a stale brief has already cost two wrong scopes (arrays: 54 vs real; namerefs:
 | of the whole suite (3971 cases) | 56.3 % |
 | as a fraction of bash's score | 2344 / 2577 = 91.0 % |
 | share of the bash gap closed since 1013 | 1331 / 1564 = 85.1 % |
-| our test count | 1296 |
+| our test count | 1298 |
 
 Measured with `bash 5.3.20` as the comparison shell, harness forced to
 `LC_ALL=C` (bash scores *worse* under `C.UTF-8`: 2574 → 2435, so the C locale
@@ -80,6 +80,35 @@ database cost seven cases and gained one (1968/1914 → 1962/1908): `history
 `HISTFILE=my-history` interactive cases. A case that expected `fc` to reject
 too many arguments now passes because `fc` does not exist (status 127). The
 count was diffed case by case against the previous commit; nothing else moved.
+
+### How it is built and checked
+
+One toolchain, pinned in `flake.nix` (`rust-overlay`, Rust 1.99.1), serves the
+dev shell, the checks and the release build; `crane` builds the dependency graph
+once so the checks share it.
+
+`nix flake check` is the gate, and it holds what a derivation can hold:
+
+| check | what it is |
+|---|---|
+| `build` | the package, which also installs `baash-spec` |
+| `fmt` | `cargo fmt --check` |
+| `clippy` | `cargo clippy --deny warnings`, workspace, all targets and features |
+| `windows` | `packages.<system>.windows`: the `x86_64-pc-windows-gnu` exe |
+
+Two things stay jobs, for reasons the sandbox dictates:
+
+* **The test suite.** The `interactive_*` tests drive a real pty. In a build
+  sandbox `openpty` succeeds and reads then hang, so the suite runs on a real
+  `/dev/pts` instead, via `nix develop --command cargo test`.
+* **Conformance.** 18 cases read the machine rather than the shell — hostname,
+  tzdata, effective uid, wall-clock timers — so a sandbox measures 2326 where a
+  real environment measures 2344. The job runs the *nix-built* binaries in the
+  runner's environment, which is the environment the baseline was recorded in.
+
+The Windows derivation is the reason the old CI job shrank from a `nix shell`
+package list to `nix build .#windows`: rustup, zig, cargo-zigbuild, the host
+`cc` and the `windres` shim are all inputs of the derivation now.
 
 ## 3. Layers
 
@@ -523,13 +552,12 @@ Where the waves stand:
   stripped, 16.4 MiB) is built by CI so the local loop stays fast. Each
   embedded utility runs on its own worker thread, because uutils' message
   catalog is thread-local and single-utility: warm dispatch is 3.7 µs, and a
-  utility's first call costs 57–191 µs (thread plus catalog). The CI job pins
-  its rustup toolchain (`1.99.1`) because its cache is keyed on the branch, not
-  the compiler; it takes `gcc` too, because rustc's host linker is `cc` and the
-  proc-macro build scripts are host binaries (`nix shell` inherits no stdenv,
-  unlike `nix develop`); and it shims `windres` from `ci/windres`. The artifact
-  is a PE32+ console executable at
-  `target/x86_64-pc-windows-gnu/windows/baash.exe`.
+  utility's first call costs 57–191 µs (thread plus catalog). The exe is a nix
+  derivation (`packages.<system>.windows`): `cargo zigbuild` against a
+  rust-overlay toolchain that carries the target's std, `ci/windres` for
+  `turso_sdk_kit`'s hardcoded `windres` call, and `llvmPackages.clang` because
+  that resource compiler preprocesses the script. Nothing about it is
+  improvised in CI any more.
   `$PPID` is the one identity variable Windows cannot answer, so it is left
   unset there rather than zero (`parent_pid() -> Option<u32>`).
 

@@ -392,19 +392,25 @@ unix-only code.
 
 One Windows build detail: `turso_sdk_kit`'s build script links a version
 resource by invoking plain `windres`, which `cargo-zigbuild` does not provide.
-The shim is checked in as `ci/windres` — `exec llvm-windres "$@"` — and CI puts
-it on `PATH` under the plain name, with `llvm-windres` coming from
-`nixpkgs#llvmPackages.bintools`.
+The shim is checked in as `ci/windres` — `exec "${BAASH_WINDRES:-llvm-windres}"
+"$@"` — and the Windows derivation puts it on `PATH` under the plain name with
+`BAASH_WINDRES` naming the real compiler (`llvmPackages.bintools-unwrapped`:
+the wrapped path needs a stdenv environment that a build script does not have).
 
 It is a wrapper *script*, not a symlink, on purpose: nix-wrapped binutils
 resolve their own directory from `argv[0]`, so a symlink to one of those breaks
 it. LLVM's binary does not care, but the script is the form that stays correct
 whichever resource compiler is behind it.
 
-The MinGW cross-`windres` also works, but needs a different wrapper: it shells
-out to `x86_64-w64-mingw32-gcc` as its preprocessor, which
-`cargo-zigbuild`'s toolchain does not contain, so the wrapper has to prepend the
-MinGW `bin` to `PATH` rather than just `exec` the one binary — otherwise it
-fails with `x86_64-w64-mingw32-gcc: command not found`. LLVM's needs no
-preprocessor of its own for a script with no `#include`, so that dance is
-skipped.
+Either way, the resource compiler **preprocesses** the script before compiling
+it, so a C preprocessor has to be on `PATH` as well — this is the part that is
+easy to miss because it only bites where the wrapper was not in the picture:
+
+* LLVM's looks for `clang` and gives up with `llvm-rc: Unable to find clang for
+  preprocessing.` when there is none, so the derivation takes
+  `llvmPackages.clang` next to the bintools. `--no-preprocess` is not a way out:
+  the script turso generates is built out of `#define`s (`FLAGSMASK`, `VORG_NT`
+  …), which then never expand.
+* The MinGW cross-`windres` shells out to `x86_64-w64-mingw32-gcc` and fails
+  with `x86_64-w64-mingw32-gcc: command not found`, so that wrapper has to
+  prepend the MinGW `bin` to `PATH` rather than just `exec` the one binary.

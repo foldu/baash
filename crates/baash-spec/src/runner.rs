@@ -290,10 +290,12 @@ pub fn run(plans: &[FilePlan], options: &Options) -> Result<Report, String> {
     // `#!/usr/bin/env python2`.  When python2 is unavailable, use Python 3
     // equivalents (same output) instead of failing every argv.py test for an
     // environmental reason.
-    let shim_bin = if command_on_path("python2") {
-        None
-    } else {
-        Some(shim.write_helper_shims()?)
+    // Python 3 gets shims of its own even when python2 is present: the vendored
+    // helpers start with `#!/usr/bin/env python2`, and that shebang needs
+    // `/usr/bin/env`, which a minimal runtime may not have.
+    let shim_bin = match helper_interpreter() {
+        Some(interpreter) => Some(shim.write_helper_shims(&interpreter)?),
+        None => None,
     };
     let mut path = String::new();
     if let Some(dir) = &shim_bin {
@@ -451,7 +453,7 @@ fn missing_helper(case: &Case) -> Option<String> {
 /// nothing could be measured. Callers turn this into a distinct exit code so
 /// "cannot measure" never looks like "got worse".
 pub fn require_helper_runtime() -> Result<(), String> {
-    if command_on_path("python2") || command_on_path("python3") {
+    if helper_interpreter().is_some() || command_on_path("python2") {
         return Ok(());
     }
     Err("the suite's helpers need python2 or python3 on PATH; \
@@ -459,11 +461,24 @@ pub fn require_helper_runtime() -> Result<(), String> {
         .to_string())
 }
 
+/// The Python 3 to write the helper shims for, if there is one.
+///
+/// Absolute, because the shims' shebang has to name an interpreter that exists
+/// where the case runs: `#!/usr/bin/env python3` assumes `/usr/bin/env`, which a
+/// minimal container or a nix build sandbox does not have.
+fn helper_interpreter() -> Option<PathBuf> {
+    which("python3")
+}
+
+fn which(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
 fn command_on_path(name: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
+    which(name).is_some()
 }
 
 fn invokes_command(code: &str, name: &str) -> bool {
@@ -901,8 +916,9 @@ impl RepoShim {
         })
     }
 
-    /// Write Python 3 replacements for the suite's Python 2 helpers.
-    fn write_helper_shims(&self) -> Result<PathBuf, String> {
+    /// Write Python 3 replacements for the suite's Python 2 helpers, with
+    /// `interpreter` in the shebang instead of `/usr/bin/env`.
+    fn write_helper_shims(&self, interpreter: &Path) -> Result<PathBuf, String> {
         let helpers: [(&str, &str); 5] = [
             ("argv.py", ARGV_PY),
             ("printenv.py", PRINTENV_PY),
@@ -912,7 +928,7 @@ impl RepoShim {
         ];
         for (name, body) in helpers {
             let path = self.shim_bin.join(name);
-            fs::write(&path, body)
+            fs::write(&path, shim_source(body, interpreter))
                 .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
             #[cfg(unix)]
             {
@@ -922,6 +938,17 @@ impl RepoShim {
             }
         }
         Ok(self.shim_bin.clone())
+    }
+}
+
+/// A helper's text with `interpreter` in the shebang, replacing the `#!` line
+/// the Python 2 original carries.
+fn shim_source(body: &str, interpreter: &Path) -> String {
+    match body.split_once('\n') {
+        Some((first, rest)) if first.starts_with("#!") => {
+            format!("#!{}\n{rest}", interpreter.display())
+        }
+        _ => format!("#!{}\n{body}", interpreter.display()),
     }
 }
 
@@ -1016,6 +1043,25 @@ mod tests {
     fn parse_case(text: &str) -> Case {
         let file = parse_text("x.test.sh", Path::new("x.test.sh"), text).unwrap();
         file.cases.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn helper_shims_name_the_interpreter_by_path() {
+        // `#!/usr/bin/env python3` needs `/usr/bin/env`, which a minimal
+        // container or a build sandbox does not have; the shebang names the
+        // interpreter the harness found instead.
+        let source = shim_source(ARGV_PY, Path::new("/opt/python/bin/python3"));
+        assert!(
+            source.starts_with("#!/opt/python/bin/python3\nimport os\n"),
+            "{source}"
+        );
+        assert!(!source.contains("/usr/bin/env"), "{source}");
+    }
+
+    #[test]
+    fn helper_shims_gain_a_shebang_when_the_body_has_none() {
+        let source = shim_source("print('hi')\n", Path::new("/bin/python3"));
+        assert_eq!(source, "#!/bin/python3\nprint('hi')\n");
     }
 
     #[test]

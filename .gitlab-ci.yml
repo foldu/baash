@@ -12,106 +12,68 @@ stages:
   - package
 
 variables:
-  CARGO_TERM_COLOR: always
   GIT_DEPTH: "1"
 
 default:
   interruptible: true
 
-# Everything is built through the flake, so every job needs the nix runner:
-# untagged jobs get a bare ubuntu image with no nix daemon.
-.nix-cache: &nix_cache
-  cache:
-    key: "$CI_JOB_NAME-$CI_COMMIT_REF_SLUG"
-    paths:
-      - target/
-
-lint:
+# Everything that can be a derivation is one, so this job is one command: the
+# release build, `cargo fmt`, `cargo clippy`, the conformance ratchet and the
+# Windows cross build are all `checks.*` (see `flake.nix`). Nothing here knows
+# what a compiler needs on `PATH` — the derivations do.
+check:
   stage: check
   tags: [nix]
-  <<: *nix_cache
   script:
-    - nix develop --command cargo fmt --all -- --check
-    - nix develop --command cargo clippy --workspace --all-targets --all-features -- --deny warnings
+    - nix flake check --print-build-logs
 
-test:
-  stage: check
-  tags: [nix]
-  <<: *nix_cache
-  script:
-    - nix develop --command cargo test --workspace --all-features
-
+# Not a check either: 18 cases read the machine rather than the shell —
+# hostname, tzdata, effective uid, wall-clock timers — so a build sandbox
+# measures 2326 where a real environment measures 2344. The *binaries* here are
+# the nix-built ones; only the environment is the runner's, which is the number
+# `crates/baash-spec/baseline.txt` was recorded against.
 conformance:
   stage: check
   tags: [nix]
-  <<: *nix_cache
-  # A ratchet, not a dashboard: this job fails the pipeline when the pass count
-  # drops below crates/baash-spec/baseline.txt. Re-record with `--record` only
-  # when a drop is intended, and commit the file with the change that caused it.
-  #
-  # The tolerance covers one known load-sensitive case (builtin-trap's
-  # "traps are cleared in subshell (started with &)" flips under parallel
-  # load); narrowing it to 0 is a TODO once that race is fixed.
-  #
-  # Exit codes: 1 = below baseline, 2 = cannot measure (no python2/python3 for
-  # the suite's helpers). The second is distinct on purpose: a runner that
-  # cannot measure must not look like a shell that got worse.
   script:
-    - nix develop --command cargo build -p baash
-    - nix develop --command cargo run -p baash-spec -- --shell target/debug/baash --ratchet --tolerance 5
+    # `pkg` is not a safe name: `nix develop` exports one of its own (it is the
+    # stdenv's gcc wrapper), so this uses its own.
+    - BAASH_PKG=$(nix build --print-out-paths .#default)
+    - export BAASH_PKG
+    - nix develop --command bash -c 'LC_ALL=C BAASH_SPEC_WORKSPACE_ROOT=$PWD "$BAASH_PKG/bin/baash-spec" --shell "$BAASH_PKG/bin/baash" --spec-dir "$PWD/spec/oils" --baseline "$PWD/crates/baash-spec/baseline.txt" --list-failures --ratchet --tolerance 5'
+
+# The one thing that is not a check. The `interactive_*` tests drive a real pty,
+# and a nix build sandbox has no usable `/dev/pts`: `openpty` succeeds and reads
+# then hang. This job runs on a real pty, in the same pinned toolchain the
+# checks use (`nix develop` takes it from the flake).
+test:
+  stage: check
+  tags: [nix]
+  cache:
+    key: "test-$CI_COMMIT_REF_SLUG"
+    paths:
+      - target/
+  script:
+    - nix develop --command cargo test --workspace --all-features
 
 package:
   stage: package
   tags: [nix]
   script:
-    - nix build --print-build-logs .#default
+    - nix build .#default -o result
     - mkdir -p dist
     - cp -L result/bin/baash dist/
   artifacts:
     paths:
       - dist/
 
-# The Windows build is the slow one on purpose: `profile.windows` is fat LTO
-# with one codegen unit, which nobody should pay in a local loop. It needs a
-# Rust toolchain that carries the target's std (nixpkgs' rustc does not), so
-# rustup installs one into the project cache, and cargo-zigbuild supplies the
-# mingw linker through zig.
-#
-# The toolchain version is named rather than `stable`: this job's cache is keyed
-# on the branch, not on the compiler, so a moving `stable` would silently change
-# what ships. Bump it deliberately (and say what was verified) when it moves.
 package:windows:
   stage: package
   tags: [nix]
-  variables:
-    RUSTUP_HOME: "$CI_PROJECT_DIR/.rustup"
-    CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
-  cache:
-    key: "windows-$CI_COMMIT_REF_SLUG"
-    paths:
-      - target/
-      - .rustup/
-      - .cargo/
-  # The runner image is Alpine, so nothing the build needs may be assumed from
-  # it — and this job uses `nix shell`, not `nix develop`, so it does not
-  # inherit a stdenv either. Three things come from the shell list instead:
-  # `bash`; `gcc`, because rustc's host linker is `cc` and the proc-macro build
-  # scripts are host binaries; and a `windres` for `turso_sdk_kit`'s build
-  # script, which hardcodes that name for gnu targets (`ci/windres`, execing
-  # the LLVM resource compiler from `llvmPackages.bintools`).
   script:
-    - |
-      nix shell nixpkgs#bash nixpkgs#gcc nixpkgs#rustup nixpkgs#cargo-zigbuild nixpkgs#zig nixpkgs#llvmPackages.bintools \
-        --command bash -c '
-          set -e
-          toolchain=1.99.1
-          rustup toolchain install "$toolchain" --profile minimal --target x86_64-pc-windows-gnu
-          export PATH="$RUSTUP_HOME/toolchains/$toolchain-x86_64-unknown-linux-gnu/bin:$PATH"
-          shims=$(mktemp -d)
-          cp ci/windres "$shims/windres" && chmod 755 "$shims/windres"
-          export PATH="$shims:$PATH"
-          cargo zigbuild --profile windows --target x86_64-pc-windows-gnu -p baash
-        '
+    - nix build .#windows -o result
+    - mkdir -p dist
+    - cp -L result/bin/baash.exe dist/
   artifacts:
     paths:
-      - target/x86_64-pc-windows-gnu/windows/baash.exe
+      - dist/

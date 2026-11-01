@@ -6,4 +6,7 @@
 # A script rather than a symlink: nix-wrapped binutils resolve their own
 # directory from `argv[0]`, so a link to one of those breaks it (see
 # docs/portability.md §10).
-exec llvm-windres "$@"
+#
+# `clang` has to be on PATH too — the resource compiler preprocesses the script
+# and looks it up by name.
+exec "${BAASH_WINDRES:-llvm-windres}" "$@"
