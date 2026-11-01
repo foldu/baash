@@ -11,6 +11,10 @@ license = "GPL-3.0-or-later"
 publish = false
 
 [workspace.dependencies]
+gix = { version = "0.90", default-features = false, features = [
+  "status",
+  "sha1",
+] }
 baash-diag = { path = "crates/baash-diag" }
 baash-syntax = { path = "crates/baash-syntax" }
 baash-highlight = { path = "crates/baash-highlight" }

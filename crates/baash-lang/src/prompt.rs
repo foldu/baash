@@ -989,22 +989,29 @@ fn short_host(host: &[u8]) -> &[u8] {
 /// unmodified `PS1` is this instead:
 ///
 /// ```text
-/// ~/src/bshell main !4 ?3$
+/// ~/src/bshell main !2 ?5 $
 /// ```
 ///
 /// in this order, with a component's leading space omitted together with the
 /// component:
 ///
-/// * `cwd`, with a leading `$HOME` abbreviated to `~.  The bytes are kept as
-///   bytes: a path that is not UTF-8 renders exactly, and nothing here is
-///   expanded a second time, so a `$` or `\` in a directory name stays literal.
+/// * `cwd`, with a leading `$HOME` abbreviated to `~`. The last path component
+///   is painted brighter than the rest, so the directory you are in is the one
+///   that stands out. The bytes are kept as bytes: a path that is not UTF-8
+///   renders exactly, and nothing here is expanded a second time, so a `$` or
+///   `\` in a directory name stays literal.
 /// * the git branch from [`git_branch`], plain and unbracketed.
-/// * `!N` for `job_count` background children, only when `N > 0`.
-/// * `?N` for a non-zero `last_status`.
-/// * `$`, or `#` for a root user, then one space: the prompt has to say where
-///   the command starts and who the shell thinks you are, which is what `\$`
-///   does in a template. It is the last thing before the cursor, so a prompt
-///   never runs into the text being typed.
+/// * `!N` for a modified tracked file, only when `N > 0` ([`git_status`]).
+/// * `?N` for an untracked file, only when `N > 0`.
+/// * `$`, or `#` for a root user, preceded by a space and followed by one: the
+///   prompt has to say where the command starts and who the shell thinks you
+///   are, which is what `\$` does in a template. It is the last thing before
+///   the cursor, so a prompt never runs into the text being typed.
+///
+/// When `color` is false the same text is emitted with no escapes at all, which
+/// is what `NO_COLOR` and a non-terminal get. The colours are ANSI SGR codes,
+/// never 24-bit values, so the prompt follows whatever palette the terminal
+/// uses (kanagawa, in this project's case).
 ///
 /// It is built directly rather than through `PS1` escapes: the paths and
 /// branch names are data, and the escape decoder (or the `promptvars` second
@@ -1013,24 +1020,127 @@ pub fn fish_prompt(
     cwd: &[u8],
     home: &[u8],
     branch: Option<&[u8]>,
-    job_count: u32,
-    last_status: i32,
+    git: Option<GitStatus>,
     root: bool,
+    color: bool,
 ) -> ExpandedPrompt {
-    let mut bytes = abbreviate_home(cwd, home);
+    // The palette, in SGR terms: cyan for the path, brighter cyan for the
+    // component you are in, green for the repository and the marker, blue for
+    // what git does not track yet.
+    const RESET: &[u8] = b"\x1b[0m";
+    const PATH: &[u8] = b"\x1b[36m";
+    const HERE: &[u8] = b"\x1b[96m";
+    const CLEAN: &[u8] = b"\x1b[92m";
+    const UNTRACKED: &[u8] = b"\x1b[94m";
+    const ROOT: &[u8] = b"\x1b[91m";
+
+    fn sgr(bytes: &mut Vec<u8>, color: bool, code: &[u8]) {
+        if color {
+            bytes.extend_from_slice(code);
+        }
+    }
+
+    let path = abbreviate_home(cwd, home);
+    // The last component keeps its slash, so `~/a` + `/b` reads as the path it
+    // is; a bare `~` has no component to brighten.
+    // A leading slash is not a component boundary: `/x` is one component, not
+    // an empty prefix and a bright `/x`.
+    let (prefix, here) = match path.iter().rposition(|&byte| byte == b'/') {
+        Some(index) if index > 0 => (&path[..index], &path[index..]),
+        _ => (&path[..], &path[..0]),
+    };
+
+    let mut bytes = Vec::with_capacity(path.len() + 48);
+    sgr(&mut bytes, color, PATH);
+    bytes.extend_from_slice(prefix);
+    if !here.is_empty() {
+        sgr(&mut bytes, color, HERE);
+        bytes.extend_from_slice(here);
+    }
+    sgr(&mut bytes, color, RESET);
+
     if let Some(branch) = branch {
         bytes.push(b' ');
+        sgr(&mut bytes, color, CLEAN);
         bytes.extend_from_slice(branch);
+        sgr(&mut bytes, color, RESET);
     }
-    if job_count > 0 {
-        bytes.extend_from_slice(format!(" !{job_count}").as_bytes());
+
+    if let Some(git) = git {
+        if git.modified > 0 {
+            bytes.push(b' ');
+            sgr(&mut bytes, color, CLEAN);
+            bytes.extend_from_slice(format!("!{}", git.modified).as_bytes());
+            sgr(&mut bytes, color, RESET);
+        }
+        if git.untracked > 0 {
+            bytes.push(b' ');
+            sgr(&mut bytes, color, UNTRACKED);
+            bytes.extend_from_slice(format!("?{}", git.untracked).as_bytes());
+            sgr(&mut bytes, color, RESET);
+        }
     }
-    if last_status != 0 {
-        bytes.extend_from_slice(format!(" ?{last_status}").as_bytes());
-    }
+
+    bytes.push(b' ');
+    sgr(&mut bytes, color, if root { ROOT } else { CLEAN });
     bytes.push(if root { b'#' } else { b'$' });
+    sgr(&mut bytes, color, RESET);
     bytes.push(b' ');
     ExpandedPrompt::from_bytes(bytes)
+}
+
+/// What the default prompt's git segment counts.
+///
+/// `modified` is a tracked file whose content, mode or existence differs from
+/// what `HEAD`/the index says; `untracked` is a path git is not tracking. Both
+/// are file counts, not change counts: a file modified in the index *and* the
+/// worktree is one dirty file, not two.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GitStatus {
+    /// Tracked files that differ from `HEAD` or from the index.
+    pub modified: u32,
+    /// Files git does not track.
+    pub untracked: u32,
+}
+
+/// Count what is dirty and what is untracked in the repository containing
+/// `cwd`, or `None` when there is no repository.
+///
+/// This reads the index and walks the worktree in process (`gix`), so the
+/// prompt never forks a `git status` and never waits on one: the cost is a stat
+/// per tracked file and one directory walk, on the prompt path only.
+pub fn git_status(cwd: &[u8]) -> Option<GitStatus> {
+    use std::collections::BTreeSet;
+
+    let repo = gix::discover(os_path(cwd)).ok()?;
+    let status = repo.status(gix::progress::Discard).ok()?;
+    let mut modified = BTreeSet::new();
+    let mut untracked = BTreeSet::new();
+    for item in status.into_iter(None).ok()? {
+        let item = item.ok()?;
+        match item {
+            gix::status::Item::IndexWorktree(item) => match item {
+                gix::status::index_worktree::Item::Modification { rela_path, .. } => {
+                    modified.insert(rela_path);
+                }
+                gix::status::index_worktree::Item::Rewrite { dirwalk_entry, .. } => {
+                    modified.insert(dirwalk_entry.rela_path);
+                }
+                gix::status::index_worktree::Item::DirectoryContents { entry, .. } => {
+                    if entry.status == gix::dir::entry::Status::Untracked {
+                        untracked.insert(entry.rela_path);
+                    }
+                }
+            },
+            gix::status::Item::TreeIndex(change) => {
+                modified.insert(change.location().to_owned());
+            }
+        }
+    }
+    Some(GitStatus {
+        modified: u32::try_from(modified.len()).unwrap_or(u32::MAX),
+        untracked: u32::try_from(untracked.len()).unwrap_or(u32::MAX),
+    })
 }
 
 /// The branch the repository containing `cwd` has checked out, if any.
@@ -2056,19 +2166,63 @@ mod tests {
         os_bytes(path.as_os_str())
     }
 
-    fn render(cwd: &[u8], home: &[u8], branch: Option<&[u8]>, jobs: u32, status: i32) -> Vec<u8> {
-        fish_prompt(cwd, home, branch, jobs, status, false).into_bytes()
+    fn render(cwd: &[u8], home: &[u8], branch: Option<&[u8]>, git: Option<GitStatus>) -> Vec<u8> {
+        fish_prompt(cwd, home, branch, git, false, false).into_bytes()
+    }
+
+    fn dirty(modified: u32, untracked: u32) -> Option<GitStatus> {
+        Some(GitStatus {
+            modified,
+            untracked,
+        })
     }
 
     #[test]
     fn the_default_prompt_abbreviates_home_and_orders_the_segments() {
         assert_eq!(
-            render(b"/home/ada/src/bshell", b"/home/ada", Some(b"main"), 4, 3),
-            b"~/src/bshell main !4 ?3$ "
+            render(
+                b"/home/ada/src/bshell",
+                b"/home/ada",
+                Some(b"main"),
+                dirty(4, 3)
+            ),
+            b"~/src/bshell main !4 ?3 $ "
         );
+        // A clean repository has nothing to say between the branch and the
+        // marker, and a directory outside one has nothing to say at all.
         assert_eq!(
-            render(b"/home/ada", b"/home/ada", Some(b"main"), 0, 0),
-            b"~ main$ "
+            render(b"/home/ada", b"/home/ada", Some(b"main"), dirty(0, 0)),
+            b"~ main $ "
+        );
+    }
+
+    #[test]
+    fn the_colours_are_ansi_and_the_last_component_is_the_bright_one() {
+        assert_eq!(
+            fish_prompt(
+                b"/home/ada/src/bshell",
+                b"/home/ada",
+                Some(b"main"),
+                dirty(2, 5),
+                false,
+                true
+            )
+            .into_bytes(),
+            b"\x1b[36m~/src\x1b[96m/bshell\x1b[0m \x1b[92mmain\x1b[0m \
+              \x1b[92m!2\x1b[0m \x1b[94m?5\x1b[0m \x1b[92m$\x1b[0m "
+        );
+        // Root keeps its distinction, and the escape covers the marker only.
+        assert_eq!(
+            fish_prompt(b"/x", b"/h", None, None, true, true).into_bytes(),
+            b"\x1b[36m/x\x1b[0m \x1b[91m#\x1b[0m "
+        );
+    }
+
+    #[test]
+    fn a_bare_home_is_not_split_into_a_component() {
+        assert_eq!(
+            fish_prompt(b"/home/ada", b"/home/ada", None, None, false, true).into_bytes(),
+            b"\x1b[36m~\x1b[0m \x1b[92m$\x1b[0m "
         );
     }
 
@@ -2076,28 +2230,28 @@ mod tests {
     fn the_prompt_ends_with_the_user_s_marker() {
         // `$` for an ordinary user, `#` for root: the same distinction `\$`
         // makes in a template, and the last thing before the cursor.
-        assert_eq!(render(b"/x", b"/h", None, 0, 0), b"/x$ ");
+        assert_eq!(render(b"/x", b"/h", None, None), b"/x $ ");
         assert_eq!(
-            fish_prompt(b"/x", b"/h", None, 0, 0, true).into_bytes(),
-            b"/x# "
+            fish_prompt(b"/x", b"/h", None, None, true, false).into_bytes(),
+            b"/x # "
         );
         // The marker follows the counters rather than replacing them.
         assert_eq!(
-            fish_prompt(b"/x", b"/h", Some(b"main"), 2, 1, true).into_bytes(),
-            b"/x main !2 ?1# "
+            fish_prompt(b"/x", b"/h", Some(b"main"), dirty(2, 1), true, false).into_bytes(),
+            b"/x main !2 ?1 # "
         );
     }
 
     #[test]
     fn a_path_outside_home_stays_absolute() {
         assert_eq!(
-            render(b"/opt/bshell", b"/home/ada", None, 0, 0),
-            b"/opt/bshell$ "
+            render(b"/opt/bshell", b"/home/ada", None, None),
+            b"/opt/bshell $ "
         );
         // A `$HOME` prefix that is not at a path boundary is not abbreviated.
         assert_eq!(
-            render(b"/home/adam/x", b"/home/ada", None, 0, 0),
-            b"/home/adam/x$ "
+            render(b"/home/adam/x", b"/home/ada", None, None),
+            b"/home/adam/x $ "
         );
     }
 
@@ -2105,10 +2259,13 @@ mod tests {
     fn counters_appear_only_when_non_zero() {
         // Each component carries its own space, so no component leaves a
         // double space behind.
-        assert_eq!(render(b"/x", b"/h", None, 2, 0), b"/x !2$ ");
-        assert_eq!(render(b"/x", b"/h", None, 0, 1), b"/x ?1$ ");
-        assert_eq!(render(b"/x", b"/h", Some(b"dev"), 0, 0), b"/x dev$ ");
-        assert_eq!(render(b"/x", b"/h", None, 0, 0), b"/x$ ");
+        assert_eq!(render(b"/x", b"/h", None, dirty(2, 0)), b"/x !2 $ ");
+        assert_eq!(render(b"/x", b"/h", None, dirty(0, 1)), b"/x ?1 $ ");
+        assert_eq!(
+            render(b"/x", b"/h", Some(b"dev"), dirty(0, 0)),
+            b"/x dev $ "
+        );
+        assert_eq!(render(b"/x", b"/h", None, None), b"/x $ ");
     }
 
     #[test]
@@ -2116,10 +2273,10 @@ mod tests {
         // Paths are bytes. Nothing in the default prompt decodes them, so an
         // undecodable byte survives exactly and cannot become U+FFFD.
         let cwd = b"/tmp/caf\xe9/\xff";
-        assert_eq!(render(cwd, b"/tmp", None, 0, 0), b"~/caf\xe9/\xff$ ");
+        assert_eq!(render(cwd, b"/tmp", None, None), b"~/caf\xe9/\xff $ ");
         assert_eq!(
-            render(b"/home/ada/\xff", b"/home/ada", Some(b"ma\xefn"), 0, 0),
-            b"~/\xff ma\xefn$ "
+            render(b"/home/ada/\xff", b"/home/ada", Some(b"ma\xefn"), None),
+            b"~/\xff ma\xefn $ "
         );
     }
 
@@ -2178,9 +2335,10 @@ mod tests {
     fn no_repository_has_no_branch() {
         let root = scratch("no-repo");
         assert_eq!(git_branch(&as_bytes(&root)), None);
-        assert_eq!(render(&as_bytes(&root), b"/h", None, 0, 0), {
+        assert_eq!(git_status(&as_bytes(&root)), None);
+        assert_eq!(render(&as_bytes(&root), b"/h", None, None), {
             let mut expected = as_bytes(&root);
-            expected.extend_from_slice(b"$ ");
+            expected.extend_from_slice(b" $ ");
             expected
         });
     }

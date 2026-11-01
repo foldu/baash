@@ -54,6 +54,18 @@ const SCRUBBED: &[&[u8]] = &[
 
 impl Session {
     fn spawn(home: &Path, cwd: &Path, arguments: &[&str], environment: &[(&str, &str)]) -> Self {
+        Self::spawn_with(home, cwd, arguments, environment, true)
+    }
+
+    /// `plain` adds `NO_COLOR=1`, so an assertion can read the prompt as text;
+    /// the colour test passes false and looks for the escapes.
+    fn spawn_with(
+        home: &Path,
+        cwd: &Path,
+        arguments: &[&str],
+        environment: &[(&str, &str)],
+        plain: bool,
+    ) -> Self {
         let pty = open_pty().expect("open a pty");
         let master = pty.master.as_raw_fd();
         let slave = pty.slave.as_raw_fd();
@@ -79,6 +91,11 @@ impl Session {
         }
         entries.push(b"TERM=xterm".to_vec());
         entries.push(b"LC_ALL=C".to_vec());
+        // Plain text by default: these assertions read the prompt as a string,
+        // and the stock one is coloured on a terminal.
+        if plain {
+            entries.push(b"NO_COLOR=1".to_vec());
+        }
         let mut home_entry = b"HOME=".to_vec();
         use std::os::unix::ffi::OsStrExt;
         home_entry.extend_from_slice(home.as_os_str().as_bytes());
@@ -407,15 +424,37 @@ fn the_default_prompt_is_fish_like() {
     // ending in `$`, or `#` for root, like a `\$` in a template would.
     let marker = user_marker();
     let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
-    session.prompt(&format!("~/src/bshell main{marker} "));
-    // A failed command adds the status; a background child adds the job count
-    // and the successful `&` clears the status again.
+    // A space before the marker, and the branch between the path and it.
+    session.prompt(&format!("~/src/bshell main {marker} "));
+    // The counts are git's, not the shell's: a failing command and a background
+    // child leave the prompt alone now.
     session.send(b"false\n");
-    session.prompt(&format!("~/src/bshell main ?1{marker} "));
-    session.send(b"sleep 1 &\n");
-    session.prompt(&format!("~/src/bshell main !1{marker} "));
-    session.send(b"wait\n");
-    session.prompt(&format!("~/src/bshell main{marker} "));
+    session.prompt(&format!("~/src/bshell main {marker} "));
+    // Leave through a successful command, so `exit` exits zero.
+    session.send(b"true\n");
+    session.prompt(&format!("~/src/bshell main {marker} "));
+    session.send(b"exit\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn the_stock_prompt_is_coloured_on_a_terminal() {
+    let home = temp_dir("colour-home");
+    std::fs::create_dir_all(home.join("src/bshell/.git")).expect("create git directory");
+    std::fs::write(home.join("src/bshell/.git/HEAD"), b"ref: refs/heads/main\n")
+        .expect("write HEAD");
+
+    let mut session = Session::spawn_with(
+        &home,
+        &home.join("src/bshell"),
+        &["--norc", "-i"],
+        &[],
+        false,
+    );
+    // The whole prompt is painted, not the marker alone: the path cyan, the
+    // last component bright cyan, the branch green.
+    session.prompt("\x1b[36m~/src\x1b[96m/bshell\x1b[0m \x1b[92mmain\x1b[0m ");
     session.send(b"exit\n");
     session.wait_child();
     let _ = std::fs::remove_dir_all(&home);

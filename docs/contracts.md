@@ -377,15 +377,27 @@ substitutes `baash_lang::prompt::fish_prompt` while the value is still that one.
 The rendered shape is
 
 ```text
-~/src/bshell main !4 ?3$ 
+~/src/bshell main !2 ?5 $
 ```
 
 `cwd` (a leading `$HOME` abbreviated to `~`, bytes unchanged), then the git
-branch, then `!N` background children when `N > 0`, then `?N` last status when
-non-zero, then `$` (or `#` for root) and one space. A component's space is
-omitted with the component, so a repository with nothing to report is
-`~/src/bshell$ ` rather than a double space, and the prompt always ends with
-the marker `\$` would have produced.
+branch, then `!N` tracked files that differ from `HEAD` or the index when
+`N > 0`, then `?N` untracked files when `N > 0`, then `$` (or `#` for root),
+each preceded by one space, and one space after the marker. A component's space
+is omitted with the component, so a clean repository is `~/src/bshell main $ `
+rather than a double space, and the prompt always ends with the marker `\$`
+would have produced.
+
+The counts come from `baash_lang::prompt::git_status`, which opens the
+repository with `gix` (gitoxide: index and worktree in process) and counts
+*distinct paths*, so a file changed in the index and again in the worktree is
+one dirty file rather than two. Nothing here forks a `git status`.
+
+On a terminal the prompt is painted in ANSI SGR colours only — never 24-bit
+values — so it follows the terminal's palette: cyan for the path, bright cyan
+for the last component, green for the branch, `!N` and the marker, blue for
+`?N`, red for `#`. `NO_COLOR` or a non-terminal gets the same text with no
+escapes.
 
 The branch is `baash_lang::prompt::git_branch`: walk up for `.git` (a directory,
 or a file whose `gitdir:` names the real one for a linked worktree or

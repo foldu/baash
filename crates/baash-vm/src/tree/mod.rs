@@ -681,7 +681,7 @@ impl Interp {
     ///
     /// The stock `PS1` is the one exception: it renders as the fish-like
     /// [`baash_lang::prompt::fish_prompt`] instead of bash's `baash-0.0$ ` —
-    /// `~/src/bshell main !4 ?3$ ` rather than `baash-0.0$ `. That
+    /// `~/src/bshell main !2 ?5 $ ` rather than `baash-0.0$ `. That
     /// prompt is built from data rather than decoded from a template, so a
     /// directory or branch containing `$`, a backslash or an escape-looking
     /// sequence is painted literally and cannot be expanded twice. The
@@ -692,13 +692,17 @@ impl Interp {
         let status = self.state.vars.last_status();
         let rendered = if template == DEFAULT_PS1 {
             let branch = baash_lang::prompt::git_branch(&context.cwd);
+            let git = baash_lang::prompt::git_status(&context.cwd);
+            // ANSI only where the terminal will read it: `NO_COLOR` wins, and a
+            // prompt going to a pipe (a recorded session, a test) stays plain.
+            let color = std::env::var_os("NO_COLOR").is_none() && baash_sys::is_tty(0);
             baash_lang::prompt::fish_prompt(
                 &context.cwd,
                 &context.home,
                 branch.as_deref(),
-                context.job_count,
-                status.0,
+                git,
                 context.root,
+                color,
             )
         } else {
             baash_lang::prompt::expand_with_variables(template, &context, self)

@@ -165,12 +165,18 @@ delegates everything else: line editing to `baash-repl`, execution to the
   `PWD`, its background children (`\j`) and its history ring; `\!` is the
   number the line will get and `\#` bash's command number;
 * **the stock prompt is fish-like**: while `PS1` is still the built-in
-  `\s-\v\$ `, the rendered prompt is `~/src/bshell main !4 ?3$ ` — the
+  `\s-\v\$ `, the rendered prompt is `~/src/bshell main !2 ?5 $ ` — the
   abbreviated `$PWD`, the git branch (read from `.git/HEAD`, following a `.git`
-  file and `packed-refs` for worktrees), `!N` when background children exist,
-  `?N` when the last status is non-zero, then `$` (`#` for root) and one space.
-  The marker is the same distinction `\$` draws in a template, and it is the
-  last cell before the cursor, so the prompt never runs into typed text. It is
+  file and `packed-refs` for worktrees), `!N` tracked files that differ from
+  `HEAD` or the index, `?N` untracked files — both counted by `gix` in process,
+  never by forking `git status` — then `$` (`#` for root), a space before it and
+  one after. On a terminal the segments are painted with plain ANSI SGR codes
+  (cyan path, bright cyan last component, green branch/`!N`/marker, blue `?N`,
+  red `#`), so the palette is whatever the terminal uses; `NO_COLOR` gives the
+  same text uncoloured. The marker is the same distinction `\$` draws in a
+  template, and it is the last cell before the cursor, so the prompt never runs
+  into typed text. The counts are recomputed at each prompt, not while you
+  type — `docs/prompt-watch.md` is the watcher that would keep them live. It is
   built from bytes in one pass, so non-UTF-8 paths render exactly and nothing in
   the prompt is expanded twice. The `PS1` *variable* keeps bash's value, so
   `${PS1@P}` and the conformance `default PS1` case are unchanged. An explicit
