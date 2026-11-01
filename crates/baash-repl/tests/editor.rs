@@ -820,11 +820,13 @@ fn a_non_utf8_candidate_is_inserted_byte_for_byte() {
         &baash_repl::NeverNeedsMore,
         plain_config(),
     );
-    assert_eq!(
-        result,
-        ReadResult::Line(b"ls caf\\\xe9\n".to_vec()),
-        "the inserted form is the quoted spelling of the original bytes"
-    );
+    // The byte is inserted as it is. Escaping it (`\\` + `0xE9`) would lex
+    // back to the same argument, so it was never load-bearing: it only put a
+    // visible backslash in front of a character the reader cannot identify
+    // anyway. Bash inserts filename bytes verbatim, and so does this now —
+    // including for the valid sequences that used to be split down the middle
+    // (`ß` became `\\` `0xC3` `\\` `0x9F`).
+    assert_eq!(result, ReadResult::Line(b"ls caf\xe9\n".to_vec()));
     // The display projection is UTF-8, so painting it cannot panic either.
     assert!(term.text().contains("caf"));
 }

@@ -29,8 +29,15 @@ pub enum QuoteCtx {
 }
 
 /// Bytes that need no escaping in an unquoted word.
+///
+/// Everything from `0x80` up is bare: no shell metacharacter is non-ASCII, so a
+/// high byte is a literal byte in any locale, and escaping it splits a UTF-8
+/// sequence across backslashes — the bytes still lex back to the same argv, but
+/// the line reads as `\<mojibake>` and the terminal's column count goes wrong,
+/// because each backslash is its own character between two halves of one.
 fn is_bare_safe(b: u8) -> bool {
-    b.is_ascii_alphanumeric()
+    b >= 0x80
+        || b.is_ascii_alphanumeric()
         || matches!(
             b,
             b'_' | b'@' | b'%' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'-'
@@ -111,6 +118,20 @@ mod tests {
         // Inside a quote it was never special.
         assert_eq!(quote(b"~/src", QuoteCtx::DoubleQuoted), b"~/src");
         assert_eq!(quote(b"~/src", QuoteCtx::SingleQuoted), b"~/src");
+    }
+
+    #[test]
+    fn non_ascii_bytes_are_inserted_as_they_are() {
+        // A multi-byte character is not a shell metacharacter: escaping its
+        // bytes inserts a backslash *inside* the character, which renders as
+        // two replacement characters and breaks the column count.
+        let path = "ßhell/".as_bytes();
+        assert_eq!(quote(path, QuoteCtx::Unquoted), path);
+        let mixed = "src/ßhell/a b".as_bytes();
+        assert_eq!(
+            quote(mixed, QuoteCtx::Unquoted),
+            "src/ßhell/a\\ b".as_bytes()
+        );
     }
 
     #[test]

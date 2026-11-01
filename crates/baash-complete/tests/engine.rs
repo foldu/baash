@@ -608,3 +608,26 @@ fn a_home_relative_completion_keeps_its_tilde() {
         inserts(&menu)
     );
 }
+
+/// A path with non-ASCII bytes is inserted byte for byte.
+///
+/// The repository this shell is developed in lives under `…/ßhell`, so this is
+/// the everyday case, not an exotic one: escaping the two UTF-8 bytes of `ß`
+/// inserts a backslash inside the character, which the terminal shows as
+/// `\�\�hell` and which the column arithmetic counts as two extra characters.
+#[test]
+fn a_non_ascii_completion_is_not_escaped() {
+    let tree = TempTree::new("utf8");
+    tree.dir("lab.home.5kw.li/ßhell");
+    let engine = CompletionEngine::new()
+        .with_root(&tree.root)
+        .with_home(&tree.root);
+    let line: &[u8] = "cd ~/lab.home.5kw.li/ßh".as_bytes();
+    let menu = engine.complete(line, line.len());
+    assert_eq!(
+        menu.insertion(0),
+        Some("~/lab.home.5kw.li/ßhell/".as_bytes().to_vec()),
+        "candidates: {:?}",
+        inserts(&menu)
+    );
+}
