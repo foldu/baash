@@ -30,7 +30,7 @@ lookup fast paths below. Same machine, same method, best of 3.
 | arithmetic loop, 20k `((i++))` | 9.4 ms | 6.9 ms (**0.7×**) |
 | `${s#*c}`, 20k | 23.4 ms | 20.2 ms (**0.9×**) |
 | `${s//d/e}`, 20k | 26.4 ms | 16.4 ms (**0.6×**) |
-| function call, 20k | 31.4 ms | 38.7 ms (1.2×) |
+| function call, 20k | 32.0 ms | 32.6 ms (1.0×) |
 | `case` dispatch, 20k | 15.3 ms | 14.1 ms (**0.9×**) |
 | builtin `echo`, 20k | 21.5 ms | 21.0 ms (**1.0×**) |
 | fork+exec, 200 (`env true`) | 186 ms | 169 ms (0.9×) |
@@ -80,9 +80,19 @@ needs one build flag: mimalloc's `options.c` prints its build date with
 `__DATE__`, which Nix's cc wrapper rejects as unreproducible, so the Windows
 derivation relaxes `-Wdate-time` for that C dependency only.
 
-Function calls are the one case still behind the 2026-10-28 build (38.7 ms now,
-33.1 ms then, 31.4 ms in bash). The remaining cost is the same table walk for
-the *frame* locals a call pushes and pops; the global cache does not cover them.
+Function calls started this series at 52.5 ms (1.5× the 2026-10-28 build) and
+are now 32.6 ms against bash's 32.0 — parity, and better than that build's 33.1.
+What was left after the variable-table fast paths was the per-call rebuild of
+`FUNCNAME`/`BASH_SOURCE`/`BASH_LINENO`: `declare_shape` + `clear_array` + one
+`set_indexed` per element, for three arrays, three times per command. It is now
+one `Vars::replace_indexed` per array, and the function's definition file is
+stored on the `Function` instead of being copied per call.
+
+An ablation that stubs the rebuild out entirely measures 24 ms (435 ns per
+call), so that is the ceiling of the next step: answering the three arrays from
+the call stack at read time instead of materialising them in the variable
+table. It costs `declare -p FUNCNAME` (bash lists it; we would not), which is
+why it is not in this commit.
 
 ## What this says
 

@@ -1124,9 +1124,8 @@ impl Interp {
         // `BASH_SOURCE` is the *definition* file, `BASH_LINENO` the caller's
         // line (bash: "BASH_SOURCE is about the definition, FUNCNAME and
         // BASH_LINENO are about the call").
-        let definition = function.chunk.source.name().as_bytes().to_vec();
         let line = self.line_number().max(0) as usize;
-        self.push_call(&function.name, &definition, line);
+        self.push_call(&function.name, &function.source, line);
         // `$LINENO` belongs to the *call site* again once the body returns:
         // an `ERR` trap that fires for the call reports the caller's line, not
         // the function's last one (`line=14` for a call on line 14).

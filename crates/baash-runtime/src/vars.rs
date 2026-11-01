@@ -1129,6 +1129,28 @@ impl Vars {
         self.set_assoc(name, key, &joined)
     }
 
+    /// Replace an indexed array's elements in one table operation.
+    ///
+    /// `SHELLOPTS`-style derived arrays are rebuilt per command (`FUNCNAME`,
+    /// `BASH_SOURCE`, `BASH_LINENO` on every call), and doing that through
+    /// `declare_shape` + `clear_array` + one `set_indexed` per element is three
+    /// table operations plus one lookup per element — each of which scans the
+    /// variable table. This resolves the name once and installs the whole
+    /// value, which is what a rebuild actually is.
+    pub fn replace_indexed<I>(&mut self, name: &[u8], values: I) -> Result<(), Error>
+    where
+        I: IntoIterator<Item = Vec<u8>>,
+    {
+        let var = self.cell_mut(name, CreateScope::Default, false)?;
+        let elements = values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| (i64::try_from(index).unwrap_or(i64::MAX), value))
+            .collect();
+        var.value = VarValue::Indexed(IndexedArray::from_map(elements));
+        Ok(())
+    }
+
     /// `${a[index]}` for an indexed array (a scalar behaves like `[0]`).
     pub fn element_indexed(&self, name: &[u8], index: i64) -> Option<&[u8]> {
         let name = self.deref_name(name).ok()?;

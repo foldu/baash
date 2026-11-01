@@ -133,6 +133,7 @@ impl Interp {
                 self.functions.retain(|function| function.name != name);
                 self.functions.push(Function {
                     name,
+                    source: chunk.source.name().as_bytes().to_vec(),
                     chunk: chunk.clone(),
                     body: *body,
                 });

@@ -230,6 +230,12 @@ struct Function {
     name: Vec<u8>,
     chunk: Arc<ParsedChunk>,
     body: NodeId,
+    /// `BASH_SOURCE` for frames of this function: the *definition* file.
+    ///
+    /// Stored rather than recomputed per call, because every call needs the
+    /// bytes (`push_call` copies them into the frame and `refresh_call_vars`
+    /// into the array) and the definition does not move.
+    source: Vec<u8>,
 }
 
 /// Cached values for the special parameters that `baash_lang::Vars::get` has to
@@ -905,6 +911,11 @@ impl Interp {
             }
             return;
         }
+        // `replace_indexed` installs the whole array per name: one table
+        // operation instead of `declare_shape` + `clear_array` + one
+        // `set_indexed` per element, each of which scanned the variable table.
+        // The three arrays are the entire cost of a function call
+        // (`docs/performance.md`).
         let mut names: Vec<Vec<u8>> = Vec::with_capacity(self.calls.len());
         let mut sources: Vec<Vec<u8>> = Vec::with_capacity(self.calls.len());
         let mut lines: Vec<Vec<u8>> = Vec::with_capacity(self.calls.len());
@@ -913,23 +924,9 @@ impl Interp {
             sources.push(frame.source.clone());
             lines.push(frame.line.to_string().into_bytes());
         }
-        for (name, values) in [
-            (b"FUNCNAME".as_slice(), &names),
-            (b"BASH_SOURCE", &sources),
-            (b"BASH_LINENO", &lines),
-        ] {
-            let _ = self
-                .state
-                .vars
-                .declare_shape(name, baash_runtime::ArrayShape::Indexed);
-            let _ = self
-                .state
-                .vars
-                .clear_array(name, baash_runtime::ArrayShape::Indexed);
-            for (index, value) in values.iter().enumerate() {
-                let _ = self.state.vars.set_indexed(name, index as i64, value);
-            }
-        }
+        let _ = self.state.vars.replace_indexed(b"FUNCNAME", names);
+        let _ = self.state.vars.replace_indexed(b"BASH_SOURCE", sources);
+        let _ = self.state.vars.replace_indexed(b"BASH_LINENO", lines);
     }
 
     /// Parse and evaluate one chunk, returning the unwind *unabsorbed*.
