@@ -916,8 +916,21 @@ impl Interp {
             .map_err(|error| format!("cannot rewind a command substitution: {error}"))?;
         let mut bytes = bsh_sys::read_all(capture_fd)
             .map_err(|error| format!("cannot read a command substitution: {error}"))?;
+        // A command substitution produces a *string*: bash drops NUL bytes
+        // (with a warning) because its strings are C strings, and the same
+        // drop is what lets the result be passed to a child process, whose
+        // arguments cannot contain one either.
+        let mut stripped = false;
+        if bytes.contains(&0) {
+            bytes.retain(|&byte| byte != 0);
+            stripped = true;
+        }
         while bytes.last() == Some(&b'\n') {
             bytes.pop();
+        }
+        if stripped {
+            let _ =
+                self.write_err(b"bsh: warning: command substitution: ignored null byte in input\n");
         }
         Ok((bytes, status))
     }

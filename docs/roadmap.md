@@ -1,9 +1,9 @@
 # Roadmap: the 397-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2331/2787** (2278 strict). bash passes 2577/2787 on the same run and
-317 of the cases we fail are ones bash passes (we pass 71 it fails), so the net
-gap is 246 cases.
+now **2336/2787** (2283 strict). bash passes 2577/2787 on the same run and
+312 of the cases we fail are ones bash passes (we pass 71 it fails), so the net
+gap is 241 cases.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
 queue. Interactive usability now outranks script conformance; see
@@ -236,7 +236,7 @@ around 2170.**
 ## Tranche 5 — the remaining bash gap (active goal)
 
 Re-measured with `--json --compare bash` after items 1–18 below:
-**2331/2787 total, 2278 strict**. 456 failures, of which **317 are cases bash
+**2336/2787 total, 2283 strict**. 451 failures, of which **312 are cases bash
 passes** (the real queue) and 139 are cases bash fails too (osh-only
 expectations, older-bash behaviour, environment). The plan is to work these in
 order, cheapest first, re-measuring after each commit:
@@ -327,12 +327,12 @@ it is not re-litigated.
     `(a  b)`, `(a b|c)` and `(;)` are patterns while `a  b` stays a syntax
     error; a `)` with no opener closes the conditional — `regex` (11 of 12,
     the remaining three are osh-only strictness).
-17. **[open]** NUL bytes through expansion and the quoting edge cases —
-    `nul-bytes` (8) + `var-sub-quote` (7) + `command-sub` (4). The bytes
-    themselves already survive (`printf 'a\0b'` writes the NUL and `${#x}`
-    counts it); what is missing is bash's *dropping* of NULs from command
-    substitution with a warning, and the `$'…'`/IFS forms the suite builds on
-    it.
+17. **[done, mostly]** NUL bytes: a command substitution is a *string*, so a
+    NUL in its output is dropped with bash's warning — which is also what
+    lets the result be handed to a child process, whose arguments cannot
+    contain one. `nul-bytes` 8 → 3 remaining (`printf`'s C-string format
+    truncation, `test -f` with a NUL, and `mapfile`), and the quoting cases
+    that built on it now pass.
 18. **[done]** Interactive startup: `--rcdir DIR` loads every regular file in a
     directory in name order after `--rcfile`, `--norc` skips both, a missing
     directory is ignored, and a piped `-i` shell runs `PROMPT_COMMAND` once per

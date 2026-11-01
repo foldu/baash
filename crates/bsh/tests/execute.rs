@@ -1780,3 +1780,22 @@ fn a_function_definition_tolerates_layout_and_odd_names() {
     // An adjacent empty pair after a name with `=` is still an array.
     assert_eq!(out("a=(); echo ${#a[@]}"), "0\n");
 }
+
+#[test]
+fn a_command_substitution_drops_nul_bytes() {
+    // bash's strings are C strings, so a NUL from a command substitution is
+    // dropped with a warning — and dropping it is also what lets the result be
+    // handed to a child process, whose arguments cannot contain one.
+    let output = run("x=$(printf 'a\\0b'); echo \"${#x}\"; echo \"$x\"");
+    assert_eq!(stdout(&output), "2\nab\n");
+    assert_eq!(code(&output), 0);
+    assert!(
+        stderr(&output).contains("ignored null byte"),
+        "expected a warning, got {:?}",
+        stderr(&output)
+    );
+    // A substitution with no NUL is untouched.
+    let output = run("x=$(printf 'ab'); echo \"${#x}$x\"");
+    assert_eq!(stdout(&output), "2ab\n");
+    assert!(!stderr(&output).contains("ignored null byte"));
+}
