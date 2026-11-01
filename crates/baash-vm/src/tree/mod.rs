@@ -274,6 +274,15 @@ pub struct Interp {
     /// Status of the last command substitution performed while expanding:
     /// `x=$(false)` must leave `$?` at 1.
     last_cmdsub: Option<Status>,
+    /// The option set `SHELLOPTS` and `BASHOPTS` were last rendered from.
+    ///
+    /// Both are derived variables, so they are rebuilt whenever an option
+    /// changes — but they were being rebuilt after *every* command, which put a
+    /// pair of sorted, allocated strings on the hot path of a loop
+    /// (`((i++))` 20k went from 15 ms to 40 ms, `docs/performance.md`). The
+    /// fingerprint makes "did anything change" one comparison over the option
+    /// bits.
+    option_lists: Option<u128>,
     /// Set by a built-in that unwinds (`break`, `continue`, `return`), read by
     /// the command sequence after the built-in returns.
     pending: Option<Unwind>,
@@ -512,6 +521,7 @@ impl Interp {
             functions: Vec::new(),
             specials: Specials::default(),
             last_cmdsub: None,
+            option_lists: None,
             pending: None,
             depth: 0,
             calls: Vec::new(),
@@ -1024,6 +1034,11 @@ impl Interp {
     /// readonly attribute they carry, which is why it goes through
     /// [`baash_runtime::Vars::refresh_derived`].
     fn refresh_option_lists(&mut self) {
+        let fingerprint = self.state.opts.fingerprint();
+        if self.option_lists == Some(fingerprint) {
+            return;
+        }
+        self.option_lists = Some(fingerprint);
         let shellopts = self.state.opts.shellopts();
         let _ = self.state.vars.refresh_derived(b"SHELLOPTS", &shellopts);
         let bashopts = self.state.opts.bashopts();
