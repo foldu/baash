@@ -100,9 +100,6 @@ impl Interp {
                 }
             }
             NodeKind::For { var, in_list, body } => {
-                if let Some(exit) = self.run_debug_trap() {
-                    return Unwind::Exit(exit);
-                }
                 self.eval_for(chunk, var, in_list.as_deref(), *body, ctx)
             }
             NodeKind::ForArith { header, body } => {
@@ -275,6 +272,10 @@ impl Interp {
         // instead of only suppressing the check here: `{ false; } && true`
         // continues, while a brace group as the *last* operand still exits.
         let chain_last = rest.last().map_or(first, |link| link.node);
+        // One `ERR` trap per failing command: the list that *is* the command
+        // clears the record, so a compound whose status is a child's failure
+        // cannot report the same failure twice.
+        self.err_trap_reported = false;
         let mut status = match self.eval_node(chunk, first, operand_ctx(ctx, first == chain_last)) {
             Unwind::Status(status) => status,
             other => return other,
@@ -338,6 +339,9 @@ impl Interp {
             },
             _ => match self.run_pipeline(chunk, stages, links, ctx) {
                 Ok(statuses) => {
+                    if let Some(exit) = self.debug_exit_request.take() {
+                        return Unwind::Exit(exit);
+                    }
                     // Traps run after the whole foreground pipeline has been
                     // reaped, never between two of its stages.
                     if let Some(exit) = self.after_foreground_wait() {
@@ -397,6 +401,24 @@ impl Interp {
 
         for (index, stage) in stages.iter().enumerate() {
             let last = index + 1 == count;
+            // bash runs `DEBUG` for a *simple* stage in the parent, before the
+            // stage's redirections exist and before its subshell scope clears
+            // the trap table: the handler's output belongs to the shell, and
+            // the stage must not fire it again. A compound stage (`{ …; } | cat`)
+            // runs no trap of its own — bash forks it and the child has none.
+            // The handler reports *this* stage's line, which the node spans
+            // give; the line state is still the previous stage's here.
+            let stage_span = chunk.ast.node(*stage).span.clone();
+            self.set_line(&chunk.source, stage_span.start);
+            if matches!(
+                node_kind(chunk, *stage),
+                NodeKind::Simple(_) | NodeKind::TestCommand { .. } | NodeKind::ArithCommand { .. }
+            ) && let Some(exit) = self.run_debug_trap()
+            {
+                self.debug_exit_request = Some(exit);
+                break;
+            }
+
             let stderr_to_stdout = links
                 .get(index)
                 .is_some_and(|link| *link == PipeOp::PipeStderr);
@@ -447,7 +469,9 @@ impl Interp {
             // `ERR` belongs to the pipeline, not to a stage (see
             // `err_trap_suppressed`).
             self.err_trap_suppressed += 1;
+            self.debug_suppressed += 1;
             let unwind = self.eval_node(chunk, *stage, ctx);
+            self.debug_suppressed -= 1;
             self.err_trap_suppressed -= 1;
             statuses[index] = unwind.status();
             if let Some(scope) = scope {
@@ -566,6 +590,13 @@ impl Interp {
 
         let mut last = Status::SUCCESS;
         for value in words {
+            // bash treats the `for` header as one DEBUG event *per iteration*
+            // (a loop with no iterations runs no trap at all), reported on the
+            // header's line rather than the previous body's.
+            self.set_line(&chunk.source, var.span.start);
+            if let Some(exit) = self.run_debug_trap() {
+                return Unwind::Exit(exit);
+            }
             if let Err(error) = self.state.vars.assign_scalar(&name, &value) {
                 self.report(crate::codes::ASSIGNMENT, var.span.clone(), error.message());
                 return Unwind::Status(Status::FAILURE);
@@ -745,7 +776,19 @@ impl Interp {
     fn eval_subshell(&mut self, chunk: &Arc<ParsedChunk>, body: NodeId, ctx: Ctx) -> Unwind {
         // In process, not in a child: the body reads and writes the same shell
         // state, and the scope restores what it changed (`tree/scope.rs`).
+        // Traps are the one thing a real child would not inherit: `ERR` (and
+        // `DEBUG`) stay out of a subshell unless `errtrace`/`functrace` asked
+        // for them, and its line state must not leak back out.
+        let suppress_traps = !self.state.opts.errtrace;
+        if suppress_traps {
+            self.err_trap_suppressed += 1;
+        }
+        let saved_line = (self.line_source.clone(), self.line_offset, self.line_number);
         let status = self.run_in_scope(chunk, body, ctx);
+        if suppress_traps {
+            self.err_trap_suppressed -= 1;
+        }
+        (self.line_source, self.line_offset, self.line_number) = saved_line;
         self.set_status(status);
         self.sync_specials();
         if let Some(exit) = self.after_foreground_wait() {
@@ -801,6 +844,15 @@ impl Interp {
         // finish before the capture is read, so the substitution runs them
         // synchronously and puts the flag back afterwards.
         let deferred = std::mem::replace(&mut self.defer_next_spawn, false);
+        // A command substitution is a subprogram: bash does not run `ERR` in it
+        // unless `errtrace` is on, and its `$LINENO` is its own — the enclosing
+        // command keeps its line, so a trap that fires for its status reports
+        // the outer line.
+        let suppress_traps = !self.state.opts.errtrace;
+        if suppress_traps {
+            self.err_trap_suppressed += 1;
+        }
+        let saved_line = (self.line_source.clone(), self.line_offset, self.line_number);
         let scope = self.open_scope();
         // bash resets `errexit` inside a command substitution: a failure in the
         // body contributes to the substitution's status and the rest of the body
@@ -823,6 +875,10 @@ impl Interp {
         let status = unwind.status();
         self.pipeline_buffer = outer_buffer;
         self.defer_next_spawn = deferred;
+        if suppress_traps {
+            self.err_trap_suppressed -= 1;
+        }
+        (self.line_source, self.line_offset, self.line_number) = saved_line;
         match saved_stdout {
             Some(saved) => {
                 let _ = bsh_sys::dup2(saved.as_raw_fd(), 1);

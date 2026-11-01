@@ -1,9 +1,9 @@
 # Roadmap: the 397-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2313/2787** (2258 strict). bash passes 2577/2787 on the same run and
-335 of the cases we fail are ones bash passes (we pass 71 it fails), so the net
-gap is 264 cases.
+now **2322/2787** (2269 strict). bash passes 2577/2787 on the same run and
+326 of the cases we fail are ones bash passes (we pass 71 it fails), so the net
+gap is 255 cases.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
 queue. Interactive usability now outranks script conformance; see
@@ -236,7 +236,7 @@ around 2170.**
 ## Tranche 5 — the remaining bash gap (active goal)
 
 Re-measured with `--json --compare bash` after items 1–18 below:
-**2313/2787 total, 2258 strict**. 474 failures, of which **335 are cases bash
+**2322/2787 total, 2269 strict**. 465 failures, of which **326 are cases bash
 passes** (the real queue) and 139 are cases bash fails too (osh-only
 expectations, older-bash behaviour, environment). The plan is to work these in
 order, cheapest first, re-measuring after each commit:
@@ -300,11 +300,22 @@ it is not re-litigated.
 14. **[done, mostly]** Trap exactness. A handler is its own chunk but bash
     reports the *trapped command's* line inside it, which one line-base rule
     now does for every trap kind (`$LINENO` in DEBUG/ERR/EXIT), and the shell's
-    own line state is restored afterwards. `DEBUG` fires for simple commands,
-    `((…))`, `[[ … ]]`, the `case` statement, the `for` header and each
-    `for ((…))` condition/update — but not for `if`/`while` headers or brace
-    groups, which is what bash does — `builtin-trap-bash` 19 → 6,
-    `builtin-trap-err` 16 → 10 remaining.
+    own line state is restored afterwards — after a trap, a command
+    substitution, a subshell and a function call, so an inherited line never
+    leaks into the caller. `DEBUG` fires for simple commands, `((…))`,
+    `[[ … ]]`, the `case` statement, each `for` iteration and each
+    `for ((…))` condition/update — but not for `if`/`while` headers, brace
+    groups or inside a command substitution/subshell, which is what bash does;
+    in a pipeline it fires once per *simple* stage, in the parent, before the
+    stage's redirections. `ERR` fires once per failing command (a compound
+    whose status is a child's failure is not a second event), again for a
+    function call under `errtrace`, and on the *redirection's* line when a
+    redirect fails. `trap err ERR` installs the command `err` instead of
+    reading it as `ERR`-the-signal to reset (only a lone operand or a numeric
+    first operand resets) — `builtin-trap-bash` 19 → 9, `builtin-trap-err`
+    16 → 10 remaining, where the leftovers are the `&`-based ones (out of
+    scope, item 19) and bash's own self-inconsistent `$LINENO` inside
+    handlers that run other handlers.
 15. **[done, mostly]** Arithmetic contexts: the text between `$((` and `))` is
     expanded as a quoted word before evaluation, so `${j:-5}`, `$( )`,
     backticks and nested `$(( ))` all work; `nounset` and bad-LValue

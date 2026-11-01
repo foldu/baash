@@ -1169,12 +1169,14 @@ fn bi_trap(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
         return print_traps(host, &[]);
     }
 
-    // bash's rule, and the one place the `trap` surface is surprising: if the
-    // *first* operand is itself a signal specification, there is no action and
-    // every operand is a signal to reset. So `trap 0 2` resets EXIT and INT,
-    // and `trap 2 EXIT` does too; `trap - SIG` spells the same thing out, and
-    // `trap EXIT` (one operand) is the common shorthand.
-    if crate::TrapKey::parse(operands[0]).is_some() {
+    // bash's rule, and the one place the `trap` surface is surprising: a lone
+    // operand, or a first operand that is a *number*, is a list of signals to
+    // reset — `trap 0 2` and `trap 2 EXIT` both reset, and `trap EXIT` is the
+    // common shorthand. A first operand that is a signal *name* is the action:
+    // `trap err ERR` runs the function `err` on ERR, and `trap USR1 USR2` sets
+    // the USR2 trap to the command `USR1` (measured against bash 5.3.20).
+    let first_is_number = !operands[0].is_empty() && operands[0].iter().all(u8::is_ascii_digit);
+    if operands.len() == 1 || first_is_number {
         let mut status = Status::SUCCESS;
         for spec in operands {
             match crate::TrapKey::parse(spec) {

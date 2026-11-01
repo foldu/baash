@@ -348,6 +348,20 @@ pub struct Interp {
     /// waited for normally — inside a stage, `$?` after an external command is
     /// that command's status, as in a subshell.
     defer_next_spawn: bool,
+    /// Whether the `ERR` trap has already run for the command that is
+    /// finishing. bash fires it once per failing *command*: a `for`, `case` or
+    /// brace group whose status is a child's failure does not fire it again,
+    /// which is what `err_trap_reported` (reset as each command starts)
+    /// encodes.
+    err_trap_reported: bool,
+    /// Set while a pipeline stage runs, whose `DEBUG` trap already fired in
+    /// the parent: bash fires exactly one per stage, before the stage's
+    /// redirections and before its own (subshell) trap table exists, so the
+    /// commands inside a compound stage must not fire it again.
+    debug_suppressed: usize,
+    /// Set when a `DEBUG` handler asked to leave the shell while a pipeline
+    /// was starting; `eval_pipeline` turns it into the unwind.
+    debug_exit_request: Option<Status>,
     /// While a trap handler runs: the line number that handler's first line
     /// stands for, so `$LINENO` inside it names the command being trapped.
     line_base: Option<u32>,
@@ -495,6 +509,9 @@ impl Interp {
             depth: 0,
             calls: Vec::new(),
             line_base: None,
+            err_trap_reported: false,
+            debug_suppressed: 0,
+            debug_exit_request: None,
             array_literals: Vec::new(),
             nameref_cycle: std::cell::Cell::new(false),
             random: std::cell::Cell::new(0x9E37_79B9_7F4A_7C15),
@@ -1182,7 +1199,9 @@ impl Interp {
         if status.is_success() || ctx.ignore_errexit || negated {
             return Unwind::Status(status);
         }
-        if let Some(exit) = self.run_err_trap(status) {
+        if !self.err_trap_reported
+            && let Some(exit) = self.run_err_trap(status)
+        {
             return Unwind::Exit(exit);
         }
         if !self.state.opts.errexit {

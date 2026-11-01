@@ -298,7 +298,8 @@ impl Interp {
 
         // `DEBUG` runs before the command, after its words have been expanded
         // (bash sets `BASH_COMMAND` from the expanded text). A `DEBUG` handler
-        // that fails is fatal only under `errexit`.
+        // that fails is fatal only under `errexit`. A pipeline stage has
+        // already fired its own trap in the parent.
         if let Some(exit) = self.run_debug_trap() {
             return Unwind::Exit(exit);
         }
@@ -1097,11 +1098,16 @@ impl Interp {
         let definition = function.chunk.source.name().as_bytes().to_vec();
         let line = self.line_number().max(0) as usize;
         self.push_call(&function.name, &definition, line);
+        // `$LINENO` belongs to the *call site* again once the body returns:
+        // an `ERR` trap that fires for the call reports the caller's line, not
+        // the function's last one (`line=14` for a call on line 14).
+        let saved_line = (self.line_source.clone(), self.line_offset, self.line_number);
         let result = self.eval_node(&function.chunk, function.body, ctx);
         // `RETURN` runs with the function's frame still in scope.
         if let Some(exit) = self.run_return_trap() {
             self.depth -= 1;
             self.pop_call();
+            (self.line_source, self.line_offset, self.line_number) = saved_line;
             let _ = self.state.vars.pop_frame();
             self.restore_function_traps(inherited);
             let _ = self.state.vars.finish_prefix_assignments(applied);
@@ -1110,6 +1116,7 @@ impl Interp {
         }
         self.depth -= 1;
         self.pop_call();
+        (self.line_source, self.line_offset, self.line_number) = saved_line;
         let frame = self.state.vars.pop_frame();
         self.restore_function_traps(inherited);
         let _ = self.state.vars.finish_prefix_assignments(applied);
@@ -1120,6 +1127,12 @@ impl Interp {
         if let Err(error) = frame {
             self.report(crate::codes::INTERNAL, 0..0, error.message());
         }
+        // bash reports a *function call* whose status is a failure even when
+        // the command inside already fired `ERR` (that is what `errtrace`
+        // exposes): `passing` fires once for its `false`, `failing` fires for
+        // its `false` and again for the call. Forget the inner report so the
+        // call site has its own.
+        self.err_trap_reported = false;
 
         match result {
             Unwind::Return(status) => Unwind::Status(status),

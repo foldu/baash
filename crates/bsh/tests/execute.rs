@@ -1698,3 +1698,39 @@ fn a_for_header_may_put_its_word_list_on_the_next_line() {
     // With no `in` at all the positional parameters are used.
     assert_eq!(out("for i\ndo echo $i\ndone\n"), "");
 }
+
+#[test]
+fn the_err_trap_fires_once_per_failing_command() {
+    // A compound whose status is a child's failure is not a second event.
+    let script = "trap 'echo err' ERR\nfor i in 1 2; do false; done\n{ false; } \necho done\n";
+    assert_eq!(out(script), "err\nerr\nerr\ndone\n");
+
+    // A redirection failure is its own event, on the redirection's line.
+    let script = "trap 'echo line=$LINENO' ERR\nfalse\n{ false\n} > /nonexistent-dir/x\necho ok\n";
+    assert_eq!(out(script), "line=2\nline=4\nok\n");
+
+    // `errtrace` exposes the call as an event of its own.
+    let script = "trap 'echo err' ERR\nset -o errtrace\nf() { false; }\nf\necho ok\n";
+    assert_eq!(out(script), "err\nerr\nok\n");
+}
+
+#[test]
+fn the_debug_trap_runs_once_per_pipeline_stage_and_per_for_iteration() {
+    let script =
+        "trap 'echo D$LINENO' DEBUG\nfalse | false | false\nfor i in 1 2; do\n  echo x\n  done\n";
+    assert_eq!(out(script), "D2\nD2\nD2\nD3\nD4\nx\nD3\nD4\nx\n");
+    // A command substitution is a subprogram: no DEBUG trap inside it.
+    let script = "trap 'echo D' DEBUG\necho \"$(echo inner)\"\n";
+    assert_eq!(out(script), "D\ninner\n");
+}
+
+#[test]
+fn an_action_named_like_a_signal_is_an_action() {
+    // `trap err ERR` runs the function `err`; it must not be read as "reset
+    // the ERR and ERR signals" the way a lone operand is.
+    let script = "err() { echo handled; }\ntrap err ERR\nfalse\necho ok\n";
+    assert_eq!(out(script), "handled\nok\n");
+    // A lone operand, or a numeric first operand, still resets.
+    assert_eq!(out("trap 'echo F' EXIT\ntrap EXIT\nexit 0\n"), "");
+    assert_eq!(out("trap 'echo F' USR1\ntrap 2 EXIT\nexit 0\n"), "");
+}

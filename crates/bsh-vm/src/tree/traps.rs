@@ -23,6 +23,8 @@
 //! which is bash's inheritance rule).
 
 use std::collections::BTreeMap;
+
+use bsh_sys::AsRawFd;
 use std::sync::Arc;
 
 use bsh_runtime::{Status, TrapAction, TrapKey};
@@ -261,7 +263,7 @@ impl Interp {
         let Some(TrapAction::Command(code)) = self.state.traps.get(TrapKey::Debug).cloned() else {
             return None;
         };
-        if self.in_trap {
+        if self.in_trap || self.debug_suppressed > 0 {
             return None;
         }
         let outcome = self.run_trap_code(&code);
@@ -282,9 +284,16 @@ impl Interp {
         if self.in_trap || self.err_trap_suppressed > 0 {
             return None;
         }
+        self.err_trap_reported = true;
         self.set_status(failing);
         self.sync_specials();
-        self.run_trap_code(&code).exit
+        let exit = self.run_trap_code(&code).exit;
+        // The handler is a list of commands, and running them clears the
+        // record like any other command would; the *failure* it was reporting
+        // is still the same one, so a compound wrapping this command must not
+        // report it a second time.
+        self.err_trap_reported = true;
+        exit
     }
 
     /// Take the traps a function call must not inherit.
@@ -402,7 +411,6 @@ impl PipelineBuffer {
     /// Bytes buffered so far, if the swap happened.
     pub(crate) fn size(&self) -> Option<u64> {
         let file = self.file.as_ref()?;
-        use bsh_sys::AsRawFd;
         let len = bsh_sys::lseek(file.as_raw_fd(), 0, bsh_sys::seek::END).ok()?;
         u64::try_from(len).ok()
     }

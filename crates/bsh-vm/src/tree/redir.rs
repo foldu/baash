@@ -69,6 +69,12 @@ impl Interp {
             if let Err(error) = apply_step(step) {
                 // Undo what this command already changed, then report.
                 self.restore_fds(saved);
+                // The report, and an `ERR` trap that fires for it, name the
+                // line the redirection is written on rather than the line the
+                // command starts on: bash reports `} > /zz` on the `}` line.
+                if let Some(redirect) = redirects.get(index) {
+                    self.set_line(&chunk.source, redirect.span.start);
+                }
                 self.report(
                     crate::codes::REDIRECTION,
                     0..0,
