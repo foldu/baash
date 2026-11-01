@@ -1199,3 +1199,42 @@ fn left_and_right_accept_the_match_and_put_the_cursor_on_it() {
     assert_eq!(result, ReadResult::Line(b"echo hello Yworld\n".to_vec()));
     let _ = keys;
 }
+
+/// A history entry that spans lines is painted as those lines.
+///
+/// Recalling one used to show `for i in 1 2; do^Jecho $i^Jdone`: the newlines
+/// were caret notation, so a command that runs read as something the shell
+/// would reject. They are row breaks now, and the cursor sits at the end of the
+/// last row.
+#[test]
+fn a_multiline_history_entry_is_painted_as_lines() {
+    let mut history = History::new();
+    history.push(b"for i in 1 2; do\necho $i\ndone\n");
+    let mut term = FakeTerminal::sized(b"", 80, 24);
+    let completer = StubCompleter::empty();
+    let config = Config {
+        history,
+        ..plain_config()
+    };
+    let sink = term.output_handle();
+    let mut editor =
+        Editor::with_config(&mut term, &completer, &baash_repl::NeverNeedsMore, config);
+    clear_output(&sink);
+    editor.step(Key::Up).unwrap();
+    let frame = output_text(&sink);
+    assert!(
+        !frame.contains("^J"),
+        "no caret notation in a recalled line: {frame:?}"
+    );
+    assert!(
+        frame.contains("do\r\necho $i\r\ndone"),
+        "one row per line: {frame:?}"
+    );
+    // The ring drops the entry's trailing newline; the ones inside it are the
+    // command's own and are what the shell will run.
+    assert_eq!(
+        editor.line().buffer(),
+        b"for i in 1 2; do\necho $i\ndone",
+        "the buffer keeps the newlines it will run with"
+    );
+}

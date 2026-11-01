@@ -292,7 +292,16 @@ impl Canvas {
     }
 
     /// Write one display unit, wrapping before it when it would not fit.
+    ///
+    /// A newline is a row break rather than a cell: the editor emits `\r\n`
+    /// itself, so the cursor lands where it thinks it does. That is what makes
+    /// a recalled history entry that spans lines paint as those lines instead of
+    /// as literal `^J`.
     fn cell(&mut self, bytes: &[u8], width: usize) {
+        if bytes == b"\n" {
+            self.newline();
+            return;
+        }
         if width > 0 && self.col > 0 && usize::from(self.col) + width > usize::from(self.columns) {
             self.newline();
         }

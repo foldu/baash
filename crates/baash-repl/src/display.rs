@@ -8,8 +8,10 @@
 //!
 //! * a tab becomes four spaces, so a column is a number and not a function of
 //!   where the tab started;
-//! * a control byte becomes caret notation (`^J`), so a pasted newline cannot
-//!   move the terminal's cursor behind the editor's back;
+//! * a newline is a *row break*, not a cell: a history entry that spans lines
+//!   (or a bracketed paste) is drawn as the lines it contains, because the
+//!   renderer emits the break itself and then knows where the cursor is;
+//! * any other control byte becomes caret notation (`^A`);
 //! * an invalid byte stays itself and counts as one cell, because bytes out is
 //!   the rule and the terminal will draw a replacement glyph there anyway;
 //! * a zero-width character is kept in the byte stream but consumes no cells.
@@ -105,6 +107,10 @@ fn display_char(src: &[u8], at: usize) -> (Vec<u8>, usize, usize) {
         Some((character, length)) => {
             if character == '\t' {
                 (vec![b' '; TAB_WIDTH], 1, TAB_WIDTH)
+            } else if character == '\n' {
+                // `Canvas::cell` turns this into a row break. Zero columns: a
+                // newline occupies no cell, it ends the row.
+                (vec![b'\n'], 1, 0)
             } else if (character as u32) < 0x20 || character == '\u{7f}' {
                 (vec![b'^', (character as u32 as u8) ^ 0x40], 1, 2)
             } else if character.is_control() {
@@ -194,11 +200,15 @@ mod tests {
     }
 
     #[test]
-    fn control_bytes_become_caret_notation() {
+    fn a_newline_is_a_row_break_and_other_controls_are_caret_notation() {
         let expanded = Expanded::new(b"a\nb");
-        assert_eq!(expanded.bytes(), b"a^Jb");
+        assert_eq!(expanded.bytes(), b"a\nb");
+        // The break itself takes no column: it ends a row, it is not a cell in
+        // one. The renderer turns it into `\r\n` and tracks the row.
+        assert_eq!(expanded.width(), 2);
+        let expanded = Expanded::new(b"a\x01b");
+        assert_eq!(expanded.bytes(), b"a^Ab");
         assert_eq!(expanded.width(), 4);
-        assert!(!expanded.bytes().contains(&b'\n'));
     }
 
     #[test]

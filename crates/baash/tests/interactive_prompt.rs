@@ -283,6 +283,44 @@ fn cursor_right_after(output: &[u8], from: usize) -> Option<usize> {
         .ok()
 }
 
+/// A multi-line command recalled from history is shown as the lines it is.
+///
+/// The editor paints continuation lines as scrollback while you type, so a
+/// recalled entry is the first time it has to draw a buffer that contains
+/// newlines. Caret notation (`for i in 1 2; do^Jecho $i^Jdone`) made a working
+/// command look unparseable.
+#[test]
+fn a_multiline_entry_is_recalled_as_lines() {
+    let home = temp_dir("multiline-home");
+    let work = temp_dir("multiline-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.prompt("$ ");
+    // A command the editor continues: `for` is unfinished until `done`.
+    session.send(b"for i in 1 2; do\n");
+    session.prompt("> ");
+    session.send(b"echo $i\n");
+    session.prompt("> ");
+    session.send(b"done\n");
+    session.prompt("$ ");
+    // Recalling it must paint three rows, not one with literal `^J`.
+    session.send(b"\x1b[A");
+    session.expect(b"do", Duration::from_secs(10));
+    session.expect(b"echo $i", Duration::from_secs(10));
+    session.expect(b"done", Duration::from_secs(10));
+    let recalled = session.output.clone();
+    assert!(
+        !recalled.windows(2).any(|window| window == b"^J"),
+        "no caret-J in a recalled line: {:?}",
+        String::from_utf8_lossy(&recalled)
+    );
+    // Abandon the recalled line; `Ctrl-C` leaves `$?` at 130, so `exit` takes
+    // the status explicitly.
+    session.send(b"\x03");
+    session.prompt("$ ");
+    session.send(b"exit 0\n");
+    session.wait_child();
+}
+
 /// An `ssh` session says which machine the command will run on.
 ///
 /// `sshd` sets one of these for every session, including the nested shells and

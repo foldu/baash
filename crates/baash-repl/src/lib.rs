@@ -77,7 +77,7 @@
 //!   `$(…)` in `PS1` with a side effect, say) is visible at the next prompt,
 //!   not mid-line.
 //! * **Bracketed-paste text inserted as real newlines**; a pasted newline is
-//!   inserted verbatim but displayed as `^J`, like any other control byte.
+//!   inserted verbatim and painted as the row break it is.
 //! * **Differential repaint**; every keystroke paints the whole frame.
 
 #![forbid(unsafe_code)]
