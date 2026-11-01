@@ -248,6 +248,13 @@ pub struct Vars {
     /// because `OPTIND=1` written twice must re-parse the same argument, so
     /// the counter is what makes a reset observable.
     optind_writes: u64,
+    /// The global index the last successful lookup hit, validated by name.
+    ///
+    /// A loop reads the same handful of variables thousands of times, and every
+    /// miss walks the whole table comparing names — on a 20k loop that walk was
+    /// the largest single cost in the profile. A stale index is harmless: the
+    /// name comparison fails and the walk happens anyway.
+    global_hit: std::cell::Cell<Option<usize>>,
 }
 
 impl Default for Vars {
@@ -261,6 +268,7 @@ impl Default for Vars {
             shell_pid: std::process::id(),
             last_bg_pid: None,
             optind_writes: 0,
+            global_hit: std::cell::Cell::new(None),
         }
     }
 }
@@ -291,16 +299,40 @@ impl Vars {
                 return Some(var);
             }
         }
-        self.global
+        if let Some(index) = self.global_hit.get() {
+            if let Some((candidate, var)) = self.global.get(index) {
+                if candidate.as_slice() == name {
+                    return Some(var);
+                }
+            }
+        }
+        let found = self
+            .global
             .iter()
-            .find(|(candidate, _)| candidate.as_slice() == name)
-            .map(|(_, var)| var)
+            .position(|(candidate, _)| candidate.as_slice() == name);
+        self.global_hit.set(found);
+        found.map(|index| &self.global[index].1)
+    }
+
+    /// The cell for `name` when following namerefs cannot change the answer.
+    ///
+    /// Every read path tries this before [`Vars::resolve_chain`], which copies
+    /// the name and looks it up a second time: on a loop that reads one
+    /// variable several times per iteration that copy was a measurable share of
+    /// the run, and a nameref is the rare case, not the common one.
+    #[inline]
+    fn plain(&self, name: &[u8]) -> Option<&Var> {
+        let var = self.lookup(name)?;
+        (!var.attrs.nameref).then_some(var)
     }
 
     /// The variable's value, if it exists.
     ///
     /// Namerefs are followed: `-n r=x; value(r)` is `x`'s value.
     pub fn value(&self, name: &[u8]) -> Option<&VarValue> {
+        if let Some(var) = self.plain(name) {
+            return Some(&var.value);
+        }
         match self.resolve_chain(name).ok()? {
             Resolved::Var(target) => self.lookup(&target).map(|var| &var.value),
             Resolved::Indexed(..) | Resolved::Assoc(..) => None,
@@ -313,6 +345,9 @@ impl Vars {
     /// Namerefs are followed, including element references: `-n r='a[2]'`
     /// makes `scalar(r)` the bytes of `a[2]`.
     pub fn scalar(&self, name: &[u8]) -> Option<&[u8]> {
+        if let Some(var) = self.plain(name) {
+            return var.scalar();
+        }
         match self.resolve_chain(name).ok()? {
             Resolved::Var(target) => self.lookup(&target).and_then(Var::scalar),
             Resolved::Indexed(base, index) => self.element_indexed(&base, index),
@@ -323,6 +358,9 @@ impl Vars {
 
     /// Whether the variable exists (even if it is `Unset`).
     pub fn contains(&self, name: &[u8]) -> bool {
+        if self.plain(name).is_some() {
+            return true;
+        }
         match self.resolve_chain(name) {
             Ok(Resolved::Var(target)) => self.lookup(&target).is_some(),
             Ok(_) => true,
@@ -332,6 +370,9 @@ impl Vars {
 
     /// Whether the variable exists and is set.
     pub fn is_set(&self, name: &[u8]) -> bool {
+        if let Some(var) = self.plain(name) {
+            return var.value.is_set();
+        }
         match self.resolve_chain(name) {
             Ok(Resolved::Var(target)) => self.lookup(&target).is_some_and(|var| var.value.is_set()),
             Ok(Resolved::Indexed(base, index)) => self.element_indexed(&base, index).is_some(),
@@ -343,6 +384,9 @@ impl Vars {
 
     /// Whether the variable is readonly.
     pub fn is_readonly(&self, name: &[u8]) -> bool {
+        if let Some(var) = self.plain(name) {
+            return var.attrs.readonly;
+        }
         match self.resolve_chain(name) {
             Ok(Resolved::Var(target)) => self.lookup(&target).is_some_and(|var| var.attrs.readonly),
             _ => false,
@@ -351,6 +395,9 @@ impl Vars {
 
     /// Whether the variable is exported.
     pub fn is_exported(&self, name: &[u8]) -> bool {
+        if let Some(var) = self.plain(name) {
+            return var.attrs.exported;
+        }
         match self.resolve_chain(name) {
             Ok(Resolved::Var(target)) => self.lookup(&target).is_some_and(|var| var.attrs.exported),
             _ => false,
@@ -1525,10 +1572,19 @@ impl Vars {
                 return Some(Location::Frame { frame, index });
             }
         }
-        self.global
+        if let Some(index) = self.global_hit.get() {
+            if let Some((candidate, _)) = self.global.get(index) {
+                if candidate.as_slice() == name {
+                    return Some(Location::Global(index));
+                }
+            }
+        }
+        let found = self
+            .global
             .iter()
-            .position(|(candidate, _)| candidate.as_slice() == name)
-            .map(Location::Global)
+            .position(|(candidate, _)| candidate.as_slice() == name);
+        self.global_hit.set(found);
+        found.map(Location::Global)
     }
 
     fn var_at(&self, location: Location) -> &Var {

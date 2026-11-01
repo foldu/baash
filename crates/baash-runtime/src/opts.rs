@@ -99,27 +99,6 @@ macro_rules! option_table {
             }
 
             /// Set `flag` to `on`.
-            /// Which options are on, as a bit per option.
-            ///
-            /// The exact enabled set, not a hash: a cache that keeps derived
-            /// strings (`SHELLOPTS`, `BASHOPTS`) can compare this instead of
-            /// rebuilding them, and equal fingerprints mean equal sets.
-            #[must_use]
-            pub fn fingerprint(&self) -> u128 {
-                // One bit per option, in the table's order. `u128` because the
-                // table is larger than 64 entries and a shift past the width is
-                // an overflow panic, not a collision.
-                let mut bits = 0u128;
-                let mut index = 0u32;
-                $(
-                    if self.$field {
-                        bits |= 1u128 << index;
-                    }
-                    index += 1;
-                )+
-                bits
-            }
-
             pub fn set_flag(&mut self, flag: Flag, on: bool) {
                 match flag {
                     $( Flag::$flag => self.$field = on, )+

@@ -19,42 +19,46 @@ the release column is `cargo build --release`.
 | command substitution, 1000 | 171 ms | 220 ms (2.0×) | 128 ms (0.7×) |
 | subshell, 1000 (`( : )`) | 143 ms | 158 ms (1.1×) | 105 ms (0.7×) |
 
-### 2026-11-01: the specials stop being written per command
+### 2026-11-01: dynamic specials, and two variable-table fast paths
 
-Re-measured at `05fc4bf` plus the two changes below, same machine, same method.
-`$SECONDS`, `$RANDOM` and `$-` were being *materialised into the variable table*
-after every command; they are dynamic variables now, kept in the interpreter's
-`Specials` and read back by `Vars::get` (and `IntVars::get` for arithmetic), and
-`$-` is rebuilt only when the option fingerprint changes. `SHELLOPTS`/`BASHOPTS`
-stopped being rebuilt per command in `05fc4bf`.
+Re-measured at the commits that made `$SECONDS`/`$RANDOM` lazy and added the
+lookup fast paths below. Same machine, same method, best of 3.
 
 | case | bash | baash release |
 |---|---:|---:|
-| startup, per spawn | 0.55 ms | 0.66 ms (1.2×) |
-| arithmetic loop, 20k `((i++))` | 9.6 ms | 15.5 ms (1.6×) |
-| `${s#*c}`, 20k | 23.5 ms | 30.8 ms (1.3×) |
-| `${s//d/e}`, 20k | 25.8 ms | 27.5 ms (1.1×) |
-| function call, 20k | 32.4 ms | 52.3 ms (1.6×) |
-| `case` dispatch, 20k | 15.2 ms | 24.4 ms (1.6×) |
-| builtin `echo`, 20k | 21.6 ms | 29.6 ms (1.4×) |
-| fork+exec, 200 (`env true`) | 189 ms | 172 ms (0.9×) |
-| pipeline, 200 | 125 ms | 95.9 ms (0.8×) |
-| command substitution, 1000 | 168 ms | 8.0 ms (0.05×) |
-| subshell, 1000 (`( : )`) | 144 ms | 4.6 ms (0.03×) |
-| subshell 200, 20k-element array | 49.0 ms | 67.4 ms (1.4×) |
+| startup, per spawn | 0.52 ms | 0.69 ms (1.3×) |
+| arithmetic loop, 20k `((i++))` | 9.4 ms | 6.9 ms (**0.7×**) |
+| `${s#*c}`, 20k | 23.4 ms | 20.2 ms (**0.9×**) |
+| `${s//d/e}`, 20k | 26.4 ms | 16.4 ms (**0.6×**) |
+| function call, 20k | 31.4 ms | 38.7 ms (1.2×) |
+| `case` dispatch, 20k | 15.3 ms | 14.1 ms (**0.9×**) |
+| builtin `echo`, 20k | 21.5 ms | 21.0 ms (**1.0×**) |
+| fork+exec, 200 (`env true`) | 186 ms | 169 ms (0.9×) |
+| pipeline, 200 | 124 ms | 92.2 ms (0.7×) |
+| command substitution, 1000 | 176 ms | 7.6 ms (0.04×) |
+| subshell, 1000 (`( : )`) | 145 ms | 4.3 ms (0.03×) |
+| subshell 200, 20k-element array | 50.6 ms | 65.5 ms (1.3×) |
 
-Two things this table says that the 2026-10-28 one could not:
+Three changes, each measured with `perf stat -e instructions:u` and callgrind
+rather than guessed at:
 
-* **Interpretation is back inside ~1–1.6× bash** and every derived-string write
-  is off the per-command path. The regression that prompted this measurement
-  (`((i++))` 20k at 40 ms, bisected to the commit that made `SHELLOPTS`
-  derived-and-refreshed-per-command) is gone: 40 → 25.7 → 15.5 ms.
-* **The process-heavy column is a different design, not a faster loop.** Command
-  substitution and subshells no longer `fork`, so they are 20–30× bash rather
-  than 0.7×; `docs/direction.md` §2 is why. The debug column above is stale: it
-  predates that pivot, so its ratios are not comparable to these.
+* `$SECONDS` and `$RANDOM` are dynamic variables now: their bytes are
+  materialised into the interpreter's `Specials` once per command and read back
+  from there, instead of being *written into the variable table* — a name lookup
+  and a copy per command, on the hot path of every loop.
+* Every variable read tried nameref resolution first, which copies the name and
+  looks it up a second time; `Vars::plain` answers the ordinary case (not a
+  nameref) from the cell it already found. `$-` and `SHELLOPTS`/`BASHOPTS` are
+  compared against a cached `Opts` value (a memcmp of a `bool` bundle) rather
+  than a per-command walk of the option table.
+* `Vars` keeps a one-entry cache of the global index its last lookup hit,
+  validated by name. A 20k loop reads the same handful of names, and every miss
+  walked the whole table comparing names: that walk was the largest single line
+  in the profile.
 
-Companion numbers: conformance 2344 (baseline 2344, +0) on the same binary.
+Function calls are the one case still behind the 2026-10-28 build (38.7 ms now,
+33.1 ms then, 31.4 ms in bash). The remaining cost is the same table walk for
+the *frame* locals a call pushes and pops; the global cache does not cover them.
 
 ## What this says
 

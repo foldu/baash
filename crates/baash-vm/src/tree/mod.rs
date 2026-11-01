@@ -314,7 +314,7 @@ pub struct Interp {
     /// (`((i++))` 20k went from 15 ms to 40 ms, `docs/performance.md`). The
     /// fingerprint makes "did anything change" one comparison over the option
     /// bits.
-    option_lists: Option<u128>,
+    option_lists: Option<baash_runtime::Opts>,
     /// Set by a built-in that unwinds (`break`, `continue`, `return`), read by
     /// the command sequence after the built-in returns.
     pending: Option<Unwind>,
@@ -341,11 +341,13 @@ pub struct Interp {
     /// `$SECONDS`' counter. It ticks once per command rather than reading the
     /// clock, which is what it did when the value lived in the variable table.
     seconds: u64,
-    /// `$-` and the option fingerprint it was built from.
+    /// `$-` and the option set it was built from.
     ///
     /// Rebuilding `$-` walks the whole option table, and the option set changes
-    /// far more rarely than commands run.
-    dash: Option<(u128, Vec<u8>)>,
+    /// far more rarely than commands run. The set is compared as a value:
+    /// `Opts` is a plain `bool` bundle, so that is a memcmp rather than a walk
+    /// of the table computing a fingerprint.
+    dash: Option<(baash_runtime::Opts, Vec<u8>)>,
     /// Bytes a `read` pulled from a descriptor but could not give back.
     ///
     /// Only a descriptor that is not seekable can end up here; on a regular
@@ -608,9 +610,6 @@ impl Interp {
         // script that never sets it still traces with `+ `, while `unset PS4`
         // makes the prefix empty. The environment import can replace it.
         let _ = interp.state.vars.assign_scalar(b"PS4", b"+ ");
-        // `$_` exists from the start (bash sets it to `$0`), so `set -u` does
-        // not make the first read of it an error.
-        let _ = interp.state.vars.assign_scalar(b"_", b"");
         // `SECONDS` is *not* seeded: it is a dynamic variable, so the value
         // lives in `Specials` and `Vars::get` answers for it (a seed here would
         // shadow the ticking value for the life of the shell).
@@ -1078,11 +1077,10 @@ impl Interp {
     /// readonly attribute they carry, which is why it goes through
     /// [`baash_runtime::Vars::refresh_derived`].
     fn refresh_option_lists(&mut self) {
-        let fingerprint = self.state.opts.fingerprint();
-        if self.option_lists == Some(fingerprint) {
+        if self.option_lists == Some(self.state.opts) {
             return;
         }
-        self.option_lists = Some(fingerprint);
+        self.option_lists = Some(self.state.opts);
         let shellopts = self.state.opts.shellopts();
         let _ = self.state.vars.refresh_derived(b"SHELLOPTS", &shellopts);
         let bashopts = self.state.opts.bashopts();
@@ -1121,14 +1119,13 @@ impl Interp {
         );
         // `-i` has no `set -o` row (it is an invocation mode, not a toggle),
         // so `$-` has to add it here.
-        let fingerprint = self.state.opts.fingerprint();
-        let stale = !matches!(&self.dash, Some((cached, _)) if *cached == fingerprint);
+        let stale = !matches!(&self.dash, Some((cached, _)) if *cached == self.state.opts);
         if stale {
             let mut flags = self.state.opts.dash_flags();
             if self.interactive && !flags.contains(&b'i') {
                 flags.push(b'i');
             }
-            self.dash = Some((fingerprint, flags));
+            self.dash = Some((self.state.opts, flags));
         }
         let (_, flags) = self.dash.as_ref().expect("just built");
         self.specials.dash.clear();
@@ -1352,9 +1349,9 @@ impl baash_lang::Vars for Interp {
         if name == b"LINENO" {
             return Some(&self.lineno);
         }
-        // `$SECONDS` and `$RANDOM` are dynamic: their bytes are refreshed once
-        // per command and live beside the other special parameters, unless the
-        // script assigned the name itself, in which case the variable table
+        // `$SECONDS`, `$RANDOM` and `$_` are dynamic: their bytes are refreshed
+        // once per command and live beside the other special parameters, unless
+        // the script assigned the name itself, in which case the variable table
         // wins (it is what `unset` and `declare` act on).
         if name == b"SECONDS" && self.state.vars.scalar(name).is_none() {
             return Some(&self.specials.seconds);

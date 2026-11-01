@@ -444,6 +444,9 @@ impl Interp {
         // has already happened, so a `$_` inside the command saw the previous
         // value; only later commands see this one.
         if let Some(last) = argv.last() {
+            // `_` stays an ordinary variable — `declare -p _` lists it and a
+            // script may assign it — so this is a table write, and it is the
+            // one per-command special that kept its home.
             let _ = self.state.vars.assign_scalar(b"_", last);
         }
         unwind
