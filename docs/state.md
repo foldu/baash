@@ -476,6 +476,14 @@ Do not re-litigate these without a reason; several were expensive.
 * **One execution engine, for now.** The tree-walking evaluator is the shell.
   A bytecode VM stays on the table for later — the crate is named for it — but
   it is not being built alongside.
+* **GPL-3.0-or-later, deliberately, not Apache-2.0.** bash's implementation was
+  read closely — the parser's ambiguity resolutions, `[[ =~ ]]`, `pipefail`,
+  `declare -p`'s layout, the prompt and completion rules all cite its
+  behaviour. Work informed that way is not clean-room, and a permissive license
+  would be a claim the history does not support. bash is GPLv3-or-later, so the
+  project is too: the licenses are also simply incompatible, which makes the
+  choice about honesty rather than preference. Third-party work keeps its own
+  terms (`THIRD-PARTY.md`).
 
 ## 8. Next steps
 

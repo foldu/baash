@@ -253,4 +253,20 @@ the project's only real progress metric (DESIGN.md §8).
 
 ## License
 
-Apache-2.0; see [LICENSE](LICENSE).
+GNU GPL, version 3 or later — the same license as bash, and deliberately so:
+bash's implementation was read closely enough to count, which rules out a
+permissive claim (and the two licenses could not be combined anyway). See
+[LICENSE](LICENSE).
+
+    baash is free software: you can redistribute it and/or modify it under the
+    terms of the GNU General Public License as published by the Free Software
+    Foundation, either version 3 of the License, or (at your option) any later
+    version.
+
+    baash is distributed in the hope that it will be useful, but WITHOUT ANY
+    WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+    A PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+
+Compiled-in and vendored third-party work keeps its own license: the uutils
+subcrates embedded in `baash-utils` are MIT, and the vendored Oils spec suite is
+Apache-2.0. [THIRD-PARTY.md](THIRD-PARTY.md) has the notices.

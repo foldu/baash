@@ -170,7 +170,8 @@
               meta = {
                 description = "POSIX- and bash-compatible interactive shell";
                 mainProgram = "baash";
-                license = pkgs.lib.licenses.asl20;
+                # GPL-3.0-or-later: the same license as bash.
+                license = pkgs.lib.licenses.gpl3Plus;
                 platforms = nixpkgs.lib.platforms.linux;
               };
             }
