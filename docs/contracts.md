@@ -1190,6 +1190,11 @@ an error either — the `(` stays an ordinary word byte, which is how
 
 ### baash-spec
 
+`--shell PATH` and every `--compare` reference are spawned exactly as named,
+never canonicalized: `/bin/sh` is a symlink to a multi-call binary on Alpine,
+and `busybox`/`toybox` pick their applet from `argv[0]`, so resolving the link
+runs the usage banner instead of a shell.
+
 `--locale NAME` sets `LC_ALL` for the shell under test **and** every reference,
 so the comparison is like-for-like. `C` is the default because the suite's
 primary expectations are byte-calibrated: measured, bash falls from 2574 to

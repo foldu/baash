@@ -117,3 +117,47 @@ fn counts_passes_separately_from_skips_and_honours_min() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_shell_named_through_a_symlink_is_run_as_named() {
+    // `busybox` and `toybox` choose their applet from `argv[0]`, and `/bin/sh`
+    // is a symlink to the multi-call binary on Alpine — the CI image. A
+    // harness that resolves the link runs `busybox` with no applet, which
+    // prints its usage instead of the script, and every case fails.
+    let dir = temp_dir("symlink");
+    let spec_dir = dir.join("spec");
+    std::fs::create_dir_all(&spec_dir).unwrap();
+    write(
+        &spec_dir,
+        "a.test.sh",
+        "#### passing case\necho hi\n## STDOUT:\nhi\n## END\n",
+    );
+    let link = dir.join("sh");
+    std::os::unix::fs::symlink("/bin/sh", &link).expect("link to /bin/sh");
+
+    let exe = env!("CARGO_BIN_EXE_baash-spec");
+    let json = dir.join("report.json");
+    let output = Command::new(exe)
+        .args([
+            "--spec-dir",
+            spec_dir.to_str().unwrap(),
+            "--shell",
+            link.to_str().unwrap(),
+            "--jobs",
+            "1",
+            "--json",
+            json.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("TOTAL: 1/1 compared"), "{stdout}");
+
+    // And the report names the shell it was given, not what the link points
+    // at: resolving is how the applet gets lost.
+    let report = std::fs::read_to_string(&json).unwrap();
+    let named = format!("\"shell\": \"{}\"", link.display());
+    assert!(report.contains(&named), "expected {named} in {report}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}

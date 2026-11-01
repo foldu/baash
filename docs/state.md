@@ -54,7 +54,7 @@ a stale brief has already cost two wrong scopes (arrays: 54 vs real; namerefs:
 | of the whole suite (3971 cases) | 56.3 % |
 | as a fraction of bash's score | 2344 / 2577 = 91.0 % |
 | share of the bash gap closed since 1013 | 1331 / 1564 = 85.1 % |
-| our test count | 1294 |
+| our test count | 1295 |
 
 Measured with `bash 5.3.20` as the comparison shell, harness forced to
 `LC_ALL=C` (bash scores *worse* under `C.UTF-8`: 2574 → 2435, so the C locale

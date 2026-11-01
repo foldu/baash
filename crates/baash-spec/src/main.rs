@@ -89,8 +89,11 @@ fn run(started: Instant) -> Result<std::process::ExitCode, String> {
                     path.display()
                 ));
             }
-            path.canonicalize()
-                .map_err(|error| format!("cannot resolve shell {}: {error}", path.display()))?
+            // Spawned exactly as named. Resolving symlinks here would run the
+            // wrong program: busybox and toybox dispatch on argv[0], so
+            // `/bin/sh` (a symlink to `/bin/busybox`) resolved to `busybox`
+            // prints the multi-call binary's usage instead of running a shell.
+            path.clone()
         }
         None => default_shell(&workspace)?,
     };
@@ -419,13 +422,14 @@ fn resolve_references(tokens: &[String]) -> Result<Vec<Reference>, String> {
         if token.is_empty() {
             continue;
         }
+        // Kept as named, for the same reason as `--shell`: a symlink's name is
+        // part of how a multi-call shell knows which applet to be.
         let path = if token.contains('/') {
             let path = PathBuf::from(token);
             if !path.is_file() {
                 return Err(format!("reference shell {token:?} does not exist"));
             }
-            path.canonicalize()
-                .map_err(|error| format!("cannot resolve {token:?}: {error}"))?
+            path
         } else {
             find_on_path(token)
                 .ok_or_else(|| format!("reference shell {token:?} was not found on PATH"))?
@@ -450,7 +454,7 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(name);
         if candidate.is_file() {
-            return candidate.canonicalize().ok();
+            return Some(candidate);
         }
     }
     None
