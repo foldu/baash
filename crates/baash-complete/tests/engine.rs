@@ -585,3 +585,26 @@ fn a_command_word_is_not_completed_from_history_words() {
             .all(|candidate| candidate.insert != b"has-arg")
     );
 }
+
+/// A completion under `~` must not escape the tilde.
+///
+/// `cd ~/src/gith<TAB>` inserting `\~/src/github.com/` makes the argument a
+/// literal `~` directory, so the command fails on a path that does not exist.
+/// The bug was in the insertion quoting (`baash_lang::quote`), and this pins
+/// the bytes that actually reach the line.
+#[test]
+fn a_home_relative_completion_keeps_its_tilde() {
+    let tree = TempTree::new("tilde");
+    tree.dir("src/github.com");
+    let engine = CompletionEngine::new()
+        .with_root(&tree.root)
+        .with_home(&tree.root);
+    let line: &[u8] = b"cd ~/src/gith";
+    let menu = engine.complete(line, line.len());
+    assert_eq!(
+        menu.insertion(0),
+        Some(b"~/src/github.com/".to_vec()),
+        "candidates: {:?}",
+        inserts(&menu)
+    );
+}

@@ -3,10 +3,15 @@
 //! The completer has a candidate (a filename, a variable value, a command
 //! name) and a cursor position inside some partially typed word. It needs the
 //! bytes to insert so that, when the line is lexed and expanded again, exactly
-//! the candidate's bytes appear in argv. Over-escaping is harmless — an
+//! the candidate's bytes appear in argv. Over-escaping is *nearly* harmless — an
 //! escaped letter still means the same letter — while under-escaping silently
 //! turns one argument into two or into a different command, so this module is
 //! deliberately conservative.
+//!
+//! The exception is `~`, which is not a letter: `\~` is a literal tilde, so
+//! escaping a home-relative candidate turns `~/src` into a path that does not
+//! exist. It is therefore left bare in an unquoted word (where it only expands
+//! at the start of the word — see [`quote`]).
 
 /// Where a completion is being inserted, which decides what must be escaped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +54,14 @@ pub fn quote(bytes: &[u8], ctx: QuoteCtx) -> Vec<u8> {
             QuoteCtx::Unquoted => {
                 if is_bare_safe(b) {
                     out.push(b);
+                } else if b == b'~' {
+                    // A `~` is special only at the start of an unquoted word,
+                    // and there it must stay bare: `\~` makes it a literal
+                    // tilde, which is not what a home-relative candidate means
+                    // (and not what the user typed to get there). Anywhere else
+                    // in the word it is already literal, so escaping it would
+                    // only add noise.
+                    out.push(b);
                 } else if b == b'\n' {
                     out.extend_from_slice(b"$'\\n'");
                 } else {
@@ -77,4 +90,36 @@ pub fn quote(bytes: &[u8], ctx: QuoteCtx) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{QuoteCtx, quote};
+
+    #[test]
+    fn a_home_relative_word_keeps_its_tilde_bare() {
+        // `cd ~/src/gith<TAB>` completes to `~/src/github.com/`: escaping the
+        // tilde would make it a literal `~` directory (`\~/src`), which is the
+        // bug this pins.
+        assert_eq!(
+            quote(b"~/src/github.com/", QuoteCtx::Unquoted),
+            b"~/src/github.com/"
+        );
+        // A tilde that is not at the start of the word never expands, so the
+        // escape would only be noise.
+        assert_eq!(quote(b"a~b", QuoteCtx::Unquoted), b"a~b");
+        // Inside a quote it was never special.
+        assert_eq!(quote(b"~/src", QuoteCtx::DoubleQuoted), b"~/src");
+        assert_eq!(quote(b"~/src", QuoteCtx::SingleQuoted), b"~/src");
+    }
+
+    #[test]
+    fn everything_else_is_still_escaped() {
+        assert_eq!(quote(b"a b", QuoteCtx::Unquoted), b"a\\ b");
+        assert_eq!(quote(b"x*y", QuoteCtx::Unquoted), b"x\\*y");
+        assert_eq!(quote(b"$x", QuoteCtx::Unquoted), b"\\$x");
+        // A newline cannot be a backslash escape: that would be a line
+        // continuation. It goes through `$'…'`.
+        assert_eq!(quote(b"a\nb", QuoteCtx::Unquoted), b"a$'\\n'b");
+    }
 }
