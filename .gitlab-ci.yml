@@ -93,13 +93,15 @@ package:windows:
       - .rustup/
       - .cargo/
   # The runner image is Alpine, so nothing the build needs may be assumed from
-  # it. Two things come from the shell list instead of the image: `bash`, and a
-  # `windres` for `turso_sdk_kit`'s build script, which hardcodes that name for
-  # gnu targets. `ci/windres` is that shim; LLVM's resource compiler it execs
-  # comes from `llvmPackages.bintools`.
+  # it — and this job uses `nix shell`, not `nix develop`, so it does not
+  # inherit a stdenv either. Three things come from the shell list instead:
+  # `bash`; `gcc`, because rustc's host linker is `cc` and the proc-macro build
+  # scripts are host binaries; and a `windres` for `turso_sdk_kit`'s build
+  # script, which hardcodes that name for gnu targets (`ci/windres`, execing
+  # the LLVM resource compiler from `llvmPackages.bintools`).
   script:
     - |
-      nix shell nixpkgs#bash nixpkgs#rustup nixpkgs#cargo-zigbuild nixpkgs#zig nixpkgs#llvmPackages.bintools \
+      nix shell nixpkgs#bash nixpkgs#gcc nixpkgs#rustup nixpkgs#cargo-zigbuild nixpkgs#zig nixpkgs#llvmPackages.bintools \
         --command bash -c '
           set -e
           toolchain=1.99.1

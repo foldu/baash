@@ -525,8 +525,11 @@ Where the waves stand:
   catalog is thread-local and single-utility: warm dispatch is 3.7 µs, and a
   utility's first call costs 57–191 µs (thread plus catalog). The CI job pins
   its rustup toolchain (`1.99.1`) because its cache is keyed on the branch, not
-  the compiler, and shims `windres` from `ci/windres`; the artifact is a PE32+
-  console executable at `target/x86_64-pc-windows-gnu/windows/baash.exe`.
+  the compiler; it takes `gcc` too, because rustc's host linker is `cc` and the
+  proc-macro build scripts are host binaries (`nix shell` inherits no stdenv,
+  unlike `nix develop`); and it shims `windres` from `ci/windres`. The artifact
+  is a PE32+ console executable at
+  `target/x86_64-pc-windows-gnu/windows/baash.exe`.
   `$PPID` is the one identity variable Windows cannot answer, so it is left
   unset there rather than zero (`parent_pid() -> Option<u32>`).
 
