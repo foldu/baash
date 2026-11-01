@@ -61,6 +61,34 @@ fn random_is_a_number_and_changes() {
     assert!(second.parse::<u32>().unwrap() < 32768);
 }
 
+/// `$SECONDS` is dynamic: it counts, and arithmetic sees the count.
+///
+/// It is not in the variable table (a per-command write was a name lookup and a
+/// copy on the hot path of every loop), so both readers have to know about it —
+/// parameter expansion through `Vars::get` and arithmetic through `IntVars`.
+#[test]
+fn seconds_is_dynamic_and_ticks() {
+    let mut interp = shell();
+    assert!(run(&mut interp, "first=$SECONDS").is_success());
+    assert!(run(&mut interp, "second=$SECONDS").is_success());
+    let first: u64 = String::from_utf8(scalar(&mut interp, b"first"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let second: u64 = String::from_utf8(scalar(&mut interp, b"second"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(second > first, "SECONDS counts: {first} then {second}");
+    // Arithmetic reads the same clock rather than an unset variable.
+    assert!(run(&mut interp, "n=$(( SECONDS + 0 ))").is_success());
+    let n: u64 = String::from_utf8(scalar(&mut interp, b"n"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(n > 0, "arithmetic sees $SECONDS: {n}");
+}
+
 #[test]
 fn name_listing_and_attributes() {
     let mut interp = shell();

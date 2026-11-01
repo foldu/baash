@@ -19,6 +19,43 @@ the release column is `cargo build --release`.
 | command substitution, 1000 | 171 ms | 220 ms (2.0×) | 128 ms (0.7×) |
 | subshell, 1000 (`( : )`) | 143 ms | 158 ms (1.1×) | 105 ms (0.7×) |
 
+### 2026-11-01: the specials stop being written per command
+
+Re-measured at `05fc4bf` plus the two changes below, same machine, same method.
+`$SECONDS`, `$RANDOM` and `$-` were being *materialised into the variable table*
+after every command; they are dynamic variables now, kept in the interpreter's
+`Specials` and read back by `Vars::get` (and `IntVars::get` for arithmetic), and
+`$-` is rebuilt only when the option fingerprint changes. `SHELLOPTS`/`BASHOPTS`
+stopped being rebuilt per command in `05fc4bf`.
+
+| case | bash | baash release |
+|---|---:|---:|
+| startup, per spawn | 0.55 ms | 0.66 ms (1.2×) |
+| arithmetic loop, 20k `((i++))` | 9.6 ms | 15.5 ms (1.6×) |
+| `${s#*c}`, 20k | 23.5 ms | 30.8 ms (1.3×) |
+| `${s//d/e}`, 20k | 25.8 ms | 27.5 ms (1.1×) |
+| function call, 20k | 32.4 ms | 52.3 ms (1.6×) |
+| `case` dispatch, 20k | 15.2 ms | 24.4 ms (1.6×) |
+| builtin `echo`, 20k | 21.6 ms | 29.6 ms (1.4×) |
+| fork+exec, 200 (`env true`) | 189 ms | 172 ms (0.9×) |
+| pipeline, 200 | 125 ms | 95.9 ms (0.8×) |
+| command substitution, 1000 | 168 ms | 8.0 ms (0.05×) |
+| subshell, 1000 (`( : )`) | 144 ms | 4.6 ms (0.03×) |
+| subshell 200, 20k-element array | 49.0 ms | 67.4 ms (1.4×) |
+
+Two things this table says that the 2026-10-28 one could not:
+
+* **Interpretation is back inside ~1–1.6× bash** and every derived-string write
+  is off the per-command path. The regression that prompted this measurement
+  (`((i++))` 20k at 40 ms, bisected to the commit that made `SHELLOPTS`
+  derived-and-refreshed-per-command) is gone: 40 → 25.7 → 15.5 ms.
+* **The process-heavy column is a different design, not a faster loop.** Command
+  substitution and subshells no longer `fork`, so they are 20–30× bash rather
+  than 0.7×; `docs/direction.md` §2 is why. The debug column above is stale: it
+  predates that pivot, so its ratios are not comparable to these.
+
+Companion numbers: conformance 2344 (baseline 2344, +0) on the same binary.
+
 ## What this says
 
 * **Startup was not the problem.** A one-shot `baash -c ':'` costs 0.40 ms in

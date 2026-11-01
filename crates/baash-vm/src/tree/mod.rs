@@ -241,6 +241,38 @@ struct Specials {
     dash: Vec<u8>,
     pid: Vec<u8>,
     bang: Vec<u8>,
+    /// `$SECONDS`, materialised once per command. A dynamic variable: the
+    /// value exists only to be read, so it is not written into the variable
+    /// table (`Vars::get` falls through to here).
+    seconds: Vec<u8>,
+    /// `$RANDOM`, same treatment.
+    random: Vec<u8>,
+}
+
+/// Write `value` in decimal into `dest`, reusing its buffer.
+///
+/// `to_string()` allocates and the per-command specials are on the hot path of
+/// every loop, so the number is formatted into a stack buffer and copied: two
+/// digits on average, no allocation after the first command.
+fn write_decimal(dest: &mut Vec<u8>, value: i64) {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    let negative = value < 0;
+    let mut magnitude = value.unsigned_abs();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if negative {
+        at -= 1;
+        digits[at] = b'-';
+    }
+    dest.clear();
+    dest.extend_from_slice(&digits[at..]);
 }
 
 /// Where an `errexit` check is allowed to fire.
@@ -306,6 +338,14 @@ pub struct Interp {
     nameref_cycle: std::cell::Cell<bool>,
     /// State for `$RANDOM`, refreshed once per command in `sync_specials`.
     random: std::cell::Cell<u64>,
+    /// `$SECONDS`' counter. It ticks once per command rather than reading the
+    /// clock, which is what it did when the value lived in the variable table.
+    seconds: u64,
+    /// `$-` and the option fingerprint it was built from.
+    ///
+    /// Rebuilding `$-` walks the whole option table, and the option set changes
+    /// far more rarely than commands run.
+    dash: Option<(u128, Vec<u8>)>,
     /// Bytes a `read` pulled from a descriptor but could not give back.
     ///
     /// Only a descriptor that is not seekable can end up here; on a regular
@@ -533,6 +573,8 @@ impl Interp {
             array_literals: Vec::new(),
             nameref_cycle: std::cell::Cell::new(false),
             random: std::cell::Cell::new(0x9E37_79B9_7F4A_7C15),
+            seconds: 0,
+            dash: None,
             read_buffers: std::collections::BTreeMap::new(),
             signals: traps::SignalState::default(),
             run_depth: 0,
@@ -569,7 +611,9 @@ impl Interp {
         // `$_` exists from the start (bash sets it to `$0`), so `set -u` does
         // not make the first read of it an error.
         let _ = interp.state.vars.assign_scalar(b"_", b"");
-        let _ = interp.state.vars.assign_scalar(b"SECONDS", b"0");
+        // `SECONDS` is *not* seeded: it is a dynamic variable, so the value
+        // lives in `Specials` and `Vars::get` answers for it (a seed here would
+        // shadow the ticking value for the life of the shell).
         // POSIX's default field separators, and the option list a script can
         // read (`SHELLOPTS` is non-empty in every real shell).
         let _ = interp.state.vars.assign_scalar(b"IFS", b" \t\n");
@@ -1047,50 +1091,58 @@ impl Interp {
 
     pub(crate) fn sync_specials(&mut self) {
         self.refresh_option_lists();
-        let status = self.state.vars.last_status().exit_code().to_string();
+        write_decimal(
+            &mut self.specials.status,
+            i64::from(self.state.vars.last_status().exit_code()),
+        );
         // `$RANDOM` is a fresh value per command: bash gives a new one on
         // every read, but one per command is enough for `$RANDOM` to look
-        // random and avoids mutating shell state from inside expansion.
-        // `$SECONDS` counts from shell start; a per-command tick is close
-        // enough to the second-resolution value bash reports.
-        let seconds = self
-            .state
-            .vars
-            .scalar(b"SECONDS")
-            .and_then(|value| std::str::from_utf8(value).ok()?.parse::<u64>().ok())
-            .unwrap_or(0)
-            + 1;
-        let _ = self
-            .state
-            .vars
-            .assign_scalar(b"SECONDS", seconds.to_string().as_bytes());
+        // random. `$SECONDS` counts from shell start; a per-command tick is
+        // close enough to the second-resolution value bash reports.
+        //
+        // Both are dynamic variables, so they are materialised here and read
+        // back through `Vars::get`, which knows their names. Writing them into
+        // the variable table instead cost a name lookup and a copy per
+        // command, and nothing but a read ever wanted the value.
+        self.seconds = self.seconds.saturating_add(1);
+        write_decimal(
+            &mut self.specials.seconds,
+            i64::try_from(self.seconds).unwrap_or(i64::MAX),
+        );
         let random = self
             .random
             .get()
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
         self.random.set(random);
-        let value = ((random >> 33) % 32768).to_string().into_bytes();
-        let _ = self.state.vars.assign_scalar(b"RANDOM", &value);
-        let mut dash = self.state.opts.dash_flags();
+        write_decimal(
+            &mut self.specials.random,
+            i64::from(((random >> 33) % 32768) as u32),
+        );
         // `-i` has no `set -o` row (it is an invocation mode, not a toggle),
         // so `$-` has to add it here.
-        if self.interactive && !dash.contains(&b'i') {
-            dash.push(b'i');
+        let fingerprint = self.state.opts.fingerprint();
+        let stale = !matches!(&self.dash, Some((cached, _)) if *cached == fingerprint);
+        if stale {
+            let mut flags = self.state.opts.dash_flags();
+            if self.interactive && !flags.contains(&b'i') {
+                flags.push(b'i');
+            }
+            self.dash = Some((fingerprint, flags));
         }
-        let pid = self.state.vars.shell_pid().to_string();
-        let bang = self
-            .state
-            .vars
-            .last_bg_pid()
-            .map(|pid| pid.to_string())
-            .unwrap_or_default();
-        self.specials = Specials {
-            status: status.into_bytes(),
-            dash,
-            pid: pid.into_bytes(),
-            bang: bang.into_bytes(),
-        };
+        let (_, flags) = self.dash.as_ref().expect("just built");
+        self.specials.dash.clear();
+        self.specials.dash.extend_from_slice(flags);
+        if self.specials.pid.is_empty() {
+            write_decimal(
+                &mut self.specials.pid,
+                i64::from(self.state.vars.shell_pid()),
+            );
+        }
+        self.specials.bang.clear();
+        if let Some(pid) = self.state.vars.last_bg_pid() {
+            write_decimal(&mut self.specials.bang, i64::from(pid));
+        }
     }
 
     /// Point `$LINENO` at `offset` in `source`, the chunk being evaluated.
@@ -1299,6 +1351,16 @@ impl baash_lang::Vars for Interp {
     fn get(&self, name: &[u8]) -> Option<&[u8]> {
         if name == b"LINENO" {
             return Some(&self.lineno);
+        }
+        // `$SECONDS` and `$RANDOM` are dynamic: their bytes are refreshed once
+        // per command and live beside the other special parameters, unless the
+        // script assigned the name itself, in which case the variable table
+        // wins (it is what `unset` and `declare` act on).
+        if name == b"SECONDS" && self.state.vars.scalar(name).is_none() {
+            return Some(&self.specials.seconds);
+        }
+        if name == b"RANDOM" && self.state.vars.scalar(name).is_none() {
+            return Some(&self.specials.random);
         }
         // `$PIPESTATUS` is its element zero, like any array's scalar form.
         if name == b"PIPESTATUS" {
@@ -1685,6 +1747,15 @@ impl crate::arith::IntVars for Interp {
                 .get(index)
                 .and_then(crate::arith::parse_int)
                 .unwrap_or(0);
+        }
+        // `$SECONDS` and `$RANDOM` are dynamic variables, so they are not in
+        // the variable table; arithmetic reads them from the same place
+        // `Vars::get` does.
+        if name == b"SECONDS" && self.state.vars.value(name).is_none() {
+            return crate::arith::parse_int(&self.specials.seconds).unwrap_or(0);
+        }
+        if name == b"RANDOM" && self.state.vars.value(name).is_none() {
+            return crate::arith::parse_int(&self.specials.random).unwrap_or(0);
         }
         // An array decays to element zero in arithmetic, just as `${a}` does.
         let bytes = match self.state.vars.value(name) {
