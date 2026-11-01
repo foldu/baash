@@ -1,0 +1,30 @@
+[package]
+name = "baash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The baash binary"
+
+[features]
+# `baash --features builtin-utils`: use the embedded coreutils on Linux too.
+builtin-utils = ["baash-vm/builtin-utils"]
+
+[dependencies]
+baash-diag.workspace = true
+baash-syntax.workspace = true
+baash-highlight.workspace = true
+baash-lang.workspace = true
+baash-runtime.workspace = true
+baash-vm.workspace = true
+baash-sys.workspace = true
+baash-complete.workspace = true
+baash-repl.workspace = true
+baash-tools.workspace = true
+compio.workspace = true
+
+# A Windows `PATH` has no coreutils, so the embedded fallback is not optional
+# there. The feature is still the switch; it is just on by default for this
+# target.
+[target.'cfg(windows)'.dependencies]
+baash-vm = { workspace = true, features = ["builtin-utils"] }

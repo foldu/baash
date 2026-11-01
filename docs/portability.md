@@ -7,7 +7,7 @@ on Linux before any Windows code exists.
 
 The motivating facts: PowerShell 7 takes seconds to start and its completion
 times out; a native Rust shell starts in well under a millisecond (measured:
-`bsh -c :` 0.40 ms in release) and completes a 59k-entry directory in ~4 ms
+`baash -c :` 0.40 ms in release) and completes a 59k-entry directory in ~4 ms
 in-process. The gap is worth closing on Windows, where "a fast shell with tab
 completion" is currently a niche filled by Git Bash and WSL.
 
@@ -35,7 +35,7 @@ cases under `--profile=subinterpreter` and require that each case is *pass* or
 *rejected with a code* — the number of silently-wrong cases must be zero. That
 becomes a second ratchet, alongside the conformance one.
 
-The Windows port then becomes "same shell, different `bsh-sys`, narrower
+The Windows port then becomes "same shell, different `baash-sys`, narrower
 profile", instead of a fork of the codebase.
 
 ## 2. What used to depend on `fork` (historical)
@@ -48,16 +48,16 @@ the "what it needs" column is what that mechanism has to reproduce:
 
 | construct | site | what it needs from the child |
 |---|---|---|
-| `( … )` subshell | `bsh-vm/src/tree/eval.rs`, `fork_shell` | run shell code on a copy of the state, discard changes |
+| `( … )` subshell | `baash-vm/src/tree/eval.rs`, `fork_shell` | run shell code on a copy of the state, discard changes |
 | `$( … )` command substitution | same helper | run shell code, capture its stdout |
 | `&` on a builtin/function, and pipeline stages that contain shell code | same helper | a process to be a background child / a stage |
-| completion capture (`complete -F`-style, and `PROMPT_COMMAND`) | `bsh-vm/src/tree/complete.rs`, `capture_stdout` | run shell code with stdout redirected |
+| completion capture (`complete -F`-style, and `PROMPT_COMMAND`) | `baash-vm/src/tree/complete.rs`, `capture_stdout` | run shell code with stdout redirected |
 
 Everything else about spawning already avoids `fork`: external commands go
 through `posix_spawn`. Job control is gone (W1), so there is no terminal
 handover, `WUNTRACED` wait or per-job process group to port.
 
-**The key observation:** `capture_stdout` in `bsh/src/main.rs` already runs
+**The key observation:** `capture_stdout` in `baash/src/main.rs` already runs
 shell code *in this process* with fd 1 temporarily `dup2`'d to a seekable temp
 file, then restores it. That is an in-process command substitution. The
 "subinterpreter" is not new machinery — it is the generalisation of a pattern
@@ -80,7 +80,7 @@ we already use, plus a state scope.
 | `^Z` | `SIGTSTP` | no-op (nothing can be suspended) | no-op |
 | `exec cmd` | `execve` | **rejected** | rejected (no `exec` on Windows) |
 | `exec 3<file` (redirection only) | `dup2` in-process | **works** — it is our fd table | works |
-| `<(...)`, `>(...)` | already `BSH-E0301` | rejected | rejected |
+| `<(...)`, `>(...)` | already `BAASH-E0301` | rejected | rejected |
 | `$$` | parent pid | same value (this is *easier* in-process) | same |
 | `$BASHPID` | child pid | synthesised id, or rejected | same |
 | `trap INT` on a background job | signal to pgroup | rejected for shell-code jobs | coarse console events |
@@ -104,7 +104,7 @@ for POSIX portability). A profile is a second gating table over the same AST.
 
 * New code, next to `UNSUPPORTED = 301`: **`CAPABILITY = 302`**, "this construct
   needs X, and the current profile does not have it".
-* Message shape: `bsh: <file>:<line>:<col>: error[BSH-E0302]: process
+* Message shape: `baash: <file>:<line>:<col>: error[BAASH-E0302]: process
   substitution needs fork; this shell runs without it (--profile=subinterpreter)`.
 * Parse-time where the construct is syntactically identifiable (`exec` in a
   subshell is *not* — it depends on runtime context; but `<( … )` is).
@@ -113,9 +113,9 @@ for POSIX portability). A profile is a second gating table over the same AST.
 The linter form matters as much as the runtime form:
 
 ```sh
-bsh --check --profile=windows script.sh    # on Linux: what would Windows refuse?
-bsh --profile=windows script.sh            # on Windows: same, enforced
-bsh --profile=subinterpreter               # Linux, no fork, for threading/fuzzing
+baash --check --profile=windows script.sh    # on Linux: what would Windows refuse?
+baash --profile=windows script.sh            # on Windows: same, enforced
+baash --profile=subinterpreter               # Linux, no fork, for threading/fuzzing
 ```
 
 This is how the Windows story gets tested years before the Windows build: every
@@ -124,8 +124,8 @@ rejection is a diagnostic we can assert on Linux, and the suite can carry a
 
 ## 5. Windows: the four boundaries
 
-The shell core (`bsh-lang`, `bsh-syntax`, `bsh-runtime`, `bsh-pattern`,
-`bsh-diag`, `bsh-complete`, `bsh-highlight`) is platform-neutral today. The port
+The shell core (`baash-lang`, `baash-syntax`, `baash-runtime`, `baash-pattern`,
+`baash-diag`, `baash-complete`, `baash-highlight`) is platform-neutral today. The port
 work is concentrated and can be described as four boundaries:
 
 1. **Process creation.** `SpawnPlan`/`FdAction` map to `CreateProcessW` with
@@ -137,10 +137,10 @@ work is concentrated and can be described as four boundaries:
    UTF-16: directory enumeration, argv, the environment block, and the console.
    Policy: the shell's text is WTF-8 (UTF-8 plus lone-surrogate encoding), so
    every name round-trips; the ~25 `OsStrExt::as_bytes` sites become a codec in
-   `bsh-sys` (`os_bytes` / `os_from_bytes`). Non-WTF-8 input (impossible from
+   `baash-sys` (`os_bytes` / `os_from_bytes`). Non-WTF-8 input (impossible from
    Windows APIs) is a diagnostic, not lossy.
 3. **Terminal.** ConPTY for the pty analogue; `SetConsoleMode` instead of
-   `termios`; ANSI/VT strings work in Windows Terminal and ConPTY. `bsh-repl`
+   `termios`; ANSI/VT strings work in Windows Terminal and ConPTY. `baash-repl`
    keeps its renderer; its `term` layer gets a Windows implementation.
 4. **Job control and signals.** No process groups, no `SIGTSTP`, no
    `tcsetpgrp`. `Ctrl-C` is a console control event delivered to the console
@@ -178,11 +178,11 @@ separate `#[cfg(windows)]` modules that use `std` where it is enough
 `ReadConsoleInputW`). The dependency itself is `cfg(unix)`-gated so that a
 Windows build does not carry a crate whose relevant modules vanish.
 
-Two consequences worth deciding early, because they reach into `bsh-vm`:
+Two consequences worth deciding early, because they reach into `baash-vm`:
 
 * **Handles are not descriptors.** `OwnedFd`, `borrowed()`, `dup2` and the
   numbered fd table above 2 are Unix affordances; Windows has inheritable
-  handles and `STARTUPINFO`/`SetStdHandle`. Either `bsh-sys` grows a portable
+  handles and `STARTUPINFO`/`SetStdHandle`. Either `baash-sys` grows a portable
   `Redirect`/`SpawnPlan` vocabulary that both backends implement, or the fd
   table is abstracted behind a handle type. Doing this in W2/W3 while the shapes
   are still small is cheaper than discovering it during W4.
@@ -199,8 +199,8 @@ spawns per command loses to one that does not: 1,000 `wc` calls at ~2–5 ms of
 
 Shape:
 
-* `crates/bsh-uutils`, **feature-gated** (`--features coreutils`), the only
-  crate besides `bsh-sys` allowed `unsafe` (uutils brings its own), built-in
+* `crates/baash-uutils`, **feature-gated** (`--features coreutils`), the only
+  crate besides `baash-sys` allowed `unsafe` (uutils brings its own), built-in
   bodies calling uutils' `uumain(args) -> UResult`.
 * A thin fd boundary: apply the shell's redirection plan to fds 0/1/2 for the
   duration of the call, then restore — the `capture_stdout` pattern, already
@@ -208,7 +208,7 @@ Shape:
 * Utilities must not call `process::exit` and must not fork internally; that is
   an inclusion criterion, checked per utility before adding it.
 * Alternatives considered: a single `coreutils` multicall binary shipped next
-  to `bsh` (simple, still one spawn per command) or a hybrid (embed the hot
+  to `baash` (simple, still one spawn per command) or a hybrid (embed the hot
   dozen, spawn the rest).
 
 **Spike before committing:** embed `cat` and `wc` behind the feature; measure
@@ -219,7 +219,7 @@ uutils binary. If it is ~5 ms saved and +1 MB, expand; if clap costs 8 MB and
 ### Built-in gaps on Windows
 
 The shell's own bodies (`printf`, `test`/`[`, `cd`, `read`, `ulimit`, …) are
-written against `std` and `bsh-sys`, so they build and run on Windows without a
+written against `std` and `baash-sys`, so they build and run on Windows without a
 separate code path. Two of them necessarily approximate a Unix answer there:
 
 * `printf '%(…)T'` has no IANA timezone database behind the Windows C library.
@@ -252,7 +252,7 @@ the Unix answer gets a different value rather than a misleading success.
    goes away entirely for shell code, and external commands keep using
    `posix_spawn`. This is the same change that makes helper threads legal, so it
    doubles as the answer to the completion-worker question.
-3. **Windows shell:** `bsh-sys` platform layer behind the portable spawn and
+3. **Windows shell:** `baash-sys` platform layer behind the portable spawn and
    redirect vocabulary described in §5a, then a `windows` profile that rejects
    the rest. Settle that vocabulary while the shapes are small, not during the
    port.
@@ -285,7 +285,7 @@ The host toolchain has no Windows std, and its `rustup` home is read-only, so a
 private toolchain in `/tmp` is the one that carries the target:
 
 ```sh
-export RUSTUP_HOME=/tmp/bsh-rustup CARGO_HOME=/tmp/bsh-cargo-home
+export RUSTUP_HOME=/tmp/baash-rustup CARGO_HOME=/tmp/baash-cargo-home
 rustup toolchain install stable-x86_64-unknown-linux-gnu --profile minimal \
     --target x86_64-pc-windows-gnu
 ```
@@ -297,18 +297,18 @@ shell and stay reachable *after* it. `RUSTFLAGS` must be unset — the workspace
 mold workaround is a Linux linker flag and breaks the cross build.
 
 ```sh
-TC=$(ls -d /tmp/bsh-rustup/toolchains/*/bin | head -1)
-export CARGO_TARGET_DIR=/tmp/bsh-target-win
+TC=$(ls -d /tmp/baash-rustup/toolchains/*/bin | head -1)
+export CARGO_TARGET_DIR=/tmp/baash-target-win
 unset RUSTFLAGS RUSTDOCFLAGS
 nix shell nixpkgs#cargo-zigbuild nixpkgs#zig --command \
-    sh -c "PATH=$TC:\$PATH cargo zigbuild --target x86_64-pc-windows-gnu -p bsh"
+    sh -c "PATH=$TC:\$PATH cargo zigbuild --target x86_64-pc-windows-gnu -p baash"
 ```
 
 Wine needs a prefix that it owns; `/tmp` is rejected, so use a directory under
 the user's home:
 
 ```sh
-export WINEPREFIX=$HOME/.cache/bsh-wine WINEDEBUG=-all
+export WINEPREFIX=$HOME/.cache/baash-wine WINEDEBUG=-all
 nix shell nixpkgs#wine64 --command wine target/x86_64-pc-windows-gnu/debug/whello.exe
 ```
 
@@ -317,39 +317,39 @@ nix shell nixpkgs#wine64 --command wine target/x86_64-pc-windows-gnu/debug/whell
 
 ### What fails, measured
 
-`cargo zigbuild --target x86_64-pc-windows-gnu -p bsh` stops on Unix-only APIs,
+`cargo zigbuild --target x86_64-pc-windows-gnu -p baash` stops on Unix-only APIs,
 in this order:
 
 | crate | `std::os::unix` / `std::os::fd` / `rustix` references |
 |---|---|
-| `bsh-sys` | 61 |
-| `bsh-vm` | 24 |
-| `bsh-lang` | 3 |
-| `bsh-repl` | 3 |
-| `bsh` | 4 |
+| `baash-sys` | 61 |
+| `baash-vm` | 24 |
+| `baash-lang` | 3 |
+| `baash-repl` | 3 |
+| `baash` | 4 |
 
-`bsh-sys` was the wall: it is fd-shaped (`RawFd`, `dup2`, `OwnedFd`) and the
+`baash-sys` was the wall: it is fd-shaped (`RawFd`, `dup2`, `OwnedFd`) and the
 redirection model is built on `dup2`; it now has a CRT backend and
-cross-compiles, as do `bsh-lang`, `bsh-runtime` and `bsh-history`. `bsh-vm` is
+cross-compiles, as do `baash-lang`, `baash-runtime` and `baash-history`. `baash-vm` is
 next and its failures are the same three shapes: `OsStrExt` byte conversions,
-`std::os::fd` imports, and `bsh_sys::Fd` (no `as_raw_fd`/`From<Fd> for File` on
-the Windows side yet), plus `bsh_sys::Regex`, `SpawnPlan::new_with_env`, the
+`std::os::fd` imports, and `baash_sys::Fd` (no `as_raw_fd`/`From<Fd> for File` on
+the Windows side yet), plus `baash_sys::Regex`, `SpawnPlan::new_with_env`, the
 `SignalSet`/`NoEcho` helpers and two `PermissionsExt::mode` calls.
 
 ### Order of work
 
-1. **`bsh-sys` platform split.** `mod unix; mod windows;` behind `cfg`, with one
+1. **`baash-sys` platform split.** `mod unix; mod windows;` behind `cfg`, with one
    public API. The Windows side keeps the fd *number* model by delegating to the
    CRT (`_dup2`, `_read`, `_write`, `_open`, `_close`), so redirection code does
    not change shape; `CreateProcess` replaces `posix_spawn`, with the parent's
    CRT fds converted to inheritable handles.
-2. **The ten non-`bsh-sys` references.** A small `bsh_sys::os` surface for
+2. **The ten non-`baash-sys` references.** A small `baash_sys::os` surface for
    "path bytes ↔ `OsString`" and "file mode", so no other crate names
    `std::os::unix`.
 3. **`-c 'echo hi'` under Wine**, then a script with `$( … )`, `for`, `if` and a
    function — the W4 acceptance in `docs/direction.md` §6.
 4. **ConPTY** last: the interactive editor needs a console host, and until then
-   the REPL should report `BSH-E0302` rather than misbehave.
+   the REPL should report `BAASH-E0302` rather than misbehave.
 
 The `Fs` column of §5a still applies: `rustix` stops at the Windows boundary,
 which is why step 1 is a platform module rather than a `cfg` sprinkled through
@@ -371,7 +371,7 @@ A `turso` limitation that shaped the schema: `id INTEGER PRIMARY KEY
 AUTOINCREMENT` is accepted and keeps a high-water mark in memory (a delete then
 insert gives the next id), but with a **file** database reopened in
 multiprocess-WAL mode it does not: after `history -c`, the next insert reused
-id 1. Measuring that is why `bsh-history` never deletes a row whose id it has
+id 1. Measuring that is why `baash-history` never deletes a row whose id it has
 shown — it tombstones it and prunes only rows below the newest id (see
 `docs/contracts.md`).
 
@@ -383,10 +383,10 @@ while the other shell is writing fails instead of waiting. Both were verified
 in one process (two stores on one file, each seeing the other's rows), and the
 mode is refused for `:memory:`, which takes the plain builder.
 
-The runtime behaviour is verified on Linux; for Windows, `bsh-history` (and
+The runtime behaviour is verified on Linux; for Windows, `baash-history` (and
 therefore turso with both of those options) cross-compiles for
 `x86_64-pc-windows-gnu`, but the database has not been executed under Wine yet
-— `bsh` itself does not cross-build until `bsh-vm` does. `bsh-runtime` also
+— `baash` itself does not cross-build until `baash-vm` does. `baash-runtime` also
 cross-compiles now, because deleting the history file removed its last
 unix-only code.
 
@@ -399,9 +399,9 @@ directory from `argv[0]`, so a symlink breaks them) on `PATH`:
 MINGW_BIN=$(dirname "$(nix shell nixpkgs#pkgsCross.mingwW64.stdenv.cc \
     --command sh -c 'command -v x86_64-w64-mingw32-windres')")
 printf '#!/bin/sh\nexec env PATH=%s:$PATH %s/x86_64-w64-mingw32-windres "$@"\n' \
-    "$MINGW_BIN" "$MINGW_BIN" > "$HOME/.cache/bsh-wbin/windres"
-chmod +x "$HOME/.cache/bsh-wbin/windres"
-# then PATH=$HOME/.cache/bsh-wbin:$TC:$PATH cargo zigbuild --target x86_64-pc-windows-gnu
+    "$MINGW_BIN" "$MINGW_BIN" > "$HOME/.cache/baash-wbin/windres"
+chmod +x "$HOME/.cache/baash-wbin/windres"
+# then PATH=$HOME/.cache/baash-wbin:$TC:$PATH cargo zigbuild --target x86_64-pc-windows-gnu
 ```
 
 The wrapper has to prepend the MinGW `bin` to `PATH`, not just `exec` the one

@@ -9,19 +9,19 @@ rust-version = "1.85"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-bsh-diag = { path = "crates/bsh-diag" }
-bsh-syntax = { path = "crates/bsh-syntax" }
-bsh-highlight = { path = "crates/bsh-highlight" }
-bsh-lang = { path = "crates/bsh-lang" }
-bsh-pattern = { path = "crates/bsh-pattern" }
-bsh-history = { path = "crates/bsh-history" }
-bsh-runtime = { path = "crates/bsh-runtime" }
-bsh-vm = { path = "crates/bsh-vm" }
-bsh-sys = { path = "crates/bsh-sys" }
-bsh-complete = { path = "crates/bsh-complete" }
-bsh-repl = { path = "crates/bsh-repl" }
-bsh-tools = { path = "crates/bsh-tools" }
-bsh-utils = { path = "crates/bsh-utils" }
+baash-diag = { path = "crates/baash-diag" }
+baash-syntax = { path = "crates/baash-syntax" }
+baash-highlight = { path = "crates/baash-highlight" }
+baash-lang = { path = "crates/baash-lang" }
+baash-pattern = { path = "crates/baash-pattern" }
+baash-history = { path = "crates/baash-history" }
+baash-runtime = { path = "crates/baash-runtime" }
+baash-vm = { path = "crates/baash-vm" }
+baash-sys = { path = "crates/baash-sys" }
+baash-complete = { path = "crates/baash-complete" }
+baash-repl = { path = "crates/baash-repl" }
+baash-tools = { path = "crates/baash-tools" }
+baash-utils = { path = "crates/baash-utils" }
 
 libc = "0.2"
 # The event loop: completion-based I/O, io_uring on Linux and IOCP on Windows.
@@ -64,7 +64,7 @@ panic = "abort"
 # The Windows binary is built by CI (`package:windows`), where a serial compile
 # is acceptable and a small executable is not optional: fat LTO, one codegen
 # unit, symbols stripped. `cargo build --profile windows --target
-# x86_64-pc-windows-gnu -p bsh` reproduces it.
+# x86_64-pc-windows-gnu -p baash` reproduces it.
 [profile.windows]
 inherits = "release"
 lto = "fat"

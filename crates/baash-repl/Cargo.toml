@@ -1,0 +1,17 @@
+[package]
+name = "baash-repl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Line editor and terminal rendering"
+
+[dependencies]
+baash-highlight.workspace = true
+baash-complete.workspace = true
+baash-runtime.workspace = true
+baash-lang.workspace = true
+baash-diag.workspace = true
+baash-sys.workspace = true
+compio.workspace = true
+unicode-width.workspace = true

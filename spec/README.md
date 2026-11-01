@@ -35,7 +35,7 @@ only real progress metric and will be tracked in the top-level README.
 
 ## Scope note
 
-80 of the files are `ysh-*.test.sh`, covering the YSH language. ßhell does not
+80 of the files are `ysh-*.test.sh`, covering the YSH language. baash does not
 implement YSH and will not; the harness should skip cases whose header says
 `## our_shell: ysh` rather than counting them as failures. They are vendored
 anyway, because a subset is harder to justify as "the upstream suite" and the

@@ -48,7 +48,7 @@ an architecture that is not poisoned by `fork`. This document supersedes the
 
 ## 4. What gets rejected, and how
 
-New diagnostic `BSH-E0302` (`CAPABILITY`): *this construct needs something this
+New diagnostic `BAASH-E0302` (`CAPABILITY`): *this construct needs something this
 shell does not have.* It must name the construct and the reason.
 
 | construct | outcome | why |
@@ -64,7 +64,7 @@ shell does not have.* It must name the construct and the reason.
 | `%1` in `wait`/`kill` | rejected | no job table |
 | `exec cmd` (top level) | works on Unix, rejected on Windows | no `exec` on Windows |
 | `exec 3<file` | works | just the fd table |
-| `<(...)`, `>(...)` | rejected (today `BSH-E0301`) | needs /dev/fd |
+| `<(...)`, `>(...)` | rejected (today `BAASH-E0301`) | needs /dev/fd |
 | `coproc` | **open** — see §7 | |
 | `set -m` | accepted, inert | rc files should not break |
 | `^Z` | unhandled: stops the child and the shell together (bash with `set +m`) | no job control |
@@ -93,7 +93,7 @@ accepted (the prompt is not visible then). File I/O — directory scans, `stat`,
 the `git status` subprocess — uses compio's completion-based operations instead
 of a thread per blocked read. CPU-bound work (ranking thousands of completion
 candidates) goes to a worker thread and returns through a channel. Inotify is
-not provided by compio, so `bsh-sys` grows a small inotify wrapper of its own
+not provided by compio, so `baash-sys` grows a small inotify wrapper of its own
 (`inotify_init1`/`inotify_add_watch`/event parsing) and the fd is awaited with
 `compio::runtime::fd::PollFd::read_ready` — readiness-based, no extra crate.
 Workers never receive `&mut Interp`.
@@ -118,7 +118,7 @@ simplifies it). No job control means no `tcsetpgrp`, no process groups, and
 | W1 | delete job control | gate green; `jobs`/`fg`/`bg` report `CAPABILITY`; `wait`/`kill`/`$!` still work for pids; baseline re-recorded |
 | W2 | no-fork subshells | `( … )` and `$( … )` in-process; `exec` in subshell, shell-code `&`, non-last builtin pipeline stages rejected with 302; the four fork call sites and `fork_gate` deleted |
 | W3 | compio event loop | spike proven (see §9); then the REPL loop on compio, `git status` spawned and awaited, directory scans through compio, completion scan and prompt refresh off the main thread; no custom poll code; no input lag while a scan runs |
-| W4 | Windows build | cross-compiles; `bsh -c 'echo hi'` runs; a simple script with `$( … )`, `for`, `if`, functions runs in a ConPTY |
+| W4 | Windows build | cross-compiles; `baash -c 'echo hi'` runs; a simple script with `$( … )`, `for`, `if`, functions runs in a ConPTY |
 | W5 | uutils embedded | curated set as built-ins behind a feature; measured size/build cost; `ls`/`cat`/`cp`/`rm`/`mkdir`/`head`/`tail`/`wc` work without external binaries |
 | W6 | curated conformance | a "supported subset" document and a differential runner asserting *match bash or reject*, with silent divergence = 0 |
 
@@ -127,7 +127,7 @@ simplifies it). No job control means no `tcsetpgrp`, no process groups, and
 * **`coproc` is in the ceiling but contradicts two commitments.** A coprocess's
   body is shell code that must run concurrently with the main thread; with no
   fork and with shell code pinned to the main thread, the only ways are (a)
-  run the body as a re-exec'd `bsh` child with serialized state, or (b) allow a
+  run the body as a re-exec'd `baash` child with serialized state, or (b) allow a
   subinterpreter thread for coproc bodies only. Neither is free. Recommendation:
   reject `coproc` with `CAPABILITY` until W4 is done, then revisit.
 * **Pipelines with a builtin stage.** The plan is lastpipe semantics by default

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Microbenchmark: bsh against bash on small command scripts.
+"""Microbenchmark: baash against bash on small command scripts.
 
 This is the harness behind docs/performance.md. It is deliberately tiny and has
 no dependencies: each case is one `-c` script, run N times, and the *minimum*
 wall time is kept (the least noisy estimator for CPU-bound work).
 
     python3 scripts/bench.py                       # release build if there is one
-    python3 scripts/bench.py --shell target/debug/bsh
+    python3 scripts/bench.py --shell target/debug/baash
     python3 scripts/bench.py --bash /bin/bash --reps 7
     python3 scripts/bench.py --filter expansion --json
 
@@ -97,7 +97,7 @@ def default_shell() -> Path | None:
     roots.append(REPO / "target")
     for root in roots:
         for profile in ("release", "debug"):
-            candidate = root / profile / "bsh"
+            candidate = root / profile / "baash"
             if candidate.is_file():
                 return candidate
     return None
@@ -147,7 +147,7 @@ def startup(shell: Path, is_bash: bool, spawns: int = 100) -> float:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--shell", type=Path, help="bsh binary (default: target/{release,debug}/bsh)")
+    parser.add_argument("--shell", type=Path, help="baash binary (default: target/{release,debug}/baash)")
     parser.add_argument("--bash", type=Path, help="comparison shell (default: bash on PATH)")
     parser.add_argument("--reps", type=int, default=None, help="override repetitions per case")
     parser.add_argument("--filter", default="", help="only run cases whose name contains this")
@@ -157,13 +157,13 @@ def main() -> int:
     shell = args.shell or default_shell()
     if shell is None or not shell.is_file():
         print(
-            "bsh: no binary found; build one first, e.g. cargo build --release -p bsh",
+            "baash: no binary found; build one first, e.g. cargo build --release -p baash",
             file=sys.stderr,
         )
         return 2
     bash = args.bash or (Path(shutil.which("bash")) if shutil.which("bash") else None)
     if bash is None or not Path(bash).is_file():
-        print("bsh: no bash to compare against (use --bash)", file=sys.stderr)
+        print("baash: no bash to compare against (use --bash)", file=sys.stderr)
         return 2
 
     if "debug" in str(shell):
@@ -179,7 +179,7 @@ def main() -> int:
         {
             "case": "startup, per spawn",
             "bash": bash_startup,
-            "bsh": shell_startup,
+            "baash": shell_startup,
         }
     )
     for name, script, reps in CASES:
@@ -190,7 +190,7 @@ def main() -> int:
             {
                 "case": name,
                 "bash": run_once(bash, script, True, reps),
-                "bsh": run_once(shell, script, False, reps),
+                "baash": run_once(shell, script, False, reps),
             }
         )
 
@@ -199,14 +199,14 @@ def main() -> int:
         return 0
 
     print(f"bash = {bash}")
-    print(f"bsh  = {shell}")
-    print(f"{'case':34} {'bash ms':>9} {'bsh ms':>10} {'ratio':>7}")
+    print(f"baash  = {shell}")
+    print(f"{'case':34} {'bash ms':>9} {'baash ms':>10} {'ratio':>7}")
     print("-" * 64)
     for row in rows:
-        ratio = row["bsh"] / row["bash"] if row["bash"] else float("inf")
+        ratio = row["baash"] / row["bash"] if row["bash"] else float("inf")
         print(
             f"{row['case']:34} {row['bash'] * 1000:9.2f} "
-            f"{row['bsh'] * 1000:10.2f} {ratio:6.1f}x"
+            f"{row['baash'] * 1000:10.2f} {ratio:6.1f}x"
         )
     return 0
 

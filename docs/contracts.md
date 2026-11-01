@@ -5,16 +5,16 @@ documents a contract in its branch report, the next agent never sees it, and the
 two assumptions quietly disagree six weeks later.
 
 Each section is owned by the producing crate. If you are implementing a consumer
-(`bsh-vm`, `bsh-repl`, `bsh-tools`) read the relevant sections before you start,
+(`baash-vm`, `baash-repl`, `baash-tools`) read the relevant sections before you start,
 and treat every item here as a fact about the API you are calling.
 
-Status: everything except the tooling has landed: `bsh-diag`, `bsh-sys`,
-`bsh-runtime`, `bsh-lang`, `bsh-syntax`, `bsh-complete`, the `bsh-vm`
-tree-walking executor and the `bsh-repl` editor.
+Status: everything except the tooling has landed: `baash-diag`, `baash-sys`,
+`baash-runtime`, `baash-lang`, `baash-syntax`, `baash-complete`, the `baash-vm`
+tree-walking executor and the `baash-repl` editor.
 
 ---
 
-## bsh-diag
+## baash-diag
 
 Renderers take `&Diagnostic` + `&SourceFile`; nothing borrows a parse arena, so
 a diagnostic can be rendered long after the chunk that produced it is gone.
@@ -40,13 +40,13 @@ a diagnostic can be rendered long after the chunk that produced it is gone.
 
 ---
 
-## bsh-sys
+## baash-sys
 
 **Forking is gone, so threads are unconstrained.** There is no `fork_gate()`:
 the server-side runs subshells, `$( … )` and pipeline stages in process
 (`docs/direction.md` §2), and `posix_spawn` never needed a gate because it shares
 the address space. The only remaining `fork` in the workspace is
-`bsh_sys::fork_child_status`, test scaffolding the pty harness uses to start a
+`baash_sys::fork_child_status`, test scaffolding the pty harness uses to start a
 shell in a child; it is documented as such and nothing in the shell calls it.
 
 **Spawn plans carry no environment and no search.** `SpawnPlan::new` takes an
@@ -74,7 +74,7 @@ children share one process group, which is why `Ctrl-Z` stops the shell too.
 
 **Process-group placement remains a spawn capability, unused by the shell.**
 `ProcessGroup::SetPgid { pgroup: 0 }` creates a group led by the child;
-`pgroup: leader` joins an existing one. `spawn` implements it, but `bsh-vm`
+`pgroup: leader` joins an existing one. `spawn` implements it, but `baash-vm`
 never sets it: there is no job control to maintain groups for. `SIGTTOU`,
 `SIGTTIN`, `SIGTSTP`, `SIGCONT`, `SIGSTOP` and `SIGCHLD` are still re-exported
 next to `SIGINT`/`SIGQUIT`.
@@ -99,7 +99,7 @@ children inherit across `exec`, and `SIGINT`/`SIGQUIT` are ignored while the
 shell waits for a foreground child); `replace_signal_mask` is the permanent form
 of `SignalSet::set`, for a forked child that must not inherit the shell's
 blocked traps. `SIGALRM`, `SIGTERM`, `SIGINT`, `SIGQUIT` and `ECHILD` are
-re-exported so `bsh-vm` needs no `libc`.
+re-exported so `baash-vm` needs no `libc`.
 
 **`exec(plan) -> io::Error` replaces the process in place** and returns only on
 failure. The caveat is inherent to exec ordering: by the time `execve` fails,
@@ -117,7 +117,7 @@ mode clears, and assert full restoration on `Drop`.
 
 ---
 
-## bsh-runtime
+## baash-runtime
 
 **`ShellHost` is the VM's obligation.** It now *requires* `state()`,
 `run_source()`, `write_out()` and `write_err()`; `is_interactive()` and
@@ -167,7 +167,7 @@ they are multi-field; expansion reads `positional().argv` and applies the
 quoting rules itself.
 
 **Integer attributes store raw bytes.** Arithmetic evaluation happens in
-`bsh-lang`/the VM *before* `assign`; the store does not parse numbers.
+`baash-lang`/the VM *before* `assign`; the store does not parse numbers.
 
 **Construct `Opts` from the presets** (`Opts::POSIX`, `Opts::BASH`, `Default`).
 It carries ~70 flags now; an exhaustive struct literal outside this crate will
@@ -183,12 +183,12 @@ chunks and cannot tell a REPL line from a script, so a non-interactive run
 never advances the counter.
 
 **History is one ring, and the database is behind it.** `ShellState::history`
-is a `bsh_history::History`: numbered entries, Up/Down navigation, ghost-text
-suggestions. `bsh_history::Store` is the Turso database on its own thread; the
+is a `baash_history::History`: numbered entries, Up/Down navigation, ghost-text
+suggestions. `baash_history::Store` is the Turso database on its own thread; the
 ring queues a write when a line is submitted and an update when it finishes
 (`$?` and wall time), so nothing on the keystroke path waits for a disk. The
 interactive loop swaps the ring in and out of the editor around each command
-(`bsh-repl` depends on this crate for the *type*), so the built-in and Up/Down
+(`baash-repl` depends on this crate for the *type*), so the built-in and Up/Down
 navigate the same entries.
 
 Numbers are the database's row ids: global, assigned at insert, and never
@@ -240,17 +240,17 @@ the action and `''`/`-` mean ignore/reset. A failing `trap` records a
 otherwise exit the shell, and no shell does that for `trap 'x' SIGINVALID`.
 
 **`ShellHost` grew two seams for `trap`.** `check_syntax(src) -> bool` validates
-a handler at registration time (parsing is `bsh-syntax`'s, which this crate must
+a handler at registration time (parsing is `baash-syntax`'s, which this crate must
 not depend on), and `trap_saved_status() -> Option<Status>` answers the exit
 status a bare `exit` inside the `EXIT` trap must reuse. Both are defaulted, so a
 new host compiles without them.
 
-**Diagnostic text is unstable; match the codes.** State errors are `BSH-E05xx`;
-an unimplemented builtin returns status 2 with `BSH-E0508`.
+**Diagnostic text is unstable; match the codes.** State errors are `BAASH-E05xx`;
+an unimplemented builtin returns status 2 with `BAASH-E0508`.
 
 ---
 
-## bsh-lang
+## baash-lang
 
 **One object implements both traits.** `Vars` (read variables, positional
 parameters, write) and `Shell` (the callbacks expansion needs) must be
@@ -280,7 +280,7 @@ pub trait Shell: Vars {
   collects into it; the expansion layer does not guess the allocation strategy.
 - `quote(bytes, ctx)` covers `Unquoted`, `DoubleQuoted` and `SingleQuoted`, and
   emits `$'\n'` for an unquoted newline (a bare backslash-newline is a line
-  continuation and would corrupt the line). `bsh-complete` must use this rather
+  continuation and would corrupt the line). `baash-complete` must use this rather
   than its own escaping.
 
 **Two properties, deliberately separate.** A part is *quoted* (glob-inert) or
@@ -310,7 +310,7 @@ Unquoted forms are a single splittable expansion result. No third path was
 introduced.
 
 **Pattern operators carry their patterns as `Word`s** and match through
-`bsh-pattern` via `Shell::pattern_flags()`: `RemovePrefix`/`RemoveSuffix
+`baash-pattern` via `Shell::pattern_flags()`: `RemovePrefix`/`RemoveSuffix
 { pattern, longest }`, `Replace { pattern, replacement, mode }` with modes
 `First|All|Prefix|Suffix`, and `Case { how, pattern: Option<Word> }` for
 `${x^pat}`/`${x^^pat}`/`${x,pat}`/`${x,,pat}`. Case conversion applies
@@ -334,7 +334,7 @@ byte units.
 non-array, `${x@Q}`/`@E`/`@u` (every transformation except `@P`), and process
 substitution return `ErrorKind::Unsupported` with the operator's span.
 
-**Prompt strings have one expander.** `bsh_lang::prompt::expand(template,
+**Prompt strings have one expander.** `baash_lang::prompt::expand(template,
 context)` decodes `PS1`-style backslash escapes into an `ExpandedPrompt`:
 `bytes()` plus `non_printing()`, the byte ranges that came from between `\[`
 and `\]` and must not count toward the display width. The line editor renders
@@ -363,7 +363,7 @@ and the string a script gets cannot drift.
 **The stock `PS1` renders as the fish-like default prompt.** The `PS1`
 *variable* keeps bash's `\s-\v\$ ` value — `${PS1@P}` and the conformance case
 that reads it still decode bash's prompt — but `Interp::render_prompt`
-substitutes `bsh_lang::prompt::fish_prompt` while the value is still that one.
+substitutes `baash_lang::prompt::fish_prompt` while the value is still that one.
 The rendered shape is
 
 ```text
@@ -376,7 +376,7 @@ non-zero, then one trailing space. A component's space is omitted with the
 component, so a repository with nothing to report is `~/src/bshell ` rather
 than a double space.
 
-The branch is `bsh_lang::prompt::git_branch`: walk up for `.git` (a directory,
+The branch is `baash_lang::prompt::git_branch`: walk up for `.git` (a directory,
 or a file whose `gitdir:` names the real one for a linked worktree or
 submodule), read `HEAD`, and show `refs/heads/<name>` as the branch. Any other
 symbolic ref is resolved through loose refs, `commondir` and `packed-refs` and
@@ -418,7 +418,7 @@ is `Clone + PartialEq + Eq` and has `bytes()`, `into_bytes()`,
 The editor does **not** expand anything itself: the shell renders both prompts
 before each line (it is the only party with the variable table and an
 interpreter for `$(…)`). `PromptContext::default()` reports the crate version
-for `\v` (`major.minor`) and `\V` (full), and `shell` as `bsh`; root, user,
+for `\v` (`major.minor`) and `\V` (full), and `shell` as `baash`; root, user,
 host, home and cwd come from the process when the caller does not override
 them.
 
@@ -426,16 +426,16 @@ them.
 `${x@…}` as `ParamOp::Unsupported(UnsupportedOp::Transform)`; it does not copy
 the letter into the word. `ParamOp::Transform(Transform)` is the direct form
 (the fixture parser produces it), and expansion resolves the generic form with
-`Shell::transform_operator(&span) -> Option<Transform>`. `bsh-vm` must
+`Shell::transform_operator(&span) -> Option<Transform>`. `baash-vm` must
 implement it by reading the byte after the last `@` from the chunk being
 evaluated — `self.line_source`, **not** `self.current`, because a command
 substitution evaluates its chunk without replacing `current`:
 
 ```rust
-fn transform_operator(&self, span: &bsh_lang::Span) -> Option<bsh_lang::Transform> {
+fn transform_operator(&self, span: &baash_lang::Span) -> Option<baash_lang::Transform> {
     let text = self.line_source.bytes().get(span.clone())?;
     let at = text.iter().rposition(|&byte| byte == b'@')?;
-    bsh_lang::Transform::from_letter(*text.get(at + 1)?)
+    baash_lang::Transform::from_letter(*text.get(at + 1)?)
 }
 ```
 
@@ -443,7 +443,7 @@ The default returns `None`, so a `Vars` source with no source text keeps the
 honest unsupported error. `Shell::prompt_context() -> PromptContext` has a
 default built from the process environment (user from `/etc/passwd` by
 effective uid, host from `/proc`, cwd from `current_dir`, local time from
-TZif). `bsh-vm` overrides it with what only it knows: the logical
+TZif). `baash-vm` overrides it with what only it knows: the logical
 `$PWD`/`$OLDPWD`/`$HOME`/`$USER`/`$HOSTNAME`, the background-child count
 (`\j`; there is no job table),
 `prompt_vars` from `shopt`, last-failed, root, `\l` (the tty basename from
@@ -453,7 +453,7 @@ below. An interactive shell also starts with bash's `PS1='\s-\v\$ '` and
 read; `unset PS1` renders an empty prompt, like bash.
 
 **History expansion is a pure text transform in this crate.**
-`bsh_lang::histexpand` turns `(typed line, &[Entry], &mut Session)` into an
+`baash_lang::histexpand` turns `(typed line, &[Entry], &mut Session)` into an
 `Expansion { text, changed, print, print_only }` or an `Error { kind, token }`.
 It does no I/O and knows nothing about options or the interpreter; the binary
 owns the policy (interactive, `histexpand` and `history` on) and the printing.
@@ -512,7 +512,7 @@ literal, since the replacement word is a separate expansion unit. Alternatives
 are slices of the original parts (their quoting kinds preserved) or, for a
 range, new unquoted literals; parts the stage did not touch reach the later
 stages unchanged and are expanded exactly once (`{a,b,c}-$((i++))` evaluates
-the arithmetic once per word). `bsh-vm` overrides `brace_expansion()` from
+the arithmetic once per word). `baash-vm` overrides `brace_expansion()` from
 `opts.braceexpand`, which is the `set +B` switch.
 
 Rules measured against bash 5.3.20 under `LC_ALL=C`: a group expands when its
@@ -526,8 +526,8 @@ wider operand including its sign; character ranges need both endpoints to be
 single ASCII alphabetic bytes. A range that does not parse (overflow, quoted
 endpoint, `0x1`, `1...3`) leaves the group literal rather than erroring.
 
-**Errors** are `bsh_lang::Error { kind, span }` with `Display`, `code()` and
-`diagnostic() -> bsh_diag::Diagnostic`. Codes 301–308 are provisional; 302 is the shell-wide `CAPABILITY` code.
+**Errors** are `baash_lang::Error { kind, span }` with `Display`, `code()` and
+`diagnostic() -> baash_diag::Diagnostic`. Codes 301–308 are provisional; 302 is the shell-wide `CAPABILITY` code.
 
 Documented deviation: for unquoted `$@` inside a `${…}` replacement word we
 apply the ordinary unquoted rules, where bash space-joins and suppresses
@@ -536,7 +536,7 @@ bash 5.3.20.
 
 ---
 
-## bsh-syntax
+## baash-syntax
 
 **Two entry points, and the difference matters.** `lex(src) -> Vec<Token>` is the
 token stream for highlighting and simple scans. `lex_full(src) -> Lexed` adds
@@ -545,7 +545,7 @@ and delimiters only appear as `TokenKind::HereDocBody` /`HereDocDelimiter` in
 the full form; a consumer that colours them must use `lex_full`. Bodies are
 **not** shell code and are styled as literal data, not as commands.
 
-**Words are `bsh_lang`'s types, re-exported.** `bsh-syntax` re-exports
+**Words are `baash_lang`'s types, re-exported.** `baash-syntax` re-exports
 `Word`, `Part`, `Lit`, `LitKind`, `ParamExp`, `ParamName`, `ParamOp`,
 `CommandSub`, `Arithmetic`, `ProcessSub`, `TildeSpec`, `UnsupportedOp`. There is
 no parallel word model, deliberately.
@@ -595,7 +595,7 @@ substitution is still one token: the chain is the nested view.
 **Redirections carry their split.** A redirection is still one token, but
 `redirect_op_len(text)` (and `Token::redirect_op_len`) give the length of the
 file-descriptor prefix plus the operator, and `Token::redirect_target` returns
-the fused target's span. The operator set is defined once, in `bsh-syntax`;
+the fused target's span. The operator set is defined once, in `baash-syntax`;
 consumers must not carry their own.
 
 **Tokens have simple-command roles.** `classify_tokens(tokens, src)` returns a
@@ -643,13 +643,13 @@ named `esac` can confuse it; CRLF scripts fail the way bash fails; and
 
 ---
 
-## bsh-complete
+## baash-complete
 
 **Call `apply`, do not re-implement insertion.** `Menu::insertion(i)` returns
 already-quoted bytes (trailing `/` for a directory, trailing space for a unique
 non-directory), and `Menu::apply(&mut line, i)` splices it in and returns the new
 cursor position. The editor must use these: quoting comes from
-`bsh_lang::quote` with the context the parser derived, and a second
+`baash_lang::quote` with the context the parser derived, and a second
 implementation of that logic will disagree.
 
 **`replace` is not `word_span`.** `replace` starts *after* an opening quote,
@@ -664,7 +664,7 @@ fuzzy ones is the product promise (§6.5).
 
 **The snapshot traits are `Send + Sync` and return owned data.** `VarNames::names`,
 `History::entries`, `ShellNames::functions`/`aliases` all return
-`Vec<Vec<u8>>`. `bsh-runtime` therefore cannot hand over a borrow of live
+`Vec<Vec<u8>>`. `baash-runtime` therefore cannot hand over a borrow of live
 interpreter state; it must supply a snapshot or a `Mutex`-backed view. This is
 deliberate: completion runs while the editor holds the terminal, and it must not
 observe a half-mutated shell.
@@ -694,8 +694,8 @@ name is offered as `NAME}`, because bash closes the expansion (`${PA<TAB>` →
 
 **Programmable completion is data.** `Spec` is what the engine needs from a
 `complete` rule (`-W` words, `-A` names, `-P`/`-S`, `-o` options, the raw `-F`
-name) and `SpecSource::spec(command)` is the lookup. `bsh-runtime` owns the
-registry and this crate must not depend on it, so `crates/bsh/src/complete.rs`
+name) and `SpecSource::spec(command)` is the lookup. `baash-runtime` owns the
+registry and this crate must not depend on it, so `crates/baash/src/complete.rs`
 translates a cloned `CompletionTable` into `Spec`s. Rules are consulted only
 for an argument slot: not the command word, not a redirection target, not an
 assignment value.
@@ -745,26 +745,26 @@ innermost slot); the earlier entries are the construct's own keyword
 candidates.
 
 Known copies: the builtin-name and keyword lists are duplicated from
-`bsh-runtime` because the dependency runs the other way, and `SIGNALS` is
+`baash-runtime` because the dependency runs the other way, and `SIGNALS` is
 spelled the way bash's `compgen -A signal` prints it (`SIGHUP`, `EXIT`, …).
 `compgen -A signal` in this shell still prints the runtime's short names
-(`HUP`); that existing inconsistency is a `bsh-runtime` fix, recorded here so
+(`HUP`); that existing inconsistency is a `baash-runtime` fix, recorded here so
 the completion menu is not "fixed" to match the wrong spelling.
 
 ---
 
-## bsh-vm (tree evaluator)
+## baash-vm (tree evaluator)
 
 **Which built-ins the executor owns.** `break`, `continue`, `return`, `exit`,
 `exec`, `eval`, `.`/`source`, `cd`, `echo`, `read`, `wait` and `kill` are
-implemented in `bsh_vm`; `jobs`, `fg`, `bg` and `disown` are registered there
+implemented in `baash_vm`; `jobs`, `fg`, `bg` and `disown` are registered there
 only to reject job control. They unwind control flow, re-enter the interpreter,
 or need the descriptor table, `lseek`, termios and signal delivery, which a
 `fn(host, argv) -> Status` signature cannot express. The executor consults them only when `BuiltinDef::is_implemented()` is
 false, so a runtime implementation takes over silently — deliberate, but it
-means whoever implements one of those in `bsh-runtime` must delete the
+means whoever implements one of those in `baash-runtime` must delete the
 executor's body in the same change. `trap`, by contrast, *is* implemented in
-`bsh-runtime`: its work is table mutation, and the execution half stays here
+`baash-runtime`: its work is table mutation, and the execution half stays here
 (see below).
 
 **Trap execution is a command-boundary poll.** Caught signals are blocked in the
@@ -794,13 +794,13 @@ names the last one and `wait PID` can report a child reaped several commands
 ago; a waited status is consumed, so a second `wait PID` is 127). There is no
 job table, no `%N`/`%%`/`%prefix` resolution, no process-group handover and no
 stopped state. `jobs`, `fg`, `bg` and `disown` stay registered so `type` and
-command completion still find them, and running one reports `BSH-E0302`
+command completion still find them, and running one reports `BAASH-E0302`
 (`CAPABILITY`) naming the construct: `jobs: job control is not implemented in
 this shell`, status 1. A `%` operand to `wait`/`kill` gets the same diagnostic
 and status 1 (`wait: %1: job control is not implemented in this shell`), not
 "no such job". The diagnostic code is `302` (`CAPABILITY`), allocated next to
-`UNSUPPORTED = 301` in `bsh-lang`; `PARAMETER_NULL`, which held 302, moved to
-308 so the pivot's `BSH-E0302` is unambiguous. `set -m`/`set -o monitor` is
+`UNSUPPORTED = 301` in `baash-lang`; `PARAMETER_NULL`, which held 302, moved to
+308 so the pivot's `BAASH-E0302` is unambiguous. `set -m`/`set -o monitor` is
 accepted and inert — the option parses and reads back, and nothing consumes
 it, so an rc file that sets it does not break. Because the
 shell does not put children in their own group, `Ctrl-Z` stops the child *and*
@@ -814,27 +814,27 @@ the non-blocking drain and does nothing at all when this shell has no tracked
 child: `waitpid(-1)` is process-wide, and the integration tests run several
 interpreters in one process.
 
-**`exec` is a real `execve`.** `bsh_sys::exec(plan)` replaces the process; the
-VM maps its `io::Error` to 127/126 and exits. See the `bsh-sys` section for why
+**`exec` is a real `execve`.** `baash_sys::exec(plan)` replaces the process; the
+VM maps its `io::Error` to 127/126 and exits. See the `baash-sys` section for why
 a failed `exec` is not a rollback.
 
-**The VM owns `PWD`/`OLDPWD` around `bsh_sys::chdir`.** Descriptors saved while
+**The VM owns `PWD`/`OLDPWD` around `baash_sys::chdir`.** Descriptors saved while
 a built-in's redirects are applied are `CLOEXEC` copies above fd 20, so a child
 spawned from inside a redirected built-in cannot inherit the shell's saved copy.
 
-**Fragments go through `bsh_syntax::parse_word`.** `[[ ]]` operands, `case`
+**Fragments go through `baash_syntax::parse_word`.** `[[ ]]` operands, `case`
 patterns and the `$…` constructs in a here-document body are single words, so
 they use the real front end with caller-relative spans. (An earlier revision
 synthesised `": <fragment>"` and took `words[1]`; that is gone.)
 
 **Here-document body expansion lives here**, as a double-quote-like scanner, and
-is a candidate to move into `bsh-lang` once a here-doc body has a word model.
+is a candidate to move into `baash-lang` once a here-doc body has a word model.
 
 **`$?`, `$-`, `$$`, `$!` are cached** and refreshed at command boundaries,
 because `Vars::get(&self)` cannot compute them. A runtime-owned `special()`
 accessor would remove the bookkeeping.
 
-**A forked child leaves through `bsh_sys::exit_child(status)`**, never
+**A forked child leaves through `baash_sys::exit_child(status)`**, never
 `std::process::exit`: the latter runs libc `atexit` handlers inside a forked
 child. `fork_child_status(f: impl FnOnce() -> i32)` does this for you.
 
@@ -848,13 +848,13 @@ start (DESIGN §2).
 through `AssignmentAction`; `exec_simple` keeps declaration-command literals on
 an `Interp` side channel (`ArrayLiteral`, keyed by the placeholder text) so
 `local`/`declare` can apply `-a`/`-A` first. `Interp` also implements
-`bsh_lang::Vars::array` (a view over `VarValue`) and
+`baash_lang::Vars::array` (a view over `VarValue`) and
 `ShellHost::unset_array_element`, and its arithmetic `IntVars` exposes element
 lvalues, so `(( a[99]=1 ))` and `${a[i+1]}` share one evaluator. A variable
 whose value is not a number is recursively evaluated as an expression, bounded
 by `MAX_RECURSION`.
 
-Deferred, and listed in `bsh_vm::tree`'s `# Deferred`: `select`, `time`,
+Deferred, and listed in `baash_vm::tree`'s `# Deferred`: `select`, `time`,
 `coproc`, `set -u`/nounset, `$LINENO`/`$RANDOM`/`$SECONDS`/`$PIPESTATUS`,
 `command`/`type`/`hash`/`builtin`, `getopts`, aliases, `mapfile`/`readarray`,
 pattern parameter operators, `[[ =~ ]]`, process substitution, `~user`, and
@@ -862,20 +862,20 @@ pattern parameter operators, `[[ =~ ]]`, process substitution, `~user`, and
 of being retried as a shell script (POSIX requires the retry), which is what
 blocks the three `$REPO_ROOT/spec/testdata/*.sh` trap cases.
 
-**Platform constants come from `bsh-sys`.** `bsh_sys::{flags, SIGPIPE, c_int,
-mode_t}` are re-exported so no other crate needs `libc`; `bsh-vm` has no `libc`
-dependency, which keeps "only `bsh-sys` touches the platform" true.
+**Platform constants come from `baash-sys`.** `baash_sys::{flags, SIGPIPE, c_int,
+mode_t}` are re-exported so no other crate needs `libc`; `baash-vm` has no `libc`
+dependency, which keeps "only `baash-sys` touches the platform" true.
 
 ---
 
-## bsh-repl
+## baash-repl
 
 **The editor takes bytes and a `Terminal`; it does not know about the shell.**
-`bsh-repl` depends on `bsh-lang` for the one prompt expander
-(`bsh_lang::prompt`) and on `bsh-runtime` for exactly one *type*: the history
-ring, re-exported as `bsh_repl::History`, so the editor's Up/Down and the
+`baash-repl` depends on `baash-lang` for the one prompt expander
+(`baash_lang::prompt`) and on `baash-runtime` for exactly one *type*: the history
+ring, re-exported as `baash_repl::History`, so the editor's Up/Down and the
 `history`/`fc` built-ins cannot drift apart. It still does not depend on an
-interpreter or parser crate — not even `bsh-syntax` — and it constructs its own
+interpreter or parser crate — not even `baash-syntax` — and it constructs its own
 `History::new()` in tests. Two traits carry everything else it needs from
 above:
 
@@ -892,11 +892,11 @@ pub trait Syntax { fn needs_more_input(&self, line: &[u8]) -> bool; }
 ```
 
 `RealTerminal` opens `/dev/tty` (falling back to stdio) and uses
-`bsh_sys::RawMode` plus `window_size_fd`, because `bsh_sys::window_size()` is
+`baash_sys::RawMode` plus `window_size_fd`, because `baash_sys::window_size()` is
 wired to stdout. A pty harness needs only those five methods; no editor change.
 
 **Continuation goes through `Syntax`, implemented in the binary** with
-`bsh_syntax::parse_bytes`. The trait is deliberately thin, and that thinness has
+`baash_syntax::parse_bytes`. The trait is deliberately thin, and that thinness has
 a visible cost: it can say "more input" but not "incomplete, and now the user
 wants to stop", so Ctrl-D on an empty `PS2` line abandons the command instead of
 reporting the syntax error the way bash does. Widening it to a three-state
@@ -941,7 +941,7 @@ line or `PS1` longer than the terminal) are still painted, with the top
 scrolled away; that is the one case that needs a viewport rather than a frame.
 
 **The editor paints a rendered prompt; it does not expand one.**
-`bsh_repl::Prompt` holds two `bsh_lang::prompt::ExpandedPrompt`s (built by the
+`baash_repl::Prompt` holds two `baash_lang::prompt::ExpandedPrompt`s (built by the
 shell with `Prompt::from_expanded`, or by `Prompt::new`/`from_template` for a
 caller with no interpreter), and `Frame::prompt` carries their non-printing
 ranges so `paint_prompt` writes hidden stretches without advancing the column.
@@ -972,19 +972,19 @@ walks older, `Ctrl-C` returns `ReadResult::Interrupted`, and any other key
 accepts the match and is reprocessed. Matching is a substring search from the
 newest entry downwards; an empty ring is a failed search, never a panic.
 
-Deferred, with the list maintained at the top of `crates/bsh-repl/src/lib.rs`:
+Deferred, with the list maintained at the top of `crates/baash-repl/src/lib.rs`:
 search-match highlighting and `Ctrl-S`, vi mode, multi-column menus and the
 full-screen picker, a `poll(2)` key timeout (a lone Esc is only distinguishable
 at end of input), `SIGWINCH` reflow, mouse, incremental/semantic highlighting.
-History expansion itself is the binary's (`bsh_lang::histexpand`); the editor
+History expansion itself is the binary's (`baash_lang::histexpand`); the editor
 only supplies the `set_initial_line` prefill used by `histverify`. The ring's
-`HISTCONTROL`/`HISTSIZE` policies are wired in `bsh-runtime`; the pty tests are
-`crates/bsh/tests/interactive_signals.rs`, `interactive_history.rs`,
+`HISTCONTROL`/`HISTSIZE` policies are wired in `baash-runtime`; the pty tests are
+`crates/baash/tests/interactive_signals.rs`, `interactive_history.rs`,
 `interactive_history_expansion.rs` and `interactive_prompt.rs`.
 
 ---
 
-## bsh-pattern
+## baash-pattern
 
 One matcher for every pattern in the shell: `${x#pat}`, `${x%pat}`, `case`,
 `[[ x == pat ]]`, extglob, `${x/pat/rep}` and globbing (DESIGN §4.8).
@@ -1031,7 +1031,7 @@ glibc); `[[.ch.]]`/`[[=a=]]` are ordinary bracket members; bash's
 meaning); malformed extglob groups degrade to literal text; nesting is capped at
 128.
 
-### bsh-runtime additions (built-in cluster)
+### baash-runtime additions (built-in cluster)
 
 - `AliasTable` lives in `ShellState`; a fork copies it and `exec` does not.
 - `CommandKind { Alias, Keyword, Function, Builtin(Tier), External }`,
@@ -1047,9 +1047,9 @@ meaning); malformed extglob groups degrade to literal text; nesting is capped at
 - `OPTIND` is initialised to 1 by the VM at startup; assigning to it is
   getopts' reset signal, which is why `Vars::optind_writes` exists.
 
-### bsh-sys: `Regex` (POSIX ERE)
+### baash-sys: `Regex` (POSIX ERE)
 
-`bsh_sys::{Regex, RegexError, CaptureRanges}`, module `regex`, `#[cfg(unix)]`.
+`baash_sys::{Regex, RegexError, CaptureRanges}`, module `regex`, `#[cfg(unix)]`.
 The engine is the platform's `regcomp`/`regexec`, not a Rust regex crate, because
 the conformance target is bash and bash uses the platform engine: POSIX
 leftmost-**longest** matching (`[[ "abcd" =~ (ab|abcd) ]]` yields `abcd`, where
@@ -1092,12 +1092,12 @@ Contract points that the caller must honour:
 Interp` answers the 24 `-A` actions from shell state, `ShellState::completions`
 holds the `CompletionTable` (definition-ordered, like `AliasTable`), and
 `ShellState::completion` is the run in progress, which is what makes `compopt`
-valid inside a completion and an error outside it. `bsh-runtime` gained the
-workspace leaf `bsh-pattern` for `-G`/`-X` matching.
+valid inside a completion and an error outside it. `baash-runtime` gained the
+workspace leaf `baash-pattern` for `-G`/`-X` matching.
 
-At the prompt, the same registry also drives Tab: `crates/bsh/src/complete.rs`
+At the prompt, the same registry also drives Tab: `crates/baash/src/complete.rs`
 clones `ShellState::completions` into the engine before each prompt (see
-`bsh-complete`). The clone is the seam, so `complete -W` takes effect on the
+`baash-complete`). The clone is the seam, so `complete -W` takes effect on the
 line typed after the one that defined it — the rule must be in the prompt
 snapshot, and the snapshot is taken before `read_line`. `-F`/`-C`/`-G` rules
 fall back to the default completion because the completer cannot run shell code
@@ -1111,14 +1111,14 @@ Two status codes are deliberately not bash's, both annotated as bugs in the
 suite: `complete -p NAME` for an unknown NAME is 0 (bash 1), and `complete NAME`
 with no action is 2 (bash 0).
 
-`crates/bsh` reads a startup file only when the shell is interactive:
+`crates/baash` reads a startup file only when the shell is interactive:
 `--rcfile FILE` replaces `~/.bashrc`, `--norc` disables it, and a missing file
 is ignored — which is what makes `--rcfile /dev/null` the portable way to ask
 for no startup file at all.
 
 ### Arithmetic: who expands the text
 
-`bsh-vm/src/arith.rs` performs `$name`, `${name}` and `${name[expr]}` splicing
+`baash-vm/src/arith.rs` performs `$name`, `${name}` and `${name[expr]}` splicing
 and double-quote removal itself, because `tree/words.rs` hands it the raw
 arithmetic text. That makes it the **only** layer that may interpret escapes
 inside an arithmetic expression: if the word layer ever expands first, the two
@@ -1172,9 +1172,9 @@ group, because none of them can begin a command.
 The lexer is a **superset** of bash's: with the option off, `echo @(a)` is the
 word `@(a)` where bash reports a syntax error. A group that never closes is not
 an error either — the `(` stays an ordinary word byte, which is how
-`bsh-pattern` degrades the same text.
+`baash-pattern` degrades the same text.
 
-### bsh-spec
+### baash-spec
 
 `--locale NAME` sets `LC_ALL` for the shell under test **and** every reference,
 so the comparison is like-for-like. `C` is the default because the suite's
@@ -1182,7 +1182,7 @@ primary expectations are byte-calibrated: measured, bash falls from 2574 to
 2435 under `C.UTF-8`, while counting characters gains us 15. UTF-8 is therefore
 a diagnostic mode, not the baseline.
 
-### The binary's REPL loop (`crates/bsh/src/main.rs`)
+### The binary's REPL loop (`crates/baash/src/main.rs`)
 
 Before each `editor.read_line()` the loop, in order: swaps the history ring into
 `ShellState`; runs
@@ -1211,7 +1211,7 @@ one chunk; an interactive pipe now uses the line-at-a-time reader (bash
 expands each line of `-i`, and the second line must see the first), while
 `-i -c` stays whole-string and never expands.
 
-### bsh-vm additions
+### baash-vm additions
 
 `Interp::each_candidate` is the single resolution walk (alias → keyword →
 special → function → intrinsic → regular/extension → `PATH`); `resolve()` is
@@ -1249,13 +1249,13 @@ text is not — anything matching on stderr should match the code.
 
 | range | owner | examples |
 |---|---|---|
-| 1xx | `bsh-syntax` | 1 unterminated, 2 need more input, 3 unexpected token |
-| 2xx | `bsh-vm` (reserved) | the POSIX §2.8.1 consequence layer |
-| 3xx | `bsh-lang` | 301 unsupported operator, 302 parameter null, 303 unset |
+| 1xx | `baash-syntax` | 1 unterminated, 2 need more input, 3 unexpected token |
+| 2xx | `baash-vm` (reserved) | the POSIX §2.8.1 consequence layer |
+| 3xx | `baash-lang` | 301 unsupported operator, 302 parameter null, 303 unset |
 | 4xx | reserved | redirection and I/O |
-| 5xx | `bsh-runtime` | 508 builtin not implemented yet, other state errors |
+| 5xx | `baash-runtime` | 508 builtin not implemented yet, other state errors |
 
-`bsh-diag` produces no codes of its own; it renders them.
+`baash-diag` produces no codes of its own; it renders them.
 
 ---
 

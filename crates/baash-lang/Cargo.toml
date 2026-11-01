@@ -1,0 +1,12 @@
+[package]
+name = "baash-lang"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Words, quoting and expansion"
+
+[dependencies]
+baash-diag.workspace = true
+baash-pattern.workspace = true
+smallvec.workspace = true

@@ -1,5 +1,5 @@
 {
-  description = "ßhell — a POSIX- and bash-compatible interactive shell";
+  description = "baash — a POSIX- and bash-compatible interactive shell";
 
   # Pinned to the nixos.org channel tarball: it redirects to an immutable
   # release that the lock records, and it is smaller and not rate-limited
@@ -18,7 +18,7 @@
     {
       packages = eachSystem (pkgs: {
         default = pkgs.rustPlatform.buildRustPackage {
-          pname = "bsh";
+          pname = "baash";
           version = "0.0.0";
 
           src = nixpkgs.lib.cleanSource ./.;
@@ -31,7 +31,7 @@
 
           meta = {
             description = "POSIX- and bash-compatible interactive shell";
-            mainProgram = "bsh";
+            mainProgram = "baash";
             license = pkgs.lib.licenses.asl20;
             platforms = nixpkgs.lib.platforms.linux;
           };
@@ -59,20 +59,20 @@
           ];
 
           shellHook = ''
-            # A checkout path containing non-ASCII characters (the ß in ßhell
-            # is enough) breaks linking: the mold linker wrapper mangles the
-            # argument and rustc then reports missing object files. Redirect
-            # the build directory only when the path is not plain ASCII, so CI
-            # keeps its normal ./target and its cache.
+            # A checkout path containing non-ASCII characters (the ß in
+            # …/ßhell is enough) breaks linking: the mold linker wrapper
+            # mangles the argument and rustc then reports missing object
+            # files. Redirect the build directory only when the path is not
+            # plain ASCII, so CI keeps its normal ./target and its cache.
             if printf '%s' "$PWD" | LC_ALL=C grep -q '[^ -~]'; then
-              export CARGO_TARGET_DIR="''${TMPDIR:-/tmp}/bsh-target"
+              export CARGO_TARGET_DIR="''${TMPDIR:-/tmp}/baash-target"
               # The shell also bakes $PWD into NIX_LDFLAGS as an -rpath, and
               # non-ASCII bytes there are mangled the same way. This workspace
               # has no C dependencies, so dropping the flag is enough.
               unset NIX_LDFLAGS
-              echo "ßhell: non-ASCII checkout path; CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
+              echo "baash: non-ASCII checkout path; CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
             fi
-            echo "ßhell dev shell: cargo / rustc / clippy / rustfmt / rust-analyzer"
+            echo "baash dev shell: cargo / rustc / clippy / rustfmt / rust-analyzer"
             echo "  cargo test --workspace"
           '';
         };

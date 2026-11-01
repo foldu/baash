@@ -1,6 +1,6 @@
-# ßhell — design notes
+# baash — design notes
 
-Status: exploration, v2. Binary `bsh`. **Interactive-first**: the primary use is
+Status: exploration, v2. Binary `baash`, the *bourne again again shell*. **Interactive-first**: the primary use is
 a person typing at a prompt, and the primary feature is completion.
 
 Evidence tags: `[spec]` checked against POSIX.1-2024 (Issue 8) text; `[oils]`
@@ -60,7 +60,7 @@ Be precise or the requirement is unbounded. `[spec]` A conforming `sh` is:
    `pwd`, `true`, `false` and all non-shell utilities must exist on disk and be
    reachable via `exec`, `env`, `find -exec`, `xargs`. They are *not* intrinsic.
 
-So: ßhell implements the shell and its builtins. It does not ship coreutils.
+So: baash implements the shell and its builtins. It does not ship coreutils.
 `sh -c 'sed …'` is our problem only to the extent of finding and exec'ing
 something.
 
@@ -107,8 +107,8 @@ Two options:
 - **(b) One superset grammar, post-parse gating.** Parse all of bash, then in
   strict mode reject bash-only *nodes* with a span.
 
-`[rec]` Take (b). `bsh -n --posix file` becomes a real portability checker with
-line/column and a fix-it, and `bsh fmt` works on files written for either shell.
+`[rec]` Take (b). `baash -n --posix file` becomes a real portability checker with
+line/column and a fix-it, and `baash fmt` works on files written for either shell.
 Only the lexically-unavoidable conflicts (§3.3 Tier A) are shared, so gating is
 syntactic, never lexical.
 
@@ -128,7 +128,7 @@ pub const POSIX: Opts = Opts { posix_mode: true, ..BASE };
 pub const BASH:  Opts = Opts { posix_mode: false, ..POSIX_STYLE };
 ```
 
-Dispatch by `argv[0]` basename (`sh` → POSIX, `bash` → BASH, `bsh` → BASH with
+Dispatch by `argv[0]` basename (`sh` → POSIX, `bash` → BASH, `baash` → BASH with
 a friendlier `echo`), `--posix`/`--bash` overrides, `set -o`/`shopt` per-option.
 Tools derive the profile from the `#!` line.
 
@@ -225,21 +225,21 @@ comes in with §6.7.
 ### 4.1 Crates and the unsafe boundary
 
 ```
-bsh-syntax    lexer, parser, AST, spans, unparse, diagnostics, expectation queries
-bsh-highlight token + theme -> styled spans; ANSI rendering          ← §6.10
-bsh-compile   AST → Chunk (bytecode)                        ← §5
-bsh-vm        the interpreter loop                          ← §5
-bsh-diag      diagnostic IR + renderers (compact / miette / json)
-bsh-lang      words, expansion, arith, patterns, glob
-bsh-runtime   vars, scopes, builtins, options, errors
-bsh-sys       fork/exec, fd table, signals, pty, tty   ← the ONLY unsafe crate
-bsh-repl      line editor, key decoding, rendering, history
-bsh-complete  completion context, providers, ranking   ← §6
-bsh-tools     fmt, lint, explain, debugger
-bsh           binary: dispatch, main loop
+baash-syntax    lexer, parser, AST, spans, unparse, diagnostics, expectation queries
+baash-highlight token + theme -> styled spans; ANSI rendering          ← §6.10
+baash-compile   AST → Chunk (bytecode)                        ← §5
+baash-vm        the interpreter loop                          ← §5
+baash-diag      diagnostic IR + renderers (compact / miette / json)
+baash-lang      words, expansion, arith, patterns, glob
+baash-runtime   vars, scopes, builtins, options, errors
+baash-sys       fork/exec, fd table, signals, pty, tty   ← the ONLY unsafe crate
+baash-repl      line editor, key decoding, rendering, history
+baash-complete  completion context, providers, ranking   ← §6
+baash-tools     fmt, lint, explain, debugger
+baash           binary: dispatch, main loop
 ```
 
-`#![forbid(unsafe_code)]` on all but `bsh-sys`, enforced in CI. Everything
+`#![forbid(unsafe_code)]` on all but `baash-sys`, enforced in CI. Everything
 reachable from `fork()` is then safe Rust, and the code that runs between
 `fork` and `exec` is auditable by reading one crate.
 
@@ -248,7 +248,7 @@ are collected in `docs/contracts.md`: the global fork gate, spawn-plan
 environment and signal rules, how exec failures surface, and the renderer
 inventory.
 
-`bsh-repl` must not depend on `bsh-runtime`. The editor talks to traits
+`baash-repl` must not depend on `baash-runtime`. The editor talks to traits
 (`Completer`, `Highlighter`), which keeps it testable headlessly and reusable.
 
 ### 4.2 Pipeline
@@ -335,7 +335,7 @@ Which gives three rules:
 `ThreadGate` enforced rule 3 mechanically until the 2026-10-30 pivot deleted
 the shell's last `fork`; the ordering problem below is now historical, and
 threads are unconstrained. The one place that still forks is the pty test
-harness (`bsh_sys::fork_child_status`, test scaffolding), which is
+harness (`baash_sys::fork_child_status`, test scaffolding), which is
 single-threaded at the point it does.
 
 Two corollaries that are easy to miss:
@@ -401,9 +401,9 @@ than leave it implied:
 
 | owner | built-ins | why |
 |---|---|---|
-| executor (`bsh-vm`) | `break`, `continue`, `return`, `exit`, `exec`, `eval`, `.`/`source`, `cd`, `echo` | they unwind control flow or re-enter the interpreter, which a `fn(host, argv) -> Status` signature cannot express |
-| `bsh-runtime` | state-only built-ins: `export`, `readonly`, `unset`, `set`, `shift`, `times` | they mutate the variable store and nothing else |
-| `bsh-sys` + caller | everything else | a plain external command |
+| executor (`baash-vm`) | `break`, `continue`, `return`, `exit`, `exec`, `eval`, `.`/`source`, `cd`, `echo` | they unwind control flow or re-enter the interpreter, which a `fn(host, argv) -> Status` signature cannot express |
+| `baash-runtime` | state-only built-ins: `export`, `readonly`, `unset`, `set`, `shift`, `times` | they mutate the variable store and nothing else |
+| `baash-sys` + caller | everything else | a plain external command |
 
 Today the executor's set is discovered by `BuiltinDef::is_implemented()` being
 false. That works, and it means a runtime implementation silently takes over,
@@ -438,13 +438,13 @@ Pattern matching appears in `case`, pathname expansion, `${x#pat}`, `${x%pat}`,
 `${x/pat/rep}` to POSIX ERE and leans on libc `glob()` with
 `FNM_EXTMATCH`/`GLOB_PERIOD`, and lists both as portability problems `[oils]`.
 
-`[rec]` One hand-written byte-oriented pattern compiler in `bsh-lang`, shared by
+`[rec]` One hand-written byte-oriented pattern compiler in `baash-lang`, shared by
 all sites, `extglob` as a flag, with a backtracking budget so `*(a)*(a)*(a)…`
 cannot hang the shell.
 
 Separately, `[[ x =~ re ]]` needs **POSIX ERE** — leftmost-longest, POSIX
 backreferences. The `regex` crate is leftmost-first and not ERE; do not use it.
-Bind `regcomp`/`regexec` in `bsh-sys`. libc is the correct answer here.
+Bind `regcomp`/`regexec` in `baash-sys`. libc is the correct answer here.
 
 ### 4.9 Memory and allocation
 
@@ -533,20 +533,20 @@ completion work on partial input.
 opened at 3:5" instead of "unexpected EOF". This one mechanism is most of the
 difference between a parser people trust and one they fight.
 
-**4. Recovery with synchronisation tokens.** For `bsh -n` and the linter you
+**4. Recovery with synchronisation tokens.** For `baash -n` and the linter you
 want *all* the errors, not the first. Sync on `;`, newline, `fi`, `done`,
 `esac`, `}` at matching depth, emit, continue. Cap the count and dedupe, or one
 missing quote produces fifty cascading complaints.
 
 **5. Stable error codes.** Oils tags every diagnostic with a searchable
 `OILS-ERR-42` and maintains an error catalog with hints `[oils]`; the codes are
-URL-shaped so they can become doc links. Do the same with `BSH-E####`. It makes
+URL-shaped so they can become doc links. Do the same with `BAASH-E####`. It makes
 messages *learnable*, and lets you reword without breaking people's greps.
 
 Rendering details that are not cosmetic: columns must be byte-accurate with tabs
 expanded and wide characters counted once, or carets land in the wrong place on
 real files; secondary labels ("opened here") carry most of the diagnostic value;
-and a `fix` enables `bsh -n --fix`.
+and a `fix` enables `baash -n --fix`.
 
 Testing: golden snapshot tests over a corpus of malformed scripts — Oils keeps
 `test/parse-errors/` and a 27-case `spec/parse-errors.test.sh` `[oils]`. Note
@@ -564,19 +564,19 @@ the chunk. The way through is to call the trait's provided methods directly on a
 borrowed `&dyn Diagnostic` and hand that to a report handler — `source_code()`
 returns `Option<&dyn SourceCode>` with the lifetime of `&self`, so a view that
 borrows the chunk is fine and `Report` never enters the picture. Keeping our own
-IR also means `bsh-syntax` has no rendering dependency and diagnostics are
+IR also means `baash-syntax` has no rendering dependency and diagnostics are
 serialisable for tests and editors.
 
 | layer | owns | depends on miette |
 |---|---|---|
-| `bsh-diag::Diagnostic` | code, span, labels, help, fix, severity | no |
+| `baash-diag::Diagnostic` | code, span, labels, help, fix, severity | no |
 | renderers | compact / graphical / JSON | optionally |
 | `miette` | colour, snippets, wrapping, hyperlinks, `unicode-width` | — |
 
 Consequences to design in now:
 
 - **Chunks own their source as `Arc<[u8]>`.** A diagnostic must be renderable
-  later — in `bsh -n` batch mode, from the linter, from a test snapshot —
+  later — in `baash -n` batch mode, from the linter, from a test snapshot —
   without borrowing an arena that has moved on.
 - **Byte offsets versus `&str`.** `SourceSpan` is byte-based, which suits us,
   but `SourceCode` is `&str`-oriented and shell input can be invalid UTF-8. Do
@@ -594,16 +594,16 @@ Consequences to design in now:
 
 | context | output |
 |---|---|
-| interactive, stderr is a tty | ≤ 3 lines, no box drawing: `bsh: 3:4: unclosed '(' [BSH-E0102]`, plus one caret line |
-| `bsh -n`, `lint`, `fmt` | full report: labels, "opened here", help, machine-applicable fix |
-| stderr is not a tty | one line, greppable: `file:3:5: error[BSH-E0102]: …` |
+| interactive, stderr is a tty | ≤ 3 lines, no box drawing: `baash: 3:4: unclosed '(' [BAASH-E0102]`, plus one caret line |
+| `baash -n`, `lint`, `fmt` | full report: labels, "opened here", help, machine-applicable fix |
+| stderr is not a tty | one line, greppable: `file:3:5: error[BAASH-E0102]: …` |
 
 miette's graphical theme is a *compiler report* format, which is right for
 checking a file. It is wrong at a prompt, where the error competes with the next
 prompt and the user types three commands a minute. bash prints one line for a
 reason; do not let the pretty renderer become the default interactive one.
 
-`url()` ties `BSH-E0102` to the catalog from §4.10, and with miette's
+`url()` ties `BAASH-E0102` to the catalog from §4.10, and with miette's
 `supports-hyperlinks` the code becomes clickable in terminals that speak OSC 8 —
 the stable-code decision paying off twice.
 
@@ -629,7 +629,7 @@ support and the handler actually used. Leave `syntect`, `backtrace` and
 **Deferred (2026-10-30).** The tree-walking evaluator is the engine and a second
 engine is not being built alongside (`docs/direction.md` §2). This section is
 the design to start from once the bash-compat surface is smaller — the crate is
-still named `bsh-vm` for it — not a plan of work.
+still named `baash-vm` for it — not a plan of work.
 
 ### 5.1 What gets compiled
 
@@ -673,7 +673,7 @@ enum Op {
 ```
 
 Roughly 25 opcodes. If a proposed opcode mentions a word-expansion detail, it
-belongs in `bsh-lang`, not the ISA.
+belongs in `baash-lang`, not the ISA.
 
 There are no `PushHandler`/`PopHandler` opcodes. Which handler covers an address
 is a compile-time property of the region, so it lives in the static table of
@@ -746,7 +746,7 @@ to disk like zsh's `.zwc` `[zsh]` to cut interactive startup.
    `step`, `next`, `print $x`. bashdb exists only because bash has no VM — it
    fakes breakpoints with `trap DEBUG` and source-line juggling. This is a
    genuinely novel interactive shell feature and it is cheap *only* on a VM.
-4. **`bsh explain`** — dump the expansion stages and final `argv` for a command
+4. **`baash explain`** — dump the expansion stages and final `argv` for a command
    (§9).
 5. **Serialisable chunks** for faster startup.
 
@@ -802,7 +802,7 @@ So:
 
 - Portable stable Rust, no `become`/`musttail` tricks, no computed goto (which
   Rust does not offer), no `unsafe` — which keeps `#![forbid(unsafe_code)]`
-  intact across every crate but `bsh-sys`.
+  intact across every crate but `baash-sys`.
 - Trivially debuggable, which matters more than 10% when the thing being
   debugged is `set -e` unwinding.
 - The escape hatch, if dispatch ever shows up in a profile, is Cloudflare's
@@ -846,7 +846,7 @@ differential-tested (§5.7).
 
 | interaction | target | notes |
 |---|---|---|
-| `bsh -i` to prompt | < 10 ms | dash ≈ 1 ms, bash ≈ 5–10 ms. Rust can win this; don't blow it on eager PATH indexing |
+| `baash -i` to prompt | < 10 ms | dash ≈ 1 ms, bash ≈ 5–10 ms. Rust can win this; don't blow it on eager PATH indexing |
 | keystroke → echo | < 5 ms | own key decoder, no allocation per keystroke |
 | keystroke → autosuggestion | < 16 ms | from an in-memory history index |
 | TAB → first paint | < 30 ms | **paint from cache synchronously**, stream slower sources after |
@@ -947,13 +947,13 @@ reports the innermost construct and its content start, all seventeen `Expect`
 variants are reachable, and `classify_tokens` gives token roles.
 
 A ninth gap was found by the executor rather than the completer: there was no
-word-level parse entry point, so `bsh-vm` synthesised `": <fragment>"` and took
+word-level parse entry point, so `baash-vm` synthesised `": <fragment>"` and took
 `words[1]` to parse `[[ ]]` operands, `case` patterns and here-doc constructs.
 `parse_word` closes it, and the executor now calls it directly.
 
 The remaining known limitation is deliberate: a here-document body is not a
-`Word`, so its expansion stays a scanner in `bsh-vm` (a candidate to move into
-`bsh-lang` once a body has a word model), and `${…}` bodies after `:-` are still
+`Word`, so its expansion stays a scanner in `baash-vm` (a candidate to move into
+`baash-lang` once a body has a word model), and `${…}` bodies after `:-` are still
 not parsed as nested word slots.
 
 ### 6.4 Completion pipeline
@@ -1101,7 +1101,7 @@ on input that is *not yet valid*. That rules out anything needing a successful
 parse: highlighting is driven by the lexer alone, with unterminated quotes and
 substitutions treated as ordinary token classes rather than errors.
 
-`bsh-highlight` therefore maps `TokenKind` to `Style` and does nothing else.
+`baash-highlight` therefore maps `TokenKind` to `Style` and does nothing else.
 
 - **Role-based, not RGB.** A theme says "keywords are bold magenta"; the
   renderer decides how to paint it. The same theme then drives the line editor,
@@ -1173,7 +1173,7 @@ The parser and the VM are the fun parts. Ranked by effective effort:
 2. **Conformance ratchet.** Pass count per file; CI fails on a drop. Put the
    number in the README. It is the only real progress metric.
 
-   **Measurement** (`crates/bsh-spec`, the harness this item asked for):
+   **Measurement** (`crates/baash-spec`, the harness this item asked for):
    **1405 of 2787 compared cases**, 1184 skipped, of 3971 total (50.4%). For
    reference bash passes 2574/2787 (92.4%) on the same run, so 1206 cases are
    ones bash passes and we do not — that list, not the headline percentage, is
@@ -1211,12 +1211,12 @@ The parser and the VM are the fun parts. Ranked by effective effort:
    existing shell can copy it without rewriting its front end.
 2. **A real debugger** (§5.6): breakpoints by `file:line`, stepping, `print`.
    Only cheap on a VM.
-3. **`bsh explain`** — print every expansion stage and the final `argv`. Every
+3. **`baash explain`** — print every expansion stage and the final `argv`. Every
    shell user debugs field splitting by guessing. A thin client over the
    expander we must build anyway.
-4. **`bsh lint --posix` / `bsh fmt`** — correct, because the parse is lossless
+4. **`baash lint --posix` / `baash fmt`** — correct, because the parse is lossless
    and spans exist. `checkbashisms` is a pile of regexes; this would be real.
-5. *(optional)* **Embeddability** — `bsh-runtime` as a library for build tools
+5. *(optional)* **Embeddability** — `baash-runtime` as a library for build tools
    that want typed capture instead of a string from `sh -c`. Free byproduct of
    the crate split, not a goal.
 
@@ -1231,7 +1231,7 @@ Interactive-first ordering: a usable shell early, conformance and VM after.
 | 0 | Vendor `spec/`, harness, run against bash/dash | harness agrees with Oils on N cases |
 | 1 | Lexer + parser + lossless + `-n` + diagnostics + **expectation queries** | lossless invariant on corpus; `expectations_at` correct on truncated input; golden diagnostics stable; `NeedMoreInput` drives PS2 |
 | 2 | AST interpreter: commands, redirects, expansion, control flow, functions, pipelines | spec: `command_`, `redirect`, `word-split`, `quote`, `var-sub`, `if_`, `loop`, `case_` |
-| 3 | REPL v1: raw mode, own key decoder, history, prompt; wire in `bsh-highlight` (§6.10) | usable daily for simple commands, with a highlighted line |
+| 3 | REPL v1: raw mode, own key decoder, history, prompt; wire in `baash-highlight` (§6.10) | usable daily for simple commands, with a highlighted line |
 | 4 | Completion v1: paths/commands/vars via `expectations_at`, `nucleo-matcher` ranking, insertion quoting | feels better than bash for `cd`/`ls`/`git` |
 | 5 | Completion v2: frecency, descriptions, menu + ghost text + picker, bash-completion compat | `git`, `docker`, `ssh` complete as in bash |
 | 6 | Job control, signal handling, terminal restore; core builtins; §2.8.1 errors | pexpect/stateful tests; `Ctrl-C`/`Ctrl-Z` behave |
@@ -1261,6 +1261,6 @@ Oils' level of rigour; steps 7–8 are strictly optional for the product.
    portability — and it has already bitten: with a checkout path containing
    `ß`, linking fails outright in this environment, because non-ASCII bytes in
    a linker argument get mangled (`303237` is `ß` spelled in octal; see README).
-   `bsh` for the binary, and consider an ASCII checkout path.
+   `baash` for the binary, and consider an ASCII checkout path.
 5. **Do we ship a `sh` symlink and claim `/bin/sh`?** It changes the conformance
    bar we are advertising, and the default profile.

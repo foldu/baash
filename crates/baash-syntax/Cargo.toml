@@ -1,0 +1,12 @@
+[package]
+name = "baash-syntax"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Tolerant lexer, spans and parse outcomes"
+
+[dependencies]
+baash-diag.workspace = true
+baash-lang.workspace = true
+memchr.workspace = true

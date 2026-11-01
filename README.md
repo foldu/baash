@@ -1,11 +1,11 @@
-# ßhell
+# baash — the bourne again again shell
 
 A POSIX- and bash-compatible interactive shell in Rust. The design rationale
 lives in [DESIGN.md](DESIGN.md); the current direction is
 [docs/direction.md](docs/direction.md); this file is the operator's manual.
 
-**Status: it runs, and conformance is now measured.** `bsh` executes scripts,
-and `bsh` with no arguments gives you an interactive editor with syntax
+**Status: it runs, and conformance is now measured.** `baash` executes scripts,
+and `baash` with no arguments gives you an interactive editor with syntax
 highlighting, bash-style TAB completion and history.
 
 Conformance is measured against the vendored Oils suite: 3971 cases, of which
@@ -14,14 +14,14 @@ comparable.
 
 | | passing | of 2787 |
 | --- | ---: | ---: |
-| `bsh`, any `## OK <shell>` alternative | **2344** | 84.1% |
-| `bsh`, strict (primary expectation only) | **2292** | 82.2% |
+| `baash`, any `## OK <shell>` alternative | **2344** | 84.1% |
+| `baash`, strict (primary expectation only) | **2292** | 82.2% |
 | bash 5.3.20, on the same run | 2577 | 92.5% |
 
 53 of the passing cases pass only because a per-shell `## OK …` alternative
-matched, which is the difference between the two `bsh` rows. bash passes 464
+matched, which is the difference between the two `baash` rows. bash passes 464
 cases we do not (and we pass 67 it fails), so we pass 84.6% of what bash passes. Both numbers live in
-`crates/bsh-spec/baseline.txt`, and CI fails if either drops below it.
+`crates/baash-spec/baseline.txt`, and CI fails if either drops below it.
 
 Conformance is measured but no longer the priority: interactive use comes
 first, and [`docs/state.md`](docs/state.md) is the resume document (what
@@ -29,8 +29,8 @@ exists, what is proven, what is next). `docs/roadmap.md` is the conformance
 queue. Reproduce the numbers with:
 
 ```
-cargo run -p bsh-spec -- --shell target/debug/bsh --compare bash
-cargo run -p bsh-spec -- --shell target/debug/bsh --ratchet --strict
+cargo run -p baash-spec -- --shell target/debug/baash --compare bash
+cargo run -p baash-spec -- --shell target/debug/baash --ratchet --strict
 ```
 
 Do not read the unit-test count as conformance: it is a different number
@@ -53,7 +53,7 @@ designators and modifiers, `^old^new^`), and the built-ins listed in
 There is **no job control** (see `docs/direction.md`): no `jobs`/`fg`/`bg`/
 `disown`, no `%` specifications, no per-job process groups and no terminal
 handover, so `Ctrl-Z` stops the child and the shell together, as bash does
-with `set +m`. Those four names are still known and report `BSH-E0302`;
+with `set +m`. Those four names are still known and report `BAASH-E0302`;
 `set -m` is accepted and does nothing.
 
 The interactive prompt is built from the shell's own variables before every
@@ -91,15 +91,15 @@ terminal. The exact blockers are in [`docs/state.md`](docs/state.md) §4.
 Not implemented yet: the directory stack (`pushd`/`popd`/`dirs`), `umask`,
 `let`, `ulimit`, `times`, `enable`, `$RANDOM`/`$SECONDS`/`$FUNCNAME`, xtrace
 (`set -x`), `~user`,
-process substitution (`<(...)`, rejected as `BSH-E0301`), and `complete -F`/
+process substitution (`<(...)`, rejected as `BAASH-E0301`), and `complete -F`/
 `-C`/`-G` at the prompt. Missing built-ins
-answer status 2 with `BSH-E0508`; missing special variables expand to nothing.
+answer status 2 with `BAASH-E0508`; missing special variables expand to nothing.
 `printf`, `pwd`, `test` and `[` are served from `PATH` by design.
 [`docs/state.md`](docs/state.md) has the full inventory; the interactive
 editor's deferred list (vi mode, undo, search highlighting, `SIGWINCH` reflow)
-is at the top of `crates/bsh-repl/src/lib.rs`.
+is at the top of `crates/baash-repl/src/lib.rs`.
 
-`bsh-vm` is a tree-walking evaluator, and for now it is the only engine: the
+`baash-vm` is a tree-walking evaluator, and for now it is the only engine: the
 bytecode VM is deferred until the bash surface is smaller, and the crate keeps
 its name for it (`DESIGN.md` §5, `docs/direction.md` §2). Dispatch is not where
 a shell spends its time.
@@ -108,31 +108,31 @@ a shell spends its time.
 
 ```
 crates/
-  bsh-diag       diagnostic IR: spans, stable codes, sources   (no dependencies)
-  bsh-syntax     lexer, spans, parse outcomes, expectations
-  bsh-highlight  token + theme -> styled spans, ANSI rendering
-  bsh-lang       words, quoting, expansion
-  bsh-runtime    options, variables, the ShellHost interface
-  bsh-vm         the evaluator
-  bsh-sys        syscalls, tty detection, fork gate   <- the only `unsafe` crate
-  bsh-complete   completion candidates and ranking
-  bsh-repl       line editor and terminal rendering
-  bsh-tools      dev helpers (stub)
-  bsh            the binary
+  baash-diag       diagnostic IR: spans, stable codes, sources   (no dependencies)
+  baash-syntax     lexer, spans, parse outcomes, expectations
+  baash-highlight  token + theme -> styled spans, ANSI rendering
+  baash-lang       words, quoting, expansion
+  baash-runtime    options, variables, the ShellHost interface
+  baash-vm         the evaluator
+  baash-sys        syscalls, tty detection, fork gate   <- the only `unsafe` crate
+  baash-complete   completion candidates and ranking
+  baash-repl       line editor and terminal rendering
+  baash-tools      dev helpers (stub)
+  baash            the binary
 ```
 
 Cross-crate contracts (fork gate, spawn plans, renderers) are in
 [docs/contracts.md](docs/contracts.md).
 
-Dependency direction follows DESIGN.md §4.1: `bsh-sys` is the only crate
+Dependency direction follows DESIGN.md §4.1: `baash-sys` is the only crate
 permitted `unsafe`, and everything else carries `#![forbid(unsafe_code)]`.
-`bsh-repl` depends on `bsh-runtime` for exactly one type — the history ring —
+`baash-repl` depends on `baash-runtime` for exactly one type — the history ring —
 so the editor and the `history`/`fc` built-ins share one ring; it still builds
 its own in tests and never touches an interpreter.
 
-An interactive shell sources `~/.bshrc` when that file exists, otherwise
+An interactive shell sources `~/.baashrc` when that file exists, otherwise
 `~/.bashrc` (`--rcfile` and `--norc` still win). History goes to
-`~/.bsh_history`, deliberately not bash's `~/.bash_history`, so two shells do
+`~/.baash_history`, deliberately not bash's `~/.bash_history`, so two shells do
 not rewrite each other's history.
 
 ## Building
@@ -142,14 +142,14 @@ nix develop          # cargo, rustc, clippy, rustfmt, rust-analyzer
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- --deny warnings
 
-cargo run -p bsh -- -c 'echo hi'     # run a command
-cargo run -p bsh                     # interactive (on a terminal)
-cargo run -p bsh -- script.sh        # run a file
-cargo run -p bsh -- -n script.sh     # parse only, report diagnostics
-printf 'if x; then\n' | cargo run -p bsh -- --highlight   # paint stdin
+cargo run -p baash -- -c 'echo hi'     # run a command
+cargo run -p baash                     # interactive (on a terminal)
+cargo run -p baash -- script.sh        # run a file
+cargo run -p baash -- -n script.sh     # parse only, report diagnostics
+printf 'if x; then\n' | cargo run -p baash -- --highlight   # paint stdin
 ```
 
-Use `--all-features` for both. `bsh-diag`'s `miette` adapter is behind the
+Use `--all-features` for both. `baash-diag`'s `miette` adapter is behind the
 `fancy` feature and is invisible to a default-feature build, so a count without
 the flag is not the project's test count.
 
@@ -188,7 +188,7 @@ exported as an artifact. The repository must be public.
 The [Oils](https://oilshell.org) spec suite is vendored unmodified under
 [spec/oils/](spec/README.md) — 223 files, 3971 cases, Apache-2.0, with the
 upstream commit recorded alongside it. The harness is not written yet; it will
-run each case against `bsh` and against the reference shells on `PATH`, honour
+run each case against `baash` and against the reference shells on `PATH`, honour
 the per-shell override blocks, and report a pass count per file. That count is
 the project's only real progress metric (DESIGN.md §8).
 

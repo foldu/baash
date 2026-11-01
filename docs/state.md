@@ -15,8 +15,8 @@ the shell misbehaves, but it is no longer the work queue — see
 ## 1. Getting back to a working loop
 
 ```sh
-export CARGO_HOME=/tmp/bsh-cargo-home CARGO_TARGET_DIR=/tmp/bsh-target
-cargo build -p bsh -p bsh-spec
+export CARGO_HOME=/tmp/baash-cargo-home CARGO_TARGET_DIR=/tmp/baash-target
+cargo build -p baash -p baash-spec
 
 # the gate that must pass before a merge
 cargo fmt --all -- --check
@@ -25,11 +25,11 @@ cargo test --workspace --all-features
 cargo test --workspace --all-features -- --list | grep -c ': test$'   # 1161
 
 # conformance
-target/debug/bsh-spec --shell target/debug/bsh --ratchet   # must be >= baseline
-target/debug/bsh-spec --shell target/debug/bsh --compare bash --json /tmp/rep.json
+target/debug/baash-spec --shell target/debug/baash --ratchet   # must be >= baseline
+target/debug/baash-spec --shell target/debug/baash --compare bash --json /tmp/rep.json
 ```
 
-`bsh-spec --json` writes per-case results; the per-file failure histogram that
+`baash-spec --json` writes per-case results; the per-file failure histogram that
 drives triage is built from it (see `docs/roadmap.md` for the shape of the
 query). **Regenerate triage every wave** — the map changes on every merge, and
 a stale brief has already cost two wrong scopes (arrays: 54 vs real; namerefs:
@@ -38,8 +38,8 @@ a stale brief has already cost two wrong scopes (arrays: 54 vs real; namerefs:
 **Two environment traps.**
 
 * The checkout path contains `ß`. Linking fails if crate or worktree paths are
-  non-ASCII, so worktrees live at `/tmp/bsh-wt-*`.
-* Several `bsh-vm` test binaries lose their libtest summary when stdout is
+  non-ASCII, so worktrees live at `/tmp/baash-wt-*`.
+* Several `baash-vm` test binaries lose their libtest summary when stdout is
   redirected, so `cargo test` alone under-reports. Always take the count from
   `--list | grep -c ': test$'`.
 
@@ -66,7 +66,7 @@ a meaningful target: bash itself scores 92.4 %, and 53 of our passes come from
 `## OK <shell>` alternatives rather than the primary expectation — which is
 exactly the 82.2 % vs 84.1 % split, and why both numbers are ratcheted.
 
-Baseline lives in `crates/bsh-spec/baseline.txt` (`total = 2344`,
+Baseline lives in `crates/baash-spec/baseline.txt` (`total = 2344`,
 `strict = 2292`). `--ratchet` exits 1 below either, 2 if it cannot measure.
 
 **The W1 drop is expected.** Removing job control failed seven Oils cases that
@@ -87,21 +87,21 @@ count was diffed case by case against the previous commit; nothing else moved.
 
 | crate | lines | responsibility |
 |---|---|---|
-| `bsh-sys` | 3898 | the only `unsafe`. fork/exec (`posix_spawn` by default), descriptors, pipes/pty, signals, libc regex, global `fork_gate()`; descriptors, termios and `wait` go through `rustix`, and the 77 remaining blocks are leaf syscalls or `posix_spawn` plumbing |
-| `bsh-syntax` | 6607 | lexer + recursive-descent parser producing `Word`/`Command`; the superset grammar |
-| `bsh-lang` | 11842 | shell *text* semantics: word expansion, patterns (`bsh-pattern`), parameter operators, prompt escapes, arithmetic; no I/O |
-| `bsh-runtime` | 10392 | shell *state*: variables/arrays/namerefs, options, builtin registry and state-only bodies, traps bookkeeping, completion registry, `declare -p` rendering; re-exports the history ring |
-| `bsh-history` | 1244 | command history: the session ring (navigation, numbering) and the Turso database behind it, written from its own thread |
-| `bsh-vm` | 12024 | the evaluator (tree-walking) and everything that needs both state and syscalls: command execution, redirection, child processes, traps |
-| `bsh-pattern` | 4197 | Thompson-NFA glob: `O(n·m)`, never exponential; `extglob`/`nocasematch`/`utf8` flags |
-| `bsh-diag` | 1946 | diagnostic model and miette rendering; error-code space |
-| `bsh-complete` | 3928 | completion engine: providers, contexts, nucleo ranking, menu layout |
-| `bsh-repl` | 3470 | line editor, key decoding, history navigation, prompt adapter, renderer, terminal abstraction |
-| `bsh-utils` | 206 | embedded coreutils (uutils 0.8 subcrates): the `builtin-utils` fallback used when `PATH` finds nothing; on by default for Windows, opt-in on Linux |
-| `bsh-highlight` | 386 | syntax highlighting (token → style), shared with the editor |
-| `bsh-spec` | 3242 | the Oils-suite runner, comparator, ratchet |
-| `bsh` | 1781 | the binary: argument parsing, startup files, REPL loop, history ownership swap |
-| `bsh-tools` | 16 | dev helpers |
+| `baash-sys` | 3898 | the only `unsafe`. fork/exec (`posix_spawn` by default), descriptors, pipes/pty, signals, libc regex, global `fork_gate()`; descriptors, termios and `wait` go through `rustix`, and the 77 remaining blocks are leaf syscalls or `posix_spawn` plumbing |
+| `baash-syntax` | 6607 | lexer + recursive-descent parser producing `Word`/`Command`; the superset grammar |
+| `baash-lang` | 11842 | shell *text* semantics: word expansion, patterns (`baash-pattern`), parameter operators, prompt escapes, arithmetic; no I/O |
+| `baash-runtime` | 10392 | shell *state*: variables/arrays/namerefs, options, builtin registry and state-only bodies, traps bookkeeping, completion registry, `declare -p` rendering; re-exports the history ring |
+| `baash-history` | 1244 | command history: the session ring (navigation, numbering) and the Turso database behind it, written from its own thread |
+| `baash-vm` | 12024 | the evaluator (tree-walking) and everything that needs both state and syscalls: command execution, redirection, child processes, traps |
+| `baash-pattern` | 4197 | Thompson-NFA glob: `O(n·m)`, never exponential; `extglob`/`nocasematch`/`utf8` flags |
+| `baash-diag` | 1946 | diagnostic model and miette rendering; error-code space |
+| `baash-complete` | 3928 | completion engine: providers, contexts, nucleo ranking, menu layout |
+| `baash-repl` | 3470 | line editor, key decoding, history navigation, prompt adapter, renderer, terminal abstraction |
+| `baash-utils` | 206 | embedded coreutils (uutils 0.8 subcrates): the `builtin-utils` fallback used when `PATH` finds nothing; on by default for Windows, opt-in on Linux |
+| `baash-highlight` | 386 | syntax highlighting (token → style), shared with the editor |
+| `baash-spec` | 3242 | the Oils-suite runner, comparator, ratchet |
+| `baash` | 1781 | the binary: argument parsing, startup files, REPL loop, history ownership swap |
+| `baash-tools` | 16 | dev helpers |
 
 The evaluator is the runtime, and for now the only one: the bytecode backend is
 deferred until the bash surface is smaller (`docs/direction.md` §2), with the
@@ -111,9 +111,9 @@ buy a few percent and cost a permanent agreement between two implementations.
 
 ## 4. The interactive shell today
 
-`bsh -i` (or a terminal on stdin) runs `bsh::run_repl`, which owns the loop and
-delegates everything else: line editing to `bsh-repl`, execution to the
-`Interp`, completion to `bsh-complete`.
+`baash -i` (or a terminal on stdin) runs `baash::run_repl`, which owns the loop and
+delegates everything else: line editing to `baash-repl`, execution to the
+`Interp`, completion to `baash-complete`.
 
 **Works** (verified under a real PTY, `script -qec`):
 
@@ -146,7 +146,7 @@ delegates everything else: line editing to `bsh-repl`, execution to the
 * **`PS2` continuation** — `for x in a b; do` ⏎ shows `> `, and the assembled
   command runs correctly after `done`;
 * entering commands, running programs, `$((…))`, `exit`;
-* syntax highlighting (raw mode, `bsh-highlight`, colour decided by fd 0);
+* syntax highlighting (raw mode, `baash-highlight`, colour decided by fd 0);
 * **completion on `Tab`**, fish-like as well as bash-shaped:
   * the first Tab inserts the candidates' longest common prefix when it
     extends the typed word; the second opens the menu (a menu also opens on the
@@ -167,7 +167,7 @@ delegates everything else: line editing to `bsh-repl`, execution to the
     expansion), `$` alone lists names; `$?`, `$#`, `$@`, `$*`, `$$`, `$!`,
     `$-` and `$0`–`$9` are offered even though they are parameters rather than
     variables;
-  * paths and directories, with insertion quoting from `bsh_lang::quote` that
+  * paths and directories, with insertion quoting from `baash_lang::quote` that
     round-trips a space, `$`, a quote, a newline and non-UTF-8 (a file
     `a b$c` inserts as `a\ b\$c`); a directory ends in `/` and adds no space;
   * **programmable completion** from `complete`: `-W` word lists, the `-A`
@@ -181,17 +181,17 @@ delegates everything else: line editing to `bsh-repl`, execution to the
     Right/End, dismissed with Esc for the current line (typing brings it
     back);
 * **history as a shell feature**: one ring shared by the editor and the
-  `history` built-in (`bsh-history`), backed by an embedded Turso database;
+  `history` built-in (`baash-history`), backed by an embedded Turso database;
   `history [n]`, `-c` and `-d`; `Up`/`Down` navigation and ghost text. Numbers
   are the row ids, seeded from the newest 1000 rows of every session. There is
   no history file: `HISTFILE`, `HISTSIZE`, `HISTFILESIZE`, `HISTCONTROL`,
   `HISTIGNORE`, `HISTTIMEFORMAT`, the `histappend` shopt, `history
   -a/-n/-r/-w/-p/-s` and `fc` are gone. The database lives in
-  `$XDG_DATA_HOME/bsh/history.db` (`%LOCALAPPDATA%\bsh\history.db` on
-  Windows), `BSH_HISTORY_DB` overrides it, and an empty value disables
+  `$XDG_DATA_HOME/baash/history.db` (`%LOCALAPPDATA%\baash\history.db` on
+  Windows), `BAASH_HISTORY_DB` overrides it, and an empty value disables
   persistence;
 * **history expansion**: `!` events are rewritten before parsing by the pure
-  `bsh_lang::histexpand` module and only in an interactive reader whose
+  `baash_lang::histexpand` module and only in an interactive reader whose
   `histexpand` *and* `history` options are on (`-H` is part of `$-` for every
   interactive shell; a `-c` string and a script never expand). `!!`, `!n`,
   `!-n`, `!string`, `!?string?`, `!#`, `!$`/`!*`/`!^`/`!%`, `!:n`, ranges,
@@ -209,13 +209,13 @@ delegates everything else: line editing to `bsh-repl`, execution to the
   share one process group, so `Ctrl-Z` stops the child and the shell together,
   as bash does with `set +m`. There is no job table, no `%` specifications and
   no terminal handover. `jobs`, `fg`, `bg` and `disown` remain known names but
-  report `BSH-E0302` (`CAPABILITY`) with status 1; `%1` operands to `wait`/`kill`
+  report `BAASH-E0302` (`CAPABILITY`) with status 1; `%1` operands to `wait`/`kill`
   do the same. `set -m`/`set -o monitor` is accepted and inert. The `Ctrl-C`
   path is unchanged: the child dies, the shell survives and `$?` is 130
-  (`crates/bsh/tests/interactive_signals.rs`);
+  (`crates/baash/tests/interactive_signals.rs`);
 * `$!`, `wait` (pids, and bare `wait` for all live children) and `kill` (pids
   and signals) for children *this* shell started;
-* `--rcfile FILE` / `--norc`; the default startup file is `~/.bshrc` when it
+* `--rcfile FILE` / `--norc`; the default startup file is `~/.baashrc` when it
   exists, otherwise `~/.bashrc` (see §9).
 
 **Missing, in order of how badly it hurts an interactive user:**
@@ -242,7 +242,7 @@ delegates everything else: line editing to `bsh-repl`, execution to the
   with an optional `~N` dirty count from a worker-thread `git status`) is
   appended only to user-defined prompts, so the stock prompt never runs a
   subprocess.
-* `\s` is `bsh`, so the conformance case that greps for `bash|osh` still
+* `\s` is `baash`, so the conformance case that greps for `bash|osh` still
   fails; `\v`/`\V` now report the crate version (`0.0` / `0.0.0`).
 * With `set -e`, a failing `PROMPT_COMMAND` exits bash and does not exit this
   shell; the status is ignored.
@@ -322,27 +322,27 @@ rediscover):
 **Known-untested:** terminal resize (there is a `TIOCGWINSZ` read; no `SIGWINCH`
 handling seen); whether the line editor is restored correctly when a child
 leaves the tty in raw/cbreak mode; and an interactive shell started in the
-background (`bsh -i &`), which now shares its foreground group with no terminal
+background (`baash -i &`), which now shares its foreground group with no terminal
 handover at all. `Ctrl-C` on a foreground command is covered by
 `interactive_signals.rs`; `Ctrl-Z` is deliberately unhandled (it stops the shell
 too) and is not tested.
 
-Harnesses: `crates/bsh-sys/tests/pty.rs` (real pty, termios, window size,
-`become_session_leader`), `crates/bsh/tests/interactive_signals.rs`
-(`Ctrl-C` end to end), `crates/bsh/tests/interactive_history.rs`
-(history persistence), `crates/bsh/tests/interactive_history_expansion.rs`
+Harnesses: `crates/baash-sys/tests/pty.rs` (real pty, termios, window size,
+`become_session_leader`), `crates/baash/tests/interactive_signals.rs`
+(`Ctrl-C` end to end), `crates/baash/tests/interactive_history.rs`
+(history persistence), `crates/baash/tests/interactive_history_expansion.rs`
 (`!!`, designators, quick substitution, `:p`, `histverify`, `set +H`, failed
-events, and the expanded ring contents at a real prompt), `crates/bsh/tests/interactive_prompt.rs` (the rendered
+events, and the expanded ring contents at a real prompt), `crates/baash/tests/interactive_prompt.rs` (the rendered
 prompt, `PROMPT_COMMAND`, prompt escapes, `PS1` from an rc file and from a
-command, `Ctrl-R` end to end), `crates/bsh/tests/interactive_complete.rs`
+command, `Ctrl-R` end to end), `crates/baash/tests/interactive_complete.rs`
 (variable, keyword, function, `complete -W`, directory, `-o default`, history
 and quoted-filename completion at a real prompt) and
-`crates/bsh-repl/tests/editor.rs` (scripted keystrokes against a fake terminal,
+`crates/baash-repl/tests/editor.rs` (scripted keystrokes against a fake terminal,
 including the search states).
 
 ## 5. Builtin inventory
 
-56 names registered in `bsh-runtime`; 22 have a registry body, and several
+56 names registered in `baash-runtime`; 22 have a registry body, and several
 more are the executor's. Eight are missing outright: `times`, `ulimit`,
 `umask`, `dirs`, `enable`, `let`, `popd`, `pushd`. Four more (`[`, `printf`,
 `pwd`, `test`) are intentionally exec-able.
@@ -356,7 +356,7 @@ more are the executor's. Eight are missing outright: `times`, `ulimit`,
   landed here.
 
 `jobs`, `fg`, `bg` and `disown` are still registered and still VM-backed, but
-their only behaviour is the `BSH-E0302` capability rejection. They are counted
+their only behaviour is the `BAASH-E0302` capability rejection. They are counted
 as "implemented" above because the name resolves and the diagnostic is
 deliberate, not because job control exists.
 
@@ -377,7 +377,7 @@ status 2 of malformed subscripts. Known diagnostic gap: sparse-array messages
 need the Oils caret format.
 
 **The suite is blind to interactive behaviour.** Job control is covered only by
-`spec/oils/stateful/job_control.py`, a Python pty harness that `bsh-spec` does
+`spec/oils/stateful/job_control.py`, a Python pty harness that `baash-spec` does
 not run, and prompt/editing behaviour is not covered at all. So the conformance
 numbers will not move when interactive work lands: the evidence for that work
 has to be PTY tests, and their absence is not a pass.
@@ -387,7 +387,7 @@ has to be PTY tests, and their absence is not a pass.
 Do not re-litigate these without a reason; several were expensive.
 
 * **Bytes, never `String`**, for anything the shell can hold or print.
-* **`bsh-sys` is the only crate with `unsafe`**; everything else is
+* **`baash-sys` is the only crate with `unsafe`**; everything else is
   `#![forbid(unsafe_code)]`. There is no fork gate: the shell does not fork.
   Inside it, every block
   carries a `// SAFETY:` comment and `clippy::undocumented_unsafe_blocks` is
@@ -403,14 +403,14 @@ Do not re-litigate these without a reason; several were expensive.
   bounded lookahead; runtime ties are settled by bash behaviour, and by
   measuring bash 5.3.20 rather than reasoning about it. That rule found
   `pipefail` and the `[[ =~ ]]` right-hand rule.
-* **Regex through libc `regcomp`/`regexec`** (`bsh-sys::regex`), not the
+* **Regex through libc `regcomp`/`regexec`** (`baash-sys::regex`), not the
   `regex` crate: POSIX is leftmost-**longest**. Measured:
   `[[ abcd =~ (ab|abcd) ]]` must yield `abcd`.
 * **`[[ =~ ]]` RHS**: expand the word, then re-escape only the metacharacters
   that were *quoted*. That single rule explains every observed case.
 * **Locale is opt-in from the binary** (`shell.detect_locale()`), never from
   `Interp::new`, so unit tests stay deterministic; the spec harness forces
-  `LC_ALL=C`. `utf8: false` *is* the C locale in `bsh-pattern`.
+  `LC_ALL=C`. `utf8: false` *is* the C locale in `baash-pattern`.
 * **UTF-8 is a pattern/completion flag, not a string type.**
 * **Special-builtin consequences follow POSIX §2.8.1** — fatal
   non-interactively. Deliberate exceptions: syntax errors inside `eval`/`source`
@@ -443,7 +443,7 @@ Where the waves stand:
 
 * **W1 (delete job control) — this change.** No job table, no `%` specs, no
   process groups/terminal handover, no `WUNTRACED`; the job built-ins report
-  `BSH-E0302`; `set -m` is inert; the baseline is re-recorded at 1982/1927.
+  `BAASH-E0302`; `set -m` is inert; the baseline is re-recorded at 1982/1927.
 * **W3 (compio event loop) — in progress.** Done: the REPL runs inside one
   `compio` runtime (`Runtime::enter`, so individual operations can `block_on`
   without nesting the executor); raw stdin is read after a `PollFd` readiness
@@ -461,7 +461,7 @@ Where the waves stand:
   `Arc<VarValue>`) was considered and deferred by decision on 2026-10-30;
   `direction.md` §9 records the trigger to revisit.
 * **W2 (no-fork subshells)** is in progress. `( … )` and `$( … )` now run in
-  a scope (`crates/bsh-vm/src/tree/scope.rs`) instead of a child; conformance is
+  a scope (`crates/baash-vm/src/tree/scope.rs`) instead of a child; conformance is
   unchanged to the case. What is left, in order:
   1. **Pipelines — landed, with three follow-ups.** Externals keep
      `posix_spawn` and still run concurrently;
@@ -477,7 +477,7 @@ Where the waves stand:
      with one known loss: nested backticks. The `ERR` fix was a suppression
      counter: bash fires `ERR` once per *pipeline*, so a stage must not fire it
      at all — `{ false; } | { false; }` used to print twice.
-  2. **Rejections — landed.** Shell-code `&` reports `BSH-E0302`; an external
+  2. **Rejections — landed.** Shell-code `&` reports `BAASH-E0302`; an external
      command still backgrounds, so `$!`, `wait $!` and `kill` work. `( exec cmd )`
      needed no rejection: the exit request is caught by the scope, so it already
      ends the subshell and not the shell. Cost: 16 Oils background cases
@@ -490,21 +490,21 @@ Where the waves stand:
      capture becomes spawn-and-read. Then re-measure and re-record the baseline.
   Job control is no longer in its way.
 
-* **W4 (Windows) — in progress.** `bsh-sys` has a CRT-backed backend
+* **W4 (Windows) — in progress.** `baash-sys` has a CRT-backed backend
   (`Fd(c_int)`, `CreateProcess` through `std::process::Command`,
   `TerminateProcess` for signals, explicit refusals for what Windows lacks),
-  `bsh-lang`'s prompt helpers are portable, and deleting the history file took
-  the last unix-only code out of `bsh-runtime`. `bsh-sys`, `bsh-lang`,
-  `bsh-history` (turso 0.8.3 included, with the `windres` wrapper in
-  `portability.md` §10), `bsh-runtime`, `bsh-vm`, `bsh-repl` and `bsh` itself
-  cross-compile to `x86_64-pc-windows-gnu`. `bsh.exe -c 'echo hi'` runs under
+  `baash-lang`'s prompt helpers are portable, and deleting the history file took
+  the last unix-only code out of `baash-runtime`. `baash-sys`, `baash-lang`,
+  `baash-history` (turso 0.8.3 included, with the `windres` wrapper in
+  `portability.md` §10), `baash-runtime`, `baash-vm`, `baash-repl` and `baash` itself
+  cross-compile to `x86_64-pc-windows-gnu`. `baash.exe -c 'echo hi'` runs under
   Wine, and so does a script with `$( … )`, `for`, `if`, a function, `case`,
   arithmetic, brace expansion and `while`. What is left: the standard utilities
   are exec-able by design and a Windows `PATH` has none (`printf`, `[`, `cat`
   report "not implemented" there — the embedded-uutils wave), ConPTY for the
   interactive editor, and PATHEXT-based command resolution.
 
-  The utility fallback has landed: `crates/bsh-utils` embeds `printf`,
+  The utility fallback has landed: `crates/baash-utils` embeds `printf`,
   `test`/`[`, `cat`, `mkdir`, `rm`, `ls`, `wc`, `head`, `tail`, `tr`, `seq` and
   `sleep`, the `builtin-utils` feature is opt-in on Linux and forced on for
   Windows, and the executor consults it only after `PATH` resolution fails
@@ -518,17 +518,17 @@ Where the waves stand:
 
 ## 9. Open questions
 
-* **Startup file — decided.** `~/.bshrc` is sourced when it exists, otherwise
+* **Startup file — decided.** `~/.baashrc` is sourced when it exists, otherwise
   `~/.bashrc`; `--rcfile` and `--norc` still win. A bashrc full of
   `bind`/`complete -D`/`PROMPT_COMMAND` half-applies, so a user who wants a
-  bsh-specific file gets one without renaming the bash file.
+  baash-specific file gets one without renaming the bash file.
 * **History is a database, not a file — decided.** A line-oriented `HISTFILE`
   cannot record when a command ran, where, or with what status, and two shells
-  sharing one rewrite each other's content. `bsh-history` keeps
+  sharing one rewrite each other's content. `baash-history` keeps
   `commands(id, session, seq, text, cwd, started_at, duration_ms, status)` in
-  an embedded Turso database (`$XDG_DATA_HOME/bsh/history.db`,
-  `%LOCALAPPDATA%\bsh\history.db`), opens it only for the terminal REPL, and
-  treats an empty `BSH_HISTORY_DB` as "no persistence". WAL plus a busy timeout
+  an embedded Turso database (`$XDG_DATA_HOME/baash/history.db`,
+  `%LOCALAPPDATA%\baash\history.db`), opens it only for the terminal REPL, and
+  treats an empty `BAASH_HISTORY_DB` as "no persistence". WAL plus a busy timeout
   is what lets two shells share the file: the second connection gets
   `experimental_multiprocess_wal(true)`, and a write that lands while another
   shell is writing waits instead of failing. A database that cannot be opened
@@ -539,10 +539,10 @@ Where the waves stand:
 * **The prompt is rendered by the shell, not the editor — decided.** Only the
   shell has the variable table (`PS1` must come from there; the environment is
   a startup snapshot) and only the shell can run `$(…)` for `promptvars`. So
-  `bsh_repl::Prompt` holds *rendered* `ExpandedPrompt`s and the binary calls
+  `baash_repl::Prompt` holds *rendered* `ExpandedPrompt`s and the binary calls
   `Editor::set_prompt` before every line. The editor stayed free of `PS1`
   knowledge, which is why an rc-file prompt, a prompt changed at run time and
-  an exported prompt all take effect identically. `bsh-lang` keeps the single
+  an exported prompt all take effect identically. `baash-lang` keeps the single
   expander shared with `${x@P}`; the second pass now runs `$(…)`, `$((…))`
   and backticks for both callers (bash does this for `@P` too; measured)
   instead of copying them through.
@@ -558,7 +558,7 @@ Where the waves stand:
   the environment and the startup file can replace them. That is what bash
   does (`declare -p PS1` in `bash -i`), it makes `$PS1`/`${PS1@P}` agree, and
   it is what the `default PS1` conformance case measures. `unset PS1` is an
-  empty prompt, as in bash. `\s` stays `bsh`, so the case that greps for
+  empty prompt, as in bash. `\s` stays `baash`, so the case that greps for
   `bash|osh` still fails.
 * **`\!` and `\#` are two different counters.** `\!` is the history ring's
   next number for the prompt (the line is not recorded yet) and its last
@@ -624,7 +624,7 @@ Where the waves stand:
   literal). `fc`'s editor form is still deferred.
 * **`set -o vi`** exists in the option table but has no editor behind it.
 * **Bytecode VM.** Deferred, not scheduled (`docs/direction.md` §2). The type
-  sketch that used to sit in `bsh-compile` is deleted, and the two contradictions
+  sketch that used to sit in `baash-compile` is deleted, and the two contradictions
   `DESIGN.md` §5 carried are resolved in it: chunks are `Vec<Op>`, and handlers
   are a static table rather than push/pop opcodes.
 * **GitLab remote** does not exist; CI is written but has never run.
@@ -634,7 +634,7 @@ Where the waves stand:
 * Merge protocol: rebase the wave branch in its worktree, `git merge --ff-only`,
   run the whole gate, re-record the baseline, remove the worktree and branch.
 * Agents get a crate-level brief, no new dependencies (workspace-level leaves
-  are allowed, e.g. `bsh-pattern` from `bsh-runtime`), no edits outside the
+  are allowed, e.g. `baash-pattern` from `baash-runtime`), no edits outside the
   crates they own, `#![forbid(unsafe_code)]`, and
   `Co-authored-by: DeepSeek-V4.1-Flash <noreply@deepseek.com>` in every commit.
 * `docs/contracts.md` is the landed-API record per crate; update it in the same

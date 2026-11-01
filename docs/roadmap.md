@@ -12,8 +12,8 @@ queue. Interactive usability now outranks script conformance; see
 Update the numbers here after each tranche by running:
 
 ```sh
-cargo build -p bsh
-cargo run -p bsh-spec -- --shell target/debug/bsh --filter <file>
+cargo build -p baash
+cargo run -p baash-spec -- --shell target/debug/baash --filter <file>
 ```
 
 ## Tranche 1 — the three biggest clusters (584 cases of the gap)
@@ -91,9 +91,9 @@ does not yet retry `ENOEXEC` as a script) plus `command -v`.
 ## Tranche 2 — expansion and pattern work
 
 At the start of this tranche the suite stood at 1013/2787 total. It is now
-**1797/2787 total, 1744 strict** (recorded in `crates/bsh-spec/baseline.txt`).
+**1797/2787 total, 1744 strict** (recorded in `crates/baash-spec/baseline.txt`).
 
-- [x] Shared pattern engine (`bsh-pattern`): Thompson NFA, byte and UTF-8
+- [x] Shared pattern engine (`baash-pattern`): Thompson NFA, byte and UTF-8
       modes, extglob, brackets, POSIX classes, no exponential blowup.
 - [x] `${x#pat}`, `${x##pat}`, `${x%pat}`, `${x%%pat}` — 0/29 → 26/29.
 - [x] `${x/a/b}`, `${x//a/b}`, `${x/#a/b}`, `${x/%a/b}` — 1/28 → 25/28.
@@ -109,7 +109,7 @@ At the start of this tranche the suite stood at 1013/2787 total. It is now
 - [x] UTF-8 character units end to end: `Vars::utf8()` (from
       `LC_ALL`/`LC_CTYPE`/`LANG`, detected only by the binary so tests stay
       deterministic) drives `${#x}`, `${x:o:l}` and the matcher's `?` through
-      one decoder (`bsh_pattern::char_len`). `LC_ALL=C` still counts bytes and
+      one decoder (`baash_pattern::char_len`). `LC_ALL=C` still counts bytes and
       still slices characters in half, like bash and dash.
 - [x] Brace expansion `{a,b}`, `{1..3}`, `{01..03}`, `{a..e..2}` - stage 0,
       before every other expansion; 21/72 -> 59/72 on the brace filter, and it
@@ -126,12 +126,12 @@ At the start of this tranche the suite stood at 1013/2787 total. It is now
       do it). The `!(…)` reading is now decided by `ParseOpts::extglob`, which
       the lexer finally receives: with the option on, `!(x)` at line start is a
       group; with it off, it is pipeline negation.
-- [x] `--locale NAME` in `bsh-spec`, so the suite can be run under any locale.
+- [x] `--locale NAME` in `baash-spec`, so the suite can be run under any locale.
       Measured: **C gives 1701, C.UTF-8 gives 1716** for us, but bash drops
       from **2574 to 2435** under C.UTF-8 — the suite's primary expectations
       are byte-calibrated, so C stays the baseline and UTF-8 is diagnostic.
 - [x] `[[ =~ ]]` with `BASH_REMATCH` - `regex.test.sh` 0/37 -> 25/37, via libc
-      `regcomp`/`regexec` in `bsh-sys` so POSIX leftmost-longest matches bash.
+      `regcomp`/`regexec` in `baash-sys` so POSIX leftmost-longest matches bash.
 - [~] `${x@P}` / prompt expansion - in flight (prompt 0/33 and most of
       `var-op-bash`).
 - [x] `$LINENO` (from node spans) and `$PIPESTATUS`.
@@ -151,7 +151,7 @@ its keep, `zsh` emulation.
 
 ## Tranche 4 — the measured queue (after indirect expansion)
 
-Measured with `bsh-spec --json` on the current tree: 2180/2787 total, 2127
+Measured with `baash-spec --json` on the current tree: 2180/2787 total, 2127
 strict, 607 failures, of which 464 are cases bash passes and 143 are cases
 bash fails too (not worth chasing). Ordered by cases per unit of work; every
 entry names the suite file that measures it.
@@ -203,7 +203,7 @@ entry names the suite file that measures it.
       ambiguity and all) — `builtin-printf` 42/61 -> **60/61** (the remaining
       case's primary expectation is an older bash's status) and the
       `test`/`[` clusters (`builtin-bracket`, `blog2`) now pass in full. Both
-      bodies live in `bsh-runtime`, where `Vars`, `Opts` and the array
+      bodies live in `baash-runtime`, where `Vars`, `Opts` and the array
       subscripts already are.
 - [ ] `set -x` / `PS4` / `set -v` — `xtrace` (16).
 - [ ] `FUNCNAME` / `BASH_SOURCE` / `BASH_LINENO` — `introspect` (12), and the

@@ -1,0 +1,506 @@
+//! POSIX extended regular expressions, through the platform's own engine.
+//!
+//! `[[ x =~ re ]]` has to agree with bash, and bash hands the pattern to
+//! `regcomp`/`regexec` with `REG_EXTENDED` (DESIGN.md §4.8). A Rust regex
+//! crate is leftmost-first rather than POSIX, so it disagrees with bash on
+//! real patterns: leftmost-longest alternation, POSIX bracket classes,
+//! backreferences and interval expressions. The conformance suite is the
+//! specification, so this module binds the same engine bash uses instead of
+//! imitating it.
+//!
+//! # What is compiled
+//!
+//! [`Regex::new`] compiles with `REG_EXTENDED` and nothing else;
+//! [`Regex::new_icase`] adds `REG_ICASE` for `shopt -s nocasematch`. In
+//! particular **`REG_NEWLINE` is never set**, because bash does not set it:
+//! `^`/`$` match only at the ends of the whole subject, `.` matches a newline,
+//! and a negated bracket expression matches a newline. A caller that wants
+//! line-oriented matching must split the subject first.
+//!
+//! # Bytes, not characters
+//!
+//! Patterns and subjects are `&[u8]`. Capture offsets are byte offsets into
+//! the subject even when the text is UTF-8, because the shell is
+//! byte-oriented and `BASH_REMATCH` slices bytes. Under a multibyte locale `.`
+//! and bracket expressions match whole characters, but the offsets stay byte
+//! offsets.
+//!
+//! # Locale
+//!
+//! `regcomp`/`regexec` use the process locale: POSIX classes such as
+//! `[[:alpha:]]`, collating symbols and multibyte decoding all come from
+//! `LC_CTYPE`/`LC_COLLATE`. A Rust process starts in the `C` locale even when
+//! the environment says otherwise, so the shell must call `setlocale(3)`
+//! before compiling a pattern if it wants bash's behaviour on non-ASCII text.
+//! This module never changes process state.
+//!
+//! # Limits
+//!
+//! * The engine takes C strings, so an embedded NUL cannot be expressed.
+//!   [`Regex::new`] rejects a pattern containing NUL with
+//!   [`RegexError::NulInPattern`]; a search of text containing NUL gives up
+//!   ([`Regex::captures`] returns `None`, [`Regex::try_captures`] returns
+//!   [`RegexError::NulInText`]). Truncating either would silently match something
+//!   the caller did not ask for.
+//! * At most [`MAX_GROUPS`] capture slots are filled: the whole match plus 63
+//!   parenthesised subexpressions. bash keeps every group (a 70-group pattern
+//!   produced 71 `BASH_REMATCH` elements), so patterns above the limit are
+//!   truncated here; [`Regex::group_count`] still reports the true count
+//!   scanned from the pattern source.
+//!
+//! # Engine quirks
+//!
+//! Delegating exists to inherit bash's quirks rather than invent our own.
+//! Measured on glibc (Linux x86-64, `C` locale):
+//!
+//! * `[[:alpha:]]` is ASCII-only in the `C` locale and decodes multibyte
+//!   characters in a UTF-8 locale; the answer depends on `setlocale`.
+//! * `\b` **is** a word boundary: glibc implements it as a GNU extension to
+//!   ERE. This is easy to get wrong in the other direction — POSIX ERE does
+//!   not define `\b`, but glibc does not treat it as a literal `b`, and bash
+//!   inherits the extension. Another libc (BSD/macOS) may differ.
+//! * Backreferences such as `(a)\1` match in ERE mode, also a GNU extension;
+//!   POSIX leaves backreferences undefined for ERE.
+//! * Redundant quantifiers (`a**`) compile, and a stray `)` is a literal.
+//!
+//! # `unsafe`
+//!
+//! This is the one module of `baash-sys` that owns an opaque C allocation. The
+//! invariant that keeps it sound is stated on [`Regex`]: a `Regex` exists only
+//! after a successful `regcomp`, and `Drop` calls `regfree` exactly once.
+
+use std::fmt;
+use std::mem::MaybeUninit;
+
+use crate::bytes::cstring;
+
+/// The capture ranges of one match, in bytes.
+///
+/// Index 0 is the whole match; index `n` is the `n`-th parenthesised
+/// subexpression, numbered by opening parenthesis. `None` means the group did
+/// not participate in this match, while a slot that is absent from the vector
+/// altogether is a group that does not exist (or one dropped by
+/// [`MAX_GROUPS`]).
+pub type CaptureRanges = Vec<Option<(usize, usize)>>;
+
+/// The largest number of capture slots a match reports.
+///
+/// Slot 0 is the whole match, so this is the whole match plus 63 parenthesised
+/// subexpressions. bash has no such small limit (it reported 71 slots for 70
+/// groups); the fixed bound keeps the wrapper's per-match allocation
+/// predictable. A pattern with more groups still compiles and matches — only
+/// the extra captures are unavailable — so a shell must not treat the limit as
+/// a compile error.
+pub const MAX_GROUPS: usize = 64;
+
+/// A compiled POSIX extended regular expression.
+///
+/// # Invariant
+///
+/// `compiled` is an initialised `regex_t` that `regcomp` accepted and that
+/// `regfree` has not yet been called on. [`Regex::new`] is the only
+/// constructor: it either returns a `Regex` carrying that invariant or an
+/// error, in which case nothing is owned and `regfree` is never called.
+/// `Regex` is deliberately not `Clone`/`Copy`, so `Drop` — the only place
+/// that frees — runs exactly once per successful compilation.
+///
+/// The compiled form holds raw pointers, so `Regex` is neither `Send` nor
+/// `Sync`, which matches its use: one shell thread, one pattern, matched
+/// repeatedly.
+pub struct Regex {
+    /// The live compiled form. See the type-level invariant.
+    compiled: libc::regex_t,
+    /// Parenthesised subexpressions scanned from the pattern source.
+    groups: usize,
+}
+
+impl Regex {
+    /// Compile `pattern` as a case-sensitive POSIX extended regular
+    /// expression.
+    ///
+    /// This is `regcomp` with `REG_EXTENDED` only; see the module docs for why
+    /// `REG_NEWLINE` is not set. A pattern containing an embedded NUL cannot be
+    /// passed to the C engine and is rejected with [`RegexError::NulInPattern`]
+    /// rather than truncated.
+    ///
+    /// A pattern with more than `MAX_GROUPS - 1` parenthesised subexpressions
+    /// still compiles; [`Regex::captures`] reports the first [`MAX_GROUPS`]
+    /// slots and the rest are dropped (see [`Regex::group_count`]).
+    pub fn new(pattern: &[u8]) -> Result<Self, RegexError> {
+        Self::compile(pattern, libc::REG_EXTENDED)
+    }
+
+    /// Compile `pattern` as a case-insensitive POSIX extended regular
+    /// expression (`REG_EXTENDED | REG_ICASE`).
+    ///
+    /// This is what `[[ x =~ re ]]` needs when `shopt -s nocasematch` is set.
+    /// Folding is the engine's and therefore locale-dependent; a caller must
+    /// not try to get the same effect by lowercasing the pattern and the
+    /// subject, because that changes bracket expressions (glibc, like bash,
+    /// also folds `[[:upper:]]` and `[[:lower:]]` under `REG_ICASE`).
+    pub fn new_icase(pattern: &[u8]) -> Result<Self, RegexError> {
+        Self::compile(pattern, libc::REG_EXTENDED | libc::REG_ICASE)
+    }
+
+    /// Compile `pattern` with the given `regcomp` flags.
+    fn compile(pattern: &[u8], flags: libc::c_int) -> Result<Self, RegexError> {
+        // Count before compiling: the scan is pure, so nothing can leak even
+        // if it were to panic (it cannot).
+        let groups = count_subexpressions(pattern);
+        let pattern = cstring(pattern).map_err(|_| RegexError::NulInPattern)?;
+
+        let mut compiled = MaybeUninit::<libc::regex_t>::uninit();
+        // SAFETY: `pattern` is NUL-terminated and lives for the call. On
+        // success `regcomp` initialises the storage behind `compiled`; on
+        // failure the storage stays uninitialised and is never turned into a
+        // `Regex`, so `regfree` cannot observe it.
+        let code = unsafe { libc::regcomp(compiled.as_mut_ptr(), pattern.as_ptr(), flags) };
+        if code != 0 {
+            // SAFETY: this is the canonical C usage after a failed `regcomp`:
+            // `regerror` is given the same `preg` and the `REG_*` code, and
+            // for compile failures it reads the code, never the undefined
+            // compiled form.
+            return Err(RegexError::from_posix(code, compiled.as_ptr()));
+        }
+        // SAFETY: `regcomp` returned 0, so it initialised the value. Moving it
+        // out of `MaybeUninit` transfers ownership to the `Regex`, whose
+        // invariant it now satisfies.
+        let compiled = unsafe { compiled.assume_init() };
+        Ok(Self { compiled, groups })
+    }
+
+    /// The number of parenthesised subexpressions in the pattern.
+    ///
+    /// This is the count bash exposes as `re_nsub`. [`Regex::captures`]
+    /// returns `min(group_count() + 1, MAX_GROUPS)` entries: the whole match
+    /// plus one slot per group. POSIX provides no way to read `re_nsub` back
+    /// out of a `regex_t`, so the count is scanned from the pattern source
+    /// (an unescaped `(` outside a bracket expression); the pattern must have
+    /// compiled for the scan to be used.
+    pub fn group_count(&self) -> usize {
+        self.groups
+    }
+
+    /// Match anywhere in `text`, returning the capture ranges in bytes.
+    ///
+    /// `regexec` searches, so this is not anchored: `"b"` matches `"abc"` at
+    /// `(1, 2)`. Index 0 is the whole match. A group that did not participate
+    /// in the match is `None`; unused slots are not reported at all, so the
+    /// vector has `min(group_count() + 1, MAX_GROUPS)` entries.
+    ///
+    /// Returns `None` when there is no match, when `text` contains an embedded
+    /// NUL (the C engine cannot represent the subject; see
+    /// [`Regex::try_captures`] for the error), or when `regexec` reports a
+    /// `REG_*` failure of its own. Use [`Regex::try_captures`] to distinguish
+    /// "did not match" from "could not search".
+    pub fn captures(&self, text: &[u8]) -> Option<CaptureRanges> {
+        self.try_captures(text).ok().flatten()
+    }
+
+    /// [`Regex::captures`], but a failure to run the search is an error.
+    ///
+    /// `Ok(None)` means the pattern did not match, which is not an error in
+    /// POSIX. `Err(RegexError::NulInText)` means the subject contains an embedded
+    /// NUL, and `Err(RegexError::Posix { .. })` is a `REG_*` failure from
+    /// `regexec` (for example `REG_ESPACE` when memory runs out).
+    pub fn try_captures(&self, text: &[u8]) -> Result<Option<CaptureRanges>, RegexError> {
+        let text = cstring(text).map_err(|_| RegexError::NulInText)?;
+        let mut matches = vec![
+            libc::regmatch_t {
+                rm_so: -1,
+                rm_eo: -1,
+            };
+            self.slots()
+        ];
+        // SAFETY: `text` is NUL-terminated for the call; `matches` has
+        // `self.slots()` initialised entries and `regexec` writes at most that
+        // many; neither pointer is retained after the call.
+        let code = unsafe {
+            libc::regexec(
+                &self.compiled,
+                text.as_ptr(),
+                matches.len(),
+                matches.as_mut_ptr(),
+                0,
+            )
+        };
+        if code == libc::REG_NOMATCH {
+            return Ok(None);
+        }
+        if code != 0 {
+            // SAFETY: `self.compiled` is live and initialised, and `code` is a
+            // `regexec` failure code, which `regerror` accepts.
+            return Err(RegexError::from_posix(code, &self.compiled));
+        }
+        Ok(Some(
+            matches
+                .into_iter()
+                .map(|matched| {
+                    // POSIX leaves unused entries at -1. A broken engine could
+                    // also report an inverted range; treat both as "did not
+                    // participate" rather than handing a caller an offset that
+                    // would panic when used to slice.
+                    if matched.rm_so < 0 || matched.rm_eo < matched.rm_so {
+                        None
+                    } else {
+                        Some((matched.rm_so as usize, matched.rm_eo as usize))
+                    }
+                })
+                .collect(),
+        ))
+    }
+
+    /// The number of `regmatch_t` slots to request from `regexec`.
+    fn slots(&self) -> usize {
+        self.groups.saturating_add(1).min(MAX_GROUPS)
+    }
+}
+
+impl Drop for Regex {
+    fn drop(&mut self) {
+        // SAFETY: the type-level invariant says `compiled` was initialised by
+        // a successful `regcomp` and has not been freed. `drop` runs at most
+        // once for a value, and `Regex` cannot be copied, so this `regfree`
+        // is the exactly-once release of that allocation. Values from a failed
+        // `regcomp` never became a `Regex` and are never passed here.
+        unsafe { libc::regfree(&mut self.compiled) };
+    }
+}
+
+impl fmt::Debug for Regex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Regex")
+            .field("group_count", &self.groups)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Why compiling a pattern or running a search failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegexError {
+    /// The pattern contains an embedded NUL byte.
+    ///
+    /// `regcomp` takes a C string, so the pattern cannot be expressed at all.
+    /// A shell must reject it rather than silently compiling a prefix.
+    NulInPattern,
+    /// The text to search contains an embedded NUL byte.
+    ///
+    /// `regexec` takes a C string, so searching would silently stop at the
+    /// NUL. [`Regex::captures`] gives up (`None`); [`Regex::try_captures`]
+    /// reports this error.
+    NulInText,
+    /// The platform engine returned a `REG_*` code.
+    ///
+    /// `message` is `regerror`'s text, which is what bash shows the user (for
+    /// example `Unmatched ( or \(`), so compiling a mistyped pattern produces
+    /// an explanation and not just a number.
+    Posix {
+        /// The `REG_*` code returned by `regcomp` or `regexec`.
+        code: libc::c_int,
+        /// The `regerror` message, lossily decoded as UTF-8.
+        message: String,
+    },
+}
+
+impl RegexError {
+    /// The raw `REG_*` code, or `None` for the embedded-NUL variants.
+    pub fn code(&self) -> Option<libc::c_int> {
+        match self {
+            Self::Posix { code, .. } => Some(*code),
+            Self::NulInPattern | Self::NulInText => None,
+        }
+    }
+
+    /// A human-readable message, never empty.
+    ///
+    /// For [`RegexError::Posix`] this is `regerror`'s text in the current locale;
+    /// error text is subject to translation, so classify on [`RegexError::code`]
+    /// rather than on this string.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::NulInPattern => "embedded NUL byte in a regular expression",
+            Self::NulInText => "embedded NUL byte in the text searched for a regular expression",
+            Self::Posix { message, .. } => message,
+        }
+    }
+
+    /// Ask `regerror` for the text belonging to `code`.
+    ///
+    /// `compiled` is the `regex_t` that produced `code`: for a successful
+    /// `regexec` it is `&Regex::compiled`, and for a failed `regcomp` it is
+    /// the storage that `regcomp` was given.
+    fn from_posix(code: libc::c_int, compiled: *const libc::regex_t) -> Self {
+        Self::Posix {
+            code,
+            message: regerror_message(code, compiled),
+        }
+    }
+}
+
+impl fmt::Display for RegexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl std::error::Error for RegexError {}
+
+/// Read `regerror`'s message for `code` into an owned `String`.
+///
+/// The two-call `regerror` protocol (ask for the size, then fill a buffer) is
+/// what POSIX specifies; the result includes the terminating NUL, so at least
+/// one byte is always written on success.
+fn regerror_message(code: libc::c_int, compiled: *const libc::regex_t) -> String {
+    // SAFETY: `regerror` reads `code` and, depending on the code, the compiled
+    // expression. A null buffer with size 0 is the documented way to ask how
+    // much space the message needs; nothing is written.
+    let needed = unsafe { libc::regerror(code, compiled, std::ptr::null_mut(), 0) };
+    let mut message = if needed == 0 {
+        String::new()
+    } else {
+        let mut buffer = vec![0u8; needed];
+        // SAFETY: `buffer` is writable for its full length and `regerror`
+        // writes at most `needed` bytes, including the terminating NUL.
+        let written =
+            unsafe { libc::regerror(code, compiled, buffer.as_mut_ptr().cast(), buffer.len()) };
+        let limit = written.min(buffer.len());
+        let end = buffer.iter().position(|&byte| byte == 0).unwrap_or(limit);
+        // Message text comes from the locale's message catalogue and is not
+        // required to be UTF-8; rendering it lossily keeps `Error: Display`.
+        String::from_utf8_lossy(&buffer[..end]).into_owned()
+    };
+    if message.is_empty() {
+        // The engine must not produce an empty explanation (a user typo is the
+        // common case), so fall back to something still actionable.
+        message = format!("regular expression error (REG_* code {code})");
+    }
+    message
+}
+
+/// Count the parenthesised subexpressions in an ERE pattern.
+///
+/// POSIX ERE has no non-capturing groups, so this is simply the number of
+/// unescaped `(` outside a bracket expression. Backslash escapes the next
+/// byte there, while inside a bracket expression it is an ordinary member
+/// (glibc agrees: `[a\]b]` is the class `{a, \}` followed by a literal `b]`,
+/// not an escaped `]`).
+///
+/// A malformed pattern can make this count "wrong", but such a pattern never
+/// compiles, so `Regex` never uses the count. The bracket scanner only needs
+/// to find the *end* of a bracket expression: `[. .]`, `[= =]` and `[: :]`
+/// items close with `.]]`, `=]]` and `:]]`, and a `]` in first position is a
+/// literal member.
+fn count_subexpressions(pattern: &[u8]) -> usize {
+    let mut groups = 0;
+    let mut index = 0;
+    while index < pattern.len() {
+        match pattern[index] {
+            // Skip the escaped byte (and, if the backslash is trailing, fall
+            // out of the loop).
+            b'\\' => index += 2,
+            b'[' => index = after_bracket_expression(pattern, index),
+            b'(' => {
+                groups += 1;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    groups
+}
+
+/// The index just past the bracket expression starting at `start`.
+///
+/// `start` is known to point at `[`. Returns `pattern.len()` when the
+/// expression is unterminated, which only happens for patterns `regcomp`
+/// rejects.
+fn after_bracket_expression(pattern: &[u8], start: usize) -> usize {
+    let mut index = start + 1;
+    if index < pattern.len() && pattern[index] == b'^' {
+        index += 1;
+    }
+    // A `]` immediately after `[` or `[^` is a member, not the terminator.
+    if index < pattern.len() && pattern[index] == b']' {
+        index += 1;
+    }
+    while index < pattern.len() {
+        match pattern[index] {
+            b']' => return index + 1,
+            b'[' if index + 1 < pattern.len() => {
+                let kind = pattern[index + 1];
+                if matches!(kind, b':' | b'.' | b'=') {
+                    // `[: :]`, `[. .]` and `[= =]` are single items: their
+                    // inner `]` does not terminate the bracket expression.
+                    let mut close = index + 2;
+                    while close + 1 < pattern.len()
+                        && !(pattern[close] == kind && pattern[close + 1] == b']')
+                    {
+                        close += 1;
+                    }
+                    if close + 1 < pattern.len() {
+                        index = close + 2;
+                        continue;
+                    }
+                    return pattern.len();
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    pattern.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_groups_outside_bracket_expressions() {
+        // The expected counts were cross-checked against glibc's public
+        // `re_nsub` field with a C probe; they follow from the POSIX ERE
+        // grammar, not from this implementation.
+        assert_eq!(count_subexpressions(b""), 0);
+        assert_eq!(count_subexpressions(b"(a)"), 1);
+        assert_eq!(count_subexpressions(b"(a)(b)?(c)"), 3);
+        assert_eq!(count_subexpressions(b"(a(b)c)"), 2);
+        assert_eq!(count_subexpressions(b"[(]"), 0);
+        assert_eq!(count_subexpressions(b"[)]"), 0);
+        assert_eq!(count_subexpressions(b"[]]"), 0);
+        assert_eq!(count_subexpressions(b"[^]]"), 0);
+        assert_eq!(count_subexpressions(b"[a(b]"), 0);
+        assert_eq!(count_subexpressions(b"[[]"), 0);
+        assert_eq!(count_subexpressions(b"[[:alpha:]]"), 0);
+        assert_eq!(count_subexpressions(b"[[:alpha:](]"), 0);
+        assert_eq!(count_subexpressions(b"[[.a.]]"), 0);
+        assert_eq!(count_subexpressions(b"[[.a.](]"), 0);
+        assert_eq!(count_subexpressions(b"[[=a=]]"), 0);
+        // A backslash is a literal member inside a bracket expression.
+        assert_eq!(count_subexpressions(b"[a\\]b]"), 0);
+        assert_eq!(count_subexpressions(b"\\[(a)"), 1);
+        assert_eq!(count_subexpressions(b"\\(a\\)"), 0);
+        assert_eq!(count_subexpressions(b"\\\\(a)"), 1);
+        assert_eq!(count_subexpressions(b"[[:alpha:]]+(x)"), 1);
+        assert_eq!(count_subexpressions(b"[[:alpha:]]+(x)(y)"), 2);
+    }
+
+    #[test]
+    fn a_failed_compile_still_has_a_message() {
+        // The `regerror` path is exercised without going through `Regex`, so
+        // it is tested even if the public wrapper changes shape.
+        let mut compiled = MaybeUninit::<libc::regex_t>::uninit();
+        let pattern = std::ffi::CString::new("(a").unwrap();
+        // SAFETY: the pattern is NUL-terminated and `regcomp` either
+        // initialises the storage or leaves it untouched.
+        let code =
+            unsafe { libc::regcomp(compiled.as_mut_ptr(), pattern.as_ptr(), libc::REG_EXTENDED) };
+        assert_ne!(code, 0, "`(a` must not compile");
+        // SAFETY: `compiled` is the storage passed to the failed `regcomp`,
+        // which is exactly what `regerror` accepts for a compile error.
+        let error = RegexError::from_posix(code, compiled.as_ptr());
+        assert_eq!(error.code(), Some(code));
+        assert!(!error.message().is_empty());
+        assert!(!error.to_string().is_empty());
+        assert!(!format!("{error:?}").is_empty());
+    }
+}

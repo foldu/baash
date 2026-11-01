@@ -206,6 +206,160 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "baash"
+version = "0.0.0"
+dependencies = [
+ "baash-complete",
+ "baash-diag",
+ "baash-highlight",
+ "baash-lang",
+ "baash-repl",
+ "baash-runtime",
+ "baash-syntax",
+ "baash-sys",
+ "baash-tools",
+ "baash-vm",
+ "compio",
+]
+
+[[package]]
+name = "baash-complete"
+version = "0.0.0"
+dependencies = [
+ "baash-diag",
+ "baash-lang",
+ "baash-syntax",
+ "nucleo-matcher",
+]
+
+[[package]]
+name = "baash-diag"
+version = "0.0.0"
+dependencies = [
+ "miette",
+ "unicode-width 0.2.2",
+]
+
+[[package]]
+name = "baash-highlight"
+version = "0.0.0"
+dependencies = [
+ "baash-syntax",
+ "unicode-width 0.2.2",
+]
+
+[[package]]
+name = "baash-history"
+version = "0.0.0"
+dependencies = [
+ "baash-sys",
+ "turso",
+]
+
+[[package]]
+name = "baash-lang"
+version = "0.0.0"
+dependencies = [
+ "baash-diag",
+ "baash-pattern",
+ "smallvec",
+]
+
+[[package]]
+name = "baash-pattern"
+version = "0.0.0"
+
+[[package]]
+name = "baash-repl"
+version = "0.0.0"
+dependencies = [
+ "baash-complete",
+ "baash-diag",
+ "baash-highlight",
+ "baash-lang",
+ "baash-runtime",
+ "baash-sys",
+ "compio",
+ "unicode-width 0.2.2",
+]
+
+[[package]]
+name = "baash-runtime"
+version = "0.0.0"
+dependencies = [
+ "baash-diag",
+ "baash-history",
+ "baash-lang",
+ "baash-pattern",
+ "baash-sys",
+]
+
+[[package]]
+name = "baash-spec"
+version = "0.0.0"
+dependencies = [
+ "baash-sys",
+]
+
+[[package]]
+name = "baash-syntax"
+version = "0.0.0"
+dependencies = [
+ "baash-diag",
+ "baash-lang",
+ "memchr",
+]
+
+[[package]]
+name = "baash-sys"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "rustix 1.1.6",
+]
+
+[[package]]
+name = "baash-tools"
+version = "0.0.0"
+dependencies = [
+ "baash-diag",
+ "baash-highlight",
+ "baash-syntax",
+]
+
+[[package]]
+name = "baash-utils"
+version = "0.0.0"
+dependencies = [
+ "baash-sys",
+ "uu_cat",
+ "uu_head",
+ "uu_ls",
+ "uu_mkdir",
+ "uu_rm",
+ "uu_seq",
+ "uu_sleep",
+ "uu_tail",
+ "uu_tr",
+ "uu_wc",
+ "uucore",
+]
+
+[[package]]
+name = "baash-vm"
+version = "0.0.0"
+dependencies = [
+ "baash-diag",
+ "baash-history",
+ "baash-lang",
+ "baash-pattern",
+ "baash-runtime",
+ "baash-syntax",
+ "baash-sys",
+ "baash-utils",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -278,160 +432,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7436b21fd6195415058eb41c9090e156b556bc7e0377bb57c5c026a421521525"
 dependencies = [
  "rustc_version",
-]
-
-[[package]]
-name = "bsh"
-version = "0.0.0"
-dependencies = [
- "bsh-complete",
- "bsh-diag",
- "bsh-highlight",
- "bsh-lang",
- "bsh-repl",
- "bsh-runtime",
- "bsh-syntax",
- "bsh-sys",
- "bsh-tools",
- "bsh-vm",
- "compio",
-]
-
-[[package]]
-name = "bsh-complete"
-version = "0.0.0"
-dependencies = [
- "bsh-diag",
- "bsh-lang",
- "bsh-syntax",
- "nucleo-matcher",
-]
-
-[[package]]
-name = "bsh-diag"
-version = "0.0.0"
-dependencies = [
- "miette",
- "unicode-width 0.2.2",
-]
-
-[[package]]
-name = "bsh-highlight"
-version = "0.0.0"
-dependencies = [
- "bsh-syntax",
- "unicode-width 0.2.2",
-]
-
-[[package]]
-name = "bsh-history"
-version = "0.0.0"
-dependencies = [
- "bsh-sys",
- "turso",
-]
-
-[[package]]
-name = "bsh-lang"
-version = "0.0.0"
-dependencies = [
- "bsh-diag",
- "bsh-pattern",
- "smallvec",
-]
-
-[[package]]
-name = "bsh-pattern"
-version = "0.0.0"
-
-[[package]]
-name = "bsh-repl"
-version = "0.0.0"
-dependencies = [
- "bsh-complete",
- "bsh-diag",
- "bsh-highlight",
- "bsh-lang",
- "bsh-runtime",
- "bsh-sys",
- "compio",
- "unicode-width 0.2.2",
-]
-
-[[package]]
-name = "bsh-runtime"
-version = "0.0.0"
-dependencies = [
- "bsh-diag",
- "bsh-history",
- "bsh-lang",
- "bsh-pattern",
- "bsh-sys",
-]
-
-[[package]]
-name = "bsh-spec"
-version = "0.0.0"
-dependencies = [
- "bsh-sys",
-]
-
-[[package]]
-name = "bsh-syntax"
-version = "0.0.0"
-dependencies = [
- "bsh-diag",
- "bsh-lang",
- "memchr",
-]
-
-[[package]]
-name = "bsh-sys"
-version = "0.0.0"
-dependencies = [
- "libc",
- "rustix 1.1.6",
-]
-
-[[package]]
-name = "bsh-tools"
-version = "0.0.0"
-dependencies = [
- "bsh-diag",
- "bsh-highlight",
- "bsh-syntax",
-]
-
-[[package]]
-name = "bsh-utils"
-version = "0.0.0"
-dependencies = [
- "bsh-sys",
- "uu_cat",
- "uu_head",
- "uu_ls",
- "uu_mkdir",
- "uu_rm",
- "uu_seq",
- "uu_sleep",
- "uu_tail",
- "uu_tr",
- "uu_wc",
- "uucore",
-]
-
-[[package]]
-name = "bsh-vm"
-version = "0.0.0"
-dependencies = [
- "bsh-diag",
- "bsh-history",
- "bsh-lang",
- "bsh-pattern",
- "bsh-runtime",
- "bsh-syntax",
- "bsh-sys",
- "bsh-utils",
 ]
 
 [[package]]

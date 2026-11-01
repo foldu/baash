@@ -1,0 +1,10 @@
+[package]
+name = "baash-spec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Conformance harness for the Oils spec-test suite"
+
+[dependencies]
+baash-sys = { workspace = true }

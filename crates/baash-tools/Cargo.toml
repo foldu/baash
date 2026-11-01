@@ -1,0 +1,12 @@
+[package]
+name = "baash-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "fmt, lint, explain"
+
+[dependencies]
+baash-syntax.workspace = true
+baash-highlight.workspace = true
+baash-diag.workspace = true

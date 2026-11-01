@@ -1,0 +1,11 @@
+[package]
+name = "baash-highlight"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Syntax highlighting over the real lexer"
+
+[dependencies]
+baash-syntax.workspace = true
+unicode-width.workspace = true

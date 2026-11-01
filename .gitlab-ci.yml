@@ -46,7 +46,7 @@ conformance:
   tags: [nix]
   <<: *nix_cache
   # A ratchet, not a dashboard: this job fails the pipeline when the pass count
-  # drops below crates/bsh-spec/baseline.txt. Re-record with `--record` only
+  # drops below crates/baash-spec/baseline.txt. Re-record with `--record` only
   # when a drop is intended, and commit the file with the change that caused it.
   #
   # The tolerance covers one known load-sensitive case (builtin-trap's
@@ -57,8 +57,8 @@ conformance:
   # the suite's helpers). The second is distinct on purpose: a runner that
   # cannot measure must not look like a shell that got worse.
   script:
-    - nix develop --command cargo build -p bsh
-    - nix develop --command cargo run -p bsh-spec -- --shell target/debug/bsh --ratchet --tolerance 5
+    - nix develop --command cargo build -p baash
+    - nix develop --command cargo run -p baash-spec -- --shell target/debug/baash --ratchet --tolerance 5
 
 package:
   stage: package
@@ -66,7 +66,7 @@ package:
   script:
     - nix build --print-build-logs .#default
     - mkdir -p dist
-    - cp -L result/bin/bsh dist/
+    - cp -L result/bin/baash dist/
   artifacts:
     paths:
       - dist/
@@ -91,7 +91,7 @@ package:windows:
   script:
     - nix shell nixpkgs#rustup nixpkgs#cargo-zigbuild nixpkgs#zig --command bash -c '
       rustup toolchain install stable --profile minimal --target x86_64-pc-windows-gnu &&
-      PATH="$RUSTUP_HOME/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PATH" cargo zigbuild --profile windows --target x86_64-pc-windows-gnu -p bsh'
+      PATH="$RUSTUP_HOME/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PATH" cargo zigbuild --profile windows --target x86_64-pc-windows-gnu -p baash'
   artifacts:
     paths:
-      - target/x86_64-pc-windows-gnu/windows/bsh.exe
+      - target/x86_64-pc-windows-gnu/windows/baash.exe

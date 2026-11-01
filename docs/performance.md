@@ -5,7 +5,7 @@ Measured 2026-10-28 at `e405c92` against `bash 5.3.20` (`/run/current-system/sw/
 column is what `cargo build` gives you and what `cargo run`/`cargo test` use;
 the release column is `cargo build --release`.
 
-| case | bash | bsh debug | bsh release |
+| case | bash | baash debug | baash release |
 |---|---:|---:|---:|
 | startup, per spawn (100 in a batch) | 0.52 ms | 0.59 ms (1.1×) | 0.40 ms (0.8×) |
 | arithmetic loop, 20k `((i++))` | 9.2 ms | 233 ms (24.7×) | 14.8 ms (1.6×) |
@@ -21,7 +21,7 @@ the release column is `cargo build --release`.
 
 ## What this says
 
-* **Startup was not the problem.** A one-shot `bsh -c ':'` costs 0.40 ms in
+* **Startup was not the problem.** A one-shot `baash -c ':'` costs 0.40 ms in
   release, slightly *faster* than bash: a small Rust binary with no rc file and
   no linker-loaded baggage. Interactive latency is dominated by the editor and
   the terminal, not by process start.
@@ -48,7 +48,7 @@ the release column is `cargo build --release`.
 ## Method
 
 `scripts/bench.py` — `python3 scripts/bench.py`, optionally
-`--shell target/debug/bsh --bash /bin/bash --reps 5 --filter expansion --json`.
+`--shell target/debug/baash --bash /bin/bash --reps 5 --filter expansion --json`.
 It prefers a release build over a debug one and honours `CARGO_TARGET_DIR`, and
 it says so on stderr when the binary it found looks like a debug build.
 

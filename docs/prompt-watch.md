@@ -16,7 +16,7 @@ same behaviour on one thread, with no async runtime and no new dependency.
 ## 1. Why the obvious design is wrong here
 
 This was written when a watcher thread had to be registered with
-`bsh_sys::fork_gate()`, or the next `$( … )`, `( … )` or `builtin | builtin`
+`baash_sys::fork_gate()`, or the next `$( … )`, `( … )` or `builtin | builtin`
 would panic (`fork() with 1 helper thread(s) live`). The 2026-10-30 pivot
 deleted the shell's last `fork`, so the gate and that whole problem are gone;
 the design below is kept because it is still the shape the watcher should take,
@@ -40,9 +40,9 @@ One thread, no gate interaction, and it is also the wrapper the editor already
 needs for another reason: a lone `Esc` is currently indistinguishable from the
 start of an `Alt-` sequence because the decoder blocks on `read`.
 
-`bsh_sys::poll_readable(fd, timeout_ms)` exists today (single fd). The first
+`baash_sys::poll_readable(fd, timeout_ms)` exists today (single fd). The first
 code change is a multi-fd `poll(fds: &mut [(RawFd, PollFlags)], timeout_ms)` —
-small, testable in `bsh-sys/tests/pty.rs`, and shared by both consumers.
+small, testable in `baash-sys/tests/pty.rs`, and shared by both consumers.
 
 ## 2. Watching: cheap events continuously, expensive check only when idle
 
@@ -116,7 +116,7 @@ Two implementations, in this order:
 1. **Built-in git segment** (fast path): parses `.git` directly for branch and
    ahead/behind; the dirty count comes from the debounced `git status`, cached
    with a timestamp. No shell code runs, so no hooks, no aliases, no surprises.
-2. **Shell hook** (optional): a function such as `BSH_PROMPT_WATCH` called on
+2. **Shell hook** (optional): a function such as `BAASH_PROMPT_WATCH` called on
    the same debounce, for people who want something else (hg, jj, nix, a
    directory of todos). This one runs shell code in the input loop, so it gets
    the same abandonment rules and must be documented as "keep it fast; it runs
@@ -129,9 +129,9 @@ non-printing ranges (`\[`/`\]`), so a coloured segment is emitted the same way.
 
 ## 4. Where the state lives
 
-* The watcher and the cache live in `bsh-repl` (it owns the event loop), behind
+* The watcher and the cache live in `baash-repl` (it owns the event loop), behind
   a trait so the editor can be tested with a fake watcher.
-* The git parsing lives in `bsh-repl` too, or in a small `bsh-git` module if it
+* The git parsing lives in `baash-repl` too, or in a small `baash-git` module if it
   grows; it needs no shell state beyond the working directory.
 * The shell does not learn about the watcher. `PROMPT_COMMAND`, `PS1` and the
   segment composer see the same rendered prompt as today.
@@ -147,8 +147,8 @@ Proposed defaults, all open to argument:
   which is most of them.
 * `PROMPT_WATCH_DEBOUNCE_MS` (150), `PROMPT_WATCH_MIN_INTERVAL_MS` (500) as
   variables, so a user can tune or disable the expensive refresh.
-* `BSH_PROMPT_WATCH=1` / `shopt -u prompt_watch` to disable entirely.
-* Per-directory escape hatch: a `.bsh-watch-off` file, or just `shopt -u` in an
+* `BAASH_PROMPT_WATCH=1` / `shopt -u prompt_watch` to disable entirely.
+* Per-directory escape hatch: a `.baash-watch-off` file, or just `shopt -u` in an
   rc function.
 
 ## 6. Failure modes, and what the prompt must do about them
@@ -170,11 +170,11 @@ slow is not.
 
 ## 7. Implementation order
 
-1. `bsh-sys`: multi-fd `poll` + tests on a pty; `inotify` wrapper (Linux-only,
+1. `baash-sys`: multi-fd `poll` + tests on a pty; `inotify` wrapper (Linux-only,
    `cfg`, no new crate — raw `libc::inotify_init1`/`inotify_add_watch`).
-2. `bsh-repl`: editor loop polls `[tty, watch_fd, timer]`; a `Watcher` trait
+2. `baash-repl`: editor loop polls `[tty, watch_fd, timer]`; a `Watcher` trait
    with a fake for tests; `Esc` decoding improves as a side effect.
-3. `bsh-repl`/`bsh-git`: parse `.git/HEAD`, `packed-refs`, refs; a
+3. `baash-repl`/`baash-git`: parse `.git/HEAD`, `packed-refs`, refs; a
    `git status --porcelain=v2 -z` runner with the environment above.
 4. Segment rendering + `shopt prompt_watch` + the debounce/abandon rules.
 5. Optional: recursive worktree watches; shell hook; Windows

@@ -1,0 +1,27 @@
+[package]
+name = "baash-vm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The execution engine: the tree-walking evaluator"
+
+[features]
+# Run the standard utilities that are not shell built-ins in-process when
+# `PATH` resolution finds nothing (`cat`, `ls`, `wc`, `tr`, …). On by default
+# on Windows in the binary crate; opt-in elsewhere.
+builtin-utils = ["dep:baash-utils"]
+
+[dependencies]
+baash-runtime.workspace = true
+baash-history.workspace = true
+# The embedded-utility fallback. Optional so a Linux build keeps its old
+# resolution behaviour (and its binary size) unless asked for it.
+baash-utils = { workspace = true, optional = true }
+baash-lang.workspace = true
+baash-diag.workspace = true
+baash-syntax.workspace = true
+baash-sys.workspace = true
+baash-pattern.workspace = true
+# Only for the `open(2)` flags and signal numbers that `baash-sys` names in its
+# public API (`FdAction::Open`, `SignalSet`). No platform code lives here.
