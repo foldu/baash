@@ -6,7 +6,7 @@ set shell := ["bash", "-uc"]
 default:
     @just --list
 
-# Everything a derivation can hold: build, fmt, clippy and the Windows exe.
+# Everything a derivation can hold: build, fmt, clippy, licenses, Windows.
 check:
     nix flake check --print-build-logs
 
@@ -18,6 +18,10 @@ test:
 conformance:
     cargo build -p baash
     cargo run -p baash-spec -- --shell target/debug/baash --list-failures --ratchet --tolerance 5
+
+# The license gate: every dependency must be in `deny.toml`'s allow-list.
+licenses:
+    cargo deny check --deny warnings licenses
 
 # The Linux package: `result/bin/baash`.
 build:

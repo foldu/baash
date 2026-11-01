@@ -43,6 +43,10 @@ The upstream license is [spec/oils/LICENSE.txt](spec/oils/LICENSE.txt).
 
 [oils]: https://oilshell.org
 
+The gate for all of this is `cargo deny check --deny warnings licenses`,
+configured in [deny.toml](deny.toml): a dependency whose license is not in the
+allow-list fails the build, which is what keeps the paragraph below true.
+
 ## Rust dependencies
 
 The crates.io dependencies keep their own licenses — overwhelmingly

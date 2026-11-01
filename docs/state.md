@@ -94,6 +94,7 @@ once so the checks share it.
 | `build` | the package, which also installs `baash-spec` |
 | `fmt` | `cargo fmt --check` |
 | `clippy` | `cargo clippy --deny warnings`, workspace, all targets and features |
+| `licenses` | `cargo deny check --deny warnings licenses` against `deny.toml` |
 | `windows` | `packages.<system>.windows`: the `x86_64-pc-windows-gnu` exe |
 
 Two things stay jobs, for reasons the sandbox dictates:

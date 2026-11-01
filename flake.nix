@@ -79,6 +79,23 @@
               }
             );
 
+            # `cargo deny check licenses`: the allow-list in `deny.toml` is what
+            # keeps `THIRD-PARTY.md` honest when a dependency appears.
+            licenses = craneLib.mkCargoDerivation {
+              pname = "baash-licenses";
+              version = "0.0.0";
+              inherit src;
+              cargoArtifacts = null;
+              doInstallCargoArtifacts = false;
+              cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
+              nativeBuildInputs = [ pkgs.cargo-deny ];
+              buildPhaseCargoCommand = "cargo deny check --deny warnings licenses";
+              installPhaseCommand = ''
+                mkdir -p $out
+                cp deny.toml $out/
+              '';
+            };
+
             windows = windowsCraneLib.mkCargoDerivation {
               pname = "baash-windows";
               version = "0.0.0";
@@ -137,6 +154,7 @@
               cargoArtifacts
               src
               commonArgs
+              licenses
               windows
               system
               ;
@@ -194,6 +212,7 @@
           cargoArtifacts,
           src,
           commonArgs,
+          licenses,
           windows,
           ...
         }:
@@ -210,7 +229,7 @@
             }
           );
 
-          inherit windows;
+          inherit licenses windows;
         }
       );
 
@@ -231,6 +250,7 @@
               # Task runner and the release driver (`justfile`, `.release.toml`).
               pkgs.just
               pkgs.cargo-release
+              pkgs.cargo-deny
               # `crates/baash/tests/interactive_zoxide.rs` drives the real
               # `zoxide init bash` script against a pty, so the integration is
               # tested against the file a user would source and not a copy of it.

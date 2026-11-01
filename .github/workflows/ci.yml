@@ -56,6 +56,17 @@ jobs:
       # `interactive_*` tests run here — unlike in a nix build sandbox.
       - run: cargo test --workspace --all-features
 
+  licenses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # `deny.toml` is the allow-list: a dependency whose license is not in it
+      # fails here, so `THIRD-PARTY.md` cannot quietly go stale.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+          arguments: --deny warnings
+
   conformance:
     runs-on: ubuntu-latest
     steps:

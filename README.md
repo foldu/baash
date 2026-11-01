@@ -174,6 +174,7 @@ nix build .#default
 just check         # nix flake check: build, fmt, clippy, the Windows exe
 just test          # the full suite, on a real pty
 just conformance   # the ratchet
+just licenses      # cargo deny check licenses
 just build         # result/bin/baash
 just windows       # result/bin/baash.exe
 ```
@@ -202,9 +203,9 @@ mirrored to GitHub, which runs a lighter copy of the same gates.
 Every GitLab job is tagged `nix`, because everything runs through the flake and
 the untagged runner has no nix daemon. The pipeline is:
 
-* `nix flake check` — the release build, `cargo fmt`, `cargo clippy` and the
-  Windows executable are all derivations (`flake.nix`), so the job is one
-  command. Nothing in it knows what a compiler needs on `PATH`.
+* `nix flake check` — the release build, `cargo fmt`, `cargo clippy`, the
+  license gate and the Windows executable are all derivations (`flake.nix`), so
+  the job is one command. Nothing in it knows what a compiler needs on `PATH`.
 * `cargo test --workspace --all-features`.
 * The conformance ratchet.
 
