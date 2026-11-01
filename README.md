@@ -130,10 +130,13 @@ permitted `unsafe`, and everything else carries `#![forbid(unsafe_code)]`.
 so the editor and the `history`/`fc` built-ins share one ring; it still builds
 its own in tests and never touches an interpreter.
 
-An interactive shell sources `~/.baashrc` when that file exists, otherwise
-`~/.bashrc` (`--rcfile` and `--norc` still win). History goes to
-`~/.baash_history`, deliberately not bash's `~/.bash_history`, so two shells do
-not rewrite each other's history.
+An interactive shell sources its startup file from the XDG configuration
+directory — `$XDG_CONFIG_HOME/baash/baashrc`, normally
+`~/.config/baash/baashrc` — when that file exists, otherwise `~/.bashrc`
+(`--rcfile` and `--norc` still win). History goes to
+`$XDG_DATA_HOME/baash/history.db` (`~/.local/share/baash/history.db`) rather
+than a `HISTFILE`, so two shells share one database instead of rewriting each
+other's history.
 
 ## Building
 

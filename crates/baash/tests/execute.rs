@@ -1159,6 +1159,59 @@ fn dash_o_sets_a_shopt_option_before_parsing() {
 }
 
 #[test]
+fn the_default_startup_file_is_the_xdg_config_one() {
+    let dir = TestDir::new("xdg-rc");
+    let home = dir.path().join("home");
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(&home).expect("create home");
+    std::fs::create_dir_all(config.join("baash")).expect("create config");
+
+    // A `~/.bashrc` (read by every shell on this machine) and the pre-XDG
+    // `~/.baashrc`, which this shell no longer looks at.
+    std::fs::write(home.join(".bashrc"), "echo bashrc\n").expect("write .bashrc");
+    std::fs::write(home.join(".baashrc"), "echo legacy\n").expect("write .baashrc");
+
+    let run_with = |config_dir: Option<&Path>| {
+        let mut command = baash();
+        command
+            .env("HOME", &home)
+            .env_remove("XDG_DATA_HOME")
+            .arg("-i")
+            .arg("-c")
+            .arg("echo cmd");
+        match config_dir {
+            Some(path) => command.env("XDG_CONFIG_HOME", path),
+            None => command.env_remove("XDG_CONFIG_HOME"),
+        };
+        stdout(&command.output().expect("spawn baash"))
+    };
+
+    // No baash file anywhere: `~/.bashrc` is the fallback, and the old
+    // `~/.baashrc` is not consulted at all.
+    assert_eq!(run_with(None), "bashrc\ncmd\n");
+
+    // `$HOME/.config/baash/baashrc` is the default location.
+    let home_rc = home.join(".config").join("baash").join("baashrc");
+    std::fs::create_dir_all(home_rc.parent().expect("parent")).expect("create home config");
+    std::fs::write(&home_rc, "echo home-config\n").expect("write home config");
+    assert_eq!(run_with(None), "home-config\ncmd\n");
+
+    // `$XDG_CONFIG_HOME` replaces `$HOME/.config`, and wins over `~/.bashrc`.
+    std::fs::write(config.join("baash").join("baashrc"), "echo xdg-config\n")
+        .expect("write xdg config");
+    assert_eq!(run_with(Some(&config)), "xdg-config\ncmd\n");
+
+    // `--norc` still skips whichever file the default would have read.
+    let output = baash()
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &config)
+        .args(["-i", "--norc", "-c", "echo cmd"])
+        .output()
+        .expect("spawn baash");
+    assert_eq!(stdout(&output), "cmd\n");
+}
+
+#[test]
 fn rcfile_is_read_only_for_an_interactive_shell() {
     let dir = std::env::temp_dir().join(format!("baash-rc-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");

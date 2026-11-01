@@ -72,7 +72,8 @@ struct ShellFlags {
     shopt_set: Vec<Vec<u8>>,
     /// `+O name`: shopt options to unset before the first parse.
     shopt_clear: Vec<Vec<u8>>,
-    /// `--rcfile FILE`: the startup file to read instead of `~/.bashrc`.
+    /// `--rcfile FILE`: the startup file to read instead of the default
+    /// (`$XDG_CONFIG_HOME/baash/baashrc`, or `~/.bashrc` without one).
     rcfile: Option<std::path::PathBuf>,
     /// `--rcdir DIR`: a directory of startup files, read in name order after
     /// `--rcfile` (an osh extension; bash has no equivalent).
@@ -419,15 +420,16 @@ fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
     }
 }
 
-/// A shell with the environment imported and `PWD` sane.
 /// Read the interactive startup file.
 ///
-/// `--norc` skips it and `--rcfile FILE` replaces it. The default is
-/// `~/.baashrc` when that file exists, otherwise `~/.bashrc`; a missing file is
-/// silently ignored, which is what makes `--rcfile /dev/null` the portable way
-/// to ask for no startup file. The `.baashrc` preference is deliberate: a bash
-/// rc full of `bind`/`complete -D` half-applies in this shell, so a user who
-/// writes a baash-specific file gets it used without renaming the bash one.
+/// `--norc` skips it and `--rcfile FILE` replaces it. The default is the
+/// XDG configuration file `$XDG_CONFIG_HOME/baash/baashrc`
+/// (`~/.config/baash/baashrc`) when it exists, otherwise `~/.bashrc`; a missing
+/// file is silently ignored, which is what makes `--rcfile /dev/null` the
+/// portable way to ask for no startup file. The baash file comes first and
+/// lives under the user's configuration directory rather than in `$HOME`: a
+/// bash rc full of `bind`/`complete -D` half-applies in this shell, so a user
+/// who wants a baash-specific file gets one without renaming the bash file.
 fn read_startup_file(shell: &mut Interp, flags: &ShellFlags) {
     if flags.norc {
         return;
@@ -471,22 +473,29 @@ fn read_rc_file(shell: &mut Interp, flags: &ShellFlags) {
     let path = match &flags.rcfile {
         Some(path) => path.clone(),
         None => {
-            let Some(home) = shell.state().vars.scalar(b"HOME") else {
+            let Some(path) = default_rc_file() else {
                 return;
             };
-            let home = baash_sys::os::path_from_bytes(home);
-            let ours = home.join(".baashrc");
-            if ours.is_file() {
-                ours
-            } else {
-                home.join(".bashrc")
-            }
+            path
         }
     };
     let Ok(bytes) = std::fs::read(&path) else {
         return;
     };
     shell.run_named(&path.to_string_lossy(), &bytes);
+}
+
+/// The startup file when `--rcfile` does not name one.
+///
+/// The configuration directory is the XDG one, so a baash-specific file is
+/// `~/.config/baash/baashrc` and not a dotfile in `$HOME`; `~/.bashrc` stays the
+/// fallback for a user with no baash file yet.
+fn default_rc_file() -> Option<std::path::PathBuf> {
+    let ours = baash_sys::dirs::config_home().map(|dir| dir.join("baash").join("baashrc"));
+    if let Some(path) = ours.filter(|path| path.is_file()) {
+        return Some(path);
+    }
+    baash_sys::dirs::home_dir().map(|home| home.join(".bashrc"))
 }
 
 fn shell(interactive: bool, flags: &ShellFlags) -> Interp {

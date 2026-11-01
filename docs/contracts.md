@@ -1112,9 +1112,12 @@ suite: `complete -p NAME` for an unknown NAME is 0 (bash 1), and `complete NAME`
 with no action is 2 (bash 0).
 
 `crates/baash` reads a startup file only when the shell is interactive:
-`--rcfile FILE` replaces `~/.bashrc`, `--norc` disables it, and a missing file
+`--rcfile FILE` replaces the default, `--norc` disables it, and a missing file
 is ignored — which is what makes `--rcfile /dev/null` the portable way to ask
-for no startup file at all.
+for no startup file at all. The default is `$XDG_CONFIG_HOME/baash/baashrc`
+(`~/.config/baash/baashrc`), falling back to `~/.bashrc`; the two bases come
+from `baash_sys::dirs`, which applies the XDG rule that a relative `XDG_*_HOME`
+is ignored rather than resolved against the working directory.
 
 ### Arithmetic: who expands the text
 

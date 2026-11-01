@@ -54,7 +54,7 @@ a stale brief has already cost two wrong scopes (arrays: 54 vs real; namerefs:
 | of the whole suite (3971 cases) | 56.3 % |
 | as a fraction of bash's score | 2344 / 2577 = 91.0 % |
 | share of the bash gap closed since 1013 | 1331 / 1564 = 85.1 % |
-| our test count | 1282 |
+| our test count | 1284 |
 
 Measured with `bash 5.3.20` as the comparison shell, harness forced to
 `LC_ALL=C` (bash scores *worse* under `C.UTF-8`: 2574 → 2435, so the C locale
@@ -83,24 +83,25 @@ count was diffed case by case against the previous commit; nothing else moved.
 
 ## 3. Layers
 
-64 582 lines of `src` across 15 crates.
+72 924 lines of `src` across 15 crates — the raw line count under each crate's
+`src` tree, tests beside it not included.
 
 | crate | lines | responsibility |
 |---|---|---|
-| `baash-sys` | 3898 | the only `unsafe`. fork/exec (`posix_spawn` by default), descriptors, pipes/pty, signals, libc regex, global `fork_gate()`; descriptors, termios and `wait` go through `rustix`, and the 77 remaining blocks are leaf syscalls or `posix_spawn` plumbing |
-| `baash-syntax` | 6607 | lexer + recursive-descent parser producing `Word`/`Command`; the superset grammar |
-| `baash-lang` | 11842 | shell *text* semantics: word expansion, patterns (`baash-pattern`), parameter operators, prompt escapes, arithmetic; no I/O |
-| `baash-runtime` | 10392 | shell *state*: variables/arrays/namerefs, options, builtin registry and state-only bodies, traps bookkeeping, completion registry, `declare -p` rendering; re-exports the history ring |
-| `baash-history` | 1244 | command history: the session ring (navigation, numbering) and the Turso database behind it, written from its own thread |
-| `baash-vm` | 12024 | the evaluator (tree-walking) and everything that needs both state and syscalls: command execution, redirection, child processes, traps |
+| `baash-sys` | 4843 | the only `unsafe`. fork/exec (`posix_spawn` by default), descriptors, pipes/pty, signals, libc regex, global `fork_gate()`; descriptors, termios and `wait` go through `rustix`, and the 77 remaining blocks are leaf syscalls or `posix_spawn` plumbing |
+| `baash-syntax` | 6678 | lexer + recursive-descent parser producing `Word`/`Command`; the superset grammar |
+| `baash-lang` | 12422 | shell *text* semantics: word expansion, patterns (`baash-pattern`), parameter operators, prompt escapes, arithmetic; no I/O |
+| `baash-runtime` | 13084 | shell *state*: variables/arrays/namerefs, options, builtin registry and state-only bodies, traps bookkeeping, completion registry, `declare -p` rendering; re-exports the history ring |
+| `baash-history` | 1308 | command history: the session ring (navigation, numbering) and the Turso database behind it, written from its own thread |
+| `baash-vm` | 15036 | the evaluator (tree-walking) and everything that needs both state and syscalls: command execution, redirection, child processes, traps |
 | `baash-pattern` | 4197 | Thompson-NFA glob: `O(n·m)`, never exponential; `extglob`/`nocasematch`/`utf8` flags |
 | `baash-diag` | 1946 | diagnostic model and miette rendering; error-code space |
-| `baash-complete` | 3928 | completion engine: providers, contexts, nucleo ranking, menu layout |
+| `baash-complete` | 4074 | completion engine: providers, contexts, nucleo ranking, menu layout |
 | `baash-repl` | 3470 | line editor, key decoding, history navigation, prompt adapter, renderer, terminal abstraction |
-| `baash-utils` | 206 | embedded coreutils (uutils 0.8 subcrates): the `builtin-utils` fallback used when `PATH` finds nothing; on by default for Windows, opt-in on Linux |
+| `baash-utils` | 244 | embedded coreutils (uutils 0.8 subcrates): the `builtin-utils` fallback used when `PATH` finds nothing; on by default for Windows, opt-in on Linux |
 | `baash-highlight` | 386 | syntax highlighting (token → style), shared with the editor |
-| `baash-spec` | 3242 | the Oils-suite runner, comparator, ratchet |
-| `baash` | 1781 | the binary: argument parsing, startup files, REPL loop, history ownership swap |
+| `baash-spec` | 3249 | the Oils-suite runner, comparator, ratchet |
+| `baash` | 1971 | the binary: argument parsing, startup files, REPL loop, history ownership swap |
 | `baash-tools` | 16 | dev helpers |
 
 The evaluator is the runtime, and for now the only one: the bytecode backend is
@@ -215,8 +216,9 @@ delegates everything else: line editing to `baash-repl`, execution to the
   (`crates/baash/tests/interactive_signals.rs`);
 * `$!`, `wait` (pids, and bare `wait` for all live children) and `kill` (pids
   and signals) for children *this* shell started;
-* `--rcfile FILE` / `--norc`; the default startup file is `~/.baashrc` when it
-  exists, otherwise `~/.bashrc` (see §9).
+* `--rcfile FILE` / `--norc`; the default startup file is
+  `$XDG_CONFIG_HOME/baash/baashrc` (`~/.config/baash/baashrc`) when it exists,
+  otherwise `~/.bashrc` (see §9).
 
 **Missing, in order of how badly it hurts an interactive user:**
 
@@ -518,16 +520,22 @@ Where the waves stand:
 
 ## 9. Open questions
 
-* **Startup file — decided.** `~/.baashrc` is sourced when it exists, otherwise
-  `~/.bashrc`; `--rcfile` and `--norc` still win. A bashrc full of
-  `bind`/`complete -D`/`PROMPT_COMMAND` half-applies, so a user who wants a
-  baash-specific file gets one without renaming the bash file.
+* **Startup file — decided.** The baash file is the XDG one,
+  `$XDG_CONFIG_HOME/baash/baashrc` (`~/.config/baash/baashrc`), sourced when it
+  exists and otherwise `~/.bashrc`; `--rcfile` and `--norc` still win. A bashrc
+  full of `bind`/`complete -D`/`PROMPT_COMMAND` half-applies, so a user who
+  wants a baash-specific file gets one without renaming the bash file, and it
+  lives where the platform keeps configuration rather than as a dotfile in
+  `$HOME`. `baash_sys::dirs` resolves both bases for Unix (XDG) and Windows
+  (roaming and local profiles), and follows the specification's rule that a
+  relative `XDG_*_HOME` is the same as an unset one.
 * **History is a database, not a file — decided.** A line-oriented `HISTFILE`
   cannot record when a command ran, where, or with what status, and two shells
   sharing one rewrite each other's content. `baash-history` keeps
   `commands(id, session, seq, text, cwd, started_at, duration_ms, status)` in
-  an embedded Turso database (`$XDG_DATA_HOME/baash/history.db`,
-  `%LOCALAPPDATA%\baash\history.db`), opens it only for the terminal REPL, and
+  an embedded Turso database (`$XDG_DATA_HOME/baash/history.db`, i.e.
+  `~/.local/share/baash/history.db`; `%LOCALAPPDATA%\baash\history.db` on
+  Windows), opens it only for the terminal REPL, and
   treats an empty `BAASH_HISTORY_DB` as "no persistence". WAL plus a busy timeout
   is what lets two shells share the file: the second connection gets
   `experimental_multiprocess_wal(true)`, and a write that lands while another

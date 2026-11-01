@@ -1,0 +1,84 @@
+//! Per-user directories: XDG on Unix, the platform's own folders on Windows.
+//!
+//! Only the two bases the shell itself needs are here. Both follow the [XDG
+//! Base Directory Specification][xdg] on Unix:
+//!
+//! * an environment variable names the base when it holds a non-empty
+//!   **absolute** path — a relative value is ignored, which is the rule the
+//!   specification states and the one a hand-rolled `$XDG_DATA_HOME` check
+//!   usually gets wrong, because it would put a database in the current
+//!   directory;
+//! * otherwise the specification's default under `$HOME` applies.
+//!
+//! A machine with no `$HOME` yields `None` rather than a path relative to
+//! wherever the shell happens to be running; callers read that as "nowhere to
+//! store this" (no config file, no history persistence).
+//!
+//! Windows has no XDG: configuration is the roaming profile and data is the
+//! local one, which is the same split XDG draws between `config` and `data`.
+//!
+//! [xdg]: https://specifications.freedesktop.org/basedir-spec/latest/
+
+use std::path::PathBuf;
+
+/// The current user's home directory.
+///
+/// `$HOME` on Unix, `%USERPROFILE%` on Windows. An empty value counts as
+/// unset: the shell must not turn it into a relative path.
+#[cfg(unix)]
+pub fn home_dir() -> Option<PathBuf> {
+    non_empty("HOME").map(PathBuf::from)
+}
+
+/// The current user's home directory.
+///
+/// `%USERPROFILE%` on Windows; `$HOME` is a Cygwin/MSYS convention that a
+/// native program should not read.
+#[cfg(windows)]
+pub fn home_dir() -> Option<PathBuf> {
+    non_empty("USERPROFILE").map(PathBuf::from)
+}
+
+/// `$XDG_CONFIG_HOME`, or `~/.config`.
+#[cfg(unix)]
+pub fn config_home() -> Option<PathBuf> {
+    xdg("XDG_CONFIG_HOME").or_else(|| home_dir().map(|home| home.join(".config")))
+}
+
+/// `%APPDATA%`, or `~/AppData/Roaming`.
+#[cfg(windows)]
+pub fn config_home() -> Option<PathBuf> {
+    non_empty("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join("AppData").join("Roaming")))
+}
+
+/// `$XDG_DATA_HOME`, or `~/.local/share`.
+#[cfg(unix)]
+pub fn data_home() -> Option<PathBuf> {
+    xdg("XDG_DATA_HOME").or_else(|| home_dir().map(|home| home.join(".local").join("share")))
+}
+
+/// `%LOCALAPPDATA%`, or `~/AppData/Local`.
+#[cfg(windows)]
+pub fn data_home() -> Option<PathBuf> {
+    non_empty("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join("AppData").join("Local")))
+}
+
+/// An XDG base directory variable, when the spec says it applies.
+///
+/// Unset, empty and relative values are all "not set": the spec reserves the
+/// defaults for exactly that case, and honouring a relative path would put the
+/// shell's files in its working directory.
+#[cfg(unix)]
+fn xdg(name: &str) -> Option<PathBuf> {
+    non_empty(name)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+fn non_empty(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(name).filter(|value| !value.is_empty())
+}

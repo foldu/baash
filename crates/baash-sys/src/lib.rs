@@ -35,6 +35,10 @@
 //!   `[[ x =~ re ]]` and `BASH_REMATCH`, using the same platform engine as
 //!   bash (`regcomp`/`regexec`). Byte offsets, POSIX ERE, no `REG_NEWLINE`;
 //!   see [`regex`] for the limits and the measured engine quirks.
+//! * [`dirs::config_home`], [`dirs::data_home`] — where this platform puts a
+//!   user's configuration and data (XDG on Unix, the roaming and local
+//!   profiles on Windows), so the shell's own files land where the platform's
+//!   tools are looked for.
 //!
 //! # Platform
 //!
@@ -56,6 +60,7 @@
 
 pub mod access;
 pub mod bytes;
+pub mod dirs;
 #[cfg(unix)]
 pub mod fd;
 pub mod outcome;

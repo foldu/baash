@@ -12,10 +12,11 @@
 //! * [`Store`] is the embedded [Turso] database behind it, written from its
 //!   own thread so a slow disk never reaches the keystroke path.
 //!
-//! The database lives in `$XDG_DATA_HOME/baash/history.db` on Unix and
-//! `%LOCALAPPDATA%\baash\history.db` on Windows; [`default_path`] applies that
-//! rule, and `BAASH_HISTORY_DB` overrides it (an empty value disables
-//! persistence).
+//! The database lives in `baash/history.db` under the platform's per-user data
+//! directory — `$XDG_DATA_HOME` or `~/.local/share` on Unix,
+//! `%LOCALAPPDATA%` on Windows, both resolved by [`baash_sys::dirs`].
+//! [`default_path`] applies that rule, and `BAASH_HISTORY_DB` overrides it (an
+//! empty value disables persistence).
 //!
 //! [Turso]: https://turso.tech
 
@@ -37,8 +38,9 @@ pub use store::Store;
 
 /// Where the history database lives, unless `BAASH_HISTORY_DB` says otherwise.
 ///
-/// `None` means there is nowhere to put it (no `HOME`, no `XDG_DATA_HOME`);
-/// the caller then runs without persistence rather than guessing.
+/// `None` means there is nowhere to put it (no home directory, so no data
+/// directory either); the caller then runs without persistence rather than
+/// guessing at a location.
 pub fn default_path() -> Option<PathBuf> {
     if let Some(value) = std::env::var_os("BAASH_HISTORY_DB") {
         return if value.is_empty() {
@@ -47,25 +49,8 @@ pub fn default_path() -> Option<PathBuf> {
             Some(PathBuf::from(value))
         };
     }
-    data_directory().map(|root| root.join("baash").join("history.db"))
-}
-
-/// The platform's per-user data directory.
-#[cfg(unix)]
-fn data_directory() -> Option<PathBuf> {
-    non_empty("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| non_empty("HOME").map(|home| PathBuf::from(home).join(".local").join("share")))
-}
-
-/// The platform's per-user data directory.
-#[cfg(windows)]
-fn data_directory() -> Option<PathBuf> {
-    non_empty("LOCALAPPDATA").map(PathBuf::from)
-}
-
-fn non_empty(name: &str) -> Option<std::ffi::OsString> {
-    std::env::var_os(name).filter(|value| !value.is_empty())
+    let root = baash_sys::dirs::data_home()?;
+    Some(root.join("baash").join("history.db"))
 }
 
 /// Drive a future that does its own I/O, on this thread.
