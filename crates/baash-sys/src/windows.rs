@@ -565,13 +565,11 @@ pub fn pid() -> u32 {
 
 /// The parent process's id, as far as Windows can tell.
 ///
-/// Windows does not expose a cheap `getppid`; this walks the tool help snapshot
-/// for the entry naming this process.
+/// Windows has no `getppid`; the tool help snapshot would answer, and that is
+/// one more declaration than the shell needs today. `None` therefore means
+/// "not known here", and `$PPID` is left unset rather than filled with a
+/// plausible-looking number.
 pub fn parent_pid() -> Option<u32> {
-    use std::os::windows::io::AsRawHandle;
-    let _ = AsRawHandle::as_raw_handle(&std::io::stdin());
-    // The snapshot API is one more declaration than the shell needs today, and
-    // `$PPID` inside a script is a diagnostic rather than a control flow input.
     None
 }
 

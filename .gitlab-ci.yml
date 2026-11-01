@@ -74,8 +74,12 @@ package:
 # The Windows build is the slow one on purpose: `profile.windows` is fat LTO
 # with one codegen unit, which nobody should pay in a local loop. It needs a
 # Rust toolchain that carries the target's std (nixpkgs' rustc does not), so
-# rustup installs it into the project cache, and cargo-zigbuild supplies the
+# rustup installs one into the project cache, and cargo-zigbuild supplies the
 # mingw linker through zig.
+#
+# The toolchain version is named rather than `stable`: this job's cache is keyed
+# on the branch, not on the compiler, so a moving `stable` would silently change
+# what ships. Bump it deliberately (and say what was verified) when it moves.
 package:windows:
   stage: package
   tags: [nix]
@@ -88,10 +92,24 @@ package:windows:
       - target/
       - .rustup/
       - .cargo/
+  # The runner image is Alpine, so nothing the build needs may be assumed from
+  # it. Two things come from the shell list instead of the image: `bash`, and a
+  # `windres` for `turso_sdk_kit`'s build script, which hardcodes that name for
+  # gnu targets. `ci/windres` is that shim; LLVM's resource compiler it execs
+  # comes from `llvmPackages.bintools`.
   script:
-    - nix shell nixpkgs#rustup nixpkgs#cargo-zigbuild nixpkgs#zig --command bash -c '
-      rustup toolchain install stable --profile minimal --target x86_64-pc-windows-gnu &&
-      PATH="$RUSTUP_HOME/toolchains/stable-x86_64-unknown-linux-gnu/bin:$PATH" cargo zigbuild --profile windows --target x86_64-pc-windows-gnu -p baash'
+    - |
+      nix shell nixpkgs#bash nixpkgs#rustup nixpkgs#cargo-zigbuild nixpkgs#zig nixpkgs#llvmPackages.bintools \
+        --command bash -c '
+          set -e
+          toolchain=1.99.1
+          rustup toolchain install "$toolchain" --profile minimal --target x86_64-pc-windows-gnu
+          export PATH="$RUSTUP_HOME/toolchains/$toolchain-x86_64-unknown-linux-gnu/bin:$PATH"
+          shims=$(mktemp -d)
+          cp ci/windres "$shims/windres" && chmod 755 "$shims/windres"
+          export PATH="$shims:$PATH"
+          cargo zigbuild --profile windows --target x86_64-pc-windows-gnu -p baash
+        '
   artifacts:
     paths:
       - target/x86_64-pc-windows-gnu/windows/baash.exe

@@ -1,0 +1,9 @@
+#!/bin/sh
+# turso_sdk_kit's build script links a Windows version resource and, for gnu
+# targets, hardcodes `Command::new("windres")`. LLVM ships a compatible
+# resource compiler as `llvm-windres`, and CI puts it on PATH under this name.
+#
+# A script rather than a symlink: nix-wrapped binutils resolve their own
+# directory from `argv[0]`, so a link to one of those breaks it (see
+# docs/portability.md §10).
+exec llvm-windres "$@"

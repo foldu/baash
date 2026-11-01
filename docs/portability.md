@@ -392,19 +392,19 @@ unix-only code.
 
 One Windows build detail: `turso_sdk_kit`'s build script links a version
 resource by invoking plain `windres`, which `cargo-zigbuild` does not provide.
-Put a wrapper *script* (not a symlink — nix-wrapped binutils resolve their own
-directory from `argv[0]`, so a symlink breaks them) on `PATH`:
+The shim is checked in as `ci/windres` — `exec llvm-windres "$@"` — and CI puts
+it on `PATH` under the plain name, with `llvm-windres` coming from
+`nixpkgs#llvmPackages.bintools`.
 
-```sh
-MINGW_BIN=$(dirname "$(nix shell nixpkgs#pkgsCross.mingwW64.stdenv.cc \
-    --command sh -c 'command -v x86_64-w64-mingw32-windres')")
-printf '#!/bin/sh\nexec env PATH=%s:$PATH %s/x86_64-w64-mingw32-windres "$@"\n' \
-    "$MINGW_BIN" "$MINGW_BIN" > "$HOME/.cache/baash-wbin/windres"
-chmod +x "$HOME/.cache/baash-wbin/windres"
-# then PATH=$HOME/.cache/baash-wbin:$TC:$PATH cargo zigbuild --target x86_64-pc-windows-gnu
-```
+It is a wrapper *script*, not a symlink, on purpose: nix-wrapped binutils
+resolve their own directory from `argv[0]`, so a symlink to one of those breaks
+it. LLVM's binary does not care, but the script is the form that stays correct
+whichever resource compiler is behind it.
 
-The wrapper has to prepend the MinGW `bin` to `PATH`, not just `exec` the one
-binary: `windres` shells out to `x86_64-w64-mingw32-gcc` as its preprocessor,
-and `cargo-zigbuild`'s own toolchain does not contain one, so a bare wrapper
-fails with `x86_64-w64-mingw32-gcc: command not found`.
+The MinGW cross-`windres` also works, but needs a different wrapper: it shells
+out to `x86_64-w64-mingw32-gcc` as its preprocessor, which
+`cargo-zigbuild`'s toolchain does not contain, so the wrapper has to prepend the
+MinGW `bin` to `PATH` rather than just `exec` the one binary — otherwise it
+fails with `x86_64-w64-mingw32-gcc: command not found`. LLVM's needs no
+preprocessor of its own for a script with no `#include`, so that dance is
+skipped.

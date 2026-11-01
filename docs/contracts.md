@@ -118,6 +118,13 @@ the geometry a layout test asserts about: a pty starts at zero columns, which
 `window_size_fd` reads as "not a terminal", and the prompt a test measures can
 be longer than the narrow default the editor then falls back to.
 
+**`parent_pid()` answers `Option<u32>`, and `None` means "not known here".**
+Unix always answers (zero included: `getppid` reporting no parent is what an
+isolated PID namespace looks like, and bash shows `PPID=0` there). Windows has
+no `getppid`, so it says `None` and `baash-vm` leaves `$PPID` *unset* rather
+than filling in a plausible number — `UID`/`EUID` already behave that way
+where the platform cannot answer.
+
 ---
 
 ## baash-runtime

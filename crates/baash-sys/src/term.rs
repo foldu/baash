@@ -155,8 +155,13 @@ pub fn pid() -> libc::pid_t {
 }
 
 /// This process's parent id (`$PPID`).
-pub fn parent_pid() -> libc::pid_t {
-    rustix::process::getppid().map_or(0, |pid| pid.as_raw_pid())
+///
+/// `None` means the platform cannot answer, not that the answer is zero — the
+/// two are different values and `$PPID` is only set when there is one. Unix
+/// always answers: `getppid` reporting no parent yields 0, which is what bash
+/// shows in an isolated PID namespace.
+pub fn parent_pid() -> Option<u32> {
+    Some(rustix::process::getppid().map_or(0, |pid| pid.as_raw_pid()) as u32)
 }
 
 #[cfg(test)]
@@ -174,7 +179,7 @@ mod tests {
     fn ids_are_plausible() {
         assert!(pid() > 0);
         // `getppid` can report 0 in an isolated PID namespace (some CI
-        // sandboxes do this), so only the sign is asserted.
-        assert!(parent_pid() >= 0);
+        // sandboxes do this) — a value, not an absence, so it stays `Some`.
+        assert!(parent_pid().is_some());
     }
 }

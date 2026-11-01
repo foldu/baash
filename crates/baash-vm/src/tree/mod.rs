@@ -581,9 +581,13 @@ impl Interp {
             let _ = interp.state.vars.mark_readonly(b"UID");
             let _ = interp.state.vars.mark_readonly(b"EUID");
         }
-        let ppid = baash_sys::parent_pid().to_string().into_bytes();
-        let _ = interp.state.vars.assign_scalar(b"PPID", &ppid);
-        let _ = interp.state.vars.mark_readonly(b"PPID");
+        // Unset rather than zero when the platform cannot answer: `$PPID` is
+        // either the parent's id or not there at all.
+        if let Some(ppid) = baash_sys::parent_pid() {
+            let ppid = ppid.to_string().into_bytes();
+            let _ = interp.state.vars.assign_scalar(b"PPID", &ppid);
+            let _ = interp.state.vars.mark_readonly(b"PPID");
+        }
         let _ = interp
             .state
             .vars
