@@ -1,4 +1,5 @@
-//! Shared test scaffolding: a fake terminal, a stub completer, a stub parser.
+//! Shared test scaffolding: a fake terminal, a stub completer, a stub parser,
+//! and a screen model for what the frames add up to.
 //!
 //! Every behavioural test in this crate drives these instead of a real
 //! terminal. `bsh-sys` has no pty helper yet, so a fake is the only way to run
@@ -303,4 +304,171 @@ pub fn has_sgr(text: &str) -> bool {
                     .all(|byte| byte.is_ascii_digit() || byte == b';')
         })
     })
+}
+
+/// A terminal screen, as the user would see it.
+///
+/// Every frame is a blob of movement and repainting, so asserting on the bytes
+/// says little about whether the editor behaved. This replays them the way a
+/// terminal does — `\r`, `\n` with a scroll at the bottom row, CSI `A`/`B`/
+/// `C`/`D`/`H`/`J`, SGR ignored — and keeps the resulting grid and cursor.
+///
+/// Every printable character is one cell. The editor itself measures with
+/// `unicode-width` (see `display.rs`); the tests here type ASCII, so the model
+/// does not repeat that.
+pub struct Screen {
+    columns: usize,
+    grid: Vec<Vec<char>>,
+    row: usize,
+    col: usize,
+    scrolls: usize,
+}
+
+impl Screen {
+    /// An empty screen of the given size.
+    pub fn new(columns: u16, rows: u16) -> Self {
+        let columns = usize::from(columns.max(1));
+        let rows = usize::from(rows.max(1));
+        Self {
+            columns,
+            grid: vec![vec![' '; columns]; rows],
+            row: 0,
+            col: 0,
+            scrolls: 0,
+        }
+    }
+
+    /// The screen a [`FakeTerminal`] painted.
+    pub fn of(term: &FakeTerminal) -> Self {
+        let mut screen = Self::new(term.size.columns, term.size.rows);
+        let bytes = term.output.borrow();
+        screen.feed(&bytes);
+        screen
+    }
+
+    /// Replay terminal output.
+    pub fn feed(&mut self, bytes: &[u8]) {
+        let text = String::from_utf8_lossy(bytes).into_owned();
+        let mut chars = text.chars().peekable();
+        while let Some(character) = chars.next() {
+            match character {
+                '\x1b' => {
+                    if chars.peek() == Some(&'[') {
+                        chars.next();
+                    }
+                    let mut parameters = String::new();
+                    let mut final_byte = None;
+                    for character in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&character) {
+                            final_byte = Some(character);
+                            break;
+                        }
+                        parameters.push(character);
+                    }
+                    self.control(final_byte, &parameters);
+                }
+                '\r' => self.col = 0,
+                '\n' => self.line_feed(),
+                character if (character as u32) < 0x20 || character == '\x7f' => {}
+                character => self.put(character),
+            }
+        }
+    }
+
+    /// The text of one row, without trailing blanks.
+    pub fn row(&self, row: usize) -> String {
+        let text: String = self.grid[row].iter().collect();
+        text.trim_end().to_string()
+    }
+
+    /// Every row, top to bottom, without trailing blanks.
+    pub fn lines(&self) -> Vec<String> {
+        (0..self.grid.len()).map(|row| self.row(row)).collect()
+    }
+
+    /// The rows that have anything on them, top to bottom.
+    pub fn used_lines(&self) -> Vec<String> {
+        self.lines()
+            .into_iter()
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+
+    /// The cursor as a `(row, column)` cell.
+    pub fn cursor(&self) -> (usize, usize) {
+        (self.row, self.col)
+    }
+
+    /// How many rows scrolled off the top.
+    pub fn scrolls(&self) -> usize {
+        self.scrolls
+    }
+
+    /// How many times `needle` appears anywhere on the screen.
+    pub fn occurrences(&self, needle: &str) -> usize {
+        self.lines()
+            .iter()
+            .map(|line| line.matches(needle).count())
+            .sum()
+    }
+
+    fn control(&mut self, final_byte: Option<char>, parameters: &str) {
+        let counts: Vec<usize> = parameters
+            .split(';')
+            .map(|part| part.trim_start_matches('?').parse().unwrap_or(0))
+            .collect();
+        let count = |index: usize| match counts.get(index).copied().unwrap_or(0) {
+            0 => 1,
+            value => value,
+        };
+        match final_byte {
+            Some('A') => self.row = self.row.saturating_sub(count(0)),
+            Some('B') => self.row = (self.row + count(0)).min(self.grid.len() - 1),
+            Some('C') => self.col = (self.col + count(0)).min(self.columns - 1),
+            Some('D') => self.col = self.col.saturating_sub(count(0)),
+            Some('H') => {
+                self.row = counts.first().copied().unwrap_or(0).saturating_sub(1);
+                self.col = counts.get(1).copied().unwrap_or(0).saturating_sub(1);
+            }
+            Some('J') => match counts.first().copied().unwrap_or(0) {
+                2 => {
+                    for row in &mut self.grid {
+                        row.fill(' ');
+                    }
+                }
+                _ => {
+                    for cell in &mut self.grid[self.row][self.col..] {
+                        *cell = ' ';
+                    }
+                    for row in &mut self.grid[self.row + 1..] {
+                        row.fill(' ');
+                    }
+                }
+            },
+            // SGR and anything the renderer does not emit are ignored: they
+            // change no cell and move no cursor.
+            _ => {}
+        }
+    }
+
+    fn line_feed(&mut self) {
+        if self.row + 1 == self.grid.len() {
+            self.grid.remove(0);
+            self.grid.push(vec![' '; self.columns]);
+            self.scrolls += 1;
+        } else {
+            self.row += 1;
+        }
+    }
+
+    fn put(&mut self, character: char) {
+        // A cell printed in the last column leaves the terminal in a pending
+        // wrap state: the *next* character starts a new row.
+        if self.col >= self.columns {
+            self.col = 0;
+            self.line_feed();
+        }
+        self.grid[self.row][self.col] = character;
+        self.col += 1;
+    }
 }

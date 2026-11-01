@@ -54,7 +54,7 @@ a stale brief has already cost two wrong scopes (arrays: 54 vs real; namerefs:
 | of the whole suite (3971 cases) | 56.3 % |
 | as a fraction of bash's score | 2344 / 2577 = 91.0 % |
 | share of the bash gap closed since 1013 | 1331 / 1564 = 85.1 % |
-| our test count | 1278 |
+| our test count | 1282 |
 
 Measured with `bash 5.3.20` as the comparison shell, harness forced to
 `LC_ALL=C` (bash scores *worse* under `C.UTF-8`: 2574 → 2435, so the C locale
@@ -96,7 +96,7 @@ count was diffed case by case against the previous commit; nothing else moved.
 | `bsh-pattern` | 4197 | Thompson-NFA glob: `O(n·m)`, never exponential; `extglob`/`nocasematch`/`utf8` flags |
 | `bsh-diag` | 1946 | diagnostic model and miette rendering; error-code space |
 | `bsh-complete` | 3928 | completion engine: providers, contexts, nucleo ranking, menu layout |
-| `bsh-repl` | 3079 | line editor, key decoding, history navigation, prompt adapter, renderer, terminal abstraction |
+| `bsh-repl` | 3470 | line editor, key decoding, history navigation, prompt adapter, renderer, terminal abstraction |
 | `bsh-utils` | 206 | embedded coreutils (uutils 0.8 subcrates): the `builtin-utils` fallback used when `PATH` finds nothing; on by default for Windows, opt-in on Linux |
 | `bsh-highlight` | 386 | syntax highlighting (token → style), shared with the editor |
 | `bsh-spec` | 3242 | the Oils-suite runner, comparator, ratchet |
@@ -155,8 +155,11 @@ delegates everything else: line editing to `bsh-repl`, execution to the
   * the menu is fuzzy (`nucleo-matcher`; typed prefixes always outrank fuzzy
     matches), columnar with a description column, and degrades to one clipped
     column on a narrow terminal. Tab/Shift-Tab (and Up/Down, `Ctrl-P`/`Ctrl-N`)
-    cycle, Enter inserts, Esc closes; its height is capped by the rows below
-    the prompt;
+    cycle, Enter inserts, Esc closes. It is painted *under* the line with the
+    cursor left on the line, and typing clears it in place instead of
+    repainting the prompt below it: the frame is measured before it is
+    painted, so the menu and the ghost text only ever get the rows left below
+    the line;
   * command position is the deduplicated union of aliases, functions,
     builtins, keywords, `PATH` executables and variables, so `ec<TAB>` has
     `exec` and `fo<TAB>` has `for` (once per name, in bash's order);

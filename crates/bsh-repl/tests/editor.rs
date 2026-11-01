@@ -6,8 +6,9 @@ use bsh_complete::Candidate;
 use bsh_repl::{Config, Editor, Flow, History, Key, Prompt, ReadResult, Size, Theme};
 
 use common::{
-    FakeTerminal, Session, StubCompleter, StubSyntax, apply_keys, chars, clear_output,
-    config_with_history, drive, has_sgr, last_frame, output_text, plain_config, run, session,
+    FakeTerminal, Screen, Session, StubCompleter, StubSyntax, apply_keys, chars, clear_output,
+    config_with_history, drive, has_sgr, last_frame, output_text, plain_config, run,
+    seeded_history, session,
 };
 
 #[test]
@@ -253,8 +254,8 @@ fn the_cursor_is_placed_on_the_right_wrapped_row() {
     keys.push(Key::Right);
     let frame = last_frame(&keys, 5);
     assert!(
-        frame.ends_with("\x1b[1B\r\x1b[4C"),
-        "cursor at source offset 2 is row 0 column 4, so it moves up one row: {frame:?}"
+        frame.ends_with("\x1b[1A\r\x1b[4C"),
+        "cursor at source offset 2 is row 0 column 4, so it moves up from the second row: {frame:?}"
     );
 }
 
@@ -801,7 +802,7 @@ fn a_non_utf8_candidate_is_inserted_byte_for_byte() {
 }
 
 #[test]
-fn the_menu_never_paints_more_rows_than_fit_below_the_prompt() {
+fn the_menu_never_pushes_the_prompt_off_a_short_screen() {
     let completer = StubCompleter::words(&[
         "alpha",
         "alpine",
@@ -812,19 +813,144 @@ fn the_menu_never_paints_more_rows_than_fit_below_the_prompt() {
         "alphanumeric",
     ]);
     let mut term = FakeTerminal::sized(b"", 20, 4);
-    let sink = term.output_handle();
     let mut editor = Editor::new(&mut term, &completer, &bsh_repl::NeverNeedsMore);
     for key in chars("ls a") {
         editor.step(key).unwrap();
     }
     editor.step(Key::Tab).unwrap(); // prefix
-    clear_output(&sink);
     editor.step(Key::Tab).unwrap(); // menu
-    let frame = output_text(&sink);
-    assert!(frame.contains("$ ls al"), "the prompt is still painted");
+    let screen = Screen::of(&term);
+    assert_eq!(screen.row(0), "$ ls al", "the prompt is still painted");
+    assert_eq!(screen.scrolls(), 0, "the frame fits: {:?}", screen.lines());
+    assert_eq!(
+        screen.cursor(),
+        (0, 7),
+        "the cursor is on the line, not below the menu"
+    );
+}
+
+/// Open the menu for `ls a`, which offers three candidates, and return the
+/// screen.
+fn open_menu(columns: u16, rows: u16) -> Screen {
+    let completer = StubCompleter::words(&["alpha", "alpine", "alt"]);
+    let mut term = FakeTerminal::sized(b"", columns, rows);
+    let sink = term.output_handle();
+    {
+        let mut editor = Editor::new(&mut term, &completer, &bsh_repl::NeverNeedsMore);
+        for key in chars("ls a") {
+            editor.step(key).unwrap();
+        }
+        editor.step(Key::Tab).unwrap(); // common prefix: `ls al`
+        editor.step(Key::Tab).unwrap(); // the menu
+    }
+    let mut screen = Screen::new(columns, rows);
+    screen.feed(&sink.borrow());
+    screen
+}
+
+#[test]
+fn the_menu_is_painted_below_the_line_and_the_cursor_stays_on_it() {
+    // Ten columns is one menu column, so each candidate gets its own row.
+    let screen = open_menu(10, 12);
+    assert_eq!(
+        screen.used_lines(),
+        ["$ ls al", "> alpha", "  alpine", "  alt"],
+        "the menu sits under the line, one candidate per row"
+    );
+    assert_eq!(
+        screen.cursor(),
+        (0, 7),
+        "the cursor is where the user is typing"
+    );
+}
+
+#[test]
+fn typing_after_the_menu_repaints_over_it_instead_of_below_it() {
+    let completer = StubCompleter::words(&["alpha", "alpine", "alt"]);
+    let mut term = FakeTerminal::sized(b"", 20, 12);
+    let sink = term.output_handle();
+    {
+        let mut editor = Editor::new(&mut term, &completer, &bsh_repl::NeverNeedsMore);
+        for key in chars("ls a") {
+            editor.step(key).unwrap();
+        }
+        editor.step(Key::Tab).unwrap(); // common prefix
+        editor.step(Key::Tab).unwrap(); // the menu
+        editor.step(Key::Char('t')).unwrap();
+    }
+    let mut screen = Screen::new(20, 12);
+    screen.feed(&sink.borrow());
+    assert_eq!(
+        screen.occurrences("$ "),
+        1,
+        "the prompt is painted once, not once per keystroke: {:?}",
+        screen.lines()
+    );
+    assert_eq!(screen.used_lines(), ["$ ls alt"], "the menu was cleared");
+    assert_eq!(screen.cursor(), (0, 8));
+}
+
+#[test]
+fn a_long_line_leaves_the_menu_only_the_rows_below_it() {
+    // Three rows of line on a six-row screen: three rows are left for the
+    // menu, and the frame stays put instead of scrolling its own top away.
+    let completer = StubCompleter::words(&["alpha", "alpine", "alt"]);
+    let mut term = FakeTerminal::sized(b"", 20, 6);
+    let mut editor = Editor::new(&mut term, &completer, &bsh_repl::NeverNeedsMore);
+    let mut line = chars(&"a".repeat(38));
+    line.extend(chars(" ls a"));
+    for key in line {
+        editor.step(key).unwrap();
+    }
+    editor.step(Key::Tab).unwrap(); // common prefix
+    editor.step(Key::Tab).unwrap(); // menu
+    let screen = Screen::of(&term);
+    assert_eq!(
+        screen.scrolls(),
+        0,
+        "nothing scrolled: {:?}",
+        screen.lines()
+    );
     assert!(
-        frame.matches("\r\n").count() <= 2,
-        "a 4-row terminal leaves room for at most two menu rows: {frame:?}"
+        screen.row(0).starts_with("$ aaaa"),
+        "the prompt is on the first row: {:?}",
+        screen.lines()
+    );
+    assert!(
+        screen.row(3).starts_with("> alpha"),
+        "the menu starts right under the line: {:?}",
+        screen.lines()
+    );
+    assert_eq!(
+        screen.cursor(),
+        (2, 6),
+        "the cursor is at the end of the line, on its last row"
+    );
+}
+
+#[test]
+fn a_suggestion_that_would_not_fit_is_not_painted() {
+    let mut term = FakeTerminal::sized(b"", 20, 2);
+    let sink = term.output_handle();
+    let config = Config {
+        color: true,
+        history: seeded_history(&["echo one two three four five six seven eight"]),
+        ..plain_config()
+    };
+    let completer = StubCompleter::empty();
+    {
+        let mut editor =
+            Editor::with_config(&mut term, &completer, &bsh_repl::NeverNeedsMore, config);
+        for key in chars("echo o") {
+            editor.step(key).unwrap();
+        }
+    }
+    let mut screen = Screen::new(20, 2);
+    screen.feed(&sink.borrow());
+    assert_eq!(
+        screen.lines(),
+        ["$ echo o", ""],
+        "the suggestion is decoration; the line keeps the screen"
     );
 }
 

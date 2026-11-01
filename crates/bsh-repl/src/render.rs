@@ -14,6 +14,13 @@
 //! prompt. That relative distance survives the terminal scrolling, which is why
 //! the next repaint can get back to the top of the region without knowing an
 //! absolute screen coordinate.
+//!
+//! That only holds while a frame fits on the screen: a frame taller than the
+//! terminal scrolls its own top row out of reach, and the next repaint would
+//! start below the frame and paint a second prompt under it. So the frame's
+//! height is measured ([`Frame::height`]) before anything is painted, and the
+//! parts that grow — the completion menu, the ghost text — are given only the
+//! rows that are left.
 
 use std::io;
 use std::ops::Range;
@@ -68,6 +75,24 @@ pub struct Frame<'a> {
     pub menu: Option<MenuView<'a>>,
     /// Ghost-text continuation to paint after the line, when there is one.
     pub ghost: Option<&'a [u8]>,
+}
+
+impl Frame<'_> {
+    /// The number of terminal rows this frame occupies at `columns`.
+    ///
+    /// Measured through the painting functions themselves, so the answer and
+    /// what [`Renderer::draw`] paints cannot disagree about wrapping. The menu
+    /// is not included: it is the caller's job to fit it into
+    /// `TERM_ROWS - height`.
+    pub fn height(&self, columns: u16, color: bool) -> u16 {
+        let mut canvas = Canvas::measuring(columns);
+        paint_prompt(&mut canvas, self.prompt);
+        let _ = paint_line(&mut canvas, self.line, self.cursor, &Theme::DARK, false);
+        if let Some(ghost) = self.ghost {
+            paint_ghost(&mut canvas, ghost, color);
+        }
+        canvas.position().0.saturating_add(1)
+    }
 }
 
 /// The painting state that survives between frames.
@@ -143,11 +168,15 @@ impl Renderer {
             }
         }
 
+        // The canvas ends on the last painted cell — the menu's bottom row when
+        // one is open — and the cursor belongs back on the line, above it. The
+        // move is always *up*, never down: painting below the cursor and then
+        // moving further down would scroll the frame off its own top row, and
+        // the next frame would repaint the prompt under the stale menu.
         let end = canvas.position();
-        if end.0 >= cursor_position.0 {
-            canvas.down(end.0 - cursor_position.0);
-        } else {
-            canvas.up(cursor_position.0 - end.0);
+        canvas.up(end.0.saturating_sub(cursor_position.0));
+        if end.0 < cursor_position.0 {
+            canvas.down(cursor_position.0 - end.0);
         }
         canvas.cr();
         canvas.right(cursor_position.1);
@@ -190,6 +219,8 @@ struct Canvas {
     out: Vec<u8>,
     row: u16,
     col: u16,
+    /// Track the position but throw the bytes away, for measuring a frame.
+    measure: bool,
 }
 
 impl Canvas {
@@ -199,6 +230,15 @@ impl Canvas {
             out: Vec::with_capacity(256),
             row: 0,
             col: 0,
+            measure: false,
+        }
+    }
+
+    /// A canvas that only tracks where the cursor would end up.
+    fn measuring(columns: u16) -> Self {
+        Self {
+            measure: true,
+            ..Self::new(columns)
         }
     }
 
@@ -207,7 +247,9 @@ impl Canvas {
     }
 
     fn raw(&mut self, bytes: &[u8]) {
-        self.out.extend_from_slice(bytes);
+        if !self.measure {
+            self.out.extend_from_slice(bytes);
+        }
     }
 
     fn cr(&mut self) {
@@ -273,7 +315,7 @@ impl Canvas {
             }
             let mut buffer = [0u8; 4];
             let encoded = character.encode_utf8(&mut buffer);
-            self.out.extend_from_slice(encoded.as_bytes());
+            self.raw(encoded.as_bytes());
             width += cells;
         }
         self.col = width.min(usize::from(self.columns)) as u16;

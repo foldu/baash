@@ -919,12 +919,26 @@ or End; Esc dismisses it for the current line, and any edit brings it back.
 
 The menu is columnar: entries are packed into as many columns as the terminal
 width allows, descriptions start at one column across rows, and a narrow
-terminal degrades to one clipped column rather than wrapping. Its height is
-capped by the rows below the prompt plus the line, so it can never scroll the
-prompt away; scrolling is by row and keeps the selected cell visible. At a
-blank command word history contributes whole previous commands (newest first,
-fuzzy-ranked like every other source), which is the fzf-like history picker;
-once a command word exists only its words are candidates.
+terminal degrades to one clipped column rather than wrapping. It is painted
+*below* the line and the cursor is put back on the line; scrolling within the
+menu is by row and keeps the selected cell visible. At a blank command word
+history contributes whole previous commands (newest first, fuzzy-ranked like
+every other source), which is the fzf-like history picker; once a command word
+exists only its words are candidates.
+
+**A frame must fit on the screen, and the cursor ends up on the line.**
+The renderer repaints the whole edit region — prompt, line, ghost text, menu —
+by moving back to the region's first row, erasing to the end of the screen and
+drawing again. That works because each frame is measured before it is painted:
+`Frame::height` runs the same wrapping code and reports the rows the prompt,
+line and ghost text need, and the editor gives the menu only `TERM_ROWS - that`
+rows (dropping the ghost text, then the menu, when a short screen has no room).
+A frame taller than the terminal would scroll its own first row out of reach,
+and the next repaint would then start below the frame and paint a second prompt
+under it — the editor must move the cursor *up* to the line, never down past
+the last painted row, for the same reason. Regions taller than the screen (a
+line or `PS1` longer than the terminal) are still painted, with the top
+scrolled away; that is the one case that needs a viewport rather than a frame.
 
 **The editor paints a rendered prompt; it does not expand one.**
 `bsh_repl::Prompt` holds two `bsh_lang::prompt::ExpandedPrompt`s (built by the

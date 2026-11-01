@@ -858,29 +858,42 @@ impl<'a> Editor<'a> {
         } else {
             self.prompt.primary_text()
         };
-        let columns = self.term.size().columns_or_fallback();
-        // A menu taller than the screen would scroll the prompt away, so the
-        // height is capped by the rows left below the prompt and the line. A
-        // terminal that reports no size falls back to the configured maximum.
-        let rows_available = match self.term.size().rows {
-            0 => self.max_menu_rows,
-            rows => usize::from(rows.saturating_sub(2)).max(1),
-        };
-        let max_rows = self.max_menu_rows.min(rows_available);
-        let rows = self.menu.as_mut().map(|menu| menu.rows(max_rows, columns));
-        let menu = rows.as_deref().map(|rows| MenuView { rows });
+        let size = self.term.size();
+        let columns = size.columns_or_fallback();
         let ghost = if self.menu.is_some() || self.search.is_some() {
             None
         } else {
             self.suggestion()
         };
-        let frame = Frame {
+        let mut frame = Frame {
             prompt,
             line: self.line.editable(),
             cursor: self.line.editable_cursor(),
-            menu,
+            menu: None,
             ghost: ghost.as_deref(),
         };
+        // A frame taller than the screen scrolls its own top row out of reach,
+        // and the next repaint would then paint a second prompt below the
+        // frame instead of over it. So the frame is measured before it is
+        // painted and the parts that grow — the menu, the suggestion — get only
+        // the rows that are left. A terminal that reports no size gets the
+        // configured maximum.
+        let screen_rows = usize::from(size.rows);
+        let mut used = usize::from(frame.height(columns, self.color));
+        if screen_rows > 0 && used > screen_rows && frame.ghost.is_some() {
+            // The suggestion is decoration; keeping the line on screen is not.
+            frame.ghost = None;
+            used = usize::from(frame.height(columns, self.color));
+        }
+        let max_rows = match screen_rows {
+            0 => self.max_menu_rows,
+            rows => self.max_menu_rows.min(rows.saturating_sub(used)),
+        };
+        let rows = match max_rows {
+            0 => None,
+            max_rows => self.menu.as_mut().map(|menu| menu.rows(max_rows, columns)),
+        };
+        frame.menu = rows.as_deref().map(|rows| MenuView { rows });
         self.renderer
             .draw(self.term, &frame, &self.theme, self.color)
     }
