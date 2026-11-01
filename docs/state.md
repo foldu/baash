@@ -217,8 +217,8 @@ delegates everything else: line editing to `baash-repl`, execution to the
 * `$!`, `wait` (pids, and bare `wait` for all live children) and `kill` (pids
   and signals) for children *this* shell started;
 * `--rcfile FILE` / `--norc`; the default startup file is
-  `$XDG_CONFIG_HOME/baash/baashrc` (`~/.config/baash/baashrc`) when it exists,
-  otherwise `~/.bashrc` (see §9).
+  `$XDG_CONFIG_HOME/baash/config.sh` (`~/.config/baash/config.sh`) when it
+  exists, otherwise `~/.bashrc` (see §9).
 
 **Missing, in order of how badly it hurts an interactive user:**
 
@@ -521,14 +521,17 @@ Where the waves stand:
 ## 9. Open questions
 
 * **Startup file — decided.** The baash file is the XDG one,
-  `$XDG_CONFIG_HOME/baash/baashrc` (`~/.config/baash/baashrc`), sourced when it
-  exists and otherwise `~/.bashrc`; `--rcfile` and `--norc` still win. A bashrc
-  full of `bind`/`complete -D`/`PROMPT_COMMAND` half-applies, so a user who
-  wants a baash-specific file gets one without renaming the bash file, and it
-  lives where the platform keeps configuration rather than as a dotfile in
-  `$HOME`. `baash_sys::dirs` resolves both bases for Unix (XDG) and Windows
-  (roaming and local profiles), and follows the specification's rule that a
-  relative `XDG_*_HOME` is the same as an unset one.
+  `$XDG_CONFIG_HOME/baash/config.sh` (`~/.config/baash/config.sh`), sourced when
+  it exists and otherwise `~/.bashrc`; `--rcfile` and `--norc` still win. The
+  name is `config.sh` rather than `baashrc`: it is a shell script, so it gets a
+  script's extension (every editor highlights it) and no `rc` suffix borrowed
+  from bash. A `~/.bashrc` full of `bind`/`complete -D`/`PROMPT_COMMAND`
+  half-applies, so a user who wants a baash-specific file gets one without
+  renaming the bash file, and it lives where the platform keeps configuration
+  rather than as a dotfile in `$HOME`. `baash_sys::dirs` resolves both bases
+  for Unix (XDG) and Windows (roaming and local profiles), and follows the
+  specification's rule that a relative `XDG_*_HOME` is the same as an unset
+  one.
 * **History is a database, not a file — decided.** A line-oriented `HISTFILE`
   cannot record when a command ran, where, or with what status, and two shells
   sharing one rewrite each other's content. `baash-history` keeps

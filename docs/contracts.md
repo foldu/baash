@@ -1114,8 +1114,8 @@ with no action is 2 (bash 0).
 `crates/baash` reads a startup file only when the shell is interactive:
 `--rcfile FILE` replaces the default, `--norc` disables it, and a missing file
 is ignored — which is what makes `--rcfile /dev/null` the portable way to ask
-for no startup file at all. The default is `$XDG_CONFIG_HOME/baash/baashrc`
-(`~/.config/baash/baashrc`), falling back to `~/.bashrc`; the two bases come
+for no startup file at all. The default is `$XDG_CONFIG_HOME/baash/config.sh`
+(`~/.config/baash/config.sh`), falling back to `~/.bashrc`; the two bases come
 from `baash_sys::dirs`, which applies the XDG rule that a relative `XDG_*_HOME`
 is ignored rather than resolved against the working directory.
 

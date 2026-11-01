@@ -1190,14 +1190,14 @@ fn the_default_startup_file_is_the_xdg_config_one() {
     // `~/.baashrc` is not consulted at all.
     assert_eq!(run_with(None), "bashrc\ncmd\n");
 
-    // `$HOME/.config/baash/baashrc` is the default location.
-    let home_rc = home.join(".config").join("baash").join("baashrc");
+    // `$HOME/.config/baash/config.sh` is the default location.
+    let home_rc = home.join(".config").join("baash").join("config.sh");
     std::fs::create_dir_all(home_rc.parent().expect("parent")).expect("create home config");
     std::fs::write(&home_rc, "echo home-config\n").expect("write home config");
     assert_eq!(run_with(None), "home-config\ncmd\n");
 
     // `$XDG_CONFIG_HOME` replaces `$HOME/.config`, and wins over `~/.bashrc`.
-    std::fs::write(config.join("baash").join("baashrc"), "echo xdg-config\n")
+    std::fs::write(config.join("baash").join("config.sh"), "echo xdg-config\n")
         .expect("write xdg config");
     assert_eq!(run_with(Some(&config)), "xdg-config\ncmd\n");
 
