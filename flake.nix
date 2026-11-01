@@ -149,7 +149,7 @@
                 export HOME="$TMPDIR"
                 export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global"
                 export ZIG_LOCAL_CACHE_DIR="$TMPDIR/zig-local"
-                cargo zigbuild --profile windows --target x86_64-pc-windows-gnu -p baash
+                cargo zigbuild --profile windows --target x86_64-pc-windows-gnu -p baash --features mimalloc
               '';
               installPhaseCommand = ''
                 mkdir -p $out/bin

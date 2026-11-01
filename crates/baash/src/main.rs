@@ -18,7 +18,7 @@
 /// The Unix builds keep the system allocator: measured against it, mimalloc
 /// trades startup and small loops for large-array throughput, which is not a
 /// trade a shell should make by default (`docs/performance.md`).
-#[cfg(windows)]
+#[cfg(feature = "mimalloc")]
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

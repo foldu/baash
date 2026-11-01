@@ -8,6 +8,10 @@ publish.workspace = true
 description = "The baash binary"
 
 [features]
+# `--features mimalloc`: the process allocator on Unix too. musl's own malloc is
+# slow on the small-vector traffic a shell generates, so a static musl build
+# wants this (`docs/performance.md`).
+mimalloc = ["dep:mimalloc"]
 # `baash --features builtin-utils`: use the embedded coreutils on Linux too.
 builtin-utils = ["baash-vm/builtin-utils"]
 
@@ -23,15 +27,11 @@ baash-complete.workspace = true
 baash-repl.workspace = true
 baash-tools.workspace = true
 compio.workspace = true
+mimalloc = { version = "0.1", optional = true, default-features = false }
 
 # A Windows `PATH` has no coreutils, so the embedded fallback is not optional
 # there. The feature is still the switch; it is just on by default for this
 # target.
 [target.'cfg(windows)'.dependencies]
 baash-vm = { workspace = true, features = ["builtin-utils"] }
-# Windows' system allocator is the slow part of a process that allocates small
-# byte vectors constantly, which is what a shell does. Measured on Linux,
-# mimalloc is a wash overall (worse startup, better on large arrays); on
-# Windows it is a straight improvement over `HeapAlloc`, so it is the one
-# platform where it is not optional (`docs/performance.md`).
-mimalloc = { version = "0.1", default-features = false }
+

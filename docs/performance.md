@@ -63,6 +63,41 @@ an `Arc` now and the first write copies it (`Arc::make_mut`), so
 `arr=( $(seq 20000) ); while …; do ( : ); done` stopped copying 4M nodes while
 `( arr[0]=x )` still pays for its own copy and cannot touch the parent's array.
 
+### Static musl: startup yes, throughput no
+
+Startup is dominated by the dynamic loader. callgrind on `baash -c ':'` puts
+**78%** of the run in `_dl_relocate_object_no_relro` and another ~9% in symbol
+lookup: the binary has **43,641 dynamic relocations** against bash's 1,563,
+because it links a large Rust dependency graph (turso's vtables are most of
+`.data.rel.ro`). Our own initialisation is ~5%, so no amount of tidying it
+would be felt. Packing the relocations (`-z pack-relative-relocs`) shrinks the
+section 1 MB → 17 KB and changes nothing, because the loader's work is per
+relocation, not per byte.
+
+A static musl build removes the loader entirely (built with the rustup musl
+target, `zig cc` for the C dependencies, and `-nostdlib` at link time so
+rustc's own startup objects are the only ones):
+
+| | gnu + glibc | musl | musl + mimalloc | bash |
+|---|---:|---:|---:|---:|
+| startup, per spawn | 0.53 ms | **0.36 ms** | 0.43 ms | 0.40 ms |
+| arith loop 20k | **6.8 ms** | 17.1 ms | 12.8 ms | 9.5 ms |
+| `${s#*c}` 20k | **19.7 ms** | 41.3 ms | 31.1 ms | 24.0 ms |
+| function call 20k | **32.6 ms** | 70.1 ms | 52.1 ms | 33.7 ms |
+| builtin `echo` 20k | **20.4 ms** | 50.9 ms | 35.1 ms | 21.5 ms |
+| subshell + 20k array | 5.2 ms | 6.9 ms | **4.5 ms** | 51.8 ms |
+
+So musl buys 0.17 ms of process startup and costs 10–40 ms per second of
+typing: musl's allocator is ~2.3× slower on the small-vector traffic every
+interpreted statement generates, and mimalloc claws back only part of it (and
+pays its own initialisation, so startup lands between the two). **glibc stays
+the default**; the musl numbers are here so the question does not get re-opened
+from a cold start.
+
+The variant that would win both is a *static glibc* build (no loader, glibc's
+allocator); it needs a static glibc toolchain at build time, which is a Nix
+`pkgsStatic` decision rather than a flag.
+
 ### Allocator: mimalloc on Windows
 
 Measured both ways on Linux, mimalloc trades one kind of work for another:
