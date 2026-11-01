@@ -1,7 +1,9 @@
 # The live prompt: a directory watcher without threads
 
-Status: **design, not built.** Written 2026-10-28, after the fork/subinterpreter
-discussion in [`portability.md`](portability.md). The feature: while the prompt
+Status: **partly built.** Written 2026-10-28, after the fork/subinterpreter
+discussion in [`portability.md`](portability.md); §7 records what landed. The
+wait primitive in §1 is no longer `poll(2)`: the shell runs on compio, so the
+watch descriptor is awaited as an io_uring poll (§1.1). The feature: while the prompt
 is sitting idle in a git repository, show the branch, ahead/behind, and a
 dirty-file count, and update them when something changes — new commits, a
 checkout, `git add`, a file edit — without the user pressing Enter.
@@ -40,9 +42,22 @@ One thread, no gate interaction, and it is also the wrapper the editor already
 needs for another reason: a lone `Esc` is currently indistinguishable from the
 start of an `Alt-` sequence because the decoder blocks on `read`.
 
-`baash_sys::poll_readable(fd, timeout_ms)` exists today (single fd). The first
-code change is a multi-fd `poll(fds: &mut [(RawFd, PollFlags)], timeout_ms)` —
-small, testable in `baash-sys/tests/pty.rs`, and shared by both consumers.
+`baash_sys::poll_readable(fd, timeout_ms)` exists today (single fd) and is what
+the decoder still uses. The loop above is the *shape*, not the implementation.
+
+### 1.1 The wait is an io_uring poll, not `poll(2)`
+
+The shell is on compio (io_uring) already, and a hand-rolled `poll` would be a
+second wait mechanism beside the reactor that drives the rest of the loop. So
+the watch descriptor is submitted as `compio_driver::op::PollOnce` with
+`Interest::READABLE` — `IORING_OP_POLL_ADD` on an arbitrary fd — and the
+reactor that wakes the keystroke wakes the watcher through the same completion
+queue. That is why [`baash_sys::watch`] hands back a non-blocking descriptor and
+never reads on its own: `pending()` drains what the kernel has already queued,
+and something else owns the waiting.
+
+The multi-fd `poll` helper is therefore **not** needed for the watcher; it stays
+useful only for the `Esc`/`Alt` decoding fix in §7 step 2.
 
 ## 2. Watching: cheap events continuously, expensive check only when idle
 
@@ -157,7 +172,7 @@ Proposed defaults, all open to argument:
 |---|---|
 | `inotify` unavailable, or `max_user_watches` exhausted | fall back to TTL polling (`min_interval` becomes the only trigger); report once at debug level, never at the prompt |
 | network filesystem (NFS, sshfs) | inotify does not deliver remote changes; the TTL fallback is the whole feature. Same fallback path. |
-| huge repository | recursive watches refused by the kernel limit; degrade to `.git`-only + TTL, do not error |
+| huge repository | the bounded walk stops at `Limits::max_dirs` and watching is abandoned (`Why::TooBig`); the segment is computed per prompt instead, so it stays correct and merely becomes a snapshot. Half-watching would be worse: a stale count is a lie, a computed one is a moment behind |
 | `git` missing, or not a repo | segment disappears; no diagnostic, no repeated spawns |
 | `git status` slow (cold cache, huge tree) | abandoned on keystroke; if it exceeds a hard limit (say 2 s) the result is discarded and the segment marked stale rather than wrong |
 | `git` writes the index (status refresh) | `GIT_OPTIONAL_LOCKS=0` plus `--no-optional-locks`; we are a shell, not a git client |
@@ -170,15 +185,22 @@ slow is not.
 
 ## 7. Implementation order
 
-1. `baash-sys`: multi-fd `poll` + tests on a pty; `inotify` wrapper (Linux-only,
-   `cfg`, no new crate — raw `libc::inotify_init1`/`inotify_add_watch`).
-2. `baash-repl`: editor loop polls `[tty, watch_fd, timer]`; a `Watcher` trait
-   with a fake for tests; `Esc` decoding improves as a side effect.
-3. `baash-repl`/`baash-git`: parse `.git/HEAD`, `packed-refs`, refs; a
-   `git status --porcelain=v2 -z` runner with the environment above.
-4. Segment rendering + `shopt prompt_watch` + the debounce/abandon rules.
-5. Optional: recursive worktree watches; shell hook; Windows
-   (`ReadDirectoryChangesW` in the same wait set).
+1. **Done** — `baash-sys`: `watch` (Linux-only, `cfg`), an `inotify` wrapper
+   over `rustix::fs::inotify` (already a dependency; no new crate, no `unsafe`),
+   with the budget (`Limits`) and the bail-out. Tests cover create, `HEAD`, a
+   branch ref, the depth cap, the budget, symlinked directories and the
+   `.git`-file of a linked worktree. `git_dir()` is here too, so the prompt and
+   the watcher agree about which repository is being shown.
+2. **Next** — `baash-repl`: the editor loop awaits `[tty, watch_fd]`; a
+   `Watcher` trait with a fake for tests; `Esc` decoding improves as a side
+   effect.
+3. Segment rendering + `shopt prompt_watch` + the debounce/abandon rules. The
+   parts of the old steps 3–4 that assumed a `git status` subprocess are gone:
+   the segment is computed in process by `gix` and the branch by the
+   hand-rolled `.git` reader, so nothing spawns and there is nothing to set
+   `GIT_OPTIONAL_LOCKS` for (`docs/contracts.md` §3).
+4. Optional: shell hook; Windows (`ReadDirectoryChangesW` awaited the same way
+   as the inotify descriptor).
 
 Steps 1–2 are worth doing regardless: they fix `Esc`/`Alt` decoding and give the
 completion scanner a place to be cancelled from, which is the other feature that
@@ -190,10 +212,12 @@ wants to be interruptible.
   separate builtin and a separate design.
 * Not a git client: no fetching, no hooks, no index writes, no credential
   prompts.
-* Not a reason to add an async runtime. `poll` on two fds is 40 lines; compio
-  would be a dependency, a runtime and a second threading model for the same
-  result. The earlier conclusion stands: io_uring does not make a directory walk
-  or a `git status` cheaper.
+* Not a reason to add an async runtime. This was written when the shell had
+  none; it has compio now, so the watcher rides the reactor that is already
+  there instead of adding one (§1.1). What still holds is the second half:
+  io_uring does not make a directory walk or a `git status` cheaper, which is
+  why the segment is computed in process by `gix` and only *when something
+  changed*, never per keystroke.
 
 ## 9. Open questions
 
