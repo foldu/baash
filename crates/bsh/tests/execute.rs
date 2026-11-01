@@ -1756,3 +1756,27 @@ fn nounset_reads_in_arithmetic_are_fatal() {
     assert_eq!(out("unset x; (( x = 5 )); echo $x"), "5\n");
     assert_eq!(out("unset y; echo $(( y + 1 ))"), "1\n");
 }
+
+#[test]
+fn reserved_words_and_braces_are_ordinary_arguments() {
+    // A keyword or a brace is reserved only in command position.
+    assert_eq!(out("echo }"), "}\n");
+    assert_eq!(out("echo {"), "{\n");
+    assert_eq!(out("echo !"), "!\n");
+    assert_eq!(out("echo done if then fi"), "done if then fi\n");
+    // Which is what closes `{ … }` at the *second* `}` here, not the first.
+    assert_eq!(out("rbrace() { echo }; }; rbrace"), "}\n");
+    assert_eq!(out("{ echo }; }"), "}\n");
+}
+
+#[test]
+fn a_function_definition_tolerates_layout_and_odd_names() {
+    assert_eq!(out("fun ( ) { echo in-func; }; fun"), "in-func\n");
+    assert_eq!(
+        out("func-name.ext ( ) { echo dot; }; func-name.ext"),
+        "dot\n"
+    );
+    assert_eq!(out("f ( )\n{ echo nl; }\nf"), "nl\n");
+    // An adjacent empty pair after a name with `=` is still an array.
+    assert_eq!(out("a=(); echo ${#a[@]}"), "0\n");
+}

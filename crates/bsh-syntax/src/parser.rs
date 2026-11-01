@@ -1467,7 +1467,7 @@ impl<'a> Parser<'a, '_> {
             return None;
         }
         let name_text = self.text_of(&name_tok);
-        if name_text.is_empty() || find_assignment_eq(self.src, &name_tok.span).is_some() {
+        if name_text.is_empty() {
             return None;
         }
         let open = self.peek_sig_n(1)?;
@@ -1478,19 +1478,19 @@ impl<'a> Parser<'a, '_> {
         if close.kind != TokenKind::Operator || self.text_of(&close) != b")" {
             return None;
         }
-        let start = name_tok.span.start;
-        if open.span.end != close.span.start {
-            // DESIGN.md §3.3: require `()` adjacency, so the decision needs one
-            // token of lookahead and never a re-lex.
-            let d = Diagnostic::error(
-                codes::UNEXPECTED,
-                open.span.start..close.span.end,
-                "a function definition needs `()` with no space",
-            )
-            .with_help("write `f() { …; }`, or run the command with a space");
-            self.push_error(d);
-            self.label_last(name_tok.span.clone(), "this is the function name");
+        // `a=()` is an empty array assignment, not a definition named `a=`;
+        // bash reads the `=` form as a function only when layout separates the
+        // parens (`func-name=ext ( ) { … }`).
+        if find_assignment_eq(self.src, &name_tok.span).is_some()
+            && open.span.end == close.span.start
+        {
+            return None;
         }
+        let start = name_tok.span.start;
+        // `f ( ) { … }` is a definition too: bash allows layout between the
+        // name and `(`, and between `(` and `)`. What must not appear is
+        // anything *between* the parens, which is what tells `f ( ) { … }`
+        // apart from a command with a subshell argument.
         self.bump_sig(); // name
         self.skip_trivia();
         self.bump_sig(); // (
@@ -1654,6 +1654,13 @@ impl<'a> Parser<'a, '_> {
                         words.push(self.take_word_token(&t));
                         continue;
                     }
+                    // A reserved word is reserved only in *command* position:
+                    // `echo }` prints `}` and `echo done` prints `done`, so
+                    // once the command word is there the rest are arguments.
+                    if !words.is_empty() {
+                        words.push(self.take_word_token(&t));
+                        continue;
+                    }
                     break;
                 }
                 TokenKind::ArithCommand => {
@@ -1665,6 +1672,15 @@ impl<'a> Parser<'a, '_> {
                     .with_help("`((` begins arithmetic in bash; write `( (` for a nested subshell");
                     self.push_error(d);
                     self.advance_exact();
+                }
+                // `{`, `}` and `!` are operators only in command position:
+                // `echo }` prints `}` and `echo !` prints `!`, and that is
+                // what lets `{ echo }; }` close the group at the second `}`.
+                TokenKind::Operator
+                    if !words.is_empty() && matches!(self.text_of(&t), b"{" | b"}" | b"!") =>
+                {
+                    words.push(self.take_word_token(&t));
+                    continue;
                 }
                 TokenKind::Operator if self.text_of(&t) == b"(" => break,
                 _ => break,

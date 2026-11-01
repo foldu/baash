@@ -104,12 +104,13 @@ fn golden_arithmetic_command_as_argument_says_how_to_nest() {
 }
 
 #[test]
-fn golden_function_paren_adjacency() {
-    let (text, _) = fail_one(b"f ( ) { :; }");
-    assert_eq!(
-        text,
-        "t.sh:1:3: error[BSH-E0003]: a function definition needs `()` with no space\n  --> t.sh:1:1: this is the function name\n  help: write `f() { …; }`, or run the command with a space"
-    );
+fn a_layout_separated_paren_pair_is_a_function_definition() {
+    // bash allows `f ( ) { …; }`: layout may separate the name from `(`, and
+    // `(` from `)`. Only something *between* the parens makes it not a
+    // definition.
+    common::ast(b"f ( ) { :; }");
+    common::ast(b"f ()\n{ :; }");
+    assert!(!common::fail(b"f (x) { :; }").is_empty());
 }
 
 #[test]
@@ -156,7 +157,7 @@ fn every_diagnostic_has_a_stable_code_and_a_nonempty_span() {
         &b"echo (x)"[..],
         &b"echo hi | | wc"[..],
         &b"cat <<\nbody"[..],
-        &b"f ( ) { :; }"[..],
+        &b"f (x) { :; }"[..],
     ] {
         for d in common::fail(src) {
             assert!(d.span.start <= d.span.end);

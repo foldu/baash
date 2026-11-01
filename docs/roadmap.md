@@ -1,9 +1,9 @@
 # Roadmap: the 397-case gap
 
 The conformance baseline (README, DESIGN §8.2) started at **1013/2787** and is
-now **2325/2787** (2272 strict). bash passes 2577/2787 on the same run and
-323 of the cases we fail are ones bash passes (we pass 71 it fails), so the net
-gap is 252 cases.
+now **2331/2787** (2278 strict). bash passes 2577/2787 on the same run and
+317 of the cases we fail are ones bash passes (we pass 71 it fails), so the net
+gap is 246 cases.
 This file is the conformance queue, ordered by cases recovered per unit of
 work, with the suite file that measures each item — **not** the current work
 queue. Interactive usability now outranks script conformance; see
@@ -236,7 +236,7 @@ around 2170.**
 ## Tranche 5 — the remaining bash gap (active goal)
 
 Re-measured with `--json --compare bash` after items 1–18 below:
-**2325/2787 total, 2272 strict**. 462 failures, of which **323 are cases bash
+**2331/2787 total, 2278 strict**. 456 failures, of which **317 are cases bash
 passes** (the real queue) and 139 are cases bash fails too (osh-only
 expectations, older-bash behaviour, environment). The plan is to work these in
 order, cheapest first, re-measuring after each commit:
