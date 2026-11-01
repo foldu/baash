@@ -77,6 +77,8 @@ pub mod term;
 pub mod time;
 #[cfg(unix)]
 pub mod wait;
+#[cfg(target_os = "linux")]
+pub mod watch;
 #[cfg(windows)]
 pub mod windows;
 
