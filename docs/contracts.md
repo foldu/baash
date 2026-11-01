@@ -113,7 +113,10 @@ signal dispositions itself. Also: keep the owned fds referenced by
 Terminal code is now tested on a real pty. `open_pty` opens the slave
 `O_NOCTTY` so a test can never steal the harness's controlling terminal; the
 tests install a known canonical `termios` state first, assert every flag raw
-mode clears, and assert full restoration on `Drop`.
+mode clears, and assert full restoration on `Drop`. `set_window_size_fd` states
+the geometry a layout test asserts about: a pty starts at zero columns, which
+`window_size_fd` reads as "not a terminal", and the prompt a test measures can
+be longer than the narrow default the editor then falls back to.
 
 ---
 

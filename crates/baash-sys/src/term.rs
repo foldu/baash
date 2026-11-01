@@ -133,6 +133,22 @@ pub fn window_size_fd(fd: RawFd) -> Option<(u16, u16)> {
     (size.ws_col > 0 && size.ws_row > 0).then_some((size.ws_col, size.ws_row))
 }
 
+/// Set the terminal size of `fd` to `columns` × `rows`.
+///
+/// A pty whose size was never set reports zero, which [`window_size_fd`] reads
+/// as "not a terminal", so a caller that cares about layout (a test asserting
+/// on where the cursor lands) has to state the geometry it means rather than
+/// inherit a default. Both pixel fields are left zero: nothing here needs them.
+pub fn set_window_size_fd(fd: RawFd, columns: u16, rows: u16) -> io::Result<()> {
+    let size = rustix::termios::Winsize {
+        ws_col: columns,
+        ws_row: rows,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    rustix::termios::tcsetwinsize(borrowed(fd), size).map_err(io::Error::from)
+}
+
 /// This process's id (`$$`).
 pub fn pid() -> libc::pid_t {
     rustix::process::getpid().as_raw_pid()

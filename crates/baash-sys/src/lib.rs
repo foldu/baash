@@ -106,7 +106,7 @@ pub use spawn::{Child, FdAction, SpawnPlan, exec, fork_child_status, spawn};
 #[cfg(unix)]
 pub use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 #[cfg(unix)]
-pub use term::{NoEcho, RawMode, parent_pid, pid, window_size, window_size_fd};
+pub use term::{NoEcho, RawMode, parent_pid, pid, set_window_size_fd, window_size, window_size_fd};
 pub use time::strftime_local;
 #[cfg(unix)]
 pub use wait::{wait_any_nohang, wait_pid};

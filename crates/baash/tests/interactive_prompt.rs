@@ -57,6 +57,12 @@ impl Session {
         let pty = open_pty().expect("open a pty");
         let master = pty.master.as_raw_fd();
         let slave = pty.slave.as_raw_fd();
+        // The geometry these tests assert about. Without it the pty reports
+        // zero columns and the editor falls back to a narrow default, so a
+        // prompt that is legitimately long — `$HOME`, `TMPDIR` and the
+        // hostname all appear in it, and a CI runner's name alone is forty
+        // columns — wraps and the cursor column is no longer the prompt width.
+        baash_sys::set_window_size_fd(master, 200, 50).expect("size the pty");
         let binary = env!("CARGO_BIN_EXE_baash");
 
         let mut entries: Vec<Vec<u8>> = Vec::new();
