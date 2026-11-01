@@ -14,8 +14,8 @@ comparable.
 
 | | passing | of 2787 |
 | --- | ---: | ---: |
-| `bsh`, any `## OK <shell>` alternative | **2336** | 83.8% |
-| `bsh`, strict (primary expectation only) | **2283** | 81.9% |
+| `bsh`, any `## OK <shell>` alternative | **2344** | 84.1% |
+| `bsh`, strict (primary expectation only) | **2292** | 82.2% |
 | bash 5.3.20, on the same run | 2577 | 92.5% |
 
 53 of the passing cases pass only because a per-shell `## OK …` alternative

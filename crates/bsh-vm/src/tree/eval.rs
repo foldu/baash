@@ -700,6 +700,68 @@ impl Interp {
         Unwind::Status(last)
     }
 
+    /// Read the file of a substitution whose body is only `< file`.
+    ///
+    /// `None` means the body is a real command. bash grants this meaning only
+    /// inside `$(…)`/backticks: at command level `< file` is an empty command
+    /// with a redirection, which is a no-op.
+    fn read_only_redirect(
+        &mut self,
+        chunk: &Arc<ParsedChunk>,
+    ) -> Option<Result<(Vec<u8>, Status), String>> {
+        let redirect = self.read_only_redirect_of(chunk)?;
+        let word = redirect.target.as_ref()?;
+        // An expansion error has already been reported by `scalar_word`.
+        let Ok(path) = self.scalar_word(word) else {
+            return Some(Ok((Vec::new(), Status::FAILURE)));
+        };
+        let bytes = match std::fs::read(bsh_sys::os::path_from_bytes(&path)) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let mut message = b"bsh: ".to_vec();
+                message.extend_from_slice(&path);
+                message.extend_from_slice(b": ");
+                message.extend_from_slice(error.to_string().as_bytes());
+                message.push(b'\n');
+                let _ = self.write_err(&message);
+                return Some(Ok((Vec::new(), Status::FAILURE)));
+            }
+        };
+        let mut bytes = bytes;
+        while bytes.last() == Some(&b'\n') {
+            bytes.pop();
+        }
+        Some(Ok((bytes, Status::SUCCESS)))
+    }
+
+    /// The single `< file` redirection of a body that has nothing else.
+    fn read_only_redirect_of(&self, chunk: &Arc<ParsedChunk>) -> Option<bsh_syntax::Redirect> {
+        let mut id = chunk.ast.root;
+        loop {
+            id = match &chunk.ast.node(id).kind {
+                bsh_syntax::NodeKind::List { items } if items.len() == 1 => items[0].node,
+                bsh_syntax::NodeKind::AndOr { first, rest } if rest.is_empty() => *first,
+                bsh_syntax::NodeKind::Pipeline {
+                    negated: false,
+                    stages,
+                    ..
+                } if stages.len() == 1 => stages[0],
+                _ => break,
+            };
+        }
+        let bsh_syntax::NodeKind::Simple(command) = &chunk.ast.node(id).kind else {
+            return None;
+        };
+        if !command.words.is_empty()
+            || !command.assignments.is_empty()
+            || command.redirects.len() != 1
+        {
+            return None;
+        }
+        let redirect = command.redirects[0].clone();
+        (redirect.op == bsh_syntax::RedirectOp::Read).then_some(redirect)
+    }
+
     fn eval_while(
         &mut self,
         chunk: &Arc<ParsedChunk>,
@@ -848,6 +910,13 @@ impl Interp {
                 return Ok((Vec::new(), Status(2)));
             }
         };
+
+        // `$(< file)` is bash's shorthand for reading a file: a substitution
+        // whose body is *only* a read redirection has no command to run, so
+        // the file's contents are the result.
+        if let Some(result) = self.read_only_redirect(&chunk) {
+            return result;
+        }
 
         let capture = bsh_sys::create_unlinked_temp(0)
             .map_err(|error| format!("cannot create a capture file: {error}"))?;

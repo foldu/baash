@@ -210,6 +210,25 @@ impl Interp {
         //    their own. Everything is expanded in source order first; array
         //    literals defer writing to `apply_assignments` because bash
         //    expands every element before it modifies the array.
+        // POSIX XCU 2.9.1: a command with no command word performs its
+        // redirections *before* expanding its assignments, so the stderr of a
+        // command substitution inside one goes where the redirection sends it
+        // (`x=$(cmd) 2>/dev/null` prints nothing). With a command word the
+        // order is the other way round, and bash agrees with POSIX there.
+        let early = if argv.is_empty() && !command.redirects.is_empty() {
+            match self.apply_redirects(chunk, &command.redirects) {
+                Ok(saved) => Some(saved),
+                Err(()) => {
+                    let error = ShellError::Utility {
+                        status: Status::FAILURE,
+                        redirection: true,
+                    };
+                    return self.apply_consequence(error, Status::FAILURE);
+                }
+            }
+        } else {
+            None
+        };
         let mut actions: Vec<AssignmentAction> = Vec::with_capacity(command.assignments.len());
         for assignment in &command.assignments {
             let name = chunk.source.bytes()[assignment.name.clone()].to_vec();
@@ -354,6 +373,7 @@ impl Interp {
         if argv.is_empty() {
             return self.exec_assignments_only(
                 chunk,
+                early,
                 &command.redirects,
                 &actions,
                 assignment_status,
@@ -616,19 +636,25 @@ impl Interp {
     fn exec_assignments_only(
         &mut self,
         chunk: &Arc<ParsedChunk>,
+        early: Option<super::redir::SavedFds>,
         redirects: &[Redirect],
         actions: &[AssignmentAction],
         status: Status,
     ) -> Unwind {
-        let saved = match self.apply_redirects(chunk, redirects) {
-            Ok(saved) => saved,
-            Err(()) => {
-                let error = ShellError::Utility {
-                    status: Status::FAILURE,
-                    redirection: true,
-                };
-                return self.apply_consequence(error, Status::FAILURE);
-            }
+        // The caller has already applied the redirections when the assignment
+        // values had to be expanded under them.
+        let saved = match early {
+            Some(saved) => saved,
+            None => match self.apply_redirects(chunk, redirects) {
+                Ok(saved) => saved,
+                Err(()) => {
+                    let error = ShellError::Utility {
+                        status: Status::FAILURE,
+                        redirection: true,
+                    };
+                    return self.apply_consequence(error, Status::FAILURE);
+                }
+            },
         };
         if let Err(failure) = self.apply_assignments(actions) {
             self.restore_fds(saved);

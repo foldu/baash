@@ -1799,3 +1799,44 @@ fn a_command_substitution_drops_nul_bytes() {
     assert_eq!(stdout(&output), "2ab\n");
     assert!(!stderr(&output).contains("ignored null byte"));
 }
+
+#[test]
+fn a_substitution_that_is_only_a_read_redirect_returns_the_file() {
+    let dir = TestDir::new("read-redirect");
+    let path = dir.at("data.txt");
+    std::fs::write(&path, "one\ntwo\n\n").expect("write data");
+    assert_eq!(out(&format!("echo \"$(< {path})\"")), "one\ntwo\n");
+    assert_eq!(out(&format!("x=`< {path}`; echo \"$x\"")), "one\ntwo\n");
+
+    // A real command is still a real command, and a missing file reports.
+    assert_eq!(out("echo $(echo hi)"), "hi\n");
+    let output = run("echo \"$(< /no-such-file-here)\"; echo s=$?");
+    assert_eq!(stdout(&output), "\ns=0\n");
+    assert!(stderr(&output).contains("No such file"));
+}
+
+#[test]
+fn file_descriptors_can_be_moved_and_duplicated_onto_themselves() {
+    let dir = TestDir::new("fd-move");
+    let path = dir.at("moved.txt");
+    let script = format!(
+        ": 3>&3; echo self-dup\n\
+         exec 5>{path}; exec 6>&5-; echo hi >&5; echo ho >&6; exec 6>&-; cat {path}"
+    );
+    let output = run(&script);
+    assert_eq!(stdout(&output), "self-dup\nho\n");
+    // `5` was closed by the move, so the write to it fails (and says so).
+    assert!(stderr(&output).contains("Bad file descriptor"));
+}
+
+#[test]
+fn an_assignment_only_command_redirects_before_it_expands() {
+    // POSIX XCU 2.9.1: no command word means the redirections happen first,
+    // so the stderr of a command substitution inside the value is redirected.
+    let dir = TestDir::new("assign-redirect");
+    let path = dir.at("stderr.txt");
+    let script = format!("x=$(echo out; echo err 1>&2) 2>{path}\necho \"x=$x\"\ncat {path}");
+    let output = run(&script);
+    assert_eq!(stdout(&output), "x=out\nerr\n");
+    assert_eq!(stderr(&output), "");
+}

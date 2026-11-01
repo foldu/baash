@@ -169,6 +169,7 @@ impl Interp {
                     actions.push(bsh_sys::FdAction::dup2(file.as_raw_fd(), to));
                     keep.push(file);
                 }
+                Step::Dup { from, to } if from == to => {}
                 Step::Dup { from, to } => actions.push(bsh_sys::FdAction::dup2(from, to)),
                 Step::Close { to } => actions.push(bsh_sys::FdAction::close(to)),
                 Step::Temp { fd, to } => {
@@ -250,6 +251,18 @@ impl Interp {
                         });
                         continue;
                     }
+                    // `[n]>&word-` is bash's *move*: duplicate, then close the
+                    // descriptor the word names, so only the copy is left.
+                    if word.last() == Some(&b'-')
+                        && let Some(fd) = descriptor(&word[..word.len() - 1])
+                    {
+                        steps.push(Step::Dup {
+                            from: fd,
+                            to: target,
+                        });
+                        steps.push(Step::Close { to: fd });
+                        continue;
+                    }
                     // bash's obsolete `>&file` means `&>file`; `<&file` is an
                     // error because there is nothing to duplicate.
                     if redirect.op == RedirectOp::DupWrite {
@@ -320,7 +333,7 @@ impl Interp {
 
     /// Expand a word as a scalar (no splitting, no globbing) — the rule for
     /// here-strings and for `n>&m`.
-    fn scalar_word(&mut self, word: &bsh_lang::Word) -> Result<Vec<u8>, ()> {
+    pub(crate) fn scalar_word(&mut self, word: &bsh_lang::Word) -> Result<Vec<u8>, ()> {
         match expand_word_with(word, self, Mode::Assignment) {
             Ok(mut fields) => Ok(fields.pop().unwrap_or_default()),
             Err(error) => {
@@ -436,6 +449,8 @@ fn apply_step(step: Step) -> std::io::Result<()> {
             let file = bsh_sys::open_cloexec(&path, flags, 0o666)?;
             adopt(file, to)
         }
+        // `3>&3` on a closed descriptor is a no-op in bash, not `EBADF`.
+        Step::Dup { from, to } if from == to => Ok(()),
         Step::Dup { from, to } => bsh_sys::dup2(from, to),
         Step::Close { to } => {
             if bsh_sys::fd_is_open(to) {
