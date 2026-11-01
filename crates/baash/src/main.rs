@@ -420,16 +420,33 @@ fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
     }
 }
 
-/// Read the interactive startup file.
+/// The default configuration shipped inside the binary.
 ///
-/// `--norc` skips it and `--rcfile FILE` replaces it. The default is the XDG
-/// configuration file `$XDG_CONFIG_HOME/baash/config.sh`
-/// (`~/.config/baash/config.sh`) when it exists, otherwise `~/.bashrc`; a
-/// missing file is silently ignored, which is what makes `--rcfile /dev/null`
-/// the portable way to ask for no startup file. The baash file comes first and
-/// lives under the user's configuration directory rather than in `$HOME`: a
-/// bash rc full of `bind`/`complete -D` half-applies in this shell, so a user
-/// who wants a baash-specific file gets one without renaming the bash file.
+/// `config/config.sh` in the source tree, compiled in so a plain `cargo build`
+/// behaves like an installed shell. A distributor can override it by
+/// installing `$XDG_CONFIG_DIRS/baash/config.sh`, which is read instead.
+const DEFAULT_CONFIG: &[u8] = include_bytes!("../../../config/config.sh");
+
+/// The name the built-in default is reported under in diagnostics.
+const DEFAULT_CONFIG_NAME: &str = "(built-in config)";
+
+/// Read the interactive startup files.
+///
+/// `--norc` skips them and `--rcfile FILE` replaces them. Otherwise there are
+/// two layers, in the order an interactive shell wants them:
+///
+/// 1. **the shell's defaults** — `$XDG_CONFIG_DIRS/baash/config.sh` if a
+///    distributor installed one, else the copy built into the binary
+///    ([`DEFAULT_CONFIG`]);
+/// 2. **the user's own** — `$XDG_CONFIG_HOME/baash/config.sh`
+///    (`~/.config/baash/config.sh`), or `~/.bashrc` when there is none.
+///
+/// A missing file is silently ignored at every step, which is what keeps
+/// `--rcfile /dev/null` the portable way to ask for no startup file. The user
+/// file is the XDG one and lives under the configuration directory rather than
+/// in `$HOME`: a bash rc full of `bind`/`complete -D` half-applies in this
+/// shell, so a user who wants a baash-specific file gets one without renaming
+/// the bash file.
 fn read_startup_file(shell: &mut Interp, flags: &ShellFlags) {
     if flags.norc {
         return;
@@ -438,9 +455,52 @@ fn read_startup_file(shell: &mut Interp, flags: &ShellFlags) {
     read_rcdir(shell, flags);
 }
 
-/// The startup files the flags name: `--rcfile`, or the default.
+/// The startup files the flags name: `--rcfile`, or the default layers.
 fn read_rc_files(shell: &mut Interp, flags: &ShellFlags) {
-    read_rc_file(shell, flags);
+    if let Some(path) = &flags.rcfile {
+        run_startup_file(shell, path);
+        return;
+    }
+    match system_config() {
+        Some(path) => run_startup_file(shell, &path),
+        None => {
+            shell.run_named(DEFAULT_CONFIG_NAME, DEFAULT_CONFIG);
+        }
+    }
+    if let Some(path) = user_config() {
+        run_startup_file(shell, &path);
+    }
+}
+
+/// Read and run one startup file; a file that cannot be read is not an error.
+fn run_startup_file(shell: &mut Interp, path: &std::path::Path) {
+    let Ok(bytes) = std::fs::read(path) else {
+        return;
+    };
+    shell.run_named(&path.to_string_lossy(), &bytes);
+}
+
+/// The distributor's configuration file, if one is installed.
+///
+/// The first `$XDG_CONFIG_DIRS` entry that has a `baash/config.sh` wins, and
+/// nothing after it is consulted: the search path is an override list, not a
+/// set of fragments to concatenate.
+fn system_config() -> Option<std::path::PathBuf> {
+    baash_sys::dirs::config_dirs()
+        .into_iter()
+        .map(|dir| dir.join("baash").join("config.sh"))
+        .find(|path| path.is_file())
+}
+
+/// The user's own startup file: the baash one, or a bash rc as a fallback.
+fn user_config() -> Option<std::path::PathBuf> {
+    let ours = baash_sys::dirs::config_home().map(|dir| dir.join("baash").join("config.sh"));
+    if let Some(path) = ours.filter(|path| path.is_file()) {
+        return Some(path);
+    }
+    baash_sys::dirs::home_dir()
+        .map(|home| home.join(".bashrc"))
+        .filter(|path| path.is_file())
 }
 
 /// `--rcdir DIR`: every regular file in the directory, in name order.
@@ -467,37 +527,6 @@ fn read_rcdir(shell: &mut Interp, flags: &ShellFlags) {
         };
         shell.run_named(&path.to_string_lossy(), &bytes);
     }
-}
-
-fn read_rc_file(shell: &mut Interp, flags: &ShellFlags) {
-    let path = match &flags.rcfile {
-        Some(path) => path.clone(),
-        None => {
-            let Some(path) = default_rc_file() else {
-                return;
-            };
-            path
-        }
-    };
-    let Ok(bytes) = std::fs::read(&path) else {
-        return;
-    };
-    shell.run_named(&path.to_string_lossy(), &bytes);
-}
-
-/// The startup file when `--rcfile` does not name one.
-///
-/// The configuration directory is the XDG one and the file has a `.sh`
-/// extension, so a baash-specific file is `~/.config/baash/config.sh`: not a
-/// dotfile in `$HOME`, and named like the shell script it is (`~/.bashrc` and
-/// its trailing `rc` are bash's convention, not one this shell has to inherit).
-/// `~/.bashrc` stays the fallback for a user with no baash file yet.
-fn default_rc_file() -> Option<std::path::PathBuf> {
-    let ours = baash_sys::dirs::config_home().map(|dir| dir.join("baash").join("config.sh"));
-    if let Some(path) = ours.filter(|path| path.is_file()) {
-        return Some(path);
-    }
-    baash_sys::dirs::home_dir().map(|home| home.join(".bashrc"))
 }
 
 fn shell(interactive: bool, flags: &ShellFlags) -> Interp {

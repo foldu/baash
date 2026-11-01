@@ -29,6 +29,15 @@
           # build stays a packaging gate rather than a second test run.
           doCheck = false;
 
+          # The default configuration is compiled into the binary; this copy is
+          # what a distributor installs as `$XDG_CONFIG_DIRS/baash/config.sh`
+          # (/etc/xdg/baash/config.sh) to replace it. On this machine the
+          # store path is not on `XDG_CONFIG_DIRS`, so the built-in copy is what
+          # runs unless someone adds it.
+          postInstall = ''
+            install -Dm644 config/config.sh "$out/etc/xdg/baash/config.sh"
+          '';
+
           meta = {
             description = "POSIX- and bash-compatible interactive shell";
             mainProgram = "baash";

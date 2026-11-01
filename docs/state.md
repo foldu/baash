@@ -54,7 +54,7 @@ a stale brief has already cost two wrong scopes (arrays: 54 vs real; namerefs:
 | of the whole suite (3971 cases) | 56.3 % |
 | as a fraction of bash's score | 2344 / 2577 = 91.0 % |
 | share of the bash gap closed since 1013 | 1331 / 1564 = 85.1 % |
-| our test count | 1289 |
+| our test count | 1290 |
 
 Measured with `bash 5.3.20` as the comparison shell, harness forced to
 `LC_ALL=C` (bash scores *worse* under `C.UTF-8`: 2574 → 2435, so the C locale
@@ -218,9 +218,10 @@ delegates everything else: line editing to `baash-repl`, execution to the
   (`crates/baash/tests/interactive_signals.rs`);
 * `$!`, `wait` (pids, and bare `wait` for all live children) and `kill` (pids
   and signals) for children *this* shell started;
-* `--rcfile FILE` / `--norc`; the default startup file is
-  `$XDG_CONFIG_HOME/baash/config.sh` (`~/.config/baash/config.sh`) when it
-  exists, otherwise `~/.bashrc` (see §9).
+* `--rcfile FILE` / `--norc`; startup reads the shell's own defaults first
+  (`config/config.sh`, or `$XDG_CONFIG_DIRS/baash/config.sh` when a distributor
+  installs one) and then the user's file — `$XDG_CONFIG_HOME/baash/config.sh`
+  (`~/.config/baash/config.sh`), or `~/.bashrc` when there is none (see §9).
 
 **Missing, in order of how badly it hurts an interactive user:**
 
@@ -522,18 +523,22 @@ Where the waves stand:
 
 ## 9. Open questions
 
-* **Startup file — decided.** The baash file is the XDG one,
-  `$XDG_CONFIG_HOME/baash/config.sh` (`~/.config/baash/config.sh`), sourced when
-  it exists and otherwise `~/.bashrc`; `--rcfile` and `--norc` still win. The
-  name is `config.sh` rather than `baashrc`: it is a shell script, so it gets a
-  script's extension (every editor highlights it) and no `rc` suffix borrowed
-  from bash. A `~/.bashrc` full of `bind`/`complete -D`/`PROMPT_COMMAND`
-  half-applies, so a user who wants a baash-specific file gets one without
-  renaming the bash file, and it lives where the platform keeps configuration
-  rather than as a dotfile in `$HOME`. `baash_sys::dirs` resolves both bases
-  for Unix (XDG) and Windows (roaming and local profiles), and follows the
-  specification's rule that a relative `XDG_*_HOME` is the same as an unset
-  one.
+* **Startup files are the shell's defaults, then the user's — decided.** Two
+  layers, in that order, because a shell that ships no defaults leaves every
+  user to rediscover coloured `ls`, and a shell that only has defaults cannot
+  be tuned. The first layer is `config/config.sh` compiled into the binary (a
+  distributor replaces it with `$XDG_CONFIG_DIRS/baash/config.sh`), the second
+  is `$XDG_CONFIG_HOME/baash/config.sh` (`~/.config/baash/config.sh`) or, when
+  that does not exist, `~/.bashrc`; `--rcfile` and `--norc` still win. Every
+  layer is optional and a missing file is not an error. The user file's name is
+  `config.sh` rather than `baashrc`: it is a shell script, so it gets a script's
+  extension (every editor highlights it) and no `rc` suffix borrowed from bash.
+  A `~/.bashrc` full of `bind`/`complete -D`/`PROMPT_COMMAND` half-applies, so a
+  user who wants a baash-specific file gets one without renaming the bash file,
+  and it lives where the platform keeps configuration rather than as a dotfile
+  in `$HOME`. `baash_sys::dirs` resolves all three bases for Unix (XDG) and
+  Windows (roaming and local profiles), and follows the specification's rule
+  that a relative `XDG_*` path is the same as an unset one.
 * **History is a database, not a file — decided.** A line-oriented `HISTFILE`
   cannot record when a command ran, where, or with what status, and two shells
   sharing one rewrite each other's content. `baash-history` keeps

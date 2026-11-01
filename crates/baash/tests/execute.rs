@@ -1158,6 +1158,84 @@ fn dash_o_sets_a_shopt_option_before_parsing() {
     assert_eq!(code(&output), 2, "an unknown shopt name must be rejected");
 }
 
+/// The `alias` listing for `names`, as an interactive shell sees it.
+fn aliases(home: &Path, config: &Path, system: &Path, args: &[&str]) -> (String, i32) {
+    let output = baash()
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", config)
+        .env("XDG_CONFIG_DIRS", system)
+        .arg("-i")
+        .args(args)
+        .output()
+        .expect("spawn baash");
+    (stdout(&output), code(&output))
+}
+
+#[test]
+fn the_built_in_config_is_read_first_and_the_user_file_overrides_it() {
+    let dir = TestDir::new("builtin-config");
+    let home = dir.path().join("home");
+    let config = dir.path().join("config");
+    let system = dir.path().join("system");
+    for path in [&home, &config, &system] {
+        std::fs::create_dir_all(path).expect("create directory");
+    }
+
+    // Nothing installed and no user file: the copy compiled into the binary
+    // runs, so `ls` is coloured and hyperlinked and `ll`/`la` exist.
+    let (listing, status) = aliases(
+        &home,
+        &config,
+        &system,
+        &["-c", "alias ls; alias ll; alias la"],
+    );
+    assert_eq!(status, 0, "{listing}");
+    assert!(
+        listing.contains("alias ls='ls "),
+        "the default aliases `ls`: {listing:?}"
+    );
+    #[cfg(target_os = "linux")]
+    assert!(
+        listing.contains("--hyperlink=auto") && listing.contains("--color=auto"),
+        "GNU `ls` gets hyperlinks and colour: {listing:?}"
+    );
+    assert!(listing.contains("alias ll='ls -lh'"), "{listing:?}");
+    assert!(listing.contains("alias la='ls -lAh'"), "{listing:?}");
+
+    // A user file is sourced after the defaults, so it wins for the names it
+    // defines and leaves the rest alone.
+    std::fs::create_dir_all(config.join("baash")).expect("create config dir");
+    std::fs::write(config.join("baash/config.sh"), "alias ls='ls -laF'\n")
+        .expect("write user config");
+    let (listing, status) = aliases(&home, &config, &system, &["-c", "alias ls; alias ll"]);
+    assert_eq!(status, 0, "{listing}");
+    assert!(listing.starts_with("alias ls='ls -laF'"), "{listing:?}");
+    assert!(
+        listing.contains("alias ll="),
+        "the user file does not replace the defaults: {listing:?}"
+    );
+
+    // A distributor's file replaces the built-in one instead of layering on
+    // top: the search path chooses one default, and `ll` is not defined. With
+    // no user file to override it, the installed value is what `ls` means.
+    let bare = dir.path().join("empty-config");
+    std::fs::create_dir_all(&bare).expect("create empty config dir");
+    std::fs::create_dir_all(system.join("baash")).expect("create system dir");
+    std::fs::write(system.join("baash/config.sh"), "alias ls='ls -1'\n")
+        .expect("write system config");
+    let (listing, _) = aliases(&home, &bare, &system, &["-c", "alias ls; alias ll"]);
+    assert!(listing.starts_with("alias ls='ls -1'"), "{listing:?}");
+    assert!(
+        !listing.contains("alias ll="),
+        "the installed file replaces the built-in default: {listing:?}"
+    );
+
+    // `--norc` skips both layers.
+    let (listing, status) = aliases(&home, &config, &system, &["--norc", "-c", "alias ls"]);
+    assert_eq!(status, 1, "an undefined alias is an error: {listing:?}");
+    assert!(listing.is_empty(), "{listing:?}");
+}
+
 #[test]
 fn the_default_startup_file_is_the_xdg_config_one() {
     let dir = TestDir::new("xdg-rc");

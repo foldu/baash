@@ -45,6 +45,36 @@ pub fn config_home() -> Option<PathBuf> {
     xdg("XDG_CONFIG_HOME").or_else(|| home_dir().map(|home| home.join(".config")))
 }
 
+/// `$XDG_CONFIG_DIRS`, or `/etc/xdg`.
+///
+/// The search path for system-wide configuration, in order. Entries are
+/// `:`-separated and only absolute paths count, as the specification says; an
+/// empty result means the specification's default, not "no system
+/// configuration".
+#[cfg(unix)]
+pub fn config_dirs() -> Vec<PathBuf> {
+    let Some(value) = non_empty("XDG_CONFIG_DIRS") else {
+        return vec![PathBuf::from("/etc/xdg")];
+    };
+    let dirs: Vec<PathBuf> = std::env::split_paths(&value)
+        .filter(|dir| dir.is_absolute())
+        .collect();
+    if dirs.is_empty() {
+        vec![PathBuf::from("/etc/xdg")]
+    } else {
+        dirs
+    }
+}
+
+/// No system-wide configuration directory on Windows.
+///
+/// There is no `%XDG_CONFIG_DIRS%` equivalent, and the shell's defaults are
+/// built in, so a distributor has nothing to install here.
+#[cfg(windows)]
+pub fn config_dirs() -> Vec<PathBuf> {
+    Vec::new()
+}
+
 /// `%APPDATA%`, or `~/AppData/Roaming`.
 #[cfg(windows)]
 pub fn config_home() -> Option<PathBuf> {

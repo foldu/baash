@@ -130,10 +130,15 @@ permitted `unsafe`, and everything else carries `#![forbid(unsafe_code)]`.
 so the editor and the `history`/`fc` built-ins share one ring; it still builds
 its own in tests and never touches an interpreter.
 
-An interactive shell sources its startup file from the XDG configuration
-directory — `$XDG_CONFIG_HOME/baash/config.sh`, normally
-`~/.config/baash/config.sh` — when that file exists, otherwise `~/.bashrc`
-(`--rcfile` and `--norc` still win). History goes to
+An interactive shell reads two configuration layers. The first is baash's own
+defaults, compiled into the binary: `ls` in colour with clickable OSC 8
+hyperlinks, `ll` and `la` for long listings, and a coloured `grep`. A
+distributor can replace that layer by installing
+`$XDG_CONFIG_DIRS/baash/config.sh` (`/etc/xdg/baash/config.sh`). The second
+layer is yours — `$XDG_CONFIG_HOME/baash/config.sh`, normally
+`~/.config/baash/config.sh`, or `~/.bashrc` when you have none — and it is
+sourced last, so an alias defined there overrides the default instead of
+having to copy it. `--rcfile`/`--norc` still win. History goes to
 `$XDG_DATA_HOME/baash/history.db` (`~/.local/share/baash/history.db`) rather
 than a `HISTFILE`, so two shells share one database instead of rewriting each
 other's history.

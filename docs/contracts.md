@@ -1112,13 +1112,20 @@ Two status codes are deliberately not bash's, both annotated as bugs in the
 suite: `complete -p NAME` for an unknown NAME is 0 (bash 1), and `complete NAME`
 with no action is 2 (bash 0).
 
-`crates/baash` reads a startup file only when the shell is interactive:
-`--rcfile FILE` replaces the default, `--norc` disables it, and a missing file
-is ignored — which is what makes `--rcfile /dev/null` the portable way to ask
-for no startup file at all. The default is `$XDG_CONFIG_HOME/baash/config.sh`
-(`~/.config/baash/config.sh`), falling back to `~/.bashrc`; the two bases come
-from `baash_sys::dirs`, which applies the XDG rule that a relative `XDG_*_HOME`
-is ignored rather than resolved against the working directory.
+`crates/baash` reads startup files only when the shell is interactive, and it
+reads two layers. First **the shell's defaults**: `$XDG_CONFIG_DIRS/baash/config.sh`
+when a distributor installed one, otherwise `config/config.sh` compiled into the
+binary (coloured, hyperlinked `ls`, `ll`/`la`, coloured `grep`). Then **the
+user's own**: `$XDG_CONFIG_HOME/baash/config.sh`
+(`~/.config/baash/config.sh`), or `~/.bashrc` when there is none. Later layers
+override earlier ones, which is what lets a user retune one alias without
+copying the file, and what keeps the defaults improving with the shell.
+`--rcfile FILE` replaces both layers and `--norc` disables both, and a missing
+file is ignored at every step — which is what makes `--rcfile /dev/null` the
+portable way to ask for no startup file at all. The bases come from
+`baash_sys::dirs`, which applies the XDG rules: a relative `XDG_*` path is
+ignored rather than resolved against the working directory, and the first
+`$XDG_CONFIG_DIRS` entry with a `baash/config.sh` wins.
 
 ### Arithmetic: who expands the text
 
