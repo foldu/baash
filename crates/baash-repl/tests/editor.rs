@@ -647,8 +647,8 @@ fn ghost_text_completes_from_history_and_is_accepted_by_right_or_end() {
         }
         let frame = output_text(&sink);
         assert!(
-            frame.contains("\x1b[90mello\x1b[39m"),
-            "the suggestion is muted: {frame:?}"
+            frame.contains("\x1b[2mello\x1b[22m"),
+            "the suggestion is dim: {frame:?}"
         );
         editor.step(accept.clone()).unwrap();
         assert_eq!(
@@ -696,14 +696,14 @@ fn escape_dismisses_the_ghost_and_typing_brings_it_back() {
     for key in chars("echo h") {
         editor.step(key).unwrap();
     }
-    assert!(output_text(&sink).contains("\x1b[90mello\x1b[39m"));
+    assert!(output_text(&sink).contains("\x1b[2mello\x1b[22m"));
 
     // Escape removes it for this line; Right/End cannot accept text that is
     // not painted.
     clear_output(&sink);
     editor.step(Key::Esc).unwrap();
     assert!(
-        !output_text(&sink).contains("\x1b[90m"),
+        !output_text(&sink).contains("\x1b[2m"),
         "the ghost is gone after Escape"
     );
     editor.step(Key::Right).unwrap();
@@ -713,7 +713,7 @@ fn escape_dismisses_the_ghost_and_typing_brings_it_back() {
     editor.step(Key::Char('e')).unwrap();
     assert_eq!(editor.line().buffer(), b"echo he");
     assert!(
-        output_text(&sink).contains("\x1b[90mllo\x1b[39m"),
+        output_text(&sink).contains("\x1b[2mllo\x1b[22m"),
         "typing after Escape re-enables the suggestion"
     );
     editor.step(Key::End).unwrap();
@@ -738,7 +738,7 @@ fn a_whitespace_only_line_has_no_ghost_text() {
     for key in chars("   ") {
         editor.step(key).unwrap();
     }
-    assert!(!output_text(&sink).contains("\x1b[90m"));
+    assert!(!output_text(&sink).contains("\x1b[2m"));
 }
 
 #[test]
