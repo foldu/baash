@@ -1,0 +1,118 @@
+# Tag `vX.Y.Z` -> a GitHub release with the binaries.
+#
+# Both binaries come out of the flake, so a release is the artifact the checks
+# built rather than a second, separately-parameterised build. The tag is the
+# version: `just release` bumps `Cargo.toml`, commits, tags `v{{version}}` and
+# pushes, and the first job here refuses a tag that disagrees with the manifest.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep in step with `rustVersion` in flake.nix: the same compiler the flake
+  # checks use.
+  RUST_VERSION: "1.99.1"
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - id: read
+        run: |
+          set -eu
+          version=$(cargo metadata --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "baash") | .version')
+          tag=${GITHUB_REF_NAME#v}
+          if [ "$version" != "$tag" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match baash $version in Cargo.toml — cut releases with 'just release', not by tagging by hand"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - run: nix build .#default -o result
+      - name: Package
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -eu
+          name="baash-$VERSION-x86_64-linux"
+          mkdir -p "dist/$name/bin" "dist/$name/share/baash"
+          cp -L result/bin/baash "dist/$name/bin/"
+          cp config/config.sh "dist/$name/share/baash/"
+          cp LICENSE README.md "dist/$name/"
+          tar -C dist -czf "$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: baash-*.tar.gz
+          if-no-files-found: error
+
+  windows:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+      - run: nix build .#windows -o result
+      - name: Package
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -eu
+          name="baash-$VERSION-x86_64-pc-windows-gnu"
+          mkdir -p "dist/$name/bin" "dist/$name/share/baash"
+          cp -L result/bin/baash.exe "dist/$name/bin/"
+          cp config/config.sh "dist/$name/share/baash/"
+          cp LICENSE README.md "dist/$name/"
+          cd dist && zip -r "$name.zip" "$name" >/dev/null
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: baash-*.zip
+          if-no-files-found: error
+
+  release:
+    needs: [version, linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          set -eu
+          cd dist
+          sha256sum ./*.tar.gz ./*.zip > SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # A tag with a suffix (`v0.2.0-rc.1`) is a prerelease.
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" \
+            --title "baash ${GITHUB_REF_NAME#v}" \
+            --generate-notes $prerelease \
+            dist/*.tar.gz dist/*.zip dist/SHA256SUMS

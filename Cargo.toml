@@ -7,6 +7,8 @@ version = "0.0.0"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
+# Not published: the crates exist to build the binary.
+publish = false
 
 [workspace.dependencies]
 baash-diag = { path = "crates/baash-diag" }

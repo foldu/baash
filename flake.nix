@@ -227,6 +227,9 @@
               # is absent. dash is the reference for --compare.
               pkgs.python3
               pkgs.dash
+              # Task runner and the release driver (`justfile`, `.release.toml`).
+              pkgs.just
+              pkgs.cargo-release
               # `crates/baash/tests/interactive_zoxide.rs` drives the real
               # `zoxide init bash` script against a pty, so the integration is
               # tested against the file a user would source and not a copy of it.

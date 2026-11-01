@@ -1,0 +1,18 @@
+# `cargo release`, driven by `just release <version>`.
+#
+# The tag is the version the workflow insists on: `v{{version}}` must equal the
+# `baash` version in Cargo.toml, or the release job refuses to publish.
+allow-branch = ["master"]
+# One version, one tag: every crate inherits `version.workspace`, so `v0.0.1`
+# is the tag rather than fifteen per-crate ones.
+shared-version = true
+consolidate-commits = true
+# Nothing here goes to crates.io; the crates exist to build the binary.
+publish = false
+# The recipe pushes branch and tag itself, after the commit exists.
+push = false
+sign-commit = false
+sign-tag = false
+tag-name = "v{{version}}"
+tag-message = "baash {{version}}"
+pre-release-commit-message = "release {{version}}"

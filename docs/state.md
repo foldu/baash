@@ -110,6 +110,15 @@ The Windows derivation is the reason the old CI job shrank from a `nix shell`
 package list to `nix build .#windows`: rustup, zig, cargo-zigbuild, the host
 `cc` and the `windres` shim are all inputs of the derivation now.
 
+GitHub is a mirror, not the source of truth, so its workflow
+(`.github/workflows/ci.yml`) runs the same three gates with a rustup toolchain
+and no nix — the build has no C dependencies, so that is enough, and it keeps
+the mirror fast. Releases live there: a tag `vX.Y.Z` builds both binaries from
+the flake and publishes them with checksums, and the first job refuses a tag
+whose version disagrees with `Cargo.toml`. Cutting one is `just release
+<version>` — `cargo-release` with `release.toml` — so the manifest bump, the
+commit and the tag cannot drift apart.
+
 ## 3. Layers
 
 72 924 lines of `src` across 15 crates — the raw line count under each crate's

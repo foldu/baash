@@ -168,6 +168,16 @@ cargo build --workspace
 nix build .#default
 ```
 
+`just` wraps the loops the pipeline runs:
+
+```sh
+just check         # nix flake check: build, fmt, clippy, the Windows exe
+just test          # the full suite, on a real pty
+just conformance   # the ratchet
+just build         # result/bin/baash
+just windows       # result/bin/baash.exe
+```
+
 ### If the checkout path is not ASCII
 
 The directory name contains `ß`, and some toolchains mangle non-ASCII paths
@@ -186,10 +196,51 @@ is the real fix (DESIGN.md §11).
 
 ## CI
 
-GitLab CI on `lab.home.5kw.li`. Every job is tagged `nix`, because everything
-runs through the flake and the untagged runner has no nix daemon. Jobs:
-`fmt` + `clippy`, `cargo test --workspace`, and `nix build` with the binary
-exported as an artifact. The repository must be public.
+GitLab CI on `lab.home.5kw.li` is the source of truth; the repository is
+mirrored to GitHub, which runs a lighter copy of the same gates.
+
+Every GitLab job is tagged `nix`, because everything runs through the flake and
+the untagged runner has no nix daemon. The pipeline is:
+
+* `nix flake check` — the release build, `cargo fmt`, `cargo clippy` and the
+  Windows executable are all derivations (`flake.nix`), so the job is one
+  command. Nothing in it knows what a compiler needs on `PATH`.
+* `cargo test --workspace --all-features`.
+* The conformance ratchet.
+
+The last two are jobs rather than checks for reasons the sandbox dictates: the
+pty-driven `interactive_*` tests need a real `/dev/pts` (in a build sandbox
+`openpty` succeeds and reads hang), and 18 conformance cases read the machine —
+hostname, tzdata, effective uid, wall-clock timers — so a sandbox measures 2326
+where a real environment measures 2344.
+
+GitHub Actions (`.github/workflows/ci.yml`) mirrors the same three gates with a
+rustup toolchain instead of nix, which is enough because the build has no C
+dependencies. It is the second opinion, not the ratchet of record.
+
+## Releases
+
+A tag is a version: `vX.Y.Z`, and it must match the `baash` version in
+`Cargo.toml` — the release workflow refuses a hand-made tag that disagrees.
+
+```sh
+just release 0.2.0      # or: just release patch
+```
+
+runs the gates (`check`, `test`, `conformance`), then bumps, commits, tags
+`v0.2.0` and pushes. The tag builds both binaries from the
+flake and publishes a GitHub release containing
+
+```
+baash-0.2.0-x86_64-linux.tar.gz
+baash-0.2.0-x86_64-pc-windows-gnu.zip
+SHA256SUMS
+```
+
+each archive holding `bin/baash` (or `bin/baash.exe`), the default
+`share/baash/config.sh`, `LICENSE` and `README.md`. A tag with a suffix
+(`v0.2.0-rc.1`) publishes as a prerelease. The tooling is `cargo-release`
+configured in `release.toml` and driven by the `justfile`.
 
 ## Conformance
 

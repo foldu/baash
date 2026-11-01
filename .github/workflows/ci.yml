@@ -1,0 +1,72 @@
+# The GitHub mirror's copy of the checks. GitLab is the source of truth and
+# runs the same gates through the flake; this workflow exists so a clone on
+# GitHub is not a place where the build is unverified.
+#
+# It deliberately does not install nix: the Rust here is pure (no C
+# dependencies), so the suite, the lints and the conformance ratchet run with a
+# plain rustup toolchain, which makes this the faster of the two pipelines. The
+# flake is exercised by the release workflow, which builds the binaries from it.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep in step with `rustVersion` in flake.nix: the same compiler the flake
+  # checks use.
+  RUST_VERSION: "1.99.1"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Keep in step with `rustVersion` in flake.nix.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features -- --deny warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+      # `dash` is the suite's reference shell. `zoxide` is what
+      # `interactive_zoxide.rs` drives; the test skips itself when the binary is
+      # missing, so it is an install-if-available rather than a hard dependency.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y dash
+          sudo apt-get install -y zoxide || echo "zoxide unavailable; that test will skip"
+      # A GitHub-hosted runner is a VM with a real /dev/pts, so the pty-driven
+      # `interactive_*` tests run here — unlike in a nix build sandbox.
+      - run: cargo test --workspace --all-features
+
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y dash
+      - run: cargo build -p baash
+      # Same ratchet as GitLab. The baseline was recorded against a real
+      # environment, which is what a runner is; the tolerance covers the couple
+      # of load-sensitive cases.
+      - run: cargo run -p baash-spec -- --shell target/debug/baash --list-failures --ratchet --tolerance 5
