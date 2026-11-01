@@ -161,3 +161,48 @@ fn a_shell_named_through_a_symlink_is_run_as_named() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_relative_shell_path_is_taken_from_the_working_directory() {
+    // Each case runs in its own temporary directory, so a relative `--shell`
+    // has to be made absolute before it is spawned — `--shell
+    // target/debug/baash`, which is exactly what CI passes, would otherwise be
+    // looked up inside the case directory and fail every case at once.
+    let dir = temp_dir("relative");
+    let spec_dir = dir.join("spec");
+    std::fs::create_dir_all(&spec_dir).unwrap();
+    write(
+        &spec_dir,
+        "a.test.sh",
+        "#### passing case\necho hi\n## STDOUT:\nhi\n## END\n",
+    );
+    let link = dir.join("sh");
+    std::os::unix::fs::symlink("/bin/sh", &link).expect("link to /bin/sh");
+
+    let exe = env!("CARGO_BIN_EXE_baash-spec");
+    let json = dir.join("report.json");
+    let output = Command::new(exe)
+        .current_dir(&dir)
+        .args([
+            "--spec-dir",
+            spec_dir.to_str().unwrap(),
+            "--shell",
+            "sh",
+            "--jobs",
+            "1",
+            "--json",
+            json.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("TOTAL: 1/1 compared"), "{stdout}");
+
+    // The report carries the path the name resolved to, not the bare name, so
+    // it says which binary ran even though the case directories came and went.
+    let report = std::fs::read_to_string(&json).unwrap();
+    let named = format!("\"shell\": \"{}\"", link.display());
+    assert!(report.contains(&named), "expected {named} in {report}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}

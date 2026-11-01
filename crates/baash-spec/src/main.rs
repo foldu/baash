@@ -89,11 +89,15 @@ fn run(started: Instant) -> Result<std::process::ExitCode, String> {
                     path.display()
                 ));
             }
-            // Spawned exactly as named. Resolving symlinks here would run the
-            // wrong program: busybox and toybox dispatch on argv[0], so
-            // `/bin/sh` (a symlink to `/bin/busybox`) resolved to `busybox`
-            // prints the multi-call binary's usage instead of running a shell.
-            path.clone()
+            // Absolute, but with symlinks left alone. Absolute because every
+            // case runs in its own temporary directory, so `--shell
+            // target/debug/baash` would otherwise be looked up relative to
+            // that directory and fail. Unresolved because busybox and toybox
+            // dispatch on `argv[0]`: `/bin/sh` (a symlink to `/bin/busybox`)
+            // resolved to `busybox` prints the multi-call binary's usage
+            // instead of running a shell.
+            std::path::absolute(path)
+                .map_err(|error| format!("cannot resolve shell {}: {error}", path.display()))?
         }
         None => default_shell(&workspace)?,
     };
@@ -422,14 +426,15 @@ fn resolve_references(tokens: &[String]) -> Result<Vec<Reference>, String> {
         if token.is_empty() {
             continue;
         }
-        // Kept as named, for the same reason as `--shell`: a symlink's name is
-        // part of how a multi-call shell knows which applet to be.
+        // Absolute but unresolved, for both reasons given at `--shell`: the
+        // comparison shell runs in the same per-case directory.
         let path = if token.contains('/') {
             let path = PathBuf::from(token);
             if !path.is_file() {
                 return Err(format!("reference shell {token:?} does not exist"));
             }
-            path
+            std::path::absolute(&path)
+                .map_err(|error| format!("cannot resolve {token:?}: {error}"))?
         } else {
             find_on_path(token)
                 .ok_or_else(|| format!("reference shell {token:?} was not found on PATH"))?
@@ -454,7 +459,9 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
     for dir in std::env::split_paths(&path) {
         let candidate = dir.join(name);
         if candidate.is_file() {
-            return Some(candidate);
+            // Absolute (a PATH entry may be relative) but unresolved, so the
+            // found name is what runs.
+            return std::path::absolute(&candidate).ok();
         }
     }
     None
