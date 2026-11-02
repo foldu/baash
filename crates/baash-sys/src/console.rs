@@ -151,7 +151,6 @@ impl Console {
     pub fn open() -> io::Result<Self> {
         let input = File::options()
             .read(true)
-            .write(true)
             .open("CONIN$")
             .map(End::Owned)
             .or_else(|_| standard(STD_INPUT_HANDLE))?;
@@ -223,11 +222,33 @@ impl Console {
     /// Invalid UTF-8 becomes `U+FFFD` rather than failing: a frame is a
     /// mixture of escape sequences and the line's bytes, and half a sequence
     /// painted is easier to recover from than an editor that stops painting.
+    ///
+    /// Long writes are split: `WriteConsoleW` refuses a buffer that is too
+    /// large, and a pasted screenful is easily large enough. The split is
+    /// between characters, so a surrogate pair is never cut in half.
     pub fn write(&self, bytes: &[u8]) -> io::Result<()> {
+        /// The largest chunk `WriteConsoleW` is documented to accept.
+        const CHUNK: usize = 8192;
         let text = String::from_utf8_lossy(bytes);
-        let units: Vec<u16> = text.encode_utf16().collect();
+        let mut chunk: Vec<u16> = Vec::with_capacity(CHUNK);
+        for character in text.chars() {
+            if chunk.len() >= CHUNK {
+                self.write_units(&chunk)?;
+                chunk.clear();
+            }
+            let mut pair = [0u16; 2];
+            chunk.extend_from_slice(character.encode_utf16(&mut pair));
+        }
+        if !chunk.is_empty() {
+            self.write_units(&chunk)?;
+        }
+        Ok(())
+    }
+
+    /// One `WriteConsoleW` call.
+    fn write_units(&self, units: &[u16]) -> io::Result<()> {
         let mut written = 0u32;
-        // SAFETY: `units` is `units.len()` UTF-16 code units and stays alive
+        // SAFETY: `units` holds `units.len()` UTF-16 code units and stays alive
         // for the call; the console writes at most that many.
         let ok = unsafe {
             WriteConsoleW(
