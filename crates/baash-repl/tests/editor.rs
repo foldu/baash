@@ -627,8 +627,11 @@ fn no_candidates_bells_and_leaves_the_line_alone() {
 }
 
 #[test]
-fn ghost_text_completes_from_history_and_is_accepted_by_right_or_end() {
-    for accept in [Key::Right, Key::End] {
+fn ghost_text_completes_from_history_and_is_accepted_by_movement_keys() {
+    // `Right`/`End` and their readline spellings `Ctrl-F`/`Ctrl-E`: forward
+    // past the end of the line is how the suggestion is taken, so the four
+    // mean the same thing at the end of the line.
+    for accept in [Key::Right, Key::End, Key::Ctrl(0x06), Key::Ctrl(0x05)] {
         let mut history = History::new();
         history.push(b"echo hello\n");
         let mut term = FakeTerminal::sized(b"", 80, 24);
@@ -655,6 +658,43 @@ fn ghost_text_completes_from_history_and_is_accepted_by_right_or_end() {
             editor.line().buffer(),
             b"echo hello",
             "{accept:?} accepts the ghost text"
+        );
+    }
+}
+
+#[test]
+fn ctrl_f_and_ctrl_e_move_before_they_accept() {
+    // Away from the end of the line the two are plain movement: they carry
+    // the cursor to where an accept would start, and only the next press
+    // takes the suggestion.
+    for (key, presses) in [(Key::Ctrl(0x05), 2), (Key::Ctrl(0x06), 3)] {
+        let mut history = History::new();
+        history.push(b"echo hello\n");
+        let mut term = FakeTerminal::new(b"");
+        let completer = StubCompleter::empty();
+        let config = Config {
+            color: true,
+            history,
+            ..plain_config()
+        };
+        let mut editor =
+            Editor::with_config(&mut term, &completer, &baash_repl::NeverNeedsMore, config);
+        for key in chars("echo h") {
+            editor.step(key).unwrap();
+        }
+        editor.step(Key::Left).unwrap();
+        editor.step(Key::Left).unwrap();
+        // `Ctrl-E` moves to the end in one press; `Ctrl-F` needs one per byte
+        // moved. The first press of either must not insert anything.
+        editor.step(key.clone()).unwrap();
+        assert_eq!(editor.line().buffer(), b"echo h", "{key:?} only moves");
+        for _ in 1..presses {
+            editor.step(key.clone()).unwrap();
+        }
+        assert_eq!(
+            editor.line().buffer(),
+            b"echo hello",
+            "{key:?} at the end accepts the ghost text"
         );
     }
 }

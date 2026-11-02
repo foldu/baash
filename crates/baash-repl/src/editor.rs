@@ -516,10 +516,20 @@ impl<'a> Editor<'a> {
                 self.line.delete();
             }
             Key::Ctrl(0x05) => {
-                self.line.move_end();
+                // `End`'s readline spelling. Moving to the end is the same
+                // gesture as pressing End there, so being there already
+                // accepts the ghost text, as it does for `Key::End`.
+                if !self.line.move_end() {
+                    self.accept_suggestion();
+                }
             }
             Key::Ctrl(0x06) => {
-                self.line.move_right();
+                // `Right`'s readline spelling, and fish's `forward-char`:
+                // forward at the end of the line is how the suggestion is
+                // taken, so `Ctrl-F` does what `Right` does.
+                if !self.line.move_right() {
+                    self.accept_suggestion();
+                }
             }
             Key::Ctrl(0x0b) => {
                 self.line.kill_to_end();
