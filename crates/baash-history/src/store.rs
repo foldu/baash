@@ -123,13 +123,22 @@ impl Store {
         // second connection possible at all, and the busy timeout turns the
         // instant when the other shell is mid-write into a short wait rather
         // than a failed command.
-        let builder = Builder::new_local(path);
-        let builder = if path == ":memory:" {
-            builder
-        } else {
-            builder.experimental_multiprocess_wal(true)
+        //
+        // Not every IO backend offers it — turso refuses the option outright
+        // on some Windows builds, with "experimental multiprocess WAL is not
+        // supported by the active IO backend" — so the flag is a *preference*.
+        // Without it one shell still has history and a second one gets a
+        // locked-file error, which is worse but is not "no history at all";
+        // refusing to open the database would be worse than both.
+        let database = match Self::build(path, true) {
+            Ok(database) => database,
+            Err(first) => match Self::build(path, false) {
+                Ok(database) => database,
+                // Report the first failure: it is the one that names the
+                // feature the file really wanted.
+                Err(_) => return Err(error(first)),
+            },
         };
-        let database = crate::block_on(builder.build()).map_err(error)?;
         let connection = database.connect().map_err(error)?;
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
@@ -157,6 +166,21 @@ impl Store {
             requests: Some(requests),
             worker: Some(worker),
         }))
+    }
+
+    /// Build the database handle, asking for multiprocess WAL or not.
+    ///
+    /// Split out so the preference can be retried: the option is refused at
+    /// build time by an IO backend that cannot share the file, and a shell
+    /// that cannot share it is still a shell with history of its own.
+    fn build(path: &str, multiprocess: bool) -> turso::Result<turso::Database> {
+        let builder = Builder::new_local(path);
+        let builder = if multiprocess && path != ":memory:" {
+            builder.experimental_multiprocess_wal(true)
+        } else {
+            builder
+        };
+        crate::block_on(builder.build())
     }
 
     /// This shell's session number: the `sessions` row opened at startup.
