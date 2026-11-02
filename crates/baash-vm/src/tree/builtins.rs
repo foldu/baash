@@ -328,6 +328,10 @@ fn bi_source(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
             return Status::FAILURE;
         }
     };
+    // A sourced file is script text like any other: a byte order mark or
+    // `\r\n` line endings are the file's, not the parser's, and are settled
+    // the same way `baash script` settles them (`baash_syntax::decode`).
+    let bytes = baash_syntax::decode(&bytes).into_owned();
     let display = String::from_utf8_lossy(&path).into_owned();
     // A sourced file is a stack frame named `source`, and `BASH_LINENO`
     // records where the `.` command ran (`Locations when sourcing`).

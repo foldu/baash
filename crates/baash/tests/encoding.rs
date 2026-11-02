@@ -137,3 +137,38 @@ fn a_lone_carriage_return_is_still_a_character() {
     let path = dir.write("script.sh", b"printf 'a\\rb' | wc -c\n");
     assert_eq!(run_file(&path).trim(), "3");
 }
+
+#[test]
+fn a_sourced_crlf_script_runs() {
+    // `.`/`source` reads a file itself, so it has to settle the encoding the
+    // same way the command line does.
+    let dir = TestDir::new("source");
+    let path = dir.write("lib.sh", LOOP_CRLF);
+    let output = baash()
+        .arg("-c")
+        .arg(format!(". {}", path.display()))
+        .output()
+        .expect("spawn baash");
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "1\n2\n");
+}
+
+#[test]
+fn a_shebangless_crlf_script_runs_in_a_child_shell() {
+    // A file with no `#!` is read by the shell, which is a third reader.
+    let dir = TestDir::new("noshebang");
+    let script = dir.write("snork", LOOP_CRLF);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod the script");
+    }
+    let output = baash()
+        .arg("-c")
+        .arg(script.display().to_string())
+        .output()
+        .expect("spawn baash");
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(stdout(&output), "1\n2\n");
+}

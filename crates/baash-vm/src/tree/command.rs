@@ -1357,6 +1357,9 @@ impl Interp {
         self.set_arg0(path.to_vec());
         self.set_positional(argv[1..].to_vec());
         let name = String::from_utf8_lossy(path).into_owned();
+        // A script without a `#!` is read by the shell, so it gets the same
+        // encoding treatment as one named on the command line.
+        let bytes = baash_syntax::decode(&bytes);
         let status = self.run_named(&name, &bytes);
         if let Some(applied) = applied {
             let _ = self.state.vars.finish_prefix_assignments(applied);
