@@ -666,6 +666,12 @@ fn execute(shell: &mut Interp, source: Source) -> ExitCode {
 }
 
 /// Read the bytes a [`Source`] names, and set `$0`/positional for it.
+///
+/// The text is decoded once here rather than in the parser: a script written
+/// on Windows carries a byte order mark and `\r\n` line endings, and both are
+/// settled before anything looks at tokens (`baash_syntax::decode`). That also
+/// keeps the diagnostics pointing at the text the user sees, because the
+/// `SourceFile` is built from these same bytes.
 fn read_source(shell: &mut Interp, source: Source) -> Result<(Vec<u8>, Vec<u8>), ExitCode> {
     match source {
         Source::Command(text, argv) => {
@@ -675,13 +681,13 @@ fn read_source(shell: &mut Interp, source: Source) -> Result<(Vec<u8>, Vec<u8>),
             };
             shell.set_arg0(name.clone());
             shell.set_positional(arguments);
-            Ok((name, text))
+            Ok((name, baash_syntax::decode(&text).into_owned()))
         }
         Source::File(path, argv) => match std::fs::read(baash_sys::os::path_from_bytes(&path)) {
             Ok(bytes) => {
                 shell.set_arg0(path.clone());
                 shell.set_positional(argv);
-                Ok((path, bytes))
+                Ok((path, baash_syntax::decode(&bytes).into_owned()))
             }
             Err(error) => {
                 eprintln!("baash: {}: {error}", String::from_utf8_lossy(&path));
@@ -695,7 +701,10 @@ fn read_source(shell: &mut Interp, source: Source) -> Result<(Vec<u8>, Vec<u8>),
                 return Err(ExitCode::from(1));
             }
             shell.set_arg0("baash");
-            Ok((b"<stdin>".to_vec(), bytes))
+            Ok((
+                b"<stdin>".to_vec(),
+                baash_syntax::decode(&bytes).into_owned(),
+            ))
         }
     }
 }
@@ -1384,6 +1393,7 @@ fn run_stdin(shell: &mut Interp) -> ExitCode {
             eprintln!("baash: cannot read stdin: {error}");
             return ExitCode::from(1);
         }
+        let bytes = baash_syntax::decode(&bytes);
         let status = shell.run_named("<stdin>", &bytes);
         return ExitCode::from(status.exit_code() as u8);
     }
@@ -1414,6 +1424,10 @@ fn run_stdin(shell: &mut Interp) -> ExitCode {
                 return ExitCode::from(1);
             }
         }
+        // The line keeps the `\r` of a Windows file; decoding settles it here,
+        // where a whole script is settled too, so a CRLF script reads the same
+        // whether it is piped, redirected or named.
+        let line = baash_syntax::decode(&line).into_owned();
         // bash expands an interactive shell that reads a pipe too (`baash -i <
         // file`); only a `-c` string is exempt, and that never comes here.
         let expanding =

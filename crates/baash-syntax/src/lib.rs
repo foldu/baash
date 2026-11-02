@@ -30,14 +30,22 @@
 //! let src = SourceFile::new("-c", &b"if true; then echo"[..]);
 //! assert!(matches!(parse(&src), ParseOutcome::NeedMoreInput { .. }));
 //! ```
+//!
+//! Script bytes are settled before they get here: [`decode`] consumes a byte
+//! order mark and turns `\r\n` into `\n`, so a file written on Windows parses
+//! the same way it does on Unix. Nothing above that is aware of encoding, and
+//! the lexer stays lossless about whatever it is handed.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 mod ast;
+mod encoding;
 mod lexer;
 mod parser;
 mod role;
+
+pub use encoding::decode;
 
 pub use ast::{
     AndOrLink, AndOrOp, ArrayArg, ArrayElement, ArrayIndex, Assignment, Ast, CaseArm, CaseTerm,
