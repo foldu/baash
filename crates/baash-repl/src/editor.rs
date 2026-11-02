@@ -515,6 +515,16 @@ impl<'a> Editor<'a> {
                 }
                 self.line.delete();
             }
+            // The console's end-of-file key. The editor turns processed input
+            // off so `Ctrl-C` is a keystroke rather than a signal, which also
+            // means `Ctrl-Z` arrives as a byte; without this arm a Windows
+            // user would have no key that ends the session.
+            #[cfg(windows)]
+            Key::Ctrl(0x1a) => {
+                if self.line.buffer().is_empty() && !self.line.in_continuation() {
+                    return Ok(Flow::Eof);
+                }
+            }
             Key::Ctrl(0x05) => {
                 // `End`'s readline spelling. Moving to the end is the same
                 // gesture as pressing End there, so being there already

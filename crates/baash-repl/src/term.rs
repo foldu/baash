@@ -172,53 +172,131 @@ impl RealTerminal {
     }
 }
 
-/// On Windows the editor has no console host yet, so every operation reports
-/// `Unsupported`; the type exists so `baash` builds and `-c` runs. ConPTY is the
-/// last W4 step (`docs/portability.md` §10).
+/// The real terminal on Windows: the process's console (`baash_sys::console`).
+///
+/// The shape is the same as on Unix — bytes in, bytes out, raw mode held for
+/// one [`crate::Editor::read_line`] — because the difference is entirely inside
+/// the console: keys arrive as the ANSI escapes `ENABLE_VIRTUAL_TERMINAL_INPUT`
+/// produces, which is exactly what the key decoder already reads, and output
+/// goes through `WriteConsoleW`, so the shell's UTF-8 reaches the screen
+/// whatever the console code page is.
+///
+/// There is no console equivalent of polling a directory, so nothing is
+/// watched here and the prompt only changes between lines.
 #[cfg(windows)]
 #[derive(Debug, Default)]
 pub struct RealTerminal {
-    _private: (),
+    /// `None` when the process has no console; every operation then reports
+    /// `Unsupported` instead of pretending, and the shell falls back to
+    /// reading stdin as a script.
+    console: Option<baash_sys::Console>,
+    /// The modes to put back when the line is done.
+    raw: Option<baash_sys::ConsoleMode>,
+    /// Bytes the console produced that the editor has not consumed.
+    pending: Vec<u8>,
+    /// Bytes the editor wrote that are not yet a whole character, kept so a
+    /// character split across two writes is not painted as two replacements.
+    outgoing: Vec<u8>,
 }
 
 #[cfg(windows)]
 impl RealTerminal {
-    /// Windows has no terminal to open until ConPTY exists.
+    /// The process's console, or a terminal whose operations say so when there
+    /// is none.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            console: baash_sys::Console::open().ok(),
+            ..Self::default()
+        }
+    }
+
+    /// The console, or the error every operation reports without one.
+    fn host(&self) -> io::Result<&baash_sys::Console> {
+        self.console.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the line editor needs a console: this process has no terminal attached \
+                 (docs/portability.md §10)",
+            )
+        })
     }
 }
 
 #[cfg(windows)]
 impl Terminal for RealTerminal {
     fn read_byte(&mut self) -> io::Result<Option<u8>> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "interactive input needs a console host (docs/portability.md §10)",
-        ))
+        loop {
+            if !self.pending.is_empty() {
+                return Ok(Some(self.pending.remove(0)));
+            }
+            let console = self.console.as_mut().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "the line editor needs a console: this process has no terminal attached",
+                )
+            })?;
+            // Zero means the console's input is closed, which is the editor's
+            // EOF (`Ctrl-Z` on an empty line reaches it as a keystroke first).
+            if console.read(&mut self.pending)? == 0 {
+                return Ok(None);
+            }
+        }
     }
 
-    fn write_all(&mut self, _bytes: &[u8]) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "interactive output needs a console host (docs/portability.md §10)",
-        ))
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.outgoing.extend_from_slice(bytes);
+        let chunk = drain_whole_characters(&mut self.outgoing);
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        self.host()?.write(&chunk)
     }
 
     fn size(&self) -> Size {
-        Size::FALLBACK
+        self.console
+            .as_ref()
+            .and_then(|console| console.size().ok())
+            .map(|(columns, rows)| Size { columns, rows })
+            .unwrap_or(Size::FALLBACK)
     }
 
     fn enter_raw(&mut self) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "raw mode needs a console host (docs/portability.md §10)",
-        ))
+        let guard = self.host()?.enter_raw()?;
+        self.raw = Some(guard);
+        Ok(())
     }
 
     fn leave_raw(&mut self) -> io::Result<()> {
+        if let Some(guard) = self.raw.take() {
+            guard.restore()?;
+        }
         Ok(())
     }
+}
+
+/// Take the bytes at the start of `buffer` that form whole characters.
+///
+/// The editor writes bytes and the Windows console takes UTF-16, so a character
+/// whose bytes are split across two writes has to wait for the rest of itself —
+/// otherwise `é` is painted as two replacement characters. Waiting is only
+/// right while the tail can still *become* a character, so a tail that cannot
+/// (`error_len` is `Some`) is handed over to be painted lossily instead of
+/// being kept forever.
+///
+/// Only the Windows terminal needs this; the tests run everywhere.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn drain_whole_characters(buffer: &mut Vec<u8>) -> Vec<u8> {
+    let complete = match std::str::from_utf8(buffer) {
+        Ok(_) => buffer.len(),
+        // A prefix that stops in the middle of a character: the rest of it is
+        // still to be written.
+        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+        // Bytes that are not the start of anything valid: write them (the
+        // console substitutes `U+FFFD`) rather than stall the editor.
+        Err(_) => buffer.len(),
+    };
+    let tail = buffer.split_off(complete);
+    std::mem::replace(buffer, tail)
 }
 
 /// Await two readiness futures, reporting whether the second finished first.
@@ -374,5 +452,54 @@ impl Drop for RealTerminal {
         // `RawMode`'s own `Drop` is the panic-safe half; taking it here just
         // makes the restore explicit and idempotent.
         let _ = self.leave_raw();
+    }
+}
+
+#[cfg(test)]
+mod utf8_split_tests {
+    use super::drain_whole_characters;
+
+    #[test]
+    fn ascii_is_written_at_once() {
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(b"\x1b[2mello");
+        assert_eq!(drain_whole_characters(&mut buffer), b"\x1b[2mello");
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn a_character_split_across_two_writes_waits() {
+        let mut buffer = Vec::new();
+        buffer.push(0xC3); // the first byte of `é`
+        assert!(drain_whole_characters(&mut buffer).is_empty());
+        assert_eq!(buffer, vec![0xC3], "the first byte is held");
+
+        buffer.push(0xA9);
+        assert_eq!(drain_whole_characters(&mut buffer), vec![0xC3, 0xA9]);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn a_prefix_and_a_partial_character_are_separated() {
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(b"echo \xE2\x9C"); // `echo ` and half of `✓`
+        assert_eq!(drain_whole_characters(&mut buffer), b"echo ");
+        assert_eq!(buffer, vec![0xE2, 0x9C]);
+    }
+
+    #[test]
+    fn four_bytes_of_nonsense_are_not_held_forever() {
+        let mut buffer = vec![0xFF, 0xFF, 0xFF, 0xFF];
+        assert_eq!(drain_whole_characters(&mut buffer).len(), 4);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn an_impossible_byte_is_never_a_prefix() {
+        // `0xFF` cannot start a character, so holding it would mean holding
+        // every later write too.
+        let mut buffer = vec![0xFF];
+        assert_eq!(drain_whole_characters(&mut buffer), vec![0xFF]);
+        assert!(buffer.is_empty());
     }
 }

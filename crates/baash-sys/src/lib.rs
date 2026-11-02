@@ -60,6 +60,8 @@
 
 pub mod access;
 pub mod bytes;
+#[cfg(windows)]
+pub mod console;
 pub mod dirs;
 #[cfg(unix)]
 pub mod fd;
@@ -84,6 +86,8 @@ pub mod windows;
 
 pub use access::{Access, access};
 pub use bytes::{NulByte, cstring, cstrings};
+#[cfg(windows)]
+pub use console::{Console, ConsoleMode};
 #[cfg(unix)]
 pub use fd::{
     Pipe, bytes_available, chdir, close, create_unlinked_temp, dup, dup_above, dup2, fd_is_cloexec,
@@ -162,8 +166,8 @@ pub mod flags {
 // `SetConsoleCtrlHandler` delivers a console event, not a numbered signal — so
 // the numbers there are the Linux values, kept so the shell's tables, messages
 // and `128 + n` arithmetic have something consistent to compare. Only `SIGINT`
-// and `SIGTERM` reach the platform: the former as a console event (once ConPTY
-// exists) and the latter as `TerminateProcess`.
+// and `SIGTERM` reach the platform: the former as a console event (not wired to
+// a handler yet) and the latter as `TerminateProcess`.
 
 /// `SIGPIPE`, for building a [`SignalSet`] that resets it in children.
 #[cfg(unix)]
@@ -254,9 +258,27 @@ pub const ENOEXEC: i32 = libc::ENOEXEC;
 ///
 /// Interactive behaviour (colour, the line editor, the terminal REPL) hangs
 /// off this one question, so it lives next to the other syscalls.
+#[cfg(unix)]
 pub fn is_tty(fd: i32) -> bool {
     // SAFETY: `isatty` only inspects the descriptor and cannot retain it.
     unsafe { libc::isatty(fd) == 1 }
+}
+
+/// Whether `fd` refers to a console.
+///
+/// Windows has no descriptor namespace shared with `std`, so the three standard
+/// descriptors answer for themselves — `std` asks the console API, which is the
+/// precise question — and anything else is left to the CRT's `_isatty`.
+#[cfg(windows)]
+pub fn is_tty(fd: i32) -> bool {
+    use std::io::IsTerminal;
+    match fd {
+        0 => std::io::stdin().is_terminal(),
+        1 => std::io::stdout().is_terminal(),
+        2 => std::io::stderr().is_terminal(),
+        // SAFETY: `_isatty` only inspects the descriptor and cannot retain it.
+        _ => unsafe { libc::isatty(fd) == 1 },
+    }
 }
 
 /// The machine's hostname, without a trailing newline.
@@ -277,7 +299,7 @@ pub fn hostname() -> Vec<u8> {
 pub fn hostname() -> Vec<u8> {
     std::env::var_os("COMPUTERNAME")
         .or_else(|| std::env::var_os("HOSTNAME"))
-        .map(|value| os::bytes_from_os(value))
+        .map(os::bytes_from_os)
         .unwrap_or_default()
 }
 

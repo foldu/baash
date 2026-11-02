@@ -14,11 +14,17 @@
 //!   numbers converted to inheritable handles with `_get_osfhandle`.
 //! * Waiting is `WaitForSingleObject` through the `std` child, so a foreground
 //!   pipeline reaps the way it does on Unix.
+//! * The terminal: `RawMode`, `NoEcho` and `window_size_fd` are the console's
+//!   `SetConsoleMode`/`GetConsoleScreenBufferInfo`, in [`crate::console`]. The
+//!   line editor reads and writes through the same module, so `read -s` and the
+//!   prompt's width work the way they do on a Unix tty.
 //!
 //! # What refuses
 //!
-//! * `open_pty`/`become_session_leader`: the interactive editor needs ConPTY,
-//!   which is W4's last step (`docs/portability.md` §10).
+//! * `open_pty`/`become_session_leader`: there is no pty to open on Windows.
+//!   The interactive editor does not need one — it drives the console it was
+//!   started on ([`crate::console`]) — so this is a missing test facility and a
+//!   missing `script(1)` emulation, not a missing terminal.
 //! * Signals: there is no `signalfd`, and `SIGINT` delivery to a console is a
 //!   different mechanism (`SetConsoleCtrlHandler`). Every signal entry point
 //!   reports `Unsupported` rather than pretending to work.
@@ -95,8 +101,7 @@ fn wide_path(path: &[u8]) -> std::ffi::CString {
     // `_wopen` would be the faithful call; via `_open` we go through the ANSI
     // code page. Kept as a single choke point so the switch is one edit.
     let text = String::from_utf16_lossy(&wide);
-    let cstring = std::ffi::CString::new(text).unwrap_or_default();
-    cstring
+    std::ffi::CString::new(text).unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -243,7 +248,7 @@ pub fn dup_above(fd: c_int, minimum: c_int) -> io::Result<OwnedFd> {
     while candidate < 2048 {
         if !fd_is_open(candidate) && dup2(from, candidate).is_ok() {
             // The extra slot now owns its own handle; the duplicate goes away.
-            return Ok(Fd::from_raw(candidate)?);
+            return Fd::from_raw(candidate);
         }
         candidate += 1;
     }
@@ -506,56 +511,66 @@ fn os_path(path: &[u8]) -> PathBuf {
 // Terminals
 // ---------------------------------------------------------------------------
 
-/// Saved console mode, restored on drop.
-#[derive(Debug, Default)]
+/// Saved console modes, restored on drop.
+///
+/// The editor drives [`crate::console::Console`] directly; this is the same
+/// guard under the name the rest of the shell uses, so `read -s` and any other
+/// caller asking for "raw mode" gets the console's version of it rather than a
+/// refusal.
+#[derive(Debug)]
 pub struct RawMode {
-    _private: (),
+    mode: crate::console::ConsoleMode,
 }
 
 impl RawMode {
-    /// Enter raw mode on standard input.
+    /// Enter raw mode on the console.
     ///
-    /// Returns `Unsupported` until ConPTY exists: without a console host the
-    /// line editor has nothing to talk to, and pretending otherwise would
-    /// leave a user with a prompt that cannot read keys.
+    /// `Unsupported` when the process has no console, which is the same answer
+    /// the Unix side gives for a redirected stdin.
     pub fn enter() -> io::Result<Self> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "raw mode needs a console host (docs/portability.md §10)",
-        ))
+        let console = crate::console::Console::open()?;
+        Ok(Self {
+            mode: console.enter_raw()?,
+        })
     }
 
-    /// Enter raw mode on `fd` (`std::os::fd`-shaped name on Unix).
+    /// Enter raw mode. Windows has one console, so the descriptor only names
+    /// *a* terminal, not a different one.
     pub fn enable(_fd: c_int) -> io::Result<Self> {
         Self::enter()
     }
 
     /// Put the console back the way it was.
-    pub fn restore(self) {}
+    pub fn restore(self) -> io::Result<()> {
+        self.mode.restore()
+    }
 }
 
 /// A terminal that turns echo off, for `read` without `-s`.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct NoEcho {
-    _private: (),
+    mode: crate::console::ConsoleMode,
 }
 
 impl NoEcho {
-    /// Enter no-echo mode.
+    /// Turn echo off on the console.
     pub fn enter() -> io::Result<Self> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "no-echo mode needs a console host",
-        ))
+        let console = crate::console::Console::open()?;
+        Ok(Self {
+            mode: console.enter_no_echo()?,
+        })
     }
 
-    /// Turn echo off on `fd` (`std::os::fd`-shaped name on Unix).
+    /// Turn echo off. As with [`RawMode::enable`], the descriptor only says
+    /// "the terminal".
     pub fn enable(_fd: c_int) -> io::Result<Self> {
         Self::enter()
     }
 
     /// Restore echo.
-    pub fn restore(self) {}
+    pub fn restore(self) -> io::Result<()> {
+        self.mode.restore()
+    }
 }
 
 /// This process's id.
@@ -574,9 +589,13 @@ pub fn parent_pid() -> Option<u32> {
 }
 
 /// The terminal size, in columns and rows.
+///
+/// The console's *window* is the visible part; its screen buffer is usually
+/// much taller and wrapping must follow what the user can see.
 pub fn window_size_fd(_fd: c_int) -> Option<(u16, u16)> {
-    // `GetConsoleScreenBufferInfo` on the console handle; ConPTY work brings it.
-    None
+    // Windows has one console, so any descriptor that is a terminal is the
+    // same one.
+    crate::console::Console::open().ok()?.size().ok()
 }
 
 /// The terminal size of standard output.
@@ -662,8 +681,9 @@ pub struct SignalEvent {
 /// A queue of delivered signals.
 ///
 /// There is no `signalfd`; `SetConsoleCtrlHandler` is the equivalent and it
-/// delivers only `Ctrl-C`, `Ctrl-Break` and a few console events. A description
-/// of that belongs with ConPTY, so the type exists and reports `Unsupported`.
+/// delivers only `Ctrl-C`, `Ctrl-Break` and a few console events. The type
+/// exists and reports `Unsupported` rather than pretending a console event is
+/// a signal.
 #[derive(Debug, Default)]
 pub struct SignalFd {
     _private: (),
@@ -1100,7 +1120,7 @@ impl Pty {
 pub fn open_pty() -> io::Result<Pty> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "no ConPTY yet (docs/portability.md §10)",
+        "Windows has no pseudo-terminal (docs/portability.md §10)",
     ))
 }
 

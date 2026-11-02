@@ -348,12 +348,59 @@ the Windows side yet), plus `baash_sys::Regex`, `SpawnPlan::new_with_env`, the
    `std::os::unix`.
 3. **`-c 'echo hi'` under Wine**, then a script with `$( … )`, `for`, `if` and a
    function — the W4 acceptance in `docs/direction.md` §6.
-4. **ConPTY** last: the interactive editor needs a console host, and until then
-   the REPL should report `BAASH-E0302` rather than misbehave.
+4. **The console host.** Not ConPTY: the editor talks to the console it was
+   started on, which is what a native shell does. Done 2026-11-02 — see the
+   section below.
 
 The `Fs` column of §5a still applies: `rustix` stops at the Windows boundary,
 which is why step 1 is a platform module rather than a `cfg` sprinkled through
 `fd.rs`.
+
+### The console host (2026-11-02)
+
+The interactive editor works on Windows without ConPTY. ConPTY is for hosting
+*another* program in a pseudo-console (`script(1)`, `tmux`, an embedded
+terminal); a shell that was started in a console already has one, and the
+editor's needs are the same as an ncurses program's: raw input, ANSI output, a
+size.
+
+`baash-sys`'s `console.rs` is that boundary, and it is the counterpart of
+`term.rs`:
+
+| Unix | Windows |
+|---|---|
+| `/dev/tty`, stdio fallback | `CONIN$`/`CONOUT$`, `GetStdHandle` fallback |
+| `tcgetattr`/`tcsetattr` + `cfmakeraw` | `GetConsoleMode`/`SetConsoleMode` |
+| `TIOCGWINSZ` | `GetConsoleScreenBufferInfo` (the *window*, not the buffer) |
+| `read(2)` bytes | `ReadConsoleW` → UTF-8 |
+| `write(2)` bytes | `WriteConsoleW` ← UTF-8 |
+
+The piece that makes one editor serve both is `ENABLE_VIRTUAL_TERMINAL_INPUT`:
+the console then puts the same ANSI escape sequences in the input buffer that an
+xterm sends, so `key.rs` decodes arrows and `Alt-…` unchanged.
+`ENABLE_VIRTUAL_TERMINAL_PROCESSING` does the same on the way out.
+
+Two consequences are written into the code:
+
+* **`Ctrl-C` is a keystroke.** `ENABLE_PROCESSED_INPUT` is off (otherwise the
+  console turns `Ctrl-C` into a signal and the editor never sees it), so the
+  byte arrives as `0x03` and abandons the line the way it does on Unix. The
+  same switch means `Ctrl-Z` arrives as `0x1a`, so the editor honours it as
+  end-of-input on an empty line — the console's EOF key, where Unix uses
+  `Ctrl-D`.
+* **There is no poll on a console handle.** `SetConsoleMode` is not a waitable
+  object, so the prompt watcher (`docs/prompt-watch.md`) stays
+  `#[cfg(target_os = "linux")]`; on Windows the prompt updates between lines.
+
+`RawMode`, `NoEcho` and `window_size_fd` are the same module underneath, so
+`read -s`, the `COLUMNS` fallback and the editor's wrapping all work on Windows
+for the first time.
+
+**Not yet verified on real Windows.** The code type-checks and links
+(`nix build .#windows`) and the pure parts are tested on Linux (the UTF-8
+splitting the console's UTF-16 needs). What has not happened is a keystroke
+driven through it on a real console: Wine has no console host to drive, so the
+first user to run it is the first test.
 
 ### Turso on Windows: verified (2026-10-30)
 
