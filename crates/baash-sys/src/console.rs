@@ -120,6 +120,41 @@ impl End {
             Self::Standard(handle) => *handle,
         }
     }
+
+    /// One end of the console: the standard handle when it is a console, the
+    /// device when this end is redirected.
+    ///
+    /// The standard handle comes first because when the process was started in
+    /// a console it *is* that console, with both access bits already. The
+    /// device is what makes `baash > transcript` still paint on the terminal
+    /// when stdout is a file.
+    ///
+    /// Both devices are opened `read`+`write`, and that is not tidiness:
+    /// `GetConsoleMode` requires read access, so a write-only `CONOUT$` opens
+    /// perfectly and then fails its own mode query with "access denied" — the
+    /// console is there, the check says it is not, and the editor reports
+    /// having no terminal. Opening the output end for reading costs nothing.
+    fn console(device: &str, standard: u32) -> io::Result<Self> {
+        if let Some(handle) = standard_handle(standard)
+            && mode_of(handle).is_ok()
+        {
+            return Ok(Self::Standard(handle));
+        }
+        let error = match File::options().read(true).write(true).open(device) {
+            Ok(file) => {
+                let end = Self::Owned(file);
+                return match mode_of(end.handle()) {
+                    Ok(_) => Ok(end),
+                    Err(error) => Err(error),
+                };
+            }
+            Err(error) => error,
+        };
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("{device}: {error}"),
+        ))
+    }
 }
 
 impl std::fmt::Debug for End {
@@ -141,29 +176,15 @@ pub struct Console {
 impl Console {
     /// Open the process's console.
     ///
-    /// `CONIN$` and `CONOUT$` are tried first so a redirected stdout does not
-    /// take the editor with it; the standard handles are the fallback for a
-    /// process attached to a console without them (a service, or a pty-like
-    /// host such as Wine's console).
-    ///
-    /// Fails with [`io::ErrorKind::Unsupported`] when neither end is a console:
-    /// the caller then knows there is nothing to paint on.
+    /// Fails with [`io::ErrorKind::Unsupported`] when either end is not a
+    /// console — a pipe, a file, a socket — and the message says which end and
+    /// why, because "no terminal" with no detail is what made this hard to see
+    /// the first time.
     pub fn open() -> io::Result<Self> {
-        let input = File::options()
-            .read(true)
-            .open("CONIN$")
-            .map(End::Owned)
-            .or_else(|_| standard(STD_INPUT_HANDLE))?;
-        let output = File::options()
-            .write(true)
-            .open("CONOUT$")
-            .map(End::Owned)
-            .or_else(|_| standard(STD_OUTPUT_HANDLE))?;
-        // A handle that answers `GetConsoleMode` is a console; anything else
-        // (a pipe, a file, a socket) is not a terminal to paint on.
-        if mode_of(input.handle()).is_err() || mode_of(output.handle()).is_err() {
-            return Err(unsupported("standard input or output is not a console"));
-        }
+        let input = End::console("CONIN$", STD_INPUT_HANDLE)
+            .map_err(|error| io::Error::new(error.kind(), format!("input: {error}")))?;
+        let output = End::console("CONOUT$", STD_OUTPUT_HANDLE)
+            .map_err(|error| io::Error::new(error.kind(), format!("output: {error}")))?;
         Ok(Self { input, output })
     }
 
@@ -321,15 +342,12 @@ impl Console {
     }
 }
 
-/// The standard handle `kind` names, when it is a console.
-fn standard(kind: u32) -> io::Result<End> {
-    // SAFETY: `GetStdHandle` only looks up a process-wide handle; the value is
-    // checked by the caller's `GetConsoleMode`.
+/// The standard handle `kind` names, if the process has one.
+fn standard_handle(kind: u32) -> Option<RawHandle> {
+    // SAFETY: `GetStdHandle` only looks up a process-wide handle and retains
+    // nothing; whether it is a console is the caller's `GetConsoleMode`.
     let handle = unsafe { GetStdHandle(kind) };
-    if handle.is_null() {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(End::Standard(handle))
+    (!handle.is_null() && handle as isize != -1).then_some(handle)
 }
 
 /// `GetConsoleMode` for one handle.
@@ -351,11 +369,6 @@ fn set_mode(console: RawHandle, mode: u32) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
-}
-
-/// The error for "there is no console to paint on here".
-fn unsupported(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::Unsupported, message.to_owned())
 }
 
 /// The console modes saved by [`Console::enter_raw`], restored on drop.

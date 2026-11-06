@@ -190,6 +190,9 @@ pub struct RealTerminal {
     /// `Unsupported` instead of pretending, and the shell falls back to
     /// reading stdin as a script.
     console: Option<baash_sys::Console>,
+    /// Why there is no console, when there is not. `CONOUT$: access denied` is
+    /// worth more to whoever reads the message than "no terminal attached".
+    no_console: Option<String>,
     /// The modes to put back when the line is done.
     raw: Option<baash_sys::ConsoleMode>,
     /// Bytes the console produced that the editor has not consumed.
@@ -204,21 +207,33 @@ impl RealTerminal {
     /// The process's console, or a terminal whose operations say so when there
     /// is none.
     pub fn new() -> Self {
-        Self {
-            console: baash_sys::Console::open().ok(),
-            ..Self::default()
+        match baash_sys::Console::open() {
+            Ok(console) => Self {
+                console: Some(console),
+                ..Self::default()
+            },
+            Err(error) => Self {
+                no_console: Some(error.to_string()),
+                ..Self::default()
+            },
         }
     }
 
-    /// The console, or the error every operation reports without one.
+    /// The error every operation reports without a console.
+    fn no_console(&self) -> io::Error {
+        let reason = self
+            .no_console
+            .as_deref()
+            .unwrap_or("this process has no terminal attached");
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("the line editor needs a console ({reason}); see docs/portability.md §10"),
+        )
+    }
+
+    /// The console, or that error.
     fn host(&self) -> io::Result<&baash_sys::Console> {
-        self.console.as_ref().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Unsupported,
-                "the line editor needs a console: this process has no terminal attached \
-                 (docs/portability.md §10)",
-            )
-        })
+        self.console.as_ref().ok_or_else(|| self.no_console())
     }
 }
 
@@ -229,12 +244,10 @@ impl Terminal for RealTerminal {
             if !self.pending.is_empty() {
                 return Ok(Some(self.pending.remove(0)));
             }
-            let console = self.console.as_mut().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "the line editor needs a console: this process has no terminal attached",
-                )
-            })?;
+            if self.console.is_none() {
+                return Err(self.no_console());
+            }
+            let console = self.console.as_mut().expect("checked just above");
             // Zero means the console's input is closed, which is the editor's
             // EOF (`Ctrl-Z` on an empty line reaches it as a keystroke first).
             if console.read(&mut self.pending)? == 0 {
