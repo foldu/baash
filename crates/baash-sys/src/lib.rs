@@ -254,6 +254,33 @@ pub const ECHILD: c_int = libc::ECHILD;
 /// `#!`). A shell is expected to interpret such a file itself.
 pub const ENOEXEC: i32 = libc::ENOEXEC;
 
+/// The separator between `PATH` entries: `:` on Unix, `;` on Windows.
+///
+/// Every place that walks a `PATH`-shaped variable uses this, because the two
+/// platforms disagree about what a path list is and a shell that splits one way
+/// on the other platform finds no commands at all.
+pub const PATH_SEPARATOR: u8 = if cfg!(windows) { b';' } else { b':' };
+
+/// How a `PATH` entry and a file name are joined: `\` on Windows, `/` on Unix.
+///
+/// Windows accepts `/` in most file APIs, so this is not strictly required for
+/// `CreateFile` — but a program *started* through a mixed-separator path is a
+/// different matter: `cmd.exe` refuses to start from `C:\Windows\system32/cmd.EXE`
+/// and reports "the system cannot find the path specified", while the same file
+/// written with backslashes runs.
+pub const PATH_JOIN: u8 = if cfg!(windows) { b'\\' } else { b'/' };
+
+/// Where the shell looks for commands when `PATH` is unset.
+///
+/// A shell always has a `PATH`: a script that runs under `env -i` must still
+/// find its tools. The Windows default is the system directory pair the
+/// platform itself searches when no `PATH` is given.
+pub const DEFAULT_PATH: &[u8] = if cfg!(windows) {
+    b"C:\\Windows\\system32;C:\\Windows"
+} else {
+    b"/usr/local/bin:/usr/bin:/bin"
+};
+
 /// Whether `fd` refers to a terminal.
 ///
 /// Interactive behaviour (colour, the line editor, the terminal REPL) hangs

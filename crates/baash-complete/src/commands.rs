@@ -139,7 +139,7 @@ impl CommandProvider {
         let mut names = Vec::new();
         let mut seen = HashSet::new();
         if let Some(path) = path.as_deref() {
-            for component in path.split(|&b| b == b':') {
+            for component in path.split(|&b| b == path_separator()) {
                 // POSIX: an empty component means the current directory.
                 let directory = if component.is_empty() {
                     PathBuf::from(".")
@@ -235,6 +235,14 @@ fn is_executable(path: &std::path::Path, is_symlink: bool) -> bool {
     {
         true
     }
+}
+
+/// The separator between `PATH` entries: `;` on Windows, `:` elsewhere.
+///
+/// The shell's own constant is in `baash_sys`, which this crate does not
+/// depend on; the two are one fact and both are `cfg`-selected from it.
+fn path_separator() -> u8 {
+    if cfg!(windows) { b';' } else { b':' }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

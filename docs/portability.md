@@ -396,11 +396,40 @@ Two consequences are written into the code:
 `read -s`, the `COLUMNS` fallback and the editor's wrapping all work on Windows
 for the first time.
 
-**Not yet verified on real Windows.** The code type-checks and links
-(`nix build .#windows`) and the pure parts are tested on Linux (the UTF-8
-splitting the console's UTF-16 needs). What has not happened is a keystroke
-driven through it on a real console: Wine has no console host to drive, so the
-first user to run it is the first test.
+**Verified on real Windows** (2026-11-06), in the `winvm` guest — a Windows 11
+Pro libvirt domain driven over ssh, with the binary started in a console window
+in the interactive session and keystrokes injected through QMP. What was seen:
+the coloured prompt, `echo hi`, ghost text accepted with `Ctrl-F`, single-line
+and multi-line `for` loops (including the `> ` secondary prompt), an external
+command and a pipeline, and `Ctrl-Z` returning to `cmd`'s prompt. History opens
+there (`history.db` plus a WAL, so the multiprocess WAL the Wine run refused is
+supported by the real IOCP backend).
+
+Two bugs came out of that first run, both invisible under Wine:
+
+* `CONOUT$` was opened write-only and then queried with `GetConsoleMode`, which
+  needs read access — so a perfectly good console was reported as absent. Both
+  ends are opened read+write now, and the standard handle is preferred when it
+  is a console.
+* Command lookup found nothing, for five reasons recorded in the next section.
+
+### Command resolution on Windows (2026-11-06)
+
+`whoami: command not found` had five separate causes; all are fixed, and all
+are things that only exist on this platform:
+
+| what | why it mattered |
+|---|---|
+| `PATH` arrives as `Path` | environment names are case-insensitive and keep the parent's spelling; shell variables are not, so `$PATH` was unset and the shell seeded a POSIX default |
+| a `PATH` is `;`-separated | splitting on `:` found no directory at all (one constant now: `baash_sys::PATH_SEPARATOR`) |
+| bare names get `PATHEXT` | `whoami` is `whoami.exe`; the machine's own list is used |
+| `C:\…` is a path | the "contains a separator" test only knew `/`, so a backslash path was searched for in `PATH` |
+| entries join with `\` | a `PATH` hit became `C:\WINDOWS\system32/cmd.EXE`, and `cmd.exe` refuses to *start* from that mixed path while the same file with backslashes runs (`baash_sys::PATH_JOIN`) |
+
+**Still broken:** `cd`. Every form fails with `os error 123`, and `pwd` after
+`cd ..` reports `/`. That is the Windows path model — drive letters, `\`, and
+what `..` means at a root — not command lookup, and it is the next piece of
+work here.
 
 ### Turso on Windows: verified (2026-10-30)
 

@@ -57,7 +57,7 @@ enum AssignmentAction {
 }
 
 /// Where the shell finds commands when `PATH` is unset.
-pub(crate) const DEFAULT_PATH: &[u8] = b"/usr/local/bin:/usr/bin:/bin";
+pub(crate) const DEFAULT_PATH: &[u8] = baash_sys::DEFAULT_PATH;
 
 /// One place a command name resolved to, in search order.
 ///
@@ -1704,11 +1704,8 @@ impl Interp {
     /// table answers first unless the caller asked for a fresh search
     /// (`type -P`) or for every hit (`-a`).
     fn path_hits(&self, name: &[u8], query: baash_runtime::ResolveQuery) -> Vec<Vec<u8>> {
-        if name.contains(&b'/') {
-            return executable(name)
-                .then(|| name.to_vec())
-                .into_iter()
-                .collect();
+        if is_path(name) {
+            return self.executable_form(name).into_iter().collect();
         }
         if !query.fresh
             && !query.all
@@ -1726,22 +1723,63 @@ impl Interp {
                 .unwrap_or_else(|| DEFAULT_PATH.to_vec()),
         };
         let mut hits = Vec::new();
-        for directory in path.split(|&byte| byte == b':') {
+        for directory in path.split(|&byte| byte == baash_sys::PATH_SEPARATOR) {
             let mut candidate = if directory.is_empty() {
                 b".".to_vec()
             } else {
                 directory.to_vec()
             };
-            candidate.push(b'/');
+            candidate.push(baash_sys::PATH_JOIN);
             candidate.extend_from_slice(name);
-            if executable(&candidate) {
-                hits.push(candidate);
+            if let Some(found) = self.executable_form(&candidate) {
+                hits.push(found);
                 if !query.all {
                     break;
                 }
             }
         }
         hits
+    }
+
+    /// The file `candidate` names, trying the `PATHEXT` suffixes when it is not
+    /// itself executable.
+    ///
+    /// On Unix this is exactly [`executable`]: there is no suffix list and the
+    /// cost is one `stat`. On Windows `whoami` has to find `whoami.exe`, which
+    /// is what every Windows shell does and what the name means to the people
+    /// typing it.
+    fn executable_form(&self, candidate: &[u8]) -> Option<Vec<u8>> {
+        if executable(candidate) {
+            return Some(candidate.to_vec());
+        }
+        for extension in self.extensions() {
+            let mut with = candidate.to_vec();
+            with.extend_from_slice(&extension);
+            if executable(&with) {
+                return Some(with);
+            }
+        }
+        None
+    }
+
+    /// The suffixes a bare command name may have, in the order to try them.
+    ///
+    /// `PATHEXT` is the platform's own list, so a machine that added `.PY` or
+    /// removed `.BAT` is honoured; the fallback is what a default install sets.
+    fn extensions(&self) -> Vec<Vec<u8>> {
+        if !cfg!(windows) {
+            return Vec::new();
+        }
+        let list = self
+            .state
+            .vars
+            .scalar(b"PATHEXT")
+            .map(<[u8]>::to_vec)
+            .unwrap_or_else(|| b".COM;.EXE;.BAT;.CMD".to_vec());
+        list.split(|&byte| byte == b';')
+            .filter(|extension| !extension.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect()
     }
 
     /// `PATH` search for one program, as `exec`, `.`/`source` and pipelines
@@ -1902,6 +1940,15 @@ fn assignment_parts<'a>(
 }
 
 /// Whether `path` names a regular file with an execute bit set.
+/// Whether a command word names a file rather than a name to search for.
+///
+/// `/` is the separator on Unix and still works on Windows, where `\` is the
+/// one people actually type: `C:\Windows\System32\cmd.exe` has no forward
+/// slash in it, and searching `PATH` for that string finds nothing.
+fn is_path(name: &[u8]) -> bool {
+    name.contains(&b'/') || (cfg!(windows) && name.contains(&b'\\'))
+}
+
 pub(crate) fn executable(path: &[u8]) -> bool {
     let path = baash_sys::os::path_from_bytes(path);
     #[cfg(unix)]

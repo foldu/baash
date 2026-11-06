@@ -786,6 +786,24 @@ impl Interp {
             entry.extend_from_slice(&baash_sys::os::bytes_from_os(&value));
             entries.push(entry);
         }
+        // Windows environment variables are case-insensitive and keep
+        // whatever case the parent used, so the names every script asks for
+        // arrive as `Path` and `Pathext`. Shell variables are case-sensitive:
+        // without this `$PATH` is unset, the shell falls back to a POSIX
+        // default that names no directory on this machine, and no command is
+        // ever found.
+        #[cfg(windows)]
+        for entry in &mut entries {
+            let Some(name_end) = entry.iter().position(|&byte| byte == b'=') else {
+                continue;
+            };
+            let wanted = [b"PATH".as_slice(), b"PATHEXT"]
+                .into_iter()
+                .find(|wanted| entry[..name_end].eq_ignore_ascii_case(wanted));
+            if let Some(wanted) = wanted {
+                entry[..wanted.len()].copy_from_slice(wanted);
+            }
+        }
         self.state.vars.import_envp(&entries);
         // bash applies exported option lists from the environment: that is how
         // `export SHELLOPTS` hands tracing to a child shell. The imported

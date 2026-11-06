@@ -258,7 +258,7 @@ impl Interp {
             .map(<[u8]>::to_vec)
             .unwrap_or_else(|| super::command::DEFAULT_PATH.to_vec());
         let mut out: Vec<Vec<u8>> = Vec::new();
-        for directory in path.split(|&byte| byte == b':') {
+        for directory in path.split(|&byte| byte == baash_sys::PATH_SEPARATOR) {
             let directory: &[u8] = if directory.is_empty() {
                 b"."
             } else {
@@ -274,7 +274,7 @@ impl Interp {
                     continue;
                 }
                 let mut candidate = directory.to_vec();
-                candidate.push(b'/');
+                candidate.push(baash_sys::PATH_JOIN);
                 candidate.extend_from_slice(&name);
                 if super::command::executable(&candidate) {
                     out.push(name);

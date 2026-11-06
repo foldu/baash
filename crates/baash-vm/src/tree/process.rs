@@ -11,6 +11,13 @@
 //! `capture_substitution`) goes through [`Interp::wait_foreground_children`],
 //! so `Ctrl-C` kills the child without killing the shell on every path.
 
+// `drop(guard)` is how the SIGINT/SIGQUIT guards are released: on Unix the
+// guard restores the dispositions, and dropping it early ends the window in
+// which the shell ignores them. Windows has no signal mask, so the same guard
+// is inert there and clippy's `drop_non_drop` fires; the call is still the
+// clearest way to say "release it now", so the lint is off for this module.
+#![allow(clippy::drop_non_drop)]
+
 use std::time::Duration;
 
 use baash_runtime::{ShellHost, Status, signal_number, signal_short_name, signal_table};

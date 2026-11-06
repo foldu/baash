@@ -441,6 +441,18 @@ const DEFAULT_CONFIG: &[u8] = include_bytes!("../../../config/config.sh");
 /// The name the built-in default is reported under in diagnostics.
 const DEFAULT_CONFIG_NAME: &str = "(built-in config)";
 
+/// The `PATH` a shell gives itself when the environment has none.
+///
+/// Its own value, rather than `baash_sys::DEFAULT_PATH`: this one also names
+/// the `sbin` directories, which is what a login shell on Unix wants, while
+/// the command search only needs the three. Windows keeps its system
+/// directories, which is where the platform puts its own tools.
+#[cfg(not(windows))]
+const SEEDED_PATH: &[u8] = b"/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin";
+/// The `PATH` a shell gives itself when the environment has none.
+#[cfg(windows)]
+const SEEDED_PATH: &[u8] = b"C:\\Windows\\system32;C:\\Windows";
+
 /// Read the interactive startup files.
 ///
 /// `--norc` skips them and `--rcfile FILE` replaces them. Otherwise there are
@@ -578,10 +590,7 @@ fn shell(interactive: bool, flags: &ShellFlags) -> Interp {
     // A shell always has a `PATH`, even when the environment does not: a
     // script that runs with `env -i` must still find `/bin/sh` and friends.
     if shell.state().vars.scalar(b"PATH").is_none() {
-        let _ = shell.state().vars.assign_scalar(
-            b"PATH",
-            b"/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin",
-        );
+        let _ = shell.state().vars.assign_scalar(b"PATH", SEEDED_PATH);
         let _ = shell.state().vars.mark_exported(b"PATH");
     }
     // `PWD` is an *assertion* about the process's directory, and an inherited

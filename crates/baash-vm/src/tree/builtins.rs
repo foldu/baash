@@ -371,10 +371,10 @@ fn source_path(interp: &Interp, file: &[u8]) -> Option<Vec<u8>> {
         return regular_file(file).then(|| file.to_vec());
     }
     if let Some(path) = interp.state.vars.scalar(b"PATH") {
-        for element in path.split(|&byte| byte == b':') {
+        for element in path.split(|&byte| byte == baash_sys::PATH_SEPARATOR) {
             let mut candidate = element.to_vec();
             if !element.is_empty() {
-                candidate.push(b'/');
+                candidate.push(baash_sys::PATH_JOIN);
             }
             candidate.extend_from_slice(file);
             if regular_file(&candidate) {
@@ -655,11 +655,11 @@ fn search_cdpath(interp: &Interp, target: &[u8]) -> Option<(Vec<u8>, bool)> {
     if path.is_empty() {
         return None;
     }
-    for element in path.split(|&byte| byte == b':') {
+    for element in path.split(|&byte| byte == baash_sys::PATH_SEPARATOR) {
         let mut candidate = Vec::with_capacity(element.len() + target.len() + 1);
         candidate.extend_from_slice(element);
         if !element.is_empty() {
-            candidate.push(b'/');
+            candidate.push(baash_sys::PATH_JOIN);
         }
         candidate.extend_from_slice(target);
         let probe = baash_sys::os::path_from_bytes(&candidate);
