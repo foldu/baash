@@ -397,6 +397,12 @@ fn reserved_opens_command(text: &[u8]) -> bool {
             | b"in"
             | b"function"
             | b"[["
+            // A compound command is self-delimiting: bash accepts
+            // `case … esac done`, `if … fi done` and `while … done done`
+            // without a `;` between the two reserved words.
+            | b"esac"
+            | b"done"
+            | b"fi"
     )
 }
 
@@ -779,6 +785,34 @@ pub(crate) fn scan_arith(
     None
 }
 
+/// Scan the deprecated `$[expr]` arithmetic form, `from` pointing just past
+/// the `[`. Returns the offset just past the matching `]`.
+pub(crate) fn scan_bracket_arith(src: &[u8], from: usize) -> Option<usize> {
+    let mut i = from;
+    let mut brackets = 1usize;
+    while i < src.len() {
+        match src[i] {
+            b'\\' => i += 2,
+            b'\'' => i = skip_squote(src, i + 1)?,
+            b'"' => i = skip_dquote(src, i + 1, 0, &mut Vec::new())?,
+            b'[' => {
+                brackets += 1;
+                i += 1;
+            }
+            b']' => {
+                brackets -= 1;
+                i += 1;
+                if brackets == 0 {
+                    return Some(i);
+                }
+            }
+            b'$' => i = scan_dollar(src, i, 0, false, &mut Vec::new())?,
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// Scan one `$`-introduced construct. `from` points at the `$`.
 ///
 /// `Some(end)` is just past the construct (or just past the `$` when it
@@ -855,6 +889,20 @@ pub(crate) fn scan_dollar(
                     nest.extend(open);
                     None
                 }
+            }
+        }
+        Some(b'[') => {
+            nest.push(OpenConstruct {
+                kind: UnterminatedKind::Arith,
+                opener: from..from + 2,
+                content_start: from + 2,
+            });
+            match scan_bracket_arith(src, from + 2) {
+                Some(end) => {
+                    nest.pop();
+                    Some(end)
+                }
+                None => None,
             }
         }
         Some(b'{') => {
@@ -1238,6 +1286,10 @@ struct Lexer<'a> {
     depth: usize,
     stop: Option<StopMode>,
     cases: Vec<CaseState>,
+    /// Depth of an open `[[ … ]]` conditional. Inside it `((` is regex text,
+    /// not an arithmetic command, so the lexer must not swallow the closing
+    /// `]]` into an `ArithCommand` token.
+    test_depth: usize,
     stopped: bool,
     /// Constructs open while scanning, outermost first. Reversed into
     /// [`Lexed::open`] when the pass ends.
@@ -1293,6 +1345,7 @@ impl<'a> Lexer<'a> {
             depth,
             stop,
             cases: Vec::new(),
+            test_depth: 0,
             stopped: false,
             nest: Vec::new(),
         }
@@ -1482,7 +1535,10 @@ impl<'a> Lexer<'a> {
 
     fn lparen(&mut self) {
         let start = self.i;
-        if self.src.get(self.i + 1) == Some(&b'(') {
+        // Inside `[[ … ]]` a `((` is regex text. Swallowing it as an
+        // arithmetic command would eat the closing `]]` and leave the test
+        // command unterminated.
+        if self.test_depth == 0 && self.src.get(self.i + 1) == Some(&b'(') {
             self.nest.push(OpenConstruct {
                 kind: UnterminatedKind::ArithCommand,
                 opener: start..start + 2,
@@ -1494,7 +1550,9 @@ impl<'a> Lexer<'a> {
                     self.i = end;
                     self.push(TokenKind::ArithCommand, start, end);
                     self.observe_case(TokenKind::ArithCommand, b"((..))");
-                    self.cmd_pos = false;
+                    // `((1)) then` is valid bash: the arithmetic command is
+                    // self-delimiting, so a reserved word may follow it.
+                    self.cmd_pos = true;
                     self.redirect_target = false;
                 }
                 None => {
@@ -1506,7 +1564,7 @@ impl<'a> Lexer<'a> {
                         content_start: start + 2,
                         kind: UnterminatedKind::ArithCommand,
                     });
-                    self.cmd_pos = false;
+                    self.cmd_pos = true;
                 }
             }
             return;
@@ -1660,7 +1718,11 @@ impl<'a> Lexer<'a> {
 
     fn word(&mut self) {
         let start = self.i;
-        let statement_start = self.at_statement_start();
+        // Inside a `case` pattern a leading `!(` is an extglob group, not
+        // pipeline negation: `case $x in !(a))` is the pattern `!(a)`, even
+        // when the pattern begins a line.
+        let in_pattern = self.cases.last().is_some_and(|c| c.arms && c.pattern);
+        let statement_start = self.at_statement_start() && !in_pattern;
         let scan = scan_word(
             self.src,
             start,
@@ -1671,11 +1733,18 @@ impl<'a> Lexer<'a> {
         );
         self.i = scan.end;
         let text = &self.src[start..scan.end];
-        if scan.unterminated.is_none() && text == b"\\\n" {
+        if scan.unterminated.is_none() && text.starts_with(b"\\\n") {
             // A bare backslash-newline between tokens. POSIX deletes it before
             // tokenising, so it is layout, not a word; the bytes stay in the
             // token stream, which keeps the lossless invariant.
-            self.push(TokenKind::Whitespace, start, scan.end);
+            //
+            // When the continuation begins a word (`| \` ⏎ `while`), the next
+            // bytes belong to the following token, not to this one: consuming
+            // them here would lex `\` ⏎ `while` as one word and hide the
+            // reserved word.
+            let end = (start + 2).min(self.src.len());
+            self.i = end;
+            self.push(TokenKind::Whitespace, start, end);
             return;
         }
         if let Some(open) = scan.unterminated {
@@ -1700,6 +1769,17 @@ impl<'a> Lexer<'a> {
             self.observe_case(TokenKind::Operator, text);
             self.cmd_pos = true;
             TokenKind::Operator
+        } else if text == b"]]" && self.test_depth > 0 {
+            // The end of `[[ … ]]` is a keyword even though the lexer cannot
+            // know it is in test position; it also lets a following `then`
+            // or `do` be classified without a separator.
+            self.cmd_pos = true;
+            TokenKind::Keyword
+        } else if text == b"esac" && self.cases.last().is_some_and(|c| c.arms && c.pattern) {
+            // `case x in esac` has no arms: `esac` follows `in` (a word, not
+            // command position), but it still ends the case. In pattern
+            // position it cannot be a literal pattern in bash either.
+            TokenKind::Keyword
         } else if self.cmd_pos && RESERVED.contains(&text) {
             TokenKind::Keyword
         } else {
@@ -1708,6 +1788,13 @@ impl<'a> Lexer<'a> {
 
         self.push(kind, start, scan.end);
         if kind == TokenKind::Keyword {
+            if text == b"[[" {
+                self.test_depth += 1;
+            } else if text == b"]]" && self.test_depth > 0 {
+                self.test_depth -= 1;
+                self.cmd_pos = true;
+                return;
+            }
             self.observe_case(kind, text);
             self.cmd_pos = reserved_opens_command(text);
         } else if kind == TokenKind::Word {
@@ -1732,9 +1819,6 @@ impl<'a> Lexer<'a> {
     /// Track just enough `case` state that a pattern's `)` is not mistaken for
     /// the end of an enclosing `$()`.
     fn observe_case(&mut self, kind: TokenKind, text: &[u8]) {
-        if self.stop.is_none() {
-            return;
-        }
         if let Some(top) = self.cases.last_mut() {
             if top.arms && top.pattern {
                 if text == b")" {

@@ -1478,12 +1478,10 @@ impl<'a> Parser<'a, '_> {
         if close.kind != TokenKind::Operator || self.text_of(&close) != b")" {
             return None;
         }
-        // `a=()` is an empty array assignment, not a definition named `a=`;
-        // bash reads the `=` form as a function only when layout separates the
-        // parens (`func-name=ext ( ) { … }`).
-        if find_assignment_eq(self.src, &name_tok.span).is_some()
-            && open.span.end == close.span.start
-        {
+        // `a=()` and `a=( )` are empty array assignments, not a definition
+        // named `a=`. A word containing `=` is never a function name in bash,
+        // so the assignment reading always wins.
+        if find_assignment_eq(self.src, &name_tok.span).is_some() {
             return None;
         }
         let start = name_tok.span.start;
@@ -2137,7 +2135,11 @@ impl<'a> Parser<'a, '_> {
                 self.advance_exact();
                 let mut elems = Vec::new();
                 loop {
+                    // `a=( )` is an empty array: the space before `)` is
+                    // layout, not an element. Newlines still separate
+                    // elements, so both kinds of layout are skipped.
                     self.skip_newlines();
+                    self.skip_trivia();
                     if self.is_operator(b")") {
                         self.advance_exact();
                         break;
@@ -2450,6 +2452,27 @@ impl<'a> Parser<'a, '_> {
                 }
                 None => {
                     self.mark_open_here(i, UnterminatedKind::ParamExp);
+                    push_literal(parts, &src[i..end]);
+                    end
+                }
+            },
+            // The deprecated `$[expr]` form. bash still accepts it, and
+            // old vendor scripts (drbd's OCF agent, for one) use it.
+            Some(b'[') => match lexer::scan_bracket_arith(src, i + 2) {
+                Some(close) => {
+                    let expr_end = close.saturating_sub(1).max(i + 2);
+                    let mut arith = Arithmetic::new(src[i + 2..expr_end].to_vec());
+                    arith.span = i..close;
+                    parts.push(Part::Arith(arith));
+                    self.posix(
+                        i..close,
+                        "`$[ … ]` is a bash extension",
+                        "POSIX: use `$(( … ))`",
+                    );
+                    close
+                }
+                None => {
+                    self.mark_open_here(i, UnterminatedKind::Arith);
                     push_literal(parts, &src[i..end]);
                     end
                 }
@@ -3066,6 +3089,14 @@ impl<'a> Parser<'a, '_> {
                 let header = (arith.span.start + 2)..arith.span.end.saturating_sub(2);
                 return self.new_node(NodeKind::ForArith { header, body }, start..end);
             }
+            // `for ((…)) { … }`: a brace group replaces `do … done`.
+            if self.is_operator(b"{") {
+                let body = self.parse_brace_group();
+                let end = self.prev_end();
+                self.open.pop();
+                let header = (arith.span.start + 2)..arith.span.end.saturating_sub(2);
+                return self.new_node(NodeKind::ForArith { header, body }, start..end);
+            }
             if !self.eat_keyword(b"do", Expect::Do) {
                 self.recover_to_keyword(&[b"done"]);
             }
@@ -3185,11 +3216,21 @@ impl<'a> Parser<'a, '_> {
                 self.advance_exact();
                 have_do = true;
             }
+            // `for x; { … }`: bash lets a brace group replace
+            // `do … done`.
+            Some(t) if t.kind == TokenKind::Operator && self.text_of(&t) == b"{" => {}
             None => {}
             Some(_) => {
                 self.expected_current(Expect::Do);
                 self.recover_to_keyword(&[b"do", b"done"]);
             }
+        }
+
+        if !have_do && self.is_operator(b"{") {
+            let body = self.parse_brace_group();
+            let end = self.prev_end();
+            self.open.pop();
+            return self.new_node(NodeKind::For { var, in_list, body }, start..end);
         }
 
         if !have_do && self.at_end() {
@@ -3276,7 +3317,16 @@ impl<'a> Parser<'a, '_> {
             let mut patterns: Vec<Word> = Vec::new();
             loop {
                 self.skip_trivia();
-                match self.take_literal_word(Expect::CasePattern) {
+                // `{` and `}` are reserved words everywhere else, but bash
+                // accepts either as a `case` pattern: `case $x in {) …`.
+                let brace = self.peek_sig().filter(|t| {
+                    t.kind == TokenKind::Operator && matches!(self.text_of(t), b"{" | b"}")
+                });
+                let taken = match brace {
+                    Some(t) => Some(self.take_word_token(&t)),
+                    None => self.take_literal_word(Expect::CasePattern),
+                };
+                match taken {
                     Some(w) => patterns.push(w),
                     None => {
                         if !self.at_end() {
