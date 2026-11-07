@@ -33,7 +33,7 @@
 
 use crate::complete::{
     CompletionAction, CompletionSource, CompletionSpec, CompletionTable, Request, WordList,
-    candidates, filter_prefix, has_option, is_completion_option, parse_complete,
+    candidates, filter_prefix, has_option, is_completion_option, parse_complete, short_action,
 };
 use crate::{Opts, ShellHost, Status, VarValue};
 
@@ -190,29 +190,6 @@ struct Compgen {
     command: Option<Vec<u8>>,
     options: Vec<Vec<u8>>,
     word: Vec<u8>,
-}
-
-/// The action a single-letter `compgen` flag selects.
-///
-/// `-b` is *builtin* here: `compgen` has no `-b` for bindings (that action is
-/// only reachable as `-A binding`), unlike the printer in
-/// [`crate::complete`].
-fn short_action(letter: u8) -> Option<CompletionAction> {
-    Some(match letter {
-        b'a' => CompletionAction::Alias,
-        b'b' => CompletionAction::Builtin,
-        b'c' => CompletionAction::Command,
-        b'd' => CompletionAction::Directory,
-        b'e' => CompletionAction::Export,
-        b'f' => CompletionAction::File,
-        b'g' => CompletionAction::Group,
-        b'j' => CompletionAction::Job,
-        b'k' => CompletionAction::Keyword,
-        b's' => CompletionAction::Service,
-        b'u' => CompletionAction::User,
-        b'v' => CompletionAction::Variable,
-        _ => return None,
-    })
 }
 
 /// The option letter an argument is, if it takes a value.
@@ -590,6 +567,7 @@ pub(super) fn bi_compopt(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::complete::short_action;
 
     #[test]
     fn every_short_action_letter_is_a_bash_action() {

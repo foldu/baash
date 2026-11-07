@@ -157,6 +157,32 @@ impl CompletionAction {
     }
 }
 
+/// The action a single-letter `complete`/`compgen` flag selects.
+///
+/// bash's short forms are the ones a completion script actually uses (`complete
+/// -u …`, `complete -c …`), and they are exactly the `-A` actions that have
+/// one: `-a` alias, `-b` builtin, `-c` command, `-d` directory, `-e` export,
+/// `-f` file, `-g` group, `-j` job, `-k` keyword, `-s` service, `-u` user,
+/// `-v` variable. `-b` is *builtin* in both builtins (`compgen` has no `-b` for
+/// bindings; that action is only reachable as `-A binding`).
+pub fn short_action(letter: u8) -> Option<CompletionAction> {
+    Some(match letter {
+        b'a' => CompletionAction::Alias,
+        b'b' => CompletionAction::Builtin,
+        b'c' => CompletionAction::Command,
+        b'd' => CompletionAction::Directory,
+        b'e' => CompletionAction::Export,
+        b'f' => CompletionAction::File,
+        b'g' => CompletionAction::Group,
+        b'j' => CompletionAction::Job,
+        b'k' => CompletionAction::Keyword,
+        b's' => CompletionAction::Service,
+        b'u' => CompletionAction::User,
+        b'v' => CompletionAction::Variable,
+        _ => return None,
+    })
+}
+
 /// What a shell must be able to list for `compgen`.
 ///
 /// Every method takes the prefix so an implementation can avoid building a
@@ -702,6 +728,14 @@ pub fn parse_complete(args: &[&[u8]]) -> Result<Request, String> {
                 names.extend(args[index..].iter().map(|value| value.to_vec()));
                 index = args.len();
             }
+            // bash's short action flags (`complete -u …`), which its own
+            // completion library uses: each one is exactly an `-A` action.
+            [b'-', letter] => match short_action(*letter) {
+                Some(action) => spec.actions.push(action),
+                None => {
+                    return Err(format!("complete: {}: invalid option", show(arg)));
+                }
+            },
             other if other.starts_with(b"-") && other.len() > 1 => {
                 return Err(format!("complete: {}: invalid option", show(other)));
             }
@@ -1004,6 +1038,52 @@ mod spec_tests {
 #[cfg(test)]
 mod bash_output_tests {
     use super::*;
+
+    /// The short action flags are the `-A` actions bash names.
+    ///
+    /// bash's completion scripts write `complete -u`, `complete -c` and
+    /// friends; rejecting them as invalid options is what stopped
+    /// `bash_completion` from loading.
+    #[test]
+    fn the_short_action_flags_are_the_named_actions() {
+        for (letter, name) in [
+            (b'a', "alias"),
+            (b'b', "builtin"),
+            (b'c', "command"),
+            (b'd', "directory"),
+            (b'e', "export"),
+            (b'f', "file"),
+            (b'g', "group"),
+            (b'j', "job"),
+            (b'k', "keyword"),
+            (b's', "service"),
+            (b'u', "user"),
+            (b'v', "variable"),
+        ] {
+            let short = parse_complete(&[&[b'-', letter], b"cmd"]).expect("the short flag parses");
+            let long = parse_complete(&[b"-A", name.as_bytes(), b"cmd"]).expect("the long flag");
+            let mut short_table = CompletionTable::default();
+            let mut long_table = CompletionTable::default();
+            short_table.apply(&short).expect("apply short");
+            long_table.apply(&long).expect("apply long");
+            assert_eq!(
+                short_table
+                    .apply(&parse_complete(&[b"-p"]).expect("parse"))
+                    .expect("print"),
+                long_table
+                    .apply(&parse_complete(&[b"-p"]).expect("parse"))
+                    .expect("print"),
+                "-{} must mean -A {}",
+                char::from(letter),
+                name
+            );
+        }
+        assert_eq!(
+            parse_complete(&[b"-z", b"cmd"]).expect_err("unknown"),
+            "complete: -z: invalid option"
+        );
+        assert_eq!(short_action(b'b'), Some(CompletionAction::Builtin));
+    }
 
     /// The exact strings bash 5.3.20 prints, captured from a real shell.
     /// Matching them is what makes `complete -p` output re-input-safe and
