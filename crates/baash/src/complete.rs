@@ -220,9 +220,10 @@ impl<'a> ShellCompleter<'a> {
 
     /// Set up `COMP_*`, run the function, and read `COMPREPLY` back.
     ///
-    /// `None` means the function could not run (a missing or failing function),
-    /// which leaves the caller on the ordinary completion instead of losing it.
-    fn run(&mut self, deferred: &baash_complete::Deferred) -> Option<baash_complete::Replies> {
+    /// A function can also answer with status `124`: bash's convention for
+    /// "the rule has changed, run the completion again", which is how
+    /// bash-completion's `-D` loader installs a command's script on first use.
+    fn run(&mut self, deferred: &baash_complete::Deferred) -> Run {
         let function = deferred.function().to_vec();
         let words = deferred.words().to_vec();
         // bash's `$1`, `$2`, `$3`: the command, the current word and the word
@@ -251,14 +252,19 @@ impl<'a> ShellCompleter<'a> {
         let captured = self.shell.call_function_captured(&function, &argv);
         let options = self.shell.state().completion.options().to_vec();
         self.shell.state().completion.end();
-        let (_output, status) = captured?;
+        let Some((_output, status)) = captured else {
+            return Run::Fail;
+        };
+        if status == baash_runtime::Status(124) {
+            return Run::Retry;
+        }
         if !status.is_success() {
             // bash shows nothing for a function that failed part-way; the
             // ordinary completion is better than the half-filled replies.
-            return None;
+            return Run::Fail;
         }
         let vars = &self.shell.state().vars;
-        Some(baash_complete::Replies::new(
+        Run::Replies(baash_complete::Replies::new(
             completion_replies(vars),
             options,
         ))
@@ -267,10 +273,33 @@ impl<'a> ShellCompleter<'a> {
 
 impl baash_repl::ShellCompletion for ShellCompleter<'_> {
     fn complete(&mut self, line: &[u8], cursor: usize) -> Option<baash_complete::Menu> {
-        let deferred = self.engine.deferred(line, cursor)?;
-        let replies = self.run(&deferred)?;
-        Some(self.engine.deferred_menu(&deferred, &replies))
+        // The function may install the command's real rule while it runs
+        // (bash-completion's loader sources the per-command script), so a
+        // `124` means the answer is stale: refresh the snapshot and look the
+        // rule up again. The bound is bash's own protection against a loader
+        // that keeps asking for a retry.
+        for _ in 0..4 {
+            let deferred = self.engine.deferred(line, cursor)?;
+            match self.run(&deferred) {
+                Run::Replies(replies) => {
+                    return Some(self.engine.deferred_menu(&deferred, &replies));
+                }
+                Run::Retry => refresh(self.shell, self.engine),
+                Run::Fail => return None,
+            }
+        }
+        None
     }
+}
+
+/// What one `-F` run produced.
+enum Run {
+    /// The function's `COMPREPLY` and the options in force.
+    Replies(baash_complete::Replies),
+    /// Status 124: bash's "the rule changed, complete again".
+    Retry,
+    /// No function, or one that failed: keep the ordinary completion.
+    Fail,
 }
 
 /// The candidates a completion function left in `COMPREPLY`.
@@ -475,6 +504,28 @@ mod tests {
             inserts,
             vec![b"mycmd al|1|al|mycmd".to_vec(), b"plain".to_vec()]
         );
+    }
+
+    #[test]
+    fn a_loader_that_returns_124_is_retried() {
+        // bash-completion's `-D` loader defines the command's real rule and
+        // returns 124, bash's "complete again" status; the snapshot must be
+        // refreshed so the retry sees the new rule.
+        let mut shell = Interp::new(false);
+        shell.set_arg0("baash");
+        shell.run_named(
+            "<test>",
+            b"loader(){ complete -F answer mycmd; return 124; }\nanswer(){ COMPREPLY=(alpha); }\ncomplete -D -F loader\n",
+        );
+        let engine = CompletionEngine::new();
+        refresh(&mut shell, &engine);
+        let menu = {
+            let mut completer = ShellCompleter::new(&mut shell, &engine);
+            baash_repl::ShellCompletion::complete(&mut completer, b"mycmd al", 8)
+                .expect("the retry runs the newly defined rule")
+        };
+        let inserts: Vec<Vec<u8>> = menu.candidates.iter().map(|c| c.insert.clone()).collect();
+        assert_eq!(inserts, vec![b"alpha".to_vec()]);
     }
 
     #[test]
