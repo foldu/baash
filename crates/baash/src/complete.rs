@@ -78,14 +78,16 @@ struct Specs {
 impl SpecSource for Specs {
     fn spec(&self, command: &[u8]) -> Option<Spec> {
         let spec = self.table.get(command)?;
-        // `-F`, `-C` and `-G` need to run shell code during completion. That is
-        // not possible from the completer (see `docs/state.md` §4), so a rule
-        // whose only source is one of them is treated as absent: the command
-        // keeps the default completion instead of losing it. A rule that also
-        // has `-W`/`-A` keeps those parts.
-        if (spec.function.is_some() || spec.command.is_some() || spec.glob.is_some())
+        // `-C` and `-G` still need something the completer cannot do from data
+        // alone (run a command, expand a glob), so a rule whose only source is
+        // one of them is treated as absent: the command keeps the default
+        // completion instead of losing it. `-F` is carried through — the
+        // shell's `ShellCompleter` runs the function at Tab — and a rule that
+        // also has `-W`/`-A` keeps those parts.
+        if (spec.command.is_some() || spec.glob.is_some())
             && spec.actions.is_empty()
             && spec.wordlist.is_none()
+            && spec.function.is_none()
         {
             return None;
         }
@@ -184,6 +186,9 @@ pub fn refresh(shell: &mut Interp, engine: &baash_complete::CompletionEngine) {
         });
 
         engine.set_path_var(Some(path));
+        // bash-completion edits `COMP_WORDBREAKS`; the words a `-F` function
+        // sees have to be split the way the shell currently says.
+        engine.set_word_breaks(scalar(b"COMP_WORDBREAKS"));
         engine.set_home(home.as_deref().map(baash_sys::os::path_from_bytes));
         if let Some(pwd) = pwd.as_deref() {
             engine.set_root(baash_sys::os::path_from_bytes(pwd));
@@ -194,6 +199,94 @@ pub fn refresh(shell: &mut Interp, engine: &baash_complete::CompletionEngine) {
     engine.set_shell_names(names as Arc<dyn ShellNames>);
     engine.set_history(history);
     engine.set_specs(specs);
+}
+
+/// Runs `complete -F` at the prompt.
+///
+/// The engine decides that a function must run and assembles the input bash
+/// gives it; this is the half that needs the interpreter, so it lives here
+/// where the shell is. The editor calls it on Tab, while it owns the terminal in
+/// raw mode — so the function's output is captured, never written.
+pub struct ShellCompleter<'a> {
+    shell: &'a mut Interp,
+    engine: &'a baash_complete::CompletionEngine,
+}
+
+impl<'a> ShellCompleter<'a> {
+    /// A hook for the line about to be read.
+    pub fn new(shell: &'a mut Interp, engine: &'a baash_complete::CompletionEngine) -> Self {
+        Self { shell, engine }
+    }
+
+    /// Set up `COMP_*`, run the function, and read `COMPREPLY` back.
+    ///
+    /// `None` means the function could not run (a missing or failing function),
+    /// which leaves the caller on the ordinary completion instead of losing it.
+    fn run(&mut self, deferred: &baash_complete::Deferred) -> Option<baash_complete::Replies> {
+        let function = deferred.function().to_vec();
+        let words = deferred.words().to_vec();
+        // bash's `$1`, `$2`, `$3`: the command, the current word and the word
+        // before it (measured against 5.3.20 through a pty).
+        let argv = vec![
+            function.clone(),
+            deferred.command().to_vec(),
+            deferred.current_word().to_vec(),
+            deferred.previous_word().to_vec(),
+        ];
+        let options = deferred.spec().options.clone();
+        {
+            let vars = &mut self.shell.state().vars;
+            let _ = vars.assign_scalar(b"COMP_LINE", deferred.line());
+            let _ = vars.assign_scalar(b"COMP_POINT", deferred.point().to_string().as_bytes());
+            let _ = vars.assign_scalar(b"COMP_CWORD", deferred.cword().to_string().as_bytes());
+            // `9` is Tab, the value a pty-driven bash reports for both.
+            let _ = vars.assign_scalar(b"COMP_TYPE", b"9");
+            let _ = vars.assign_scalar(b"COMP_KEY", b"9");
+            let _ = vars.assign_elements(b"COMP_WORDS", &words);
+            let _ = vars.unset(b"COMPREPLY");
+        }
+        // The rule's own `-o` options are in force before the function runs, so
+        // `compopt +o …` can turn one off and `compopt -o …` can add another.
+        self.shell.state().completion.begin(&options);
+        let captured = self.shell.call_function_captured(&function, &argv);
+        let options = self.shell.state().completion.options().to_vec();
+        self.shell.state().completion.end();
+        let (_output, status) = captured?;
+        if !status.is_success() {
+            // bash shows nothing for a function that failed part-way; the
+            // ordinary completion is better than the half-filled replies.
+            return None;
+        }
+        let vars = &self.shell.state().vars;
+        Some(baash_complete::Replies::new(
+            completion_replies(vars),
+            options,
+        ))
+    }
+}
+
+impl baash_repl::ShellCompletion for ShellCompleter<'_> {
+    fn complete(&mut self, line: &[u8], cursor: usize) -> Option<baash_complete::Menu> {
+        let deferred = self.engine.deferred(line, cursor)?;
+        let replies = self.run(&deferred)?;
+        Some(self.engine.deferred_menu(&deferred, &replies))
+    }
+}
+
+/// The candidates a completion function left in `COMPREPLY`.
+///
+/// bash reads it as an array and also accepts the scalar form, and a function
+/// may have made it associative by accident; all three are read the way bash
+/// reads them.
+fn completion_replies(vars: &baash_runtime::Vars) -> Vec<Vec<u8>> {
+    match vars.value(b"COMPREPLY") {
+        Some(baash_runtime::VarValue::Indexed(elements)) => elements.values().cloned().collect(),
+        Some(baash_runtime::VarValue::Assoc(pairs)) => {
+            pairs.iter().map(|(_, value)| value.clone()).collect()
+        }
+        Some(baash_runtime::VarValue::Str(value)) => vec![value.clone()],
+        Some(baash_runtime::VarValue::Unset) | None => Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -259,18 +352,19 @@ mod tests {
     }
 
     #[test]
-    fn a_function_only_rule_leaves_the_default_completion_alone() {
-        // `-F` cannot run from the completer (docs/state.md §4). A rule whose
-        // only source is a function must not swallow the command's filename
-        // completion, so it is reported as absent.
+    fn a_function_rule_reaches_the_completer() {
+        // `-F` is carried through and run by `ShellCompleter` at Tab, so the
+        // engine's rule names the function instead of pretending the rule is
+        // absent.
         let specs = Specs {
             table: table(&[b"-F", b"_git", b"git"]),
             ifs: DEFAULT_IFS.to_vec(),
         };
-        assert!(specs.spec(b"git").is_none());
+        let spec = specs.spec(b"git").expect("a function rule");
+        assert_eq!(spec.function.as_deref(), Some(&b"_git"[..]));
 
-        // A rule that also has words keeps them; only the function part is
-        // ignored.
+        // A rule that also has words carries both sources; the engine keeps
+        // the words and the shell runs the function.
         let mixed = Specs {
             table: table(&[b"-F", b"_git", b"-W", b"alpha", b"git"]),
             ifs: DEFAULT_IFS.to_vec(),
@@ -278,6 +372,23 @@ mod tests {
         let spec = mixed.spec(b"git").expect("the words survive");
         assert_eq!(spec.words, vec![b"alpha".to_vec()]);
         assert_eq!(spec.function.as_deref(), Some(&b"_git"[..]));
+    }
+
+    #[test]
+    fn a_command_or_glob_only_rule_stays_absent() {
+        // `-C` and `-G` still have no seam: a rule whose only source is one of
+        // them would swallow the command's default completion, so it is
+        // reported as absent.
+        let command = Specs {
+            table: table(&[b"-C", b"my-program", b"cmd"]),
+            ifs: DEFAULT_IFS.to_vec(),
+        };
+        assert!(command.spec(b"cmd").is_none());
+        let glob = Specs {
+            table: table(&[b"-G", b"*.txt", b"cmd2"]),
+            ifs: DEFAULT_IFS.to_vec(),
+        };
+        assert!(glob.spec(b"cmd2").is_none());
     }
 
     #[test]
@@ -340,6 +451,44 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![b"alpha".to_vec()]
         );
+    }
+
+    #[test]
+    fn a_complete_function_runs_at_the_prompt() {
+        let mut shell = Interp::new(false);
+        shell.set_arg0("baash");
+        shell.run_named(
+            "<test>",
+            b"f(){ COMPREPLY=(\"$COMP_LINE|$COMP_CWORD|$2|$3\" plain); }\ncomplete -F f mycmd\n",
+        );
+        let engine = CompletionEngine::new();
+        refresh(&mut shell, &engine);
+        let menu = {
+            let mut completer = ShellCompleter::new(&mut shell, &engine);
+            baash_repl::ShellCompletion::complete(&mut completer, b"mycmd al", 8)
+                .expect("a -F rule runs the function")
+        };
+        let inserts: Vec<Vec<u8>> = menu.candidates.iter().map(|c| c.insert.clone()).collect();
+        // The function saw the line, the word index, the current and the
+        // previous word, exactly as bash sets them.
+        assert_eq!(
+            inserts,
+            vec![b"mycmd al|1|al|mycmd".to_vec(), b"plain".to_vec()]
+        );
+    }
+
+    #[test]
+    fn a_failing_completion_function_leaves_the_data_path_alone() {
+        let mut shell = Interp::new(false);
+        shell.set_arg0("baash");
+        shell.run_named("<test>", b"f(){ return 1; }\ncomplete -F f mycmd\n");
+        let engine = CompletionEngine::new();
+        refresh(&mut shell, &engine);
+        let menu = {
+            let mut completer = ShellCompleter::new(&mut shell, &engine);
+            baash_repl::ShellCompletion::complete(&mut completer, b"mycmd al", 8)
+        };
+        assert!(menu.is_none(), "a failed function falls back");
     }
 
     #[test]

@@ -54,6 +54,7 @@
 mod candidate;
 mod commands;
 mod context;
+mod deferred;
 mod engine;
 mod menu;
 mod names;
@@ -69,6 +70,7 @@ pub use baash_lang::QuoteCtx;
 pub use candidate::{CandKind, Candidate, Insertion, Span};
 pub use commands::{CommandIndex, CommandProvider};
 pub use context::{Ctx, context};
+pub use deferred::{DEFAULT_WORDBREAKS, Deferred, Replies};
 pub use engine::{Completer, CompletionEngine, Config};
 pub use menu::Menu;
 pub use names::{

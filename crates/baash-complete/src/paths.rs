@@ -187,6 +187,24 @@ impl PathProvider {
     }
 
     /// Resolve the typed directory component to a real path.
+    /// Whether `text` names a directory, resolved the way a completion would.
+    ///
+    /// Used by `compopt -o filenames`: bash appends `/` to a reply that names a
+    /// directory and suppresses the space. `~` is expanded and a relative path
+    /// is resolved against the provider's root, so the answer is the directory
+    /// the shell would open rather than one relative to the editor's process.
+    pub fn is_directory(&self, text: &[u8]) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        let Some(path) = self.resolve_dir(text) else {
+            return false;
+        };
+        fs::metadata(path)
+            .map(|metadata| metadata.is_dir())
+            .unwrap_or(false)
+    }
+
     fn resolve_dir(&self, typed: &[u8]) -> Option<PathBuf> {
         let home = lock(&self.home).clone();
         if typed.starts_with(b"~/") {

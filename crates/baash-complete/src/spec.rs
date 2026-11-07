@@ -15,7 +15,8 @@
 //! * `-o nospace|default|bashdefault|dirnames|plusdirs` — the options that
 //!   change which candidates exist or how they are inserted.
 //!
-//! `-F` is intentionally absent: see [`Spec::function`].
+//! `-F` is a handoff rather than an absence: the name travels in
+//! [`Spec::function`] and the shell runs it (see [`crate::Deferred`]).
 
 /// `-o nospace`: do not append a space to a unique match.
 pub const OPT_NOSPACE: &[u8] = b"nospace";
@@ -49,13 +50,12 @@ pub struct Spec {
     pub options: Vec<Vec<u8>>,
     /// `-F function`.
     ///
-    /// **Not run.** A completion function is shell code: running it needs the
-    /// interpreter mutably, `COMP_*` variables set and `COMPREPLY` read back,
-    /// all while the editor owns the terminal. The trait that delivers specs is
-    /// `Send + Sync` and has no interpreter, so this field is carried for
-    /// honesty and diagnostic display only. `docs/state.md` records the
-    /// blocker; a spec whose only source is `-F` is treated as absent by the
-    /// shell's bridge, so the command keeps its default completion.
+    /// The function is shell code, so this crate carries the name and never
+    /// runs it. [`crate::CompletionEngine::deferred`] recognises a rule that
+    /// names one, [`crate::Deferred`] assembles the input bash gives it, and
+    /// the caller — the shell's `ShellCompleter` — runs it and returns
+    /// [`crate::Replies`] for
+    /// [`crate::CompletionEngine::deferred_menu`].
     pub function: Option<Vec<u8>>,
 }
 
@@ -71,6 +71,14 @@ impl Spec {
     pub fn has_generator(&self) -> bool {
         !self.actions.is_empty() || !self.words.is_empty()
     }
+}
+
+/// Whether `name` is in an `-o` option list.
+///
+/// The `-F` path carries the options in force *after* `compopt`, so they are a
+/// bare list rather than a [`Spec`].
+pub fn has_option(options: &[Vec<u8>], name: &[u8]) -> bool {
+    options.iter().any(|candidate| candidate.as_slice() == name)
 }
 
 /// A `complete -A` action this crate can answer.

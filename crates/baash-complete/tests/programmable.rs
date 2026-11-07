@@ -9,7 +9,7 @@ mod common;
 use std::sync::Arc;
 
 use baash_complete::{
-    Completer, CompletionEngine, History, Menu, ShellNames, Spec, SpecSource, VarNames,
+    Completer, CompletionEngine, History, Menu, Replies, ShellNames, Spec, SpecSource, VarNames,
 };
 use common::TempTree;
 
@@ -440,5 +440,167 @@ fn a_rule_does_not_apply_to_redirections_or_assignments() {
         assign.candidates.iter().all(|c| c.insert != b"alpha"),
         "{:?}",
         inserts(&assign)
+    );
+}
+
+/// A rule whose source is a `-F` function.
+fn spec_function(function: &str) -> Spec {
+    Spec {
+        function: Some(function.as_bytes().to_vec()),
+        ..Spec::default()
+    }
+}
+
+#[test]
+fn a_function_rule_is_deferred_with_the_input_bash_gives_it() {
+    // Measured against bash 5.3.20: `$1` command, `$2` current word, `$3`
+    // previous word, `COMP_CWORD` the index of the current word.
+    let engine =
+        CompletionEngine::new().with_specs(Rules::new(vec![(b"cmd", spec_function("_f"))]));
+    let deferred = engine
+        .deferred(b"cmd al", 6)
+        .expect("a -F rule is deferred");
+    assert_eq!(deferred.function(), b"_f");
+    assert_eq!(deferred.line(), b"cmd al");
+    assert_eq!(deferred.point(), 6);
+    assert_eq!(
+        deferred.words(),
+        [b"cmd".to_vec(), b"al".to_vec()].as_slice()
+    );
+    assert_eq!(deferred.cword(), 1);
+    assert_eq!(deferred.command(), b"cmd");
+    assert_eq!(deferred.current_word(), b"al");
+    // Measured: with one argument the previous word is the command word itself
+    // (`1=[cmd] 2=[al] 3=[cmd]`).
+    assert_eq!(deferred.previous_word(), b"cmd");
+}
+
+#[test]
+fn a_deferred_line_starts_after_the_last_separator() {
+    // Measured: completing `true; cmd foo al` reports `cmd foo al`.
+    let engine =
+        CompletionEngine::new().with_specs(Rules::new(vec![(b"cmd", spec_function("_f"))]));
+    let deferred = engine
+        .deferred(b"true; cmd foo al", 16)
+        .expect("a -F rule is deferred");
+    assert_eq!(deferred.line(), b"cmd foo al");
+    assert_eq!(deferred.point(), 10);
+    assert_eq!(
+        deferred.words(),
+        [b"cmd".to_vec(), b"foo".to_vec(), b"al".to_vec()].as_slice()
+    );
+    assert_eq!(deferred.cword(), 2);
+    assert_eq!(deferred.previous_word(), b"foo");
+}
+
+#[test]
+fn an_empty_current_word_is_deferred() {
+    // Measured: `cmd foo ` has COMP_CWORD 2 and `$2` empty.
+    let engine =
+        CompletionEngine::new().with_specs(Rules::new(vec![(b"cmd", spec_function("_f"))]));
+    let deferred = engine
+        .deferred(b"cmd foo ", 8)
+        .expect("a -F rule is deferred");
+    assert_eq!(deferred.cword(), 2);
+    assert_eq!(deferred.current_word(), b"");
+    assert_eq!(deferred.previous_word(), b"foo");
+}
+
+#[test]
+fn only_a_function_rule_is_deferred() {
+    let engine = CompletionEngine::new().with_specs(Rules::new(vec![
+        (b"words", spec_words(&["alpha"])),
+        (b"thing", spec_function("_f")),
+    ]));
+    assert!(engine.deferred(b"words al", 8).is_none());
+    assert!(engine.deferred(b"untouched al", 12).is_none());
+    // The command word itself is not the command's argument slot.
+    assert!(engine.deferred(b"thi", 3).is_none());
+}
+
+#[test]
+fn replies_are_decorated_and_not_filtered() {
+    let engine = CompletionEngine::new().with_specs(Rules::new(vec![(
+        b"cmd",
+        Spec {
+            prefix: Some(b"PRE".to_vec()),
+            suffix: Some(b"SUF".to_vec()),
+            ..spec_function("_f")
+        },
+    )]));
+    let deferred = engine.deferred(b"cmd al", 6).expect("deferred");
+    // bash inserts a reply that does not start with what was typed: the
+    // function is trusted to filter.
+    let menu = engine.deferred_menu(&deferred, &Replies::new(vec![b"zzz".to_vec()], Vec::new()));
+    assert_eq!(insert_bytes(&menu), vec![b"PREzzzSUF".to_vec()]);
+    assert!(menu.candidates[0].append_space);
+}
+
+#[test]
+fn nospace_and_filenames_shape_the_insertion() {
+    let tree = TempTree::new("deferred-filenames");
+    tree.dir("adir");
+    tree.file("afile", b"");
+    let engine = CompletionEngine::new()
+        .with_root(&tree.root)
+        .with_specs(Rules::new(vec![(
+            b"cmd",
+            Spec {
+                options: vec![b"filenames".to_vec()],
+                ..spec_function("_f")
+            },
+        )]));
+    let deferred = engine.deferred(b"cmd a", 5).expect("deferred");
+    let menu = engine.deferred_menu(
+        &deferred,
+        &Replies::new(
+            vec![b"adir".to_vec(), b"afile".to_vec()],
+            vec![b"filenames".to_vec()],
+        ),
+    );
+    let directory = menu
+        .candidates
+        .iter()
+        .find(|candidate| candidate.insert == b"adir/")
+        .expect("a directory reply gains a slash");
+    assert!(!directory.append_space);
+    let file = menu
+        .candidates
+        .iter()
+        .find(|candidate| candidate.insert == b"afile")
+        .expect("a file reply is unchanged");
+    assert!(file.append_space);
+
+    let no_space = engine.deferred_menu(
+        &deferred,
+        &Replies::new(vec![b"afile".to_vec()], vec![b"nospace".to_vec()]),
+    );
+    assert!(!no_space.candidates[0].append_space);
+}
+
+#[test]
+fn an_empty_reply_falls_back_to_the_rules_options() {
+    let tree = TempTree::new("deferred-default");
+    tree.dir("adir");
+    let engine = CompletionEngine::new()
+        .with_root(&tree.root)
+        .with_specs(Rules::new(vec![(
+            b"cmd",
+            Spec {
+                options: vec![b"default".to_vec()],
+                ..spec_function("_f")
+            },
+        )]));
+    let deferred = engine.deferred(b"cmd a", 5).expect("deferred");
+    let menu = engine.deferred_menu(
+        &deferred,
+        &Replies::new(Vec::new(), vec![b"default".to_vec()]),
+    );
+    assert!(
+        menu.candidates
+            .iter()
+            .any(|candidate| candidate.insert == b"adir/"),
+        "{:?}",
+        insert_bytes(&menu)
     );
 }

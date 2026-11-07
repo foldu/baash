@@ -1278,3 +1278,78 @@ fn a_multiline_history_entry_is_painted_as_lines() {
         "the buffer keeps the newlines it will run with"
     );
 }
+
+/// A shell-backed completion hook, as `complete -F` needs.
+struct FuncHook {
+    /// Answer only for this line, so the fallback path stays visible.
+    line: Vec<u8>,
+    candidates: Vec<&'static str>,
+    seen: Vec<Vec<u8>>,
+}
+
+impl baash_repl::ShellCompletion for FuncHook {
+    fn complete(&mut self, line: &[u8], cursor: usize) -> Option<baash_complete::Menu> {
+        self.seen.push(line.to_vec());
+        if line != self.line.as_slice() {
+            return None;
+        }
+        let engine = baash_complete::CompletionEngine::new();
+        let ctx = engine.context(line, cursor);
+        let candidates = self
+            .candidates
+            .iter()
+            .map(|word| {
+                baash_complete::Candidate::new(word.as_bytes(), baash_complete::CandKind::Other)
+            })
+            .collect();
+        Some(baash_complete::Menu::new(ctx, candidates))
+    }
+}
+
+/// `complete -F` runs shell code: the editor asks the shell before the data
+/// completer, and a hook that declines leaves the data path intact.
+#[test]
+fn a_shell_completion_hook_answers_before_the_data_completer() {
+    let mut hook = FuncHook {
+        line: b"cmd al".to_vec(),
+        candidates: vec!["shell-alpha"],
+        seen: Vec::new(),
+    };
+    let mut term = FakeTerminal::new(b"cmd al\t\r");
+    let completer = StubCompleter::words(&["data-alpha"]);
+    let result = {
+        let mut editor = Editor::with_config(
+            &mut term,
+            &completer,
+            &baash_repl::NeverNeedsMore,
+            plain_config(),
+        );
+        editor
+            .read_line_with_shell(&mut baash_repl::NeverRefreshes, Some(&mut hook))
+            .expect("read_line")
+    };
+    assert_eq!(result, ReadResult::Line(b"cmd shell-alpha \n".to_vec()));
+    assert_eq!(hook.seen, vec![b"cmd al".to_vec()], "the hook saw the line");
+    assert!(!term.text().contains("data-alpha"));
+
+    // Declining falls back to the data completer.
+    let mut declining = FuncHook {
+        line: b"other".to_vec(),
+        candidates: vec!["shell-alpha"],
+        seen: Vec::new(),
+    };
+    let mut term = FakeTerminal::new(b"cmd al\t\r");
+    let result = {
+        let mut editor = Editor::with_config(
+            &mut term,
+            &completer,
+            &baash_repl::NeverNeedsMore,
+            plain_config(),
+        );
+        editor
+            .read_line_with_shell(&mut baash_repl::NeverRefreshes, Some(&mut declining))
+            .expect("read_line")
+    };
+    assert_eq!(result, ReadResult::Line(b"cmd data-alpha \n".to_vec()));
+    assert_eq!(declining.seen, vec![b"cmd al".to_vec()]);
+}

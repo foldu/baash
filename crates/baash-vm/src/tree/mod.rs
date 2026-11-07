@@ -2169,6 +2169,14 @@ impl ShellHost for Interp {
         self.completion_call(name, argv)
     }
 
+    fn call_function_captured(
+        &mut self,
+        name: &[u8],
+        argv: &[Vec<u8>],
+    ) -> Option<(Vec<u8>, Status)> {
+        self.completion_call_captured(name, argv)
+    }
+
     fn capture_command(&mut self, argv: &[Vec<u8>]) -> Option<(Vec<u8>, Status)> {
         self.completion_capture(argv)
     }

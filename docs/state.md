@@ -219,8 +219,10 @@ delegates everything else: line editing to `baash-repl`, execution to the
     round-trips a space, `$`, a quote, a newline and non-UTF-8 (a file
     `a b$c` inserts as `a\ b\$c`); a directory ends in `/` and adds no space;
   * **programmable completion** from `complete`: `-W` word lists, the `-A`
-    actions the engine can answer, `-P`/`-S`, and
-    `-o nospace|default|bashdefault|dirnames|plusdirs`; `cd`-like commands
+    actions the engine can answer, `-P`/`-S`,
+    `-o nospace|default|bashdefault|dirnames|plusdirs`, and `-F` functions run
+    in the shell with `COMP_LINE`/`COMP_POINT`/`COMP_WORDS`/`COMP_CWORD`/
+    `COMP_TYPE`/`COMP_KEY` set and `COMPREPLY` read back; `cd`-like commands
     complete directories;
   * history: at a blank command word the menu lists whole previous commands,
     newest first and fuzzy-ranked (the fzf-like picker); once a command word
@@ -335,18 +337,18 @@ pid.
 **Known completion limitations** (measured against bash 5.3.20; not defects to
 rediscover):
 
-* **`complete -F` is not run.** A completion function is shell code. The
-  completer is a `&dyn Completer` the editor borrows once for the whole loop and
-  `Interp` is owned by `run_repl`; the provider traits are `Send + Sync` while
-  `Interp` is not `Sync` (`Cell` fields), so a provider cannot hold the
-  interpreter.
-  Making it work needs a per-line completer that holds the shell mutably, a
-  `COMP_*`/`COMPREPLY` save-restore around `ShellState`, and a way to keep a
-  function's own stdout out of the editor's unflushed raw-mode frame (bash
-  redraws above the prompt). `-C` and `-G` have the same blocker: they run
-  shell code or expand a glob. A rule whose only source is one of them is
-  reported as absent, so the command keeps its default completion.
-  `compopt` is therefore only observable inside `compgen`, not at Tab.
+* **`complete -F` runs; `-C` and `-G` do not.** The read loop asks a
+  `ShellCompletion` hook first (`Editor::read_line_with_shell`), and
+  `crates/baash/src/complete.rs::ShellCompleter` runs the function with the
+  interpreter: `COMP_LINE`/`COMP_POINT`/`COMP_WORDS`/`COMP_CWORD`/
+  `COMP_TYPE`/`COMP_KEY` set, the function's `$1`/`$2`/`$3` as bash passes
+  them, the rule's `-o` options in force for `compopt`, and `COMPREPLY` read
+  back. The function's standard output is captured (the `$(…)` mechanism) so it
+  cannot land in the editor's unflushed raw-mode frame, but it is *dropped*
+  rather than painted above the prompt as bash does.
+  `-C` (run a command) and `-G` (expand a glob) are still not run; a rule whose
+  only source is one of them is reported as absent, so the command keeps the
+  default completion.
 * `-W` word lists are split on `IFS` but **not expanded**: expansion is shell
   code, and doing it at prompt-refresh time would run `$(…)` on every prompt.
   A `-W '$list'` therefore offers the literal `$list`.
@@ -670,13 +672,15 @@ Where the waves stand:
   shell at that point, so a rule defined on the previous line is live on the
   next Tab. A per-line engine would have been simpler but would also rebuild the
   `PATH` index and the `nucleo` matcher on every keystroke's worth of typing.
-* **`complete -F` is deferred deliberately.** The blockers are structural, not
-  effort: the completer has no mutable interpreter (the provider traits are
-  `Send + Sync`, `Interp` is not `Sync`), a function's output would land in the
-  editor's unflushed raw-mode frame, and `COMP_*`/`COMPREPLY`/`compopt` need a
-  begin/end lifecycle around `ShellState`. A `-F`-only rule falls back to the
-  default completion instead of swallowing Tab, so sourcing bash-completion's
-  `.bashrc` cannot make completion worse than it was before this wave.
+* **`complete -F` is a per-read handoff.** The editor still borrows the engine
+  once (the per-keystroke `PATH` index and matcher are not rebuilt), but the
+  `-F` half needs the interpreter, so `read_line_with_shell` carries a
+  `ShellCompletion` hook for one read: `ShellCompleter` sets `COMP_*`, runs the
+  function with its output captured, reads `COMPREPLY` and the `compopt`
+  options, and the engine turns the replies into a menu. A rule whose function
+  is missing or fails leaves the ordinary completion in place, so a broken
+  `.bashrc` cannot make Tab worse. `-C`/`-G` remain absent for the same reasons
+  they always were.
 * **`-W` word lists are split, not expanded.** Expansion is shell code; doing it
   in `refresh_prompt` would run a `$(…)` in a word list on every prompt, and
   the completer cannot run it at Tab. Literal lists (the common case) are exact.

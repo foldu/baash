@@ -31,7 +31,7 @@
 
 use std::io;
 
-use baash_complete::Completer;
+use baash_complete::{Completer, Menu};
 use baash_highlight::Theme;
 
 use baash_runtime::History;
@@ -98,6 +98,25 @@ impl LivePrompt for NeverRefreshes {
     fn refresh(&mut self) -> Option<Prompt> {
         None
     }
+}
+
+/// Completion that needs the shell itself.
+///
+/// `complete -F` names a shell function, so its candidates are shell code: the
+/// engine can assemble the input but cannot run it (`docs/contracts.md`). A
+/// caller that owns the interpreter implements this and passes it to
+/// [`Editor::read_line_with_shell`]; the editor asks it before the data
+/// completer, and `None` means "no rule here needs shell code", so the ordinary
+/// completer answers.
+///
+/// The call happens while the terminal is in raw mode and the frame is on
+/// screen. An implementation must not write to the terminal: whatever the
+/// function prints has to be captured and painted by the caller after the read,
+/// or dropped.
+pub trait ShellCompletion {
+    /// The menu for the word at `cursor`, or `None` when no rule needs the
+    /// shell.
+    fn complete(&mut self, line: &[u8], cursor: usize) -> Option<Menu>;
 }
 
 /// A [`Syntax`] for which every buffer is complete.
@@ -309,9 +328,23 @@ impl<'a> Editor<'a> {
     /// terminal has to be armed for that to happen
     /// ([`Terminal::set_watch`]); with no watch, this is [`Editor::read_line`].
     pub fn read_line_with(&mut self, live: &mut dyn LivePrompt) -> io::Result<ReadResult> {
+        self.read_line_with_shell(live, None)
+    }
+
+    /// Read one line, letting `shell` answer completions that need the
+    /// interpreter.
+    ///
+    /// This is [`Editor::read_line_with`] plus the `complete -F` seam: on Tab
+    /// the editor first asks `shell`, and only when it answers `None` does the
+    /// data completer run. A `None` hook is the plain editor.
+    pub fn read_line_with_shell(
+        &mut self,
+        live: &mut dyn LivePrompt,
+        mut shell: Option<&mut dyn ShellCompletion>,
+    ) -> io::Result<ReadResult> {
         self.begin();
         self.term.enter_raw()?;
-        let result = self.read_line_loop(live);
+        let result = self.read_line_loop(live, &mut shell);
         let _ = self.term.leave_raw();
         result
     }
@@ -332,7 +365,16 @@ impl<'a> Editor<'a> {
     /// with its own event loop (and the tests) can drive the editor key by key
     /// without going through [`Terminal::read_byte`].
     pub fn step(&mut self, key: Key) -> io::Result<Flow> {
-        let flow = self.handle(key)?;
+        self.step_with(key, &mut None)
+    }
+
+    /// [`Editor::step`] with a shell-backed completion hook in scope.
+    fn step_with(
+        &mut self,
+        key: Key,
+        shell: &mut Option<&mut dyn ShellCompletion>,
+    ) -> io::Result<Flow> {
+        let flow = self.handle_with(key, shell)?;
         if flow == Flow::Continue {
             self.draw()?;
         }
@@ -355,7 +397,11 @@ impl<'a> Editor<'a> {
         self.dirty = true;
     }
 
-    fn read_line_loop(&mut self, live: &mut dyn LivePrompt) -> io::Result<ReadResult> {
+    fn read_line_loop(
+        &mut self,
+        live: &mut dyn LivePrompt,
+        shell: &mut Option<&mut dyn ShellCompletion>,
+    ) -> io::Result<ReadResult> {
         self.draw()?;
         loop {
             if self.term.await_input()? == Input::Watch {
@@ -372,7 +418,7 @@ impl<'a> Editor<'a> {
             let Some(key) = self.decoder.next(self.term)? else {
                 return self.finish_eof();
             };
-            match self.step(key)? {
+            match self.step_with(key, shell)? {
                 Flow::Continue => {}
                 Flow::Submit => {
                     self.line.push_newline();
@@ -430,8 +476,16 @@ impl<'a> Editor<'a> {
     }
 
     fn handle(&mut self, key: Key) -> io::Result<Flow> {
+        self.handle_with(key, &mut None)
+    }
+
+    fn handle_with(
+        &mut self,
+        key: Key,
+        shell: &mut Option<&mut dyn ShellCompletion>,
+    ) -> io::Result<Flow> {
         if self.search.is_some() {
-            return self.handle_search(key);
+            return self.handle_search(key, shell);
         }
         if self.menu.is_some() {
             return self.handle_menu(key);
@@ -461,7 +515,7 @@ impl<'a> Editor<'a> {
                 self.line.insert(&bytes);
             }
             Key::Enter => return Ok(Flow::Submit),
-            Key::Tab => self.complete()?,
+            Key::Tab => self.complete_with(shell)?,
             Key::Esc => {
                 // Dismiss the ghost text for this line. Typing refines the
                 // line and brings it back.
@@ -629,10 +683,25 @@ impl<'a> Editor<'a> {
         }
     }
 
-    fn complete(&mut self) -> io::Result<()> {
-        let menu = self
-            .completer
-            .complete(self.line.buffer(), self.line.cursor());
+    /// Run `complete` for the current line, asking the shell first.
+    ///
+    /// A `-F` rule is shell code; when the hook answers, that menu is offered
+    /// instead of the data one. A hook that answers `None` (or no hook at all)
+    /// keeps the engine's completion, which is also what a rule whose function
+    /// could not run falls back to.
+    fn complete_with(&mut self, shell: &mut Option<&mut dyn ShellCompletion>) -> io::Result<()> {
+        let from_shell = match shell {
+            Some(shell) => shell.complete(self.line.buffer(), self.line.cursor()),
+            None => None,
+        };
+        let menu = from_shell.unwrap_or_else(|| {
+            self.completer
+                .complete(self.line.buffer(), self.line.cursor())
+        });
+        self.offer(menu)
+    }
+
+    fn offer(&mut self, menu: Menu) -> io::Result<()> {
         if menu.is_empty() {
             // No candidates: a bell, not a redraw that changes nothing.
             self.prefix_tab = false;
@@ -719,7 +788,11 @@ impl<'a> Editor<'a> {
     /// accepts the match (the line already holds it) and is then processed
     /// normally — which is how `Left`/`Right` put the cursor on the match for
     /// editing.
-    fn handle_search(&mut self, key: Key) -> io::Result<Flow> {
+    fn handle_search(
+        &mut self,
+        key: Key,
+        shell: &mut Option<&mut dyn ShellCompletion>,
+    ) -> io::Result<Flow> {
         match key {
             Key::Ctrl(0x12) => {
                 self.search_older();
@@ -758,7 +831,7 @@ impl<'a> Editor<'a> {
                 // Accept and let the key act on the accepted line.
                 self.search = None;
                 self.dirty = true;
-                self.handle(other)
+                self.handle_with(other, shell)
             }
         }
     }

@@ -707,6 +707,20 @@ impl Vars {
         self.assign(name, VarValue::Str(value.to_vec()))
     }
 
+    /// Assign an indexed array from elements in index order, starting at 0.
+    ///
+    /// Used by the completion protocol, which has to hand a `-F` function the
+    /// `COMP_WORDS` array before it runs. Building the `VarValue` here keeps
+    /// `IndexedArray` an implementation detail of this module.
+    pub fn assign_elements(&mut self, name: &[u8], elements: &[Vec<u8>]) -> Result<(), Error> {
+        let map: BTreeMap<i64, Vec<u8>> = elements
+            .iter()
+            .enumerate()
+            .map(|(index, element)| (index as i64, element.clone()))
+            .collect();
+        self.assign(name, VarValue::Indexed(IndexedArray::from(map)))
+    }
+
     /// Assign a scalar in a specific scope, used for prefix assignments and
     /// `local`.
     pub fn assign_scalar_in(

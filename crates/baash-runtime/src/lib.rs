@@ -484,6 +484,22 @@ pub trait ShellHost {
         None
     }
 
+    /// Run shell function `name` with `argv`, capturing its standard output.
+    ///
+    /// A `-F` completion runs while the editor owns the terminal in raw mode:
+    /// anything the function prints would land inside an unflushed frame, so it
+    /// has to be caught rather than written. The same mechanism as `-C` and
+    /// `$(…)` does it. `None` means the host cannot capture or has no such
+    /// function.
+    fn call_function_captured(
+        &mut self,
+        name: &[u8],
+        argv: &[Vec<u8>],
+    ) -> Option<(Vec<u8>, Status)> {
+        let _ = (name, argv);
+        None
+    }
+
     /// Run `argv` as a command and return its standard output and status.
     ///
     /// This is `compgen -C` / `complete -C`: the command's output *is* the

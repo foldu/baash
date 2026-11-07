@@ -1204,7 +1204,7 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
         if let Some(requested) = shell.state().take_exit_request() {
             break requested;
         }
-        match read_command(shell, &mut editor, &mut expansion, &mut live) {
+        match read_command(shell, &mut editor, &mut expansion, &mut live, &engine) {
             Ok(NextCommand::Run(bytes)) => {
                 // Hand the ring to the shell for the duration of the command,
                 // so `history`/`fc` mutate the very ring the editor navigates.
@@ -1308,12 +1308,19 @@ fn read_command(
     editor: &mut baash_repl::Editor<'_>,
     session: &mut histexpand::Session,
     live: &mut dyn baash_repl::LivePrompt,
+    engine: &baash_complete::CompletionEngine,
 ) -> std::io::Result<NextCommand> {
     loop {
-        let bytes = match editor.read_line_with(live)? {
-            baash_repl::ReadResult::Line(bytes) => bytes,
-            baash_repl::ReadResult::Interrupted => return Ok(NextCommand::Interrupted),
-            baash_repl::ReadResult::Eof => return Ok(NextCommand::Eof),
+        // The `complete -F` seam: a rule whose source is a shell function runs
+        // it here, with the interpreter, while the editor owns the terminal.
+        let bytes = {
+            let mut completer = complete::ShellCompleter::new(shell, engine);
+            let result = editor.read_line_with_shell(live, Some(&mut completer))?;
+            match result {
+                baash_repl::ReadResult::Line(bytes) => bytes,
+                baash_repl::ReadResult::Interrupted => return Ok(NextCommand::Interrupted),
+                baash_repl::ReadResult::Eof => return Ok(NextCommand::Eof),
+            }
         };
         if bytes.iter().all(u8::is_ascii_whitespace) {
             return Ok(NextCommand::Skip);

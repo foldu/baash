@@ -746,17 +746,36 @@ assignment value.
 state this crate does not have and offer nothing; `complete` still accepts
 them. `-P`/`-S` decorate *after* matching (`compgen -P pre -W 'one' -- o` is
 `preone`, `-- pre` is nothing). `-o nospace|default|bashdefault|dirnames|plusdirs`
-are applied; `filenames` is accepted and has no effect (`-W` words and `-A`
-results are already inserted as literals), and `noquote`/`fullquote` are
-accepted and ignored.
+are applied; `filenames` has no effect on `-W`/`-A` results (they are already
+inserted as literals) but appends `/` to a directory reply from `-F`, and
+`noquote`/`fullquote` are accepted and ignored.
 
 `-W` word lists are split on the shell's `IFS` by the bridge and **not
 expanded**: expansion is shell code (`$(…)` would run on every prompt refresh),
-which is the same blocker as `-F`. `-F`, `-C` and `-G` are not run from the
-completer at all; a rule whose only source is one of them is reported as
-absent, so the command keeps the default completion instead of losing it.
-`compopt` therefore changes nothing at the prompt yet (it only becomes
-observable together with `-F`).
+which is the same blocker as `-C`/`-G`. `-C` (run a command) and `-G` (expand a
+glob) are still not run from the completer; a rule whose only source is one of
+them is reported as absent, so the command keeps the default completion instead
+of losing it.
+
+`-F` is a handoff. `CompletionEngine::deferred` decides that a function must
+run and assembles bash's input — `COMP_LINE` is the *current command* (bash
+trims at the last separator), `COMP_WORDS` is split on `COMP_WORDBREAKS` rather
+than by the grammar (a break character is an element of its own, quotes stay in
+the word, an empty current word is an empty element), `COMP_CWORD` indexes it,
+`COMP_TYPE`/`COMP_KEY` are 9, and the function's `$1`/`$2`/`$3` are the
+command, the current word and the previous one. The shell's `ShellCompleter`
+sets those variables, runs the function through `ShellHost::call_function`,
+reads `COMPREPLY` and the `compopt` options back, and
+`CompletionEngine::deferred_menu` builds the menu: replies are **not** filtered
+against the typed prefix (bash trusts the function), `-P`/`-S` decorate them,
+`-o nospace` suppresses the space, `-o filenames` turns a directory reply into
+`name/` without a space, and an empty reply falls back to
+`-o default|bashdefault|dirnames`; `-o plusdirs` adds directories to replies.
+
+The function's standard output is captured (`ShellHost::call_function_captured`,
+the `$(…)` mechanism) instead of printed: the editor owns the terminal in raw
+mode with an unflushed frame. bash paints that output above the prompt; the
+editor has no seam for it yet, so it is dropped, not corrupted into the frame.
 
 `cd`, `pushd`, `popd`, `rmdir` and `mkdir` get a built-in rule expressed as
 data: `-A directory` with `-o default`, so `cd /tm<TAB>` offers `/tmp/` and
@@ -1137,9 +1156,10 @@ At the prompt, the same registry also drives Tab: `crates/baash/src/complete.rs`
 clones `ShellState::completions` into the engine before each prompt (see
 `baash-complete`). The clone is the seam, so `complete -W` takes effect on the
 line typed after the one that defined it — the rule must be in the prompt
-snapshot, and the snapshot is taken before `read_line`. `-F`/`-C`/`-G` rules
-fall back to the default completion because the completer cannot run shell code
-(`docs/state.md` §4).
+snapshot, and the snapshot is taken before `read_line`. `-F` rules are carried
+to `ShellCompleter`, which runs the function with the interpreter while the
+editor holds the terminal; `-C`/`-G` rules still fall back to the default
+completion (`docs/state.md` §4).
 
 Sources that would be lies are stubs returning nothing rather than plausible
 lists: `binding` (no line editor), `service`, `job`/`running`/`stopped` (no

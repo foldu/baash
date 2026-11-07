@@ -15,6 +15,7 @@ use baash_syntax::ParseOpts;
 use crate::candidate::{CandKind, Candidate, dedupe};
 use crate::commands::CommandProvider;
 use crate::context::{Ctx, context};
+use crate::deferred::{Deferred, Replies};
 use crate::menu::Menu;
 use crate::names::{
     AliasProvider, BuiltinProvider, FunctionProvider, History, HistoryProvider, ShellNames,
@@ -25,7 +26,8 @@ use crate::paths::{PathMode, PathProvider};
 use crate::rank::Ranker;
 use crate::sources::{self, Provider, ProviderId};
 use crate::spec::{
-    Action, OPT_BASHDEFAULT, OPT_DEFAULT, OPT_DIRNAMES, OPT_NOSPACE, OPT_PLUSDIRS, Spec, SpecSource,
+    Action, OPT_BASHDEFAULT, OPT_DEFAULT, OPT_DIRNAMES, OPT_NOSPACE, OPT_PLUSDIRS, Spec,
+    SpecSource, has_option,
 };
 use crate::text;
 
@@ -74,6 +76,8 @@ pub struct CompletionEngine {
     vars: RwLock<Option<Arc<VarProvider>>>,
     /// `complete`/`compopt` rules for the command being completed.
     specs: RwLock<Option<Arc<dyn SpecSource>>>,
+    /// The shell's `COMP_WORDBREAKS`, when it differs from bash's default.
+    word_breaks: RwLock<Option<Vec<u8>>>,
     ranker: Mutex<Ranker>,
 }
 
@@ -105,6 +109,7 @@ impl CompletionEngine {
             commands: Arc::clone(&commands),
             vars: RwLock::new(None),
             specs: RwLock::new(None),
+            word_breaks: RwLock::new(None),
             ranker: Mutex::new(Ranker::new()),
         };
         engine.set_provider(Arc::clone(&paths) as Arc<dyn Provider>);
@@ -245,6 +250,105 @@ impl CompletionEngine {
     /// Replace the programmable-completion rules (`complete`).
     pub fn set_specs(&self, source: Arc<dyn SpecSource>) {
         *write(&self.specs) = Some(source);
+    }
+
+    /// Replace `COMP_WORDBREAKS`, which splits the `COMP_WORDS` a `-F` function
+    /// sees.
+    ///
+    /// bash-completion edits the variable, so the splitter must read what the
+    /// shell has, not a constant. `None` (or an empty value) selects bash's
+    /// default, which is what an unset variable means.
+    pub fn set_word_breaks(&self, breaks: Option<Vec<u8>>) {
+        *write(&self.word_breaks) = breaks;
+    }
+
+    /// The `-F` handoff for `cursor` in `line`, when the applicable rule names a
+    /// function.
+    ///
+    /// This is the half of `complete -F` that needs only the line: the engine
+    /// decides that a function must run and assembles the input bash gives it
+    /// (`COMP_LINE`, `COMP_POINT`, `COMP_WORDS`, `COMP_CWORD`, and the
+    /// function's `$1`/`$2`/`$3`). The caller runs the function, reads
+    /// `COMPREPLY`, and calls [`CompletionEngine::deferred_menu`] with the
+    /// result — or falls back to [`Completer::complete`] when the function
+    /// cannot run.
+    ///
+    /// `None` means the slot has no rule or the rule has no `-F`: the data path
+    /// handles it, and `-C`/`-G` are still unhandled (measured, not guessed:
+    /// `docs/state.md` records why).
+    pub fn deferred(&self, line: &[u8], cursor: usize) -> Option<Deferred> {
+        let cursor = cursor.min(line.len());
+        let ctx = self.context(line, cursor);
+        let spec = self.spec_for(&ctx)?;
+        let function = spec.function.clone()?;
+        let breaks = read(&self.word_breaks).clone().unwrap_or_default();
+        Some(Deferred::new(ctx, spec, function, line, cursor, &breaks))
+    }
+
+    /// The menu for a `-F` function's replies.
+    ///
+    /// bash trusts the function: a reply is not filtered against the typed
+    /// prefix (`al<TAB>` inserts `zzz`), `-P`/`-S` decorate it, and
+    /// `compopt -o nospace|filenames` changes the insertion. When the function
+    /// returns nothing, the rule's `-o default|bashdefault|dirnames` fallback
+    /// runs; `-o plusdirs` adds directories to whatever came back.
+    pub fn deferred_menu(&self, deferred: &Deferred, replies: &Replies) -> Menu {
+        let spec = deferred.spec();
+        let options = &replies.options;
+        let mut candidates: Vec<Candidate> = replies
+            .words
+            .iter()
+            .map(|word| Candidate::new(deferred.decorate(word), CandKind::Other))
+            .collect();
+        if candidates.is_empty() {
+            let mut fallback =
+                if has_option(options, OPT_DEFAULT) || has_option(options, OPT_BASHDEFAULT) {
+                    self.default_candidates(deferred.ctx(), &self.provider_list())
+                } else if has_option(options, OPT_DIRNAMES) {
+                    self.directory_candidates(deferred.ctx())
+                } else {
+                    Vec::new()
+                };
+            keep_prefixed(&mut fallback, &deferred.ctx().prefix);
+            for candidate in &mut fallback {
+                decorate_candidate(candidate, spec);
+            }
+            candidates = fallback;
+        }
+        if has_option(options, OPT_PLUSDIRS) {
+            let mut directories = self.directory_candidates(deferred.ctx());
+            keep_prefixed(&mut directories, &deferred.ctx().prefix);
+            for candidate in &mut directories {
+                decorate_candidate(candidate, spec);
+            }
+            candidates.extend(directories);
+        }
+        dedupe(&mut candidates);
+        if !has_option(options, b"nosort") {
+            candidates.sort_by(|a, b| {
+                a.display
+                    .cmp(&b.display)
+                    .then_with(|| a.insert.cmp(&b.insert))
+            });
+        }
+        if has_option(options, OPT_NOSPACE) {
+            for candidate in &mut candidates {
+                candidate.append_space = false;
+            }
+        }
+        if has_option(options, b"filenames") {
+            for candidate in &mut candidates {
+                if self.paths.is_directory(&candidate.insert) {
+                    // readline, told the matches are filenames, ends a
+                    // directory with `/` and does not append a space.
+                    candidate.insert.push(b'/');
+                    candidate.display.push('/');
+                    candidate.append_space = false;
+                }
+            }
+        }
+        candidates.truncate(self.config.max_candidates);
+        Menu::new(deferred.ctx().clone(), candidates)
     }
 
     /// Add or replace a provider.
@@ -402,23 +506,8 @@ impl CompletionEngine {
 
         // `-P`/`-S` decorate after matching: `compgen -P pre -W 'one' -- o`
         // prints `preone`, and `-- pre` prints nothing.
-        if spec.prefix.is_some() || spec.suffix.is_some() {
-            for candidate in &mut candidates {
-                let mut insert = Vec::with_capacity(
-                    candidate.insert.len()
-                        + spec.prefix.as_ref().map_or(0, Vec::len)
-                        + spec.suffix.as_ref().map_or(0, Vec::len),
-                );
-                if let Some(prefix) = &spec.prefix {
-                    insert.extend_from_slice(prefix);
-                }
-                insert.extend_from_slice(&candidate.insert);
-                if let Some(suffix) = &spec.suffix {
-                    insert.extend_from_slice(suffix);
-                }
-                candidate.display = String::from_utf8_lossy(&insert).into_owned();
-                candidate.insert = insert;
-            }
+        for candidate in &mut candidates {
+            decorate_candidate(candidate, spec);
         }
         if spec.has_option(OPT_NOSPACE) {
             for candidate in &mut candidates {
@@ -531,6 +620,30 @@ fn keep_prefixed(candidates: &mut Vec<Candidate>, prefix: &[u8]) {
         return;
     }
     candidates.retain(|candidate| text::starts_with(&candidate.insert, prefix));
+}
+
+/// Apply `-P prefix`/`-S suffix` to a candidate.
+///
+/// Decoration happens *after* matching, which is bash's order: a decorated
+/// candidate never has to look like a prefix match.
+fn decorate_candidate(candidate: &mut Candidate, spec: &Spec) {
+    if spec.prefix.is_none() && spec.suffix.is_none() {
+        return;
+    }
+    let mut insert = Vec::with_capacity(
+        candidate.insert.len()
+            + spec.prefix.as_ref().map_or(0, Vec::len)
+            + spec.suffix.as_ref().map_or(0, Vec::len),
+    );
+    if let Some(prefix) = &spec.prefix {
+        insert.extend_from_slice(prefix);
+    }
+    insert.extend_from_slice(&candidate.insert);
+    if let Some(suffix) = &spec.suffix {
+        insert.extend_from_slice(suffix);
+    }
+    candidate.display = String::from_utf8_lossy(&insert).into_owned();
+    candidate.insert = insert;
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

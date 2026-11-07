@@ -351,6 +351,43 @@ impl Interp {
         })
     }
 
+    /// Run a `-F` completion function with its stdout captured.
+    ///
+    /// A completion runs while the editor owns the terminal in raw mode, so
+    /// anything the function prints would land inside an unflushed frame. bash
+    /// paints it above the prompt; the editor does not have that seam yet, so
+    /// the bytes are collected here (which is what matters now: the frame
+    /// stays intact) and returned for a caller that can paint them.
+    ///
+    /// `None` means there is no such function, or the capture could not be set
+    /// up — in both cases the caller keeps the ordinary completion.
+    pub(crate) fn completion_call_captured(
+        &mut self,
+        name: &[u8],
+        argv: &[Vec<u8>],
+    ) -> Option<(Vec<u8>, Status)> {
+        use baash_sys::AsRawFd;
+
+        self.function_index(name)?;
+        // The VM writes through descriptor 1; a buffered `println!` in a
+        // built-in would otherwise stay in the buffer and escape after the
+        // descriptor is restored.
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let saved = baash_sys::dup(1).ok()?;
+        let capture = baash_sys::create_unlinked_temp(0).ok()?;
+        if baash_sys::dup2(capture.as_raw_fd(), 1).is_err() {
+            let _ = baash_sys::dup2(saved.as_raw_fd(), 1);
+            return None;
+        }
+        let status = self.completion_call(name, argv);
+        let _ = baash_sys::dup2(saved.as_raw_fd(), 1);
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let capture_fd = capture.as_raw_fd();
+        baash_sys::lseek(capture_fd, 0, baash_sys::seek::SET).ok()?;
+        let bytes = baash_sys::read_all(capture_fd).ok()?;
+        Some((bytes, status?))
+    }
+
     /// Run `argv` with its stdout captured, for `-C`.
     ///
     /// The same mechanism as `$(…)`: run the command with descriptor 1 on a

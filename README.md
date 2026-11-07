@@ -84,15 +84,18 @@ directories are inserted with the quoting that gives the name back (a space, a
 trailing space. Programmable completion from `complete` is honoured for `-W`
 word lists, the `-A` actions the engine can answer, `-P`/`-S` and
 `-o nospace|default|bashdefault|dirnames|plusdirs`; `cd` completes directories.
-`complete -F` is deliberately not run yet: a completion function is shell code,
-and the completer has no mutable interpreter while the editor owns the
-terminal. The exact blockers are in [`docs/state.md`](docs/state.md) §4.
+`complete -F` runs: on Tab the shell calls the function with `COMP_LINE`,
+`COMP_POINT`, `COMP_WORDS`, `COMP_CWORD`, `COMP_TYPE` and `COMP_KEY` set and
+reads `COMPREPLY` back, so bash completion functions work — its output is
+captured rather than printed, because the editor owns the terminal at that
+moment ([`docs/contracts.md`](docs/contracts.md)). `-C` and `-G` are not run
+yet.
 
 Not implemented yet: the directory stack (`pushd`/`popd`/`dirs`), `umask`,
 `let`, `ulimit`, `times`, `enable`, `$RANDOM`/`$SECONDS`/`$FUNCNAME`, xtrace
 (`set -x`), `~user`,
-process substitution (`<(...)`, rejected as `BAASH-E0301`), and `complete -F`/
-`-C`/`-G` at the prompt. Missing built-ins
+process substitution (`<(...)`, rejected as `BAASH-E0301`), and `complete -C`/
+`-G` at the prompt. Missing built-ins
 answer status 2 with `BAASH-E0508`; missing special variables expand to nothing.
 `printf`, `pwd`, `test` and `[` are served from `PATH` by design.
 [`docs/state.md`](docs/state.md) has the full inventory; the interactive
