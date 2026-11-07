@@ -155,7 +155,17 @@ impl Interp {
                     return Unwind::Exit(exit);
                 }
                 self.sync_specials();
+                // `(( … ))` gets the same word expansion `$(( … ))` does:
+                // `${#a[@]}`, `$#` and `$n` are ordinary arithmetic operands
+                // (`(( $# == 0 ))`), and bash expands them before evaluating.
                 let text = chunk.source.bytes()[expr.clone()].to_vec();
+                let text = match self.expand_arithmetic(&text, expr) {
+                    Ok(expanded) => expanded,
+                    Err(error) => {
+                        self.diagnose(&error.diagnostic());
+                        return Unwind::Status(Status::FAILURE);
+                    }
+                };
                 let outcome = crate::arith::eval(&text, self);
                 // `set -u; (( x++ ))` ends the script, as bash does.
                 if let Some(unwind) = self.arith_nounset() {
