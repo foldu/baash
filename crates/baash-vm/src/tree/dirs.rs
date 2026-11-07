@@ -26,6 +26,11 @@ use super::Interp;
 /// and collapsed textually, and that string is both what is chdir'ed to and
 /// what `PWD` records — which is why `cd symlink` keeps the symlink's name and
 /// `cd ..` leaves it by name. `-P` asks the kernel and `getcwd()` instead.
+///
+/// The textual collapse is [`baash_sys::paths::resolve`]'s job, because what a
+/// root is differs by platform (`docs/portability.md`). It answers `None` for
+/// the names no string can place — a Windows drive-relative `C:foo` — and then
+/// this asks the kernel, exactly as `-P` does.
 pub(super) fn enter(
     interp: &mut Interp,
     target: &[u8],
@@ -34,13 +39,18 @@ pub(super) fn enter(
     let previous = interp.state.vars.scalar(b"PWD").map(<[u8]>::to_vec);
     let current = if physical {
         baash_sys::chdir(target)?;
-        std::env::current_dir()
-            .map(baash_sys::os::bytes_from_os)
-            .unwrap_or_else(|_| target.to_vec())
+        cwd_bytes(target)
     } else {
-        let logical = resolve(&current(interp), target);
-        baash_sys::chdir(&logical)?;
-        logical
+        match baash_sys::paths::resolve(&current(interp), target) {
+            Some(logical) => {
+                baash_sys::chdir(&logical)?;
+                logical
+            }
+            None => {
+                baash_sys::chdir(target)?;
+                cwd_bytes(target)
+            }
+        }
     };
     if let Some(previous) = previous {
         let _ = interp.state.vars.assign_scalar(b"OLDPWD", &previous);
@@ -61,48 +71,26 @@ pub(super) fn enter(
 /// so far — never against the raw path, whose `..` the kernel would resolve
 /// through the symlink.
 pub(super) fn check_components(interp: &Interp, target: &[u8]) -> std::io::Result<()> {
-    let mut parts: Vec<Vec<u8>> = Vec::new();
-    if target.first() != Some(&b'/') {
-        for component in current(interp).split(|&byte| byte == b'/') {
-            match component {
-                b"" | b"." => {}
-                b".." => {
-                    parts.pop();
-                }
-                other => parts.push(other.to_vec()),
-            }
-        }
-    }
-    for component in target.split(|&byte| byte == b'/') {
-        match component {
-            b"" | b"." => continue,
-            b".." => {
-                parts.pop();
-            }
-            name => {
-                parts.push(name.to_vec());
-                let path = spell_path(&parts);
-                let metadata = std::fs::metadata(baash_sys::os::path_from_bytes(&path))?;
-                if !metadata.is_dir() {
-                    return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
-                }
-            }
+    let Some(prefixes) = baash_sys::paths::prefixes(&current(interp), target) else {
+        // The name needs the kernel to place it at all (a Windows
+        // drive-relative `C:foo`), so it also gets the kernel's walk.
+        return Ok(());
+    };
+    for path in prefixes {
+        let metadata = std::fs::metadata(baash_sys::os::path_from_bytes(&path))?;
+        if !metadata.is_dir() {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
         }
     }
     Ok(())
 }
 
-/// Join absolute path components, root included.
-fn spell_path(parts: &[Vec<u8>]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for component in parts {
-        out.push(b'/');
-        out.extend_from_slice(component);
-    }
-    if out.is_empty() {
-        out.push(b'/');
-    }
-    out
+/// The directory the process is in, as the kernel spells it, falling back to
+/// `target` when even `getcwd` fails.
+fn cwd_bytes(target: &[u8]) -> Vec<u8> {
+    std::env::current_dir()
+        .map(baash_sys::os::bytes_from_os)
+        .unwrap_or_else(|_| target.to_vec())
 }
 
 /// The current directory as the shell spells it.
@@ -117,7 +105,7 @@ fn current(interp: &Interp) -> Vec<u8> {
                 .ok()
                 .map(baash_sys::os::bytes_from_os)
         })
-        .unwrap_or_else(|| b"/".to_vec())
+        .unwrap_or_else(baash_sys::paths::root)
 }
 
 /// The stack with element 0 materialised even when nothing was pushed yet.
@@ -183,7 +171,10 @@ pub(crate) fn bi_pwd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
 /// compare identity, so `PWD=/tmp; cd /var` (typed by something other than the
 /// shell) is not believed.
 fn names_current_directory(path: &[u8]) -> bool {
-    if path.first() != Some(&b'/') {
+    // `$PWD` has to be an absolute name before comparing it with anything: a
+    // relative one names different directories depending on where it is read
+    // (`C:foo` on Windows is relative to wherever that drive was left).
+    if !baash_sys::paths::is_absolute(path) {
         return false;
     }
     let probe = baash_sys::os::path_from_bytes(path);
@@ -216,59 +207,64 @@ fn fail(interp: &mut Interp, name: &str, message: &str, status: Status) -> Statu
     status
 }
 
-/// Lexically resolve `path` against `cwd`: collapse repeated slashes, `.` and
-/// `..`, and never climb above the root.
-fn resolve(cwd: &[u8], path: &[u8]) -> Vec<u8> {
-    let mut parts: Vec<&[u8]> = Vec::new();
-    let mut sources = Vec::with_capacity(2);
-    if path.first() != Some(&b'/') {
-        sources.push(cwd);
-    }
-    sources.push(path);
-    for source in sources {
-        for component in source.split(|&byte| byte == b'/') {
-            match component {
-                b"" | b"." => {}
-                b".." => {
-                    parts.pop();
-                }
-                other => parts.push(other),
-            }
-        }
-    }
-    let mut out = Vec::new();
-    for component in parts {
-        out.push(b'/');
-        out.extend_from_slice(component);
-    }
-    if out.is_empty() {
-        out.push(b'/');
-    }
-    out
+/// The status for an empty directory name.
+///
+/// bash reports `cd ""` as "null directory" rather than as the failed `chdir`
+/// an empty path would be, and does not search `CDPATH` for one; `pushd ""`
+/// says the same thing.
+pub(super) fn null_directory(interp: &mut Interp, name: &str) -> Status {
+    fail(interp, name, "null directory", Status::FAILURE)
+}
+
+/// `$HOME`, or the platform's profile directory where a native process is
+/// started without one (Windows; see [`baash_sys::dirs::fallback_home`]).
+pub(super) fn home(interp: &Interp) -> Option<Vec<u8>> {
+    interp
+        .state
+        .vars
+        .scalar(b"HOME")
+        .map(<[u8]>::to_vec)
+        .or_else(baash_sys::dirs::fallback_home)
 }
 
 /// `%2d  path`, with the tilde abbreviation `dirs` uses unless `-l`.
 fn spell(interp: &Interp, path: &[u8], long: bool) -> Vec<u8> {
+    spell_with_home(path, home(interp).as_deref(), long)
+}
+
+/// [`spell`] against an explicit home, so the abbreviation is testable without
+/// a shell.
+fn spell_with_home(path: &[u8], home: Option<&[u8]>, long: bool) -> Vec<u8> {
     if long {
         return path.to_vec();
     }
-    let Some(home) = interp.state.vars.scalar(b"HOME") else {
+    let Some(home) = home else {
         return path.to_vec();
     };
     if home.is_empty() || home == b"/" {
         return path.to_vec();
     }
-    if path == home {
-        return b"~".to_vec();
-    }
-    if let Some(rest) = path.strip_prefix(home) {
-        if rest.first() == Some(&b'/') {
+    match baash_sys::paths::strip_prefix(path, home) {
+        // `strip_prefix` accepts a whole component only, so `/home/ada`
+        // abbreviates `/home/ada/work` but not `/home/adam`.
+        //
+        // A remainder made only of separators is the home directory itself:
+        // the comparison drops a root's trailing separator first (`C:\` is
+        // compared as `C:`), so its own root comes back as a lone separator.
+        Some(rest)
+            if rest
+                .iter()
+                .all(|&byte| baash_sys::paths::is_separator(byte)) =>
+        {
+            b"~".to_vec()
+        }
+        Some(rest) => {
             let mut out = b"~".to_vec();
             out.extend_from_slice(rest);
-            return out;
+            out
         }
+        None => path.to_vec(),
     }
-    path.to_vec()
 }
 
 fn write_stack(interp: &mut Interp, numbered: bool, one_per_line: bool, long: bool) -> Status {
@@ -445,18 +441,27 @@ pub(crate) fn bi_pushd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
         return write_stack(interp, false, false, false);
     }
 
-    let cwd = current(interp);
-    let target = resolve(&cwd, &operand);
-    if !no_chdir {
-        if let Err(error) = enter(interp, &target, false) {
-            return fail(
-                interp,
-                name,
-                &format!("{}: {error}", String::from_utf8_lossy(&target)),
-                Status::FAILURE,
-            );
-        }
+    if operand.is_empty() {
+        return null_directory(interp, name);
     }
+    // `-n` records the name without entering it, so the stack keeps what the
+    // operand resolves to; otherwise `enter` decides, which also covers the
+    // names only the kernel can place.
+    let target = if no_chdir {
+        baash_sys::paths::resolve(&current(interp), &operand).unwrap_or(operand)
+    } else {
+        match enter(interp, &operand, false) {
+            Ok(entered) => entered,
+            Err(error) => {
+                return fail(
+                    interp,
+                    name,
+                    &format!("{}: {error}", String::from_utf8_lossy(&operand)),
+                    Status::FAILURE,
+                );
+            }
+        }
+    };
     entries.insert(0, target);
     store(interp, entries);
     write_stack(interp, false, false, false)
@@ -536,19 +541,26 @@ pub(crate) fn bi_popd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
 
 #[cfg(test)]
 mod tests {
-    use super::{Index, lookup, resolve};
+    use super::{Index, lookup, spell_with_home};
 
+    /// The lexical walk itself lives in `baash_sys::paths`, where both
+    /// platforms' rules are tested; what is shell-specific is the spelling
+    /// `dirs` prints, and that is what these cover.
     #[test]
-    fn resolve_collapses_dots_and_double_slashes() {
-        assert_eq!(resolve(b"/tmp", b".."), b"/");
-        assert_eq!(resolve(b"/tmp", b"."), b"/tmp");
+    fn the_tilde_abbreviation_needs_a_whole_component() {
+        let home = Some(b"/home/ada".as_slice());
+        assert_eq!(spell_with_home(b"/home/ada/work", home, false), b"~/work");
+        assert_eq!(spell_with_home(b"/home/ada", home, false), b"~");
+        assert_eq!(spell_with_home(b"/home/adam", home, false), b"/home/adam");
+        // `-l` prints the path as recorded.
         assert_eq!(
-            resolve(b"/", b"/tmp//oil_test/$HOME"),
-            b"/tmp/oil_test/$HOME"
+            spell_with_home(b"/home/ada/work", home, true),
+            b"/home/ada/work"
         );
-        assert_eq!(resolve(b"/a/b", b"c/./d/../e"), b"/a/b/c/e");
-        assert_eq!(resolve(b"/a", b"../../.."), b"/");
-        assert_eq!(resolve(b"/a", b""), b"/a");
+        // A home of `/` is not abbreviated: every path starts with it.
+        assert_eq!(spell_with_home(b"/tmp", Some(b"/"), false), b"/tmp");
+        assert_eq!(spell_with_home(b"/tmp", Some(b""), false), b"/tmp");
+        assert_eq!(spell_with_home(b"/tmp", None, false), b"/tmp");
     }
 
     #[test]

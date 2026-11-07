@@ -367,7 +367,7 @@ fn bi_source(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
 /// directory. bash then tries the current directory itself outside posix mode,
 /// which is why `. cmd` finds `./cmd` when `PATH` has no match.
 fn source_path(interp: &Interp, file: &[u8]) -> Option<Vec<u8>> {
-    if file.contains(&b'/') {
+    if baash_sys::paths::has_separator(file) {
         return regular_file(file).then(|| file.to_vec());
     }
     if let Some(path) = interp.state.vars.scalar(b"PATH") {
@@ -577,8 +577,8 @@ fn bi_cd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
     }
     let mut print = false;
     let mut target = match target {
-        None => match interp.state.vars.scalar(b"HOME") {
-            Some(home) => home.to_vec(),
+        None => match super::dirs::home(interp) {
+            Some(home) => home,
             None => {
                 diagnose(interp, format!("{name}: HOME not set"));
                 return Status::FAILURE;
@@ -596,6 +596,12 @@ fn bi_cd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
         }
         Some(path) => path,
     };
+
+    // An empty operand is not a directory name at all, and bash says so before
+    // it would search `CDPATH` for it.
+    if target.is_empty() {
+        return super::dirs::null_directory(interp, &name);
+    }
 
     // `CDPATH` is a search path for a bare relative name: bash tries each
     // element in order, and prints the new directory when the match came from
@@ -648,7 +654,9 @@ fn bi_cd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
 /// current directory (`./`/`../`), and falls back to the original operand when
 /// nothing matches.
 fn search_cdpath(interp: &Interp, target: &[u8]) -> Option<(Vec<u8>, bool)> {
-    if target.first() == Some(&b'/') || target.starts_with(b"./") || target.starts_with(b"../") {
+    // bash searches only for a plain relative name: an absolute one, or one
+    // anchored by `.`/`..`, already says where it is.
+    if baash_sys::paths::is_absolute(target) || baash_sys::paths::is_dot_anchored(target) {
         return None;
     }
     let path = interp.state.vars.scalar(b"CDPATH")?;

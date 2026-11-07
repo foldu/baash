@@ -1662,11 +1662,13 @@ impl Interp {
     /// Resolve a command word for execution: the first candidate, and a
     /// `PATH` hit is remembered in the hash table.
     fn resolve(&mut self, name: &[u8]) -> Option<Resolution> {
-        // A name with a slash is a path, not a search: even when the file is
-        // not executable the shell has to *try* it, because the failure is
+        // A name with a separator is a path, not a search: even when the file
+        // is not executable the shell has to *try* it, because the failure is
         // EACCES (status 126) rather than "command not found" (127). The
         // permission check `type`/`command -v` do still applies to them.
-        if name.contains(&b'/') && std::fs::metadata(baash_sys::os::path_from_bytes(name)).is_ok() {
+        if baash_sys::paths::has_separator(name)
+            && std::fs::metadata(baash_sys::os::path_from_bytes(name)).is_ok()
+        {
             return Some(Resolution::External(name.to_vec()));
         }
         let mut found = None;
@@ -1679,7 +1681,7 @@ impl Interp {
             },
         );
         if let Some(Resolution::External(path)) = &found
-            && !name.contains(&b'/')
+            && !baash_sys::paths::has_separator(name)
         {
             // bash's hash table: a command found through `PATH` is remembered
             // until `hash -r`, so a program that appears earlier in `PATH`
@@ -1700,11 +1702,11 @@ impl Interp {
 
     /// Every `PATH` hit for `name`, in `PATH` order.
     ///
-    /// A name containing `/` is used as written and never searched. The hash
-    /// table answers first unless the caller asked for a fresh search
+    /// A name containing a separator is used as written and never searched.
+    /// The hash table answers first unless the caller asked for a fresh search
     /// (`type -P`) or for every hit (`-a`).
     fn path_hits(&self, name: &[u8], query: baash_runtime::ResolveQuery) -> Vec<Vec<u8>> {
-        if is_path(name) {
+        if baash_sys::paths::has_separator(name) {
             return self.executable_form(name).into_iter().collect();
         }
         if !query.fresh
@@ -1940,15 +1942,6 @@ fn assignment_parts<'a>(
 }
 
 /// Whether `path` names a regular file with an execute bit set.
-/// Whether a command word names a file rather than a name to search for.
-///
-/// `/` is the separator on Unix and still works on Windows, where `\` is the
-/// one people actually type: `C:\Windows\System32\cmd.exe` has no forward
-/// slash in it, and searching `PATH` for that string finds nothing.
-fn is_path(name: &[u8]) -> bool {
-    name.contains(&b'/') || (cfg!(windows) && name.contains(&b'\\'))
-}
-
 pub(crate) fn executable(path: &[u8]) -> bool {
     let path = baash_sys::os::path_from_bytes(path);
     #[cfg(unix)]

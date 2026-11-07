@@ -39,6 +39,9 @@
 //!   user's configuration and data (XDG on Unix, the roaming and local
 //!   profiles on Windows), so the shell's own files land where the platform's
 //!   tools are looked for.
+//! * [`paths`] — the lexical path grammar: what a *root* is here, so a logical
+//!   `cd`, `PWD` and the directory stack agree on both platforms without the
+//!   kernel canonicalising anything.
 //!
 //! # Platform
 //!
@@ -66,6 +69,7 @@ pub mod dirs;
 #[cfg(unix)]
 pub mod fd;
 pub mod outcome;
+pub mod paths;
 #[cfg(unix)]
 pub mod pty;
 #[cfg(unix)]
@@ -268,7 +272,7 @@ pub const PATH_SEPARATOR: u8 = if cfg!(windows) { b';' } else { b':' };
 /// different matter: `cmd.exe` refuses to start from `C:\Windows\system32/cmd.EXE`
 /// and reports "the system cannot find the path specified", while the same file
 /// written with backslashes runs.
-pub const PATH_JOIN: u8 = if cfg!(windows) { b'\\' } else { b'/' };
+pub const PATH_JOIN: u8 = paths::SEPARATOR;
 
 /// Where the shell looks for commands when `PATH` is unset.
 ///
@@ -585,10 +589,13 @@ pub mod os {
         None
     }
 
-    /// This process's home directory; Windows has no passwd database.
+    /// This process's home directory.
+    ///
+    /// Windows has no passwd database, so this is `%USERPROFILE%` — the
+    /// directory `cmd` starts in and every native tool calls home.
     #[cfg(windows)]
     pub fn own_home() -> Option<Vec<u8>> {
-        None
+        crate::dirs::home_dir().map(bytes_from_os)
     }
 
     /// This user's id, when the platform has one.

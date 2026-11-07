@@ -146,7 +146,7 @@ pub fn refresh(shell: &mut Interp, engine: &baash_complete::CompletionEngine) {
         let state = shell.state();
         let scalar = |name: &[u8]| state.vars.scalar(name).map(<[u8]>::to_vec);
         let path = scalar(b"PATH").unwrap_or_default();
-        let home = scalar(b"HOME");
+        let home = scalar(b"HOME").or_else(baash_sys::dirs::fallback_home);
         let pwd = scalar(b"PWD");
         let ifs = scalar(b"IFS").unwrap_or_else(|| DEFAULT_IFS.to_vec());
 

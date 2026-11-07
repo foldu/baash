@@ -1528,6 +1528,10 @@ impl baash_lang::Shell for Interp {
         }
         if let Some(value) = vars.scalar(b"HOME") {
             context.home = value.to_vec();
+        } else if let Some(home) = baash_sys::dirs::fallback_home() {
+            // A native Windows process starts without `HOME`; the profile
+            // directory is what `\w` and `~` should abbreviate to there.
+            context.home = home;
         }
         if let Some(value) = vars.scalar(b"USER") {
             context.user = value.to_vec();

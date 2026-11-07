@@ -1326,15 +1326,41 @@ fn abbreviate_commit(commit: &[u8]) -> Vec<u8> {
     commit[..commit.len().min(7)].to_vec()
 }
 
+/// Whether `byte` separates components on this platform.
+///
+/// Windows accepts `/` in a path as well as `\`, and the shell never rewrites
+/// what the user typed, so the prompt has to recognise both.
+fn is_separator(byte: u8) -> bool {
+    byte == b'/' || (cfg!(windows) && byte == b'\\')
+}
+
+/// Whether two byte strings name the same path.
+///
+/// Windows compares path components case-insensitively, and `%USERPROFILE%`
+/// and `%CD%` are not obliged to agree on the case of the drive letter.
+fn same_path(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
 fn abbreviate_home(cwd: &[u8], home: &[u8]) -> Vec<u8> {
-    if home.len() <= 1 || !cwd.starts_with(home) {
+    if home.len() <= 1 || cwd.len() < home.len() {
+        return cwd.to_vec();
+    }
+    if !same_path(&cwd[..home.len()], home) {
         return cwd.to_vec();
     }
     let rest = &cwd[home.len()..];
     if rest.is_empty() {
         return b"~".to_vec();
     }
-    if rest[0] == b'/' {
+    if is_separator(rest[0]) {
         let mut out = Vec::with_capacity(rest.len() + 1);
         out.push(b'~');
         out.extend_from_slice(rest);
@@ -1346,13 +1372,13 @@ fn abbreviate_home(cwd: &[u8], home: &[u8]) -> Vec<u8> {
 /// `\W`: bash abbreviates a working directory that *is* `$HOME` to `~` before
 /// considering the basename, so `~` is the answer there too.
 fn last_component_for_wide<'a>(cwd: &'a [u8], home: &[u8]) -> &'a [u8] {
-    if !home.is_empty() && cwd == home {
+    if !home.is_empty() && same_path(cwd, home) {
         return b"~";
     }
-    match cwd.iter().rposition(|&byte| byte == b'/') {
-        Some(0) => &cwd[..1],
-        Some(slash) => &cwd[slash + 1..],
-        None => cwd,
+    match cwd.iter().rposition(|&byte| is_separator(byte)) {
+        Some(slash) if slash + 1 < cwd.len() => &cwd[slash + 1..],
+        // A root is its own last component: `/` and `C:\` both print whole.
+        _ => cwd,
     }
 }
 

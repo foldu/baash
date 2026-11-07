@@ -39,6 +39,23 @@ pub fn home_dir() -> Option<PathBuf> {
     non_empty("USERPROFILE").map(PathBuf::from)
 }
 
+/// The home directory to use when the shell's own `HOME` variable is unset.
+///
+/// A POSIX shell has no fallback: with no `HOME`, `cd` fails and `~` stays
+/// literal, which is what bash does. A native Windows process, on the other
+/// hand, is started with no `HOME` at all — the profile lives in
+/// `%USERPROFILE%` — so there the profile directory stands in for it.
+#[cfg(unix)]
+pub fn fallback_home() -> Option<Vec<u8>> {
+    None
+}
+
+/// `%USERPROFILE%`, which is what a shell should use when `HOME` is unset.
+#[cfg(windows)]
+pub fn fallback_home() -> Option<Vec<u8>> {
+    crate::os::own_home()
+}
+
 /// `$XDG_CONFIG_HOME`, or `~/.config`.
 #[cfg(unix)]
 pub fn config_home() -> Option<PathBuf> {

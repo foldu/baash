@@ -426,10 +426,59 @@ are things that only exist on this platform:
 | `C:\…` is a path | the "contains a separator" test only knew `/`, so a backslash path was searched for in `PATH` |
 | entries join with `\` | a `PATH` hit became `C:\WINDOWS\system32/cmd.EXE`, and `cmd.exe` refuses to *start* from that mixed path while the same file with backslashes runs (`baash_sys::PATH_JOIN`) |
 
-**Still broken:** `cd`. Every form fails with `os error 123`, and `pwd` after
-`cd ..` reports `/`. That is the Windows path model — drive letters, `\`, and
-what `..` means at a root — not command lookup, and it is the next piece of
-work here.
+### The Windows path model: `cd`, `PWD` and the drive roots (2026-11-07)
+
+`cd` used to fail with `os error 123` in every form, and `pwd` after `cd ..`
+printed `/`, because the shell resolved names with POSIX rules: it split on `/`
+and joined from one root, so `C:\Users\win` became the single component
+`C:\Users\win` under a leading `/` — a name Windows does not accept. The walk
+lives in `baash_sys::paths` now and knows what a *root* is:
+
+| | POSIX | Windows |
+|---|---|---|
+| root | `/` | `C:\`, `\\server\share\` |
+| separator | `/` | `\`, and `/` everywhere |
+| `..` at a root | stays at `/` | stays at the drive or share root |
+| `\foo` | not absolute | rooted on the current *drive* |
+| `C:foo` | — | drive-relative: only the kernel can place it |
+| `\\?\…`, `\\.\…` | — | device namespaces: the kernel's, not ours |
+
+Everything else is unchanged on purpose. The walk is still lexical — no
+`canonicalize` — so `cd symlink` keeps the link's name and `pwd -P` is still the
+only way to ask the kernel. Three consequences are worth stating:
+
+* A typed `/` is recorded as `\` in `PWD`: the shell normalises the separators
+  it already collapsed, so `cd C:/Windows` then `pwd` prints `C:\Windows`.
+  This is the only rewriting it does; it never rewrites a name.
+* `C:foo` and `\\?\…` are handed to `chdir` as written and `PWD` becomes
+  `getcwd()`'s answer, which is what `cmd` does too.
+* `\` is still an escape character, as it is in every POSIX shell: a Windows
+  path is written `C:/Users/...` or quoted (`cd 'C:\Users'`). That is the
+  msys convention and it is in the list below.
+
+`cd ""` changed too, on both platforms: bash reports it as "null directory"
+rather than as a failed `chdir`, does not search `CDPATH` for it, and `pushd`
+says the same. baash used to enter the current directory and succeed.
+
+`~` and a bare `cd` also work on Windows now. A native process starts with no
+`HOME` at all — the profile is `%USERPROFILE%` — so `baash_sys::os::own_home`
+answers with it, and `cd`/`dirs`/the prompt fall back to it when `HOME` is
+unset. On POSIX there is deliberately no fallback: bash fails a bare `cd` with
+no `HOME`, and so does baash.
+
+**Verified on the `winvm` guest** (2026-11-07), with the release build from this
+tree: `cd 'C:\Windows'` and `pwd` → `C:\Windows`; `cd ..` → `C:\`, and `..`
+again → `C:\`; `cd C:/Users/win/AppData` → `C:\Users\win\AppData`; a rooted
+`cd '\Windows\System32'`; `cd /` → `C:\`; textual collapse through
+`'C:\Windows\System32\..\..\Users'` → `C:\Users`; `cd ""` → "null
+directory", status 1; `cd 'nowhere\..'` → error; `pwd -L`/`-P`;
+`pushd`/`popd`/`dirs -p`; `cd -`; `cd ~` and `cd "$USERPROFILE"` →
+`C:\Users\win`; the kernel fallback through `cd C:.`; a UNC share
+(`cd '\\localhost\C$\Users'`, and `..` stopping at `\\localhost\C$\`);
+`\?\C:\Windows` through the kernel; and `$(cmd /c cd)` in a child agreeing
+with the shell. Interactively, in a console window: `pwd` → `C:\Users\win`
+with the prompt abbreviated to `~`, then `cd C:/Windows` and the prompt showing
+`C:\Windows` — the path segment and the `$` are correct in both.
 
 ### Turso on Windows: verified (2026-10-30)
 
