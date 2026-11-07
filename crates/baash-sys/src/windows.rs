@@ -29,9 +29,11 @@
 //!   different mechanism (`SetConsoleCtrlHandler`). Every signal entry point
 //!   reports `Unsupported` rather than pretending to work.
 //!
-//! Path bytes are treated as UTF-8 and converted with `String::from_utf8_lossy`
-//! for now. That is wrong for non-UTF-8 names and it is written down as an open
-//! question (§9) rather than hidden.
+//! Path bytes are WTF-8 (`crate::wtf8`), which is UTF-8 extended with the
+//! unpaired surrogates a Windows name can hold: `os_path` and `wide_path` are
+//! the two conversions from shell bytes to a name, and neither is lossy. An
+//! NTFS name that is not valid Unicode therefore reaches `chdir`,
+//! `CreateProcessW` and the CRT unchanged.
 
 use std::ffi::OsString;
 use std::io;
@@ -58,7 +60,7 @@ use crate::WaitOutcome;
 // build script; they are declared here because `libc` does not cover all of
 // them on Windows.
 unsafe extern "C" {
-    fn _open(path: *const std::ffi::c_char, oflag: c_int, ...) -> c_int;
+    fn _wopen(path: *const u16, oflag: c_int, ...) -> c_int;
     fn _close(fd: c_int) -> c_int;
     fn _read(fd: c_int, buffer: *mut std::ffi::c_void, count: u32) -> c_int;
     fn _write(fd: c_int, buffer: *const std::ffi::c_void, count: u32) -> c_int;
@@ -95,13 +97,16 @@ pub mod seek {
 /// Shell paths are bytes; Windows wants UTF-16. This is the byte-exactness gap
 /// §9 records, and it is one function so the eventual WTF-8 conversion has one
 /// place to land.
-fn wide_path(path: &[u8]) -> std::ffi::CString {
-    let text = String::from_utf8_lossy(path).into_owned();
-    let wide: Vec<u16> = text.encode_utf16().collect();
-    // `_wopen` would be the faithful call; via `_open` we go through the ANSI
-    // code page. Kept as a single choke point so the switch is one edit.
-    let text = String::from_utf16_lossy(&wide);
-    std::ffi::CString::new(text).unwrap_or_default()
+/// A NUL-terminated UTF-16 name for the wide-character CRT entry points.
+///
+/// The name is decoded from WTF-8, so a lone surrogate arrives as the code
+/// unit it is; `_wopen` below is the wide call for exactly that reason — `_open`
+/// would take the bytes through the ANSI code page and rename anything outside
+/// it.
+fn wide_path(path: &[u8]) -> Vec<u16> {
+    let mut wide = crate::wtf8::decode(path);
+    wide.push(0);
+    wide
 }
 
 // ---------------------------------------------------------------------------
@@ -361,9 +366,9 @@ pub fn chdir(path: &[u8]) -> io::Result<()> {
 pub fn open_cloexec(path: &[u8], flags: c_int, mode: u32) -> io::Result<OwnedFd> {
     let c_path = wide_path(path);
     let translated = translate_flags(flags) | O_BINARY;
-    // SAFETY: `c_path` is a NUL-terminated string and the variadic argument is
-    // only read when `O_CREAT` is set.
-    Fd::from_raw(unsafe { _open(c_path.as_ptr(), translated, mode) })
+    // SAFETY: `c_path` is a NUL-terminated UTF-16 string and the variadic
+    // argument is only read when `O_CREAT` is set.
+    Fd::from_raw(unsafe { _wopen(c_path.as_ptr(), translated, mode) })
 }
 
 /// Translate this crate's `O_*` flags to the CRT's.
@@ -503,8 +508,13 @@ mod windows_sys_handle {
 // ---------------------------------------------------------------------------
 
 /// A shell byte path as an OS path.
+/// A shell byte string as an OS path, through the WTF-8 codec.
+///
+/// This is the single conversion used by `chdir` and by spawn (program and
+/// arguments), so a name that came from `read_dir` goes back to the OS as the
+/// same name.
 fn os_path(path: &[u8]) -> PathBuf {
-    PathBuf::from(OsString::from(String::from_utf8_lossy(path).into_owned()))
+    PathBuf::from(crate::os::os_from_bytes(path))
 }
 
 // ---------------------------------------------------------------------------
@@ -959,7 +969,7 @@ pub fn spawn(plan: SpawnPlan) -> io::Result<Child> {
     command.env_clear();
     for entry in &plan.env {
         if let Some((name, value)) = split_env(entry) {
-            command.env(OsString::from(name), OsString::from(value));
+            command.env(name, value);
         }
     }
     // Descriptors are inherited through handles, not numbers: the CRT fd the
@@ -1026,11 +1036,16 @@ fn raw_handle(fd: c_int) -> io::Result<RawHandle> {
 }
 
 /// Split one `NAME=value` environment entry.
-fn split_env(entry: &[u8]) -> Option<(String, String)> {
+///
+/// The environment block is UTF-16 like every other name-adjacent string on
+/// Windows, so the two halves go through the same WTF-8 codec: a value a shell
+/// script built out of raw bytes reaches the child unchanged instead of being
+/// scrubbed to U+FFFD on the way.
+fn split_env(entry: &[u8]) -> Option<(OsString, OsString)> {
     let position = entry.iter().position(|&byte| byte == b'=')?;
     Some((
-        String::from_utf8_lossy(&entry[..position]).into_owned(),
-        String::from_utf8_lossy(&entry[position + 1..]).into_owned(),
+        crate::os::os_from_bytes(&entry[..position]),
+        crate::os::os_from_bytes(&entry[position + 1..]),
     ))
 }
 

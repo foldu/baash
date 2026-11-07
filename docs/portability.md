@@ -135,10 +135,16 @@ work is concentrated and can be described as four boundaries:
    `PATHEXT` *is* the execute permission.
 2. **Bytes vs UTF-16.** File contents and pipes stay bytes. Four things are
    UTF-16: directory enumeration, argv, the environment block, and the console.
-   Policy: the shell's text is WTF-8 (UTF-8 plus lone-surrogate encoding), so
-   every name round-trips; the ~25 `OsStrExt::as_bytes` sites become a codec in
-   `baash-sys` (`os_bytes` / `os_from_bytes`). Non-WTF-8 input (impossible from
-   Windows APIs) is a diagnostic, not lossy.
+   The shell's text is **WTF-8** (`baash_sys::wtf8`), so every name
+   round-trips: `bytes_from_os`/`os_from_bytes` combine a surrogate pair into
+   the four-byte form and keep a lone surrogate as its three-byte one. That is
+   what makes an NTFS name no `String` can hold addressable — `cd`, `rm`, a
+   variable, a `PWD` and a history entry all keep it, and a child receives it
+   unchanged. The one lossy direction is bytes that are not WTF-8 at all: they
+   cannot name anything on Windows, so `os_from_bytes` substitutes U+FFFD
+   rather than inventing an escape. *Display* stays lossy on purpose — a lone
+   surrogate paints as U+FFFD in the editor and matches as its bytes in
+   completion, while the inserted bytes are exact (`DESIGN.md` §4.10).
 3. **Terminal.** ConPTY for the pty analogue; `SetConsoleMode` instead of
    `termios`; ANSI/VT strings work in Windows Terminal and ConPTY. `baash-repl`
    keeps its renderer; its `term` layer gets a Windows implementation.

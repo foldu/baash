@@ -193,6 +193,12 @@ gets its own protocol.
   name is resolved through `PATHEXT`; `GetConsoleMode` needs *read* access to
   the handle; there is no `HOME` (`%USERPROFILE%` stands in); a root is a drive
   or a UNC share, and `..` stops there (`baash_sys::paths`).
+* **Names are WTF-8, and every conversion must go through the codec.**
+  `baash_sys::wtf8` carries a Windows name — including an unpaired surrogate —
+  through shell bytes exactly, so `chdir`, `CreateProcessW`, the CRT open and
+  the environment block all use it (`os::bytes_from_os`/`os::os_from_bytes`).
+  A new `from_utf8_lossy` on a path is a bug: display may be lossy, the name
+  may not.
 
 ## Nix and files
 

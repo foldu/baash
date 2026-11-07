@@ -42,6 +42,9 @@
 //! * [`paths`] — the lexical path grammar: what a *root* is here, so a logical
 //!   `cd`, `PWD` and the directory stack agree on both platforms without the
 //!   kernel canonicalising anything.
+//! * [`wtf8`] — Windows' name encoding as bytes. UTF-8 extended with the lone
+//!   surrogates UTF-16 can hold but a scalar cannot, so a name that came from
+//!   `read_dir` or `argv` goes back to `CreateFileW` unchanged.
 //!
 //! # Platform
 //!
@@ -87,6 +90,7 @@ pub mod wait;
 pub mod watch;
 #[cfg(windows)]
 pub mod windows;
+pub mod wtf8;
 
 pub use access::{Access, access};
 pub use bytes::{NulByte, cstring, cstrings};
@@ -460,9 +464,9 @@ pub fn locale_exists(_name: &[u8]) -> bool {
 /// Paths and OS strings in shell bytes.
 ///
 /// Shell strings are bytes; `OsStr` is only bytes on Unix. Every crate that
-/// needs to convert between them goes through here so the Windows encoding
-/// question (`docs/portability.md` §9) has one home instead of a `cfg` per
-/// call site.
+/// needs to convert between them goes through here, so the one encoding
+/// question — how a Windows name, which is UTF-16, is spelled as shell bytes —
+/// has one answer ([`crate::wtf8`]) instead of a `cfg` per call site.
 pub mod os {
     use std::ffi::{OsStr, OsString};
     use std::path::PathBuf;
@@ -489,11 +493,16 @@ pub mod os {
 
     /// A shell byte string as an `OsString`.
     ///
-    /// Windows names are UTF-16; a byte string that is not UTF-8 cannot be
-    /// spelled, so it is replaced rather than rejected — the gap §9 records.
+    /// Windows names are UTF-16, and the shell's bytes hold them as WTF-8
+    /// ([`crate::wtf8`]), so a name that came from the OS goes back to it
+    /// unchanged — including one containing an unpaired surrogate, which
+    /// [`std::string::String`] cannot represent at all. Bytes that name
+    /// nothing on Windows (they are not WTF-8) become U+FFFD, which is the one
+    /// lossy direction and the only one the platform cannot disagree about.
     #[cfg(windows)]
     pub fn os_from_bytes(bytes: &[u8]) -> OsString {
-        OsString::from(String::from_utf8_lossy(bytes).into_owned())
+        use std::os::windows::ffi::OsStringExt;
+        OsString::from_wide(&crate::wtf8::decode(bytes))
     }
 
     /// An OS string as shell bytes.
@@ -504,9 +513,15 @@ pub mod os {
     }
 
     /// An OS string as shell bytes.
+    ///
+    /// Exactly, through WTF-8: `encode_wide` yields the UTF-16 code units the
+    /// name actually consists of, so an unpaired surrogate survives as its
+    /// three-byte form instead of becoming U+FFFD here and naming a different
+    /// file later.
     #[cfg(windows)]
     pub fn bytes_from_os(value: impl AsRef<OsStr>) -> Vec<u8> {
-        value.as_ref().to_string_lossy().into_owned().into_bytes()
+        use std::os::windows::ffi::OsStrExt;
+        crate::wtf8::encode(value.as_ref().encode_wide())
     }
 
     /// The home directory of a login name, from the platform's user database.
