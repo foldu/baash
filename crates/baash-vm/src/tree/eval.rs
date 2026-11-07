@@ -42,6 +42,7 @@ impl Interp {
         // command, so `$LINENO` is its line. Compound nodes set the line of
         // their keyword first; the simple commands inside overwrite it.
         let node = chunk.ast.node(id);
+        self.current_span = node.span.clone();
         self.set_line(&chunk.source, node.span.start);
         // A command that is not a pipeline is a one-stage one for
         // `$PIPESTATUS` (`false; echo ${PIPESTATUS[@]}` reports `1`).

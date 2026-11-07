@@ -2016,3 +2016,20 @@ fn an_assignment_only_command_redirects_before_it_expands() {
     assert_eq!(stdout(&output), "x=out\nerr\n");
     assert_eq!(stderr(&output), "");
 }
+
+#[test]
+fn a_builtin_error_in_a_sourced_file_names_its_line() {
+    // A builtin knows its `argv`, not where the words were written, so its
+    // diagnostic used to land at `file:1:1`; the interpreter now points it at
+    // the command being evaluated.
+    let dir = TestDir::new("source-span");
+    let inner = dir.at("inner.sh");
+    std::fs::write(&inner, b"# a comment\n:\ncomplete -Z x\n").expect("write the sourced file");
+    let output = run(&format!("source {inner}"));
+    assert_eq!(code(&output), 2, "stderr: {}", stderr(&output));
+    let message = stderr(&output);
+    assert!(
+        message.contains("inner.sh:3:"),
+        "the sourced file's line is named: {message}"
+    );
+}

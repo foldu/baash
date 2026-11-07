@@ -492,6 +492,13 @@ pub struct Interp {
     line_offset: usize,
     line_number: u32,
     lineno: Vec<u8>,
+    /// The span of the node being evaluated, so a diagnostic raised by a
+    /// builtin points at the command rather than at the start of the file.
+    ///
+    /// Builtins get `argv`, not a span; `0..0` in a diagnostic means "no
+    /// location", and this is the best one the interpreter knows. A sourced
+    /// file therefore reports the offending line instead of `file:1:1`.
+    current_span: baash_diag::Span,
 }
 
 /// One `name=(…)` argument in a declaration command.
@@ -607,6 +614,7 @@ impl Interp {
             line_offset: 0,
             line_number: 1,
             lineno: b"1".to_vec(),
+            current_span: 0..0,
         };
         // POSIX initializes `OPTIND` to 1 at shell startup, and `getopts`
         // counts from there; a script that never mentions it still needs the
@@ -2085,6 +2093,19 @@ impl ShellHost for Interp {
 
     fn diagnose(&mut self, diagnostic: &Diagnostic) {
         let source = self.current.clone();
+        // `0..0` is the diagnostic's way of saying "no location": a builtin
+        // knows its arguments, not where they were written, so point at the
+        // command being evaluated. Without this a sourced file reported every
+        // builtin error as `file:1:1`.
+        if diagnostic.span.start == 0
+            && diagnostic.span.end == 0
+            && self.current_span.end > self.current_span.start
+        {
+            let mut located = diagnostic.clone();
+            located.span = self.current_span.clone();
+            self.diagnose_in(&source, &located);
+            return;
+        }
         self.diagnose_in(&source, diagnostic);
     }
 
