@@ -225,6 +225,25 @@ fn temp_dir(tag: &str) -> PathBuf {
     path
 }
 
+/// Where this machine keeps `bash_completion`, when it has one.
+///
+/// The library is distribution data, not part of this repository, so the test
+/// reports the skip instead of failing when it is absent (the same rule as the
+/// zoxide harness).
+fn bash_completion_library() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("BAASH_BASH_COMPLETION") {
+        return Some(PathBuf::from(path));
+    }
+    [
+        "/run/current-system/sw/share/bash-completion/bash_completion",
+        "/usr/share/bash-completion/bash_completion",
+        "/etc/bash_completion",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|path| path.is_file())
+}
+
 /// A shell in a fresh `HOME` and `cwd`, with a stable prompt.
 fn session(tag: &str) -> (Session, PathBuf, PathBuf) {
     let home = temp_dir(&format!("{tag}-home"));
@@ -443,5 +462,48 @@ fn a_large_path_is_scanned_off_the_keystroke_path() {
         completed_at.elapsed()
     );
     session.send(b"\x15");
+    cleanup(&mut session, &home, &work);
+}
+
+/// The real bash-completion library, end to end: its `-D` loader installs a
+/// command's script on the first Tab (status 124), and the retry runs it.
+#[test]
+fn bash_completion_loads_a_command_on_the_first_tab() {
+    let Some(library) = bash_completion_library() else {
+        eprintln!("skipping: no bash_completion library on this machine");
+        return;
+    };
+    let home = temp_dir("bc-home");
+    let work = temp_dir("bc-work");
+    let completions = home.join("completions");
+    std::fs::create_dir_all(&completions).expect("create the completions dir");
+    std::fs::write(
+        completions.join("mycmd"),
+        "\n_mycmd() {\n    local cur=${COMP_WORDS[COMP_CWORD]}\n    COMPREPLY=( $(compgen -W 'start stop status' -- \"$cur\") )\n}\ncomplete -F _mycmd mycmd\n",
+    )
+    .expect("write the completion script");
+
+    let user_dir = home.to_str().expect("utf-8 home").to_owned();
+    let mut session = Session::spawn(
+        &home,
+        &work,
+        &[("PS1", "P> "), ("BASH_COMPLETION_USER_DIR", &user_dir)],
+    );
+    session.prompt();
+    session.line(&format!("source {}", library.display()));
+    assert!(
+        !session.output.windows(6).any(|window| window == b"error["),
+        "sourcing bash_completion reported a diagnostic: {}",
+        String::from_utf8_lossy(&session.output)
+    );
+    session.line("mycmd () { echo \"args:$*\"; }");
+
+    session.send(b"mycmd st\t");
+    session.expect(b"start", Duration::from_secs(10));
+    // The menu is open; Enter selects and the next Enter submits it.
+    session.send(b"\n");
+    session.send(b"\n");
+    session.expect(b"args:start", Duration::from_secs(10));
+    session.prompt();
     cleanup(&mut session, &home, &work);
 }
