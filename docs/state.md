@@ -357,8 +357,9 @@ rediscover):
 * **bash-completion works, with two version skews.** The 2.18 library sources
   with status 0 and its `-D` loader is honoured (status `124` retries the
   completion after the loader installs the command's script), so the scripts
-  installed for bash complete here; `config/config.sh` carries the enable line
-  commented out. A function's stdout is captured but not painted above the
+  installed for bash complete here; `config/config.sh` sources it at startup
+  when it finds it (`BAASH_BASH_COMPLETION` names one explicitly,
+  `BAASH_NO_BASH_COMPLETION=1` opts out). A function's stdout is captured but not painted above the
   prompt (the editor erases the frame, paints the function's output where it
   was and repaints below it), `-C`/`-G` are still absent, a function runs to
   completion with no deadline (bash has none either, so a slow script delays

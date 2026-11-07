@@ -28,14 +28,22 @@ alias grep='grep --color=auto'
 
 # Programmable completion for the commands on this machine, from the library
 # bash-completion ships: `complete -F` functions run at Tab, so the same
-# scripts that complete a command in bash complete it here. It is not enabled
-# by default because it costs a few milliseconds at startup and defines a `-D`
-# rule that loads a script on the first Tab of an unknown command; uncomment
-# one of these (NixOS keeps the library in the store, not in the profile):
+# scripts that complete a command in bash complete it here. It costs a few
+# milliseconds at startup and installs a `-D` rule that loads a command's script
+# on its first Tab, which is what bash does through its own startup files.
 #
-# for _baash_bash_completion in \
-#     /usr/share/bash-completion/bash_completion \
-#     /etc/bash_completion; do
-#     [[ -r $_baash_bash_completion ]] && . "$_baash_bash_completion"
-# done
-# unset -v _baash_bash_completion
+# `BAASH_BASH_COMPLETION` names a library explicitly (NixOS keeps it in the
+# store, not in the profile); an unreadable or absent path is skipped, as are
+# the standard ones on a system that has no bash-completion. Set
+# `BAASH_NO_BASH_COMPLETION=1` to turn it off.
+if [[ -z ${BAASH_NO_BASH_COMPLETION-} ]]; then
+    for _baash_bash_completion in \
+        "${BAASH_BASH_COMPLETION-}" \
+        /usr/share/bash-completion/bash_completion \
+        /etc/bash_completion; do
+        [[ -n $_baash_bash_completion && -r $_baash_bash_completion ]] || continue
+        . "$_baash_bash_completion"
+        break
+    done
+    unset -v _baash_bash_completion
+fi

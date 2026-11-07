@@ -92,8 +92,10 @@ function prints is captured and painted above the prompt, where bash puts it
 bash-completion library itself: sourcing it registers its `-D` loader and a
 command's script is loaded on its first Tab (the loader's status `124` means
 "complete again"), so the scripts installed for bash complete here too.
-Uncomment the block at the end of [`config/config.sh`](config/config.sh) to
-enable it. `-C` and `-G` are not run yet.
+When the system has the library, [`config/config.sh`](config/config.sh)
+sources it at startup; `BAASH_BASH_COMPLETION` names one explicitly (the NixOS
+store path, say) and `BAASH_NO_BASH_COMPLETION=1` turns it off. `-C` and `-G`
+are not run yet.
 
 Not implemented yet: the directory stack (`pushd`/`popd`/`dirs`), `umask`,
 `let`, `ulimit`, `times`, `enable`, `$RANDOM`/`$SECONDS`/`$FUNCNAME`, xtrace
