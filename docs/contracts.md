@@ -777,6 +777,19 @@ the `$(…)` mechanism) instead of printed: the editor owns the terminal in raw
 mode with an unflushed frame. bash paints that output above the prompt; the
 editor has no seam for it yet, so it is dropped, not corrupted into the frame.
 
+A function runs to completion on the main thread, exactly as it does in bash:
+there is no deadline, so a slow script delays that Tab (and nothing else — the
+frame is painted when the completion returns). A budget would need the
+interpreter to abandon the function mid-run, which is a separate decision.
+
+A function that returns status `124` asks for the completion to be retried after
+it changed the rules — bash-completion's `-D` loader sources a command's script
+and returns 124 — so `ShellCompleter` refreshes the engine's snapshot and looks
+the rule up again, at most four times. The `-D` default is visible to the engine
+because `CompletionTable::get` falls back to it, and `COMP_WORDBREAKS` is read
+from the shell before every prompt (`CompletionEngine::set_word_breaks`) so the
+`COMP_WORDS` split follows what bash-completion sets.
+
 `cd`, `pushd`, `popd`, `rmdir` and `mkdir` get a built-in rule expressed as
 data: `-A directory` with `-o default`, so `cd /tm<TAB>` offers `/tmp/` and
 `cd $HO<TAB>` still falls back to the variable provider.

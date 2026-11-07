@@ -88,8 +88,12 @@ word lists, the `-A` actions the engine can answer, `-P`/`-S` and
 `COMP_POINT`, `COMP_WORDS`, `COMP_CWORD`, `COMP_TYPE` and `COMP_KEY` set and
 reads `COMPREPLY` back, so bash completion functions work — its output is
 captured rather than printed, because the editor owns the terminal at that
-moment ([`docs/contracts.md`](docs/contracts.md)). `-C` and `-G` are not run
-yet.
+moment ([`docs/contracts.md`](docs/contracts.md)). That includes the
+bash-completion library itself: sourcing it registers its `-D` loader and a
+command's script is loaded on its first Tab (the loader's status `124` means
+"complete again"), so the scripts installed for bash complete here too.
+Uncomment the block at the end of [`config/config.sh`](config/config.sh) to
+enable it. `-C` and `-G` are not run yet.
 
 Not implemented yet: the directory stack (`pushd`/`popd`/`dirs`), `umask`,
 `let`, `ulimit`, `times`, `enable`, `$RANDOM`/`$SECONDS`/`$FUNCNAME`, xtrace

@@ -349,9 +349,22 @@ rediscover):
   `-C` (run a command) and `-G` (expand a glob) are still not run; a rule whose
   only source is one of them is reported as absent, so the command keeps the
   default completion.
-* `-W` word lists are split on `IFS` but **not expanded**: expansion is shell
-  code, and doing it at prompt-refresh time would run `$(…)` on every prompt.
-  A `-W '$list'` therefore offers the literal `$list`.
+* `-W` word lists in a `complete` rule are split on `IFS` but **not expanded**:
+  expansion is shell code, and doing it at prompt-refresh time would run `$(…)`
+  on every prompt. A `complete -W '$list'` therefore offers the literal
+  `$list`. (`compgen -W` *is* expanded, because it runs as a command, and that
+  is the form bash-completion uses.)
+* **bash-completion works, with two version skews.** The 2.18 library sources
+  with status 0 and its `-D` loader is honoured (status `124` retries the
+  completion after the loader installs the command's script), so the scripts
+  installed for bash complete here; `config/config.sh` carries the enable line
+  commented out. A function's stdout is captured but not painted above the
+  prompt, `-C`/`-G` are still absent, a function runs to completion with no
+  deadline (bash has none either, so a slow script delays that Tab), and the
+  *installed* per-command scripts
+  are older than 2.18: 58 of the 229 call `_init_completion`, which 2.18 renamed
+  to `_comp_initialize`, so those report "command not found" here exactly as
+  they do under the 2.18 library in bash.
 * `-A setopt`, `shopt`, `user`, `group`, `hostname`, `job`, `service`,
   `binding`, `enabled`, `disabled`, `running` and `stopped` offer nothing at
   Tab: the engine has no shell state for them (`compgen -A` still answers them

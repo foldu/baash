@@ -25,3 +25,17 @@ esac
 alias ll='ls -lh'
 alias la='ls -lAh'
 alias grep='grep --color=auto'
+
+# Programmable completion for the commands on this machine, from the library
+# bash-completion ships: `complete -F` functions run at Tab, so the same
+# scripts that complete a command in bash complete it here. It is not enabled
+# by default because it costs a few milliseconds at startup and defines a `-D`
+# rule that loads a script on the first Tab of an unknown command; uncomment
+# one of these (NixOS keeps the library in the store, not in the profile):
+#
+# for _baash_bash_completion in \
+#     /usr/share/bash-completion/bash_completion \
+#     /etc/bash_completion; do
+#     [[ -r $_baash_bash_completion ]] && . "$_baash_bash_completion"
+# done
+# unset -v _baash_bash_completion
