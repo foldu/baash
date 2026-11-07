@@ -116,7 +116,21 @@ impl LivePrompt for NeverRefreshes {
 pub trait ShellCompletion {
     /// The menu for the word at `cursor`, or `None` when no rule needs the
     /// shell.
-    fn complete(&mut self, line: &[u8], cursor: usize) -> Option<Menu>;
+    fn complete(&mut self, line: &[u8], cursor: usize) -> Option<ShellMenu>;
+}
+
+/// A menu that came from shell code, plus whatever the function printed.
+///
+/// bash paints a completion function's output above the prompt and then
+/// repaints the line; the editor does the same with [`ShellMenu::output`], so a
+/// script that warns while completing does not lose its message and does not
+/// garble the frame.
+#[derive(Clone, Debug)]
+pub struct ShellMenu {
+    /// The candidates the function produced.
+    pub menu: Menu,
+    /// The function's standard output, in the order it was written.
+    pub output: Vec<u8>,
 }
 
 /// A [`Syntax`] for which every buffer is complete.
@@ -694,11 +708,37 @@ impl<'a> Editor<'a> {
             Some(shell) => shell.complete(self.line.buffer(), self.line.cursor()),
             None => None,
         };
-        let menu = from_shell.unwrap_or_else(|| {
-            self.completer
-                .complete(self.line.buffer(), self.line.cursor())
-        });
+        let menu = match from_shell {
+            Some(shell_menu) => {
+                if !shell_menu.output.is_empty() {
+                    self.print_above(&shell_menu.output)?;
+                }
+                shell_menu.menu
+            }
+            None => self
+                .completer
+                .complete(self.line.buffer(), self.line.cursor()),
+        };
         self.offer(menu)
+    }
+
+    /// Erase the frame, write `bytes` where it was, and repaint below.
+    ///
+    /// This is how bash shows a completion function's output: it belongs above
+    /// the prompt, because the function wrote it while the line was being
+    /// edited, and the line has to be repainted under it.
+    fn print_above(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.renderer.clear_frame(self.term)?;
+        self.term.write_all(bytes)?;
+        if !bytes.ends_with(b"\n") {
+            self.term.write_all(b"\r\n")?;
+        }
+        self.renderer.reset();
+        self.dirty = true;
+        // The frame is painted once below the output, together with whatever
+        // `offer` decides (an insertion or the menu); drawing here would paint
+        // twice and leave the insertion unpainted.
+        Ok(())
     }
 
     fn offer(&mut self, menu: Menu) -> io::Result<()> {

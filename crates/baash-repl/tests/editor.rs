@@ -1284,11 +1284,13 @@ struct FuncHook {
     /// Answer only for this line, so the fallback path stays visible.
     line: Vec<u8>,
     candidates: Vec<&'static str>,
+    /// What the function prints, which bash paints above the prompt.
+    output: Vec<u8>,
     seen: Vec<Vec<u8>>,
 }
 
 impl baash_repl::ShellCompletion for FuncHook {
-    fn complete(&mut self, line: &[u8], cursor: usize) -> Option<baash_complete::Menu> {
+    fn complete(&mut self, line: &[u8], cursor: usize) -> Option<baash_repl::ShellMenu> {
         self.seen.push(line.to_vec());
         if line != self.line.as_slice() {
             return None;
@@ -1302,7 +1304,10 @@ impl baash_repl::ShellCompletion for FuncHook {
                 baash_complete::Candidate::new(word.as_bytes(), baash_complete::CandKind::Other)
             })
             .collect();
-        Some(baash_complete::Menu::new(ctx, candidates))
+        Some(baash_repl::ShellMenu {
+            menu: baash_complete::Menu::new(ctx, candidates),
+            output: self.output.clone(),
+        })
     }
 }
 
@@ -1313,6 +1318,7 @@ fn a_shell_completion_hook_answers_before_the_data_completer() {
     let mut hook = FuncHook {
         line: b"cmd al".to_vec(),
         candidates: vec!["shell-alpha"],
+        output: Vec::new(),
         seen: Vec::new(),
     };
     let mut term = FakeTerminal::new(b"cmd al\t\r");
@@ -1336,6 +1342,7 @@ fn a_shell_completion_hook_answers_before_the_data_completer() {
     let mut declining = FuncHook {
         line: b"other".to_vec(),
         candidates: vec!["shell-alpha"],
+        output: Vec::new(),
         seen: Vec::new(),
     };
     let mut term = FakeTerminal::new(b"cmd al\t\r");
@@ -1352,4 +1359,41 @@ fn a_shell_completion_hook_answers_before_the_data_completer() {
     };
     assert_eq!(result, ReadResult::Line(b"cmd data-alpha \n".to_vec()));
     assert_eq!(declining.seen, vec![b"cmd al".to_vec()]);
+}
+
+/// A completion function's `echo` is painted above the prompt, and the line is
+/// repainted under it — bash's order, so a warning does not garble the frame.
+#[test]
+fn a_completion_functions_output_is_painted_above_the_prompt() {
+    let mut hook = FuncHook {
+        line: b"cmd al".to_vec(),
+        candidates: vec!["shell-alpha"],
+        output: b"warning: careful\n".to_vec(),
+        seen: Vec::new(),
+    };
+    let mut term = FakeTerminal::new(b"cmd al\t\r");
+    let completer = StubCompleter::empty();
+    let result = {
+        let mut editor = Editor::with_config(
+            &mut term,
+            &completer,
+            &baash_repl::NeverNeedsMore,
+            plain_config(),
+        );
+        editor
+            .read_line_with_shell(&mut baash_repl::NeverRefreshes, Some(&mut hook))
+            .expect("read_line")
+    };
+    assert_eq!(result, ReadResult::Line(b"cmd shell-alpha \n".to_vec()));
+    let frame = term.text();
+    let note = frame
+        .find("warning: careful")
+        .expect("the output is painted");
+    let repainted = frame[note..]
+        .find("cmd shell-alpha")
+        .expect("the line is repainted below the output");
+    assert!(
+        repainted > 0,
+        "the note comes first, then the repainted line: {frame:?}"
+    );
 }

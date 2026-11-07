@@ -252,7 +252,7 @@ impl<'a> ShellCompleter<'a> {
         let captured = self.shell.call_function_captured(&function, &argv);
         let options = self.shell.state().completion.options().to_vec();
         self.shell.state().completion.end();
-        let Some((_output, status)) = captured else {
+        let Some((output, status)) = captured else {
             return Run::Fail;
         };
         if status == baash_runtime::Status(124) {
@@ -264,15 +264,15 @@ impl<'a> ShellCompleter<'a> {
             return Run::Fail;
         }
         let vars = &self.shell.state().vars;
-        Run::Replies(baash_complete::Replies::new(
-            completion_replies(vars),
-            options,
-        ))
+        Run::Replies(
+            baash_complete::Replies::new(completion_replies(vars), options),
+            output,
+        )
     }
 }
 
 impl baash_repl::ShellCompletion for ShellCompleter<'_> {
-    fn complete(&mut self, line: &[u8], cursor: usize) -> Option<baash_complete::Menu> {
+    fn complete(&mut self, line: &[u8], cursor: usize) -> Option<baash_repl::ShellMenu> {
         // The function may install the command's real rule while it runs
         // (bash-completion's loader sources the per-command script), so a
         // `124` means the answer is stale: refresh the snapshot and look the
@@ -281,8 +281,11 @@ impl baash_repl::ShellCompletion for ShellCompleter<'_> {
         for _ in 0..4 {
             let deferred = self.engine.deferred(line, cursor)?;
             match self.run(&deferred) {
-                Run::Replies(replies) => {
-                    return Some(self.engine.deferred_menu(&deferred, &replies));
+                Run::Replies(replies, output) => {
+                    return Some(baash_repl::ShellMenu {
+                        menu: self.engine.deferred_menu(&deferred, &replies),
+                        output,
+                    });
                 }
                 Run::Retry => refresh(self.shell, self.engine),
                 Run::Fail => return None,
@@ -294,8 +297,8 @@ impl baash_repl::ShellCompletion for ShellCompleter<'_> {
 
 /// What one `-F` run produced.
 enum Run {
-    /// The function's `COMPREPLY` and the options in force.
-    Replies(baash_complete::Replies),
+    /// The function's `COMPREPLY`, the options in force, and its output.
+    Replies(baash_complete::Replies, Vec<u8>),
     /// Status 124: bash's "the rule changed, complete again".
     Retry,
     /// No function, or one that failed: keep the ordinary completion.
@@ -497,7 +500,12 @@ mod tests {
             baash_repl::ShellCompletion::complete(&mut completer, b"mycmd al", 8)
                 .expect("a -F rule runs the function")
         };
-        let inserts: Vec<Vec<u8>> = menu.candidates.iter().map(|c| c.insert.clone()).collect();
+        let inserts: Vec<Vec<u8>> = menu
+            .menu
+            .candidates
+            .iter()
+            .map(|c| c.insert.clone())
+            .collect();
         // The function saw the line, the word index, the current and the
         // previous word, exactly as bash sets them.
         assert_eq!(
@@ -524,7 +532,12 @@ mod tests {
             baash_repl::ShellCompletion::complete(&mut completer, b"mycmd al", 8)
                 .expect("the retry runs the newly defined rule")
         };
-        let inserts: Vec<Vec<u8>> = menu.candidates.iter().map(|c| c.insert.clone()).collect();
+        let inserts: Vec<Vec<u8>> = menu
+            .menu
+            .candidates
+            .iter()
+            .map(|c| c.insert.clone())
+            .collect();
         assert_eq!(inserts, vec![b"alpha".to_vec()]);
     }
 

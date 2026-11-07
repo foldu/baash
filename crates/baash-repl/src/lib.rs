@@ -97,7 +97,7 @@ pub use baash_highlight::Theme;
 pub use baash_runtime::History;
 pub use editor::{
     Config, Editor, Flow, LivePrompt, NeverNeedsMore, NeverRefreshes, ReadResult, ShellCompletion,
-    Syntax,
+    ShellMenu, Syntax,
 };
 pub use key::{Decoder, Key};
 pub use line::Line;

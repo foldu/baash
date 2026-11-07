@@ -188,6 +188,22 @@ impl Renderer {
         term.write_all(&canvas.out)
     }
 
+    /// Erase the painted frame and leave the cursor where it began.
+    ///
+    /// A completion function's output belongs where the frame is, so the frame
+    /// is removed first and repainted after the output; without the erase, the
+    /// output would start at the cursor, in the middle of the line.
+    pub fn clear_frame(&mut self, term: &mut dyn Terminal) -> io::Result<()> {
+        let mut canvas = Canvas::new(self.columns);
+        if !self.fresh {
+            canvas.up(self.cursor_row);
+        }
+        canvas.cr();
+        canvas.clear_below();
+        self.reset();
+        term.write_all(&canvas.out)
+    }
+
     /// Move the cursor to the last cell the previous frame painted.
     ///
     /// Submitting a line, `Ctrl-C` and `Ctrl-D` all want to continue from the

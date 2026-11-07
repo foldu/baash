@@ -359,8 +359,10 @@ rediscover):
   completion after the loader installs the command's script), so the scripts
   installed for bash complete here; `config/config.sh` carries the enable line
   commented out. A function's stdout is captured but not painted above the
-  prompt, `-C`/`-G` are still absent, a function runs to completion with no
-  deadline (bash has none either, so a slow script delays that Tab), and the
+  prompt (the editor erases the frame, paints the function's output where it
+  was and repaints below it), `-C`/`-G` are still absent, a function runs to
+  completion with no deadline (bash has none either, so a slow script delays
+  that Tab), and the
   *installed* per-command scripts
   are older than 2.18: 58 of the 229 call `_init_completion`, which 2.18 renamed
   to `_comp_initialize`, so those report "command not found" here exactly as

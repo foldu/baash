@@ -86,9 +86,9 @@ word lists, the `-A` actions the engine can answer, `-P`/`-S` and
 `-o nospace|default|bashdefault|dirnames|plusdirs`; `cd` completes directories.
 `complete -F` runs: on Tab the shell calls the function with `COMP_LINE`,
 `COMP_POINT`, `COMP_WORDS`, `COMP_CWORD`, `COMP_TYPE` and `COMP_KEY` set and
-reads `COMPREPLY` back, so bash completion functions work — its output is
-captured rather than printed, because the editor owns the terminal at that
-moment ([`docs/contracts.md`](docs/contracts.md)). That includes the
+reads `COMPREPLY` back, so bash completion functions work — output the
+function prints is captured and painted above the prompt, where bash puts it
+([`docs/contracts.md`](docs/contracts.md)). That includes the
 bash-completion library itself: sourcing it registers its `-D` loader and a
 command's script is loaded on its first Tab (the loader's status `124` means
 "complete again"), so the scripts installed for bash complete here too.

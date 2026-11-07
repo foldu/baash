@@ -774,8 +774,10 @@ against the typed prefix (bash trusts the function), `-P`/`-S` decorate them,
 
 The function's standard output is captured (`ShellHost::call_function_captured`,
 the `$(…)` mechanism) instead of printed: the editor owns the terminal in raw
-mode with an unflushed frame. bash paints that output above the prompt; the
-editor has no seam for it yet, so it is dropped, not corrupted into the frame.
+mode with an unflushed frame. `ShellMenu::output` carries it back, and the
+editor erases the frame, writes the output where the frame was and repaints the
+prompt and line below it — bash's order, so a function that warns while
+completing keeps its message without garbling the line.
 
 A function runs to completion on the main thread, exactly as it does in bash:
 there is no deadline, so a slow script delays that Tab (and nothing else — the

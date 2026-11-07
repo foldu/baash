@@ -333,26 +333,20 @@ fn a_word_list_rule_filters_and_inserts() {
 #[test]
 fn a_function_rule_runs_the_shell_function() {
     // `complete -F` is shell code: the function runs at Tab with `$2` set to
-    // the word being completed, and its stdout must not reach the frame.
+    // the word being completed, its stdout is painted above the prompt (bash's
+    // behaviour), and the menu follows.
     let (mut session, home, work) = session("functionrule");
     session.line("mycmd () { echo \"args:$*\"; }");
     session.line("f () { echo \"$1/$2\"; COMPREPLY=(alpha-$2); }");
     session.line("complete -F f mycmd");
 
     session.send(b"mycmd al\t");
+    // The function's `echo` first, where bash puts it, then the menu.
+    session.expect(b"mycmd/al", Duration::from_secs(10));
     session.expect(b"alpha-al", Duration::from_secs(10));
     session.send(b"\n");
     session.expect(b"args:alpha-al\r\n", Duration::from_secs(10));
     session.prompt();
-    // The function's `echo` was captured, not painted into the line.
-    assert!(
-        !session
-            .output
-            .windows(b"mycmd/al".len())
-            .any(|window| window == b"mycmd/al"),
-        "the function's stdout leaked into the frame: {}",
-        String::from_utf8_lossy(&session.output)
-    );
     cleanup(&mut session, &home, &work);
 }
 
