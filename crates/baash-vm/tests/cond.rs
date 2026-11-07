@@ -63,3 +63,29 @@ fn a_malformed_conditional_is_rejected_before_anything_runs() {
     // A well-formed one is unaffected.
     assert_eq!(status(&mut interp, b"[[ a == a && -n b ]]"), Status(0));
 }
+
+#[test]
+fn a_bang_glued_to_a_pattern_is_part_of_the_word() {
+    // bash splits a `[[ … ]]` body on whitespace and the parenthesised
+    // operators, so `!` negates only when it stands alone. Everything else is
+    // a word: `[[ $x == !* ]]` is a comparison with the pattern `!*`, and
+    // `[[ !x ]]` tests the one word `!x`.
+    let mut interp = interp();
+    assert_eq!(status(&mut interp, b"x=!abc; [[ $x == !* ]]"), Status(0));
+    assert_eq!(status(&mut interp, b"x=abc; [[ $x == !* ]]"), Status(1));
+    assert_eq!(status(&mut interp, b"[[ !x == !x ]]"), Status(0));
+    assert_eq!(status(&mut interp, b"[[ !x ]]"), Status(0));
+    assert_eq!(status(&mut interp, b"[[ !a == b ]]"), Status(1));
+    assert_eq!(status(&mut interp, b"[[ a == ! ]]"), Status(1));
+    // A standalone `!` still negates, and `!(` stays a negation when extglob
+    // is off (it is a pattern only with `shopt -s extglob`).
+    assert_eq!(
+        status(&mut interp, b"[[ ! -f /nonexistent-baash-test ]]"),
+        Status(0)
+    );
+    assert_eq!(status(&mut interp, b"[[ !(a) ]]"), Status(1));
+    assert_eq!(
+        status(&mut interp, b"shopt -s extglob; [[ a == !(b) ]]"),
+        Status(0)
+    );
+}

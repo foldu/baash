@@ -410,7 +410,7 @@ pub(crate) fn conditional_tokens(body: &[u8], extglob: bool) -> Vec<CondToken> {
             two(CondToken::Ne(index..index + 2))
         } else if rest.starts_with(b"=") {
             (CondToken::Eq(index..index + 1), 1)
-        } else if rest.starts_with(b"!") {
+        } else if rest.starts_with(b"!") && bang_is_operator(rest) {
             (CondToken::Bang(index..index + 1), 1)
         } else if rest.starts_with(b"(") {
             (CondToken::LParen, 1)
@@ -437,6 +437,24 @@ pub(crate) fn conditional_tokens(body: &[u8], extglob: bool) -> Vec<CondToken> {
         index += length;
     }
     tokens
+}
+
+/// Whether a `!` is the conditional's negation operator rather than the first
+/// character of a word.
+///
+/// bash splits a `[[ … ]]` body on whitespace and the parenthesised operators,
+/// so `!` is an operator only when it stands alone: `[[ ! -f x ]]` negates,
+/// while `[[ $x == !* ]]` compares with the pattern `!*` and `[[ !x ]]` tests
+/// the one word `!x`. Reading every `!` as a negation made the second and third
+/// forms syntax errors, and a `[[ $x == !* ]]` is how bash-completion's
+/// `_comp_xspecs` munges a spec.
+fn bang_is_operator(rest: &[u8]) -> bool {
+    match rest.get(1).copied() {
+        None => true,
+        Some(byte) => {
+            byte.is_ascii_whitespace() || matches!(byte, b'(' | b')' | b'&' | b'|' | b';')
+        }
+    }
 }
 
 /// End of a `=~` right-hand side: everything to the next unquoted whitespace
