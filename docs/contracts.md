@@ -730,6 +730,17 @@ candidate that starts with `$` is `Insertion::Source`. Inside `${…}` a bare
 name is offered as `NAME}`, because bash closes the expansion (`${PA<TAB>` →
 `${PATH}`) and a name without the brace would not re-parse.
 
+**`-F` is a handoff, and the handoff is the API.** The engine exposes
+`CompletionEngine::deferred(line, cursor) -> Option<Deferred>` (the rule names a
+function and the slot is an argument) and
+`CompletionEngine::deferred_menu(&Deferred, &Replies) -> Menu` (build the menu
+once the function has answered); `Deferred` carries the function name,
+`COMP_LINE`/`COMP_POINT`/`COMP_WORDS`/`COMP_CWORD` and the `$1`/`$2`/`$3`
+positions, `Replies` carries `COMPREPLY` and the effective `-o` options.
+`CompletionEngine::set_word_breaks` supplies the shell's `COMP_WORDBREAKS`, and
+`PathProvider::is_directory` answers whether a `-o filenames` reply is a
+directory. Nothing in this crate runs shell code.
+
 **Programmable completion is data.** `Spec` is what the engine needs from a
 `complete` rule (`-W` words, `-A` names, `-P`/`-S`, `-o` options, the raw `-F`
 name) and `SpecSource::spec(command)` is the lookup. `baash-runtime` owns the
@@ -966,6 +977,18 @@ pub trait Syntax { fn needs_more_input(&self, line: &[u8]) -> bool; }
 `RealTerminal` opens `/dev/tty` (falling back to stdio) and uses
 `baash_sys::RawMode` plus `window_size_fd`, because `baash_sys::window_size()` is
 wired to stdout. A pty harness needs only those five methods; no editor change.
+
+**`ShellCompletion` is the per-read `complete -F` seam.** The editor still
+borrows one `&dyn Completer` for its whole life, but a completion function needs
+the interpreter, which the loop owns, so `Editor::read_line_with_shell(live,
+Some(hook))` lends a `&mut dyn ShellCompletion` for exactly one line. On Tab the
+editor asks the hook first; `None` means "no rule here needs shell code" and the
+data engine answers (a missing or failing function also ends in `None`). The
+hook answers with a `ShellMenu { menu, output }`: `output` is the function's
+stdout, and the editor erases the frame with `Renderer::clear_frame`, writes the
+output where the frame was and paints the prompt, line and menu below it, which
+is bash's order. `Editor::step` and `read_line` take no hook and are the plain
+editor.
 
 **Continuation goes through `Syntax`, implemented in the binary** with
 `baash_syntax::parse_bytes`. The trait is deliberately thin, and that thinness has
