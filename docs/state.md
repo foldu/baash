@@ -96,6 +96,7 @@ once so the checks share it.
 | `clippy` | `cargo clippy --deny warnings`, workspace, all targets and features |
 | `licenses` | `cargo deny check --deny warnings licenses` against `deny.toml` |
 | `windows` | `packages.<system>.windows`: the `x86_64-pc-windows-gnu` exe |
+| `module` | the NixOS module: a generated system config, run in the shell it installed |
 
 Two things stay jobs, for reasons the sandbox dictates:
 
@@ -368,9 +369,13 @@ rediscover):
   pathname expansion consult it). `config/config.sh` sources a copy the system
   installed first and the mounted one last; `BAASH_BASH_COMPLETION` names one
   explicitly, `BAASH_EMBEDDED_BASH_COMPLETION` names the mounted copy, and
-  `BAASH_NO_BASH_COMPLETION=1` turns it off. The feature is on for Windows and
-  off elsewhere: a package manager there installs the library, and
-  `--features embedded-bash-completion` is the self-contained build. `-C`/`-G` are still absent, and a
+  `BAASH_NO_BASH_COMPLETION=1` turns it off. On NixOS the flake's module
+  (`programs.baash.bashCompletion`, `nix/module.nix`) names the pinned
+  `pkgs.bash-completion` in `BAASH_BASH_COMPLETION`, because the "a
+  distribution's copy wins" rule has a distribution copy to win with there. The
+  feature is on for Windows and off elsewhere: a package manager there
+  installs the library, and `--features embedded-bash-completion` is the
+  self-contained build. `-C`/`-G` are still absent, and a
   function runs to completion with no deadline (bash has none either, so a slow
   script delays that Tab).
 * **On Windows the library is there, and `=~` is what still holds it back.**
@@ -433,7 +438,8 @@ and quoted-filename completion at a real prompt),
 for the *installed* zoxide, driven through a prompt: the hook records the
 directories visited, `z <keyword>` jumps, `z -` comes back — the dev shell
 installs `zoxide` for it, and the test reports the skip rather than failing when
-it is missing) and `crates/baash-repl/tests/editor.rs` (scripted keystrokes
+it is missing; `programs.baash.zoxide.enable` is the NixOS module's switch for
+the same integration) and `crates/baash-repl/tests/editor.rs` (scripted keystrokes
 against a fake terminal, including the search states).
 
 ## 5. Builtin inventory

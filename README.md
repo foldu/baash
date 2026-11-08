@@ -191,7 +191,7 @@ nix build .#default
 `just` wraps the loops the pipeline runs:
 
 ```sh
-just check         # nix flake check: build, fmt, clippy, the Windows exe
+just check         # nix flake check: build, fmt, clippy, licenses, windows, module
 just test          # the full suite, on a real pty
 just conformance   # the ratchet
 just licenses      # cargo deny check licenses
@@ -214,6 +214,56 @@ shell. The dev shell detects a non-ASCII `$PWD` and works around both
 (`CARGO_TARGET_DIR` to a temporary path, `NIX_LDFLAGS` unset); outside the dev
 shell, set `CARGO_TARGET_DIR` to an ASCII path yourself. Renaming the checkout
 is the real fix (DESIGN.md §11).
+
+## NixOS
+
+The flake exports a NixOS module, `nixosModules.default`:
+
+```nix
+{
+  inputs.baash.url = "git+https://lab.home.5kw.li/foldu/baash.git";
+
+  imports = [ inputs.baash.nixosModules.default ];
+
+  programs.baash = {
+    enable = true;
+    zoxide.enable = true;
+  };
+}
+```
+
+It installs the package, adds it to `environment.shells` — `/etc/shells` is what
+`chsh` and PAM consult before they let a shell be someone's login shell — and
+writes `/etc/xdg/baash/config.sh`, the one startup file a distribution owns. To
+make it the login shell as well,
+`users.users.<name>.shell = lib.getExe config.programs.baash.package;`.
+
+The generated file starts by sourcing the copy its own package installed,
+because a system config **replaces** the defaults built into the binary rather
+than extending them: without that line, enabling the module would drop the `ls`
+alias and the completion loader. What the options add goes after the defaults
+and before the user's `~/.config/baash/config.sh`.
+
+| option | default | what it does |
+|---|---|---|
+| `programs.baash.enable` | `false` | install `baash` and write the startup file |
+| `programs.baash.package` | this flake's package | the build to install |
+| `programs.baash.bashCompletion` | `true` | point `BAASH_BASH_COMPLETION` at `pkgs.bash-completion`, so TAB completion for the machine's commands works — NixOS has no `/usr/share/bash-completion` for [`config/config.sh`](config/config.sh) to find |
+| `programs.baash.zoxide.enable` | `false` | install zoxide and run `eval "$(zoxide init bash)"` at startup |
+| `programs.baash.zoxide.package` | `pkgs.zoxide` | the zoxide to install |
+| `programs.baash.extraConfig` | `""` | shell code appended to the system file |
+
+This machine's library is the flake's pinned `bash-completion`; a
+`BAASH_BASH_COMPLETION` already in the environment is left alone, and
+`BAASH_NO_BASH_COMPLETION=1` still turns completion off inside the shell.
+
+`nix/check-module.nix` is the gate (`nix flake check` builds it as
+`checks.<system>.module`). It evaluates a system three times — both options on,
+`bashCompletion = false`, and the module imported but not enabled — copies the
+generated files into `$XDG_CONFIG_DIRS` trees, and runs the shell that was
+installed against them, so the completion framework, a real per-command script
+from the library, zoxide's hook and the shell's own `ls` alias are asserted
+rather than assumed. What it does not cover is a real `/etc` and PAM.
 
 ## CI
 

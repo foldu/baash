@@ -255,6 +255,16 @@
         }
       );
 
+      # A NixOS module: `programs.baash` installs the shell, lists it in
+      # `/etc/shells`, writes the system startup file, and optionally points it
+      # at bash-completion and zoxide. `nix/check-module.nix` is its gate.
+      # `default` is the same module, so `imports = [ baash.nixosModules.default ]`
+      # reads the way other flakes do.
+      nixosModules = {
+        default = self.nixosModules.baash;
+        baash = import ./nix/module.nix { inherit self; };
+      };
+
       # `nix flake check` builds these. Two gates cannot be checks, for reasons
       # the sandbox dictates, and stay jobs in `.gitlab-ci.yml`: the test suite,
       # because the `interactive_*` tests drive a real pty and the sandbox's pty
@@ -287,6 +297,13 @@
           );
 
           inherit licenses windows;
+
+          # The module's product is one generated startup file, and nothing
+          # else in this gate ever sources it. This evaluates a system with the
+          # module enabled and runs the file in the shell it installed.
+          module = pkgs.callPackage ./nix/check-module.nix {
+            inherit nixpkgs self;
+          };
         }
       );
 

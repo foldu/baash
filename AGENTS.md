@@ -205,7 +205,8 @@ gets its own protocol.
 * `nix develop` provides the pinned toolchain. `flake.nix`'s `rustVersion` and
   `RUST_VERSION` in `.github/workflows/ci.yml` must stay in step.
 * `nix flake check` is the whole gate at once; its checks are `build`, `fmt`,
-  `clippy`, `licenses` and `windows`.
+  `clippy`, `licenses`, `windows` and `module` (the NixOS module's, in
+  `nix/check-module.nix`).
 * The flake's `src` is a **git-tracked** tree (`git ls-files`), so a new file
   that is not `git add`ed is missing from the build — the failure looks like a
   missing module or a missing test file, not like a staging mistake.
