@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use baash_lang::Field;
 use baash_lang::Shell as _;
-use baash_runtime::{ShellHost, Status};
+use baash_runtime::{ShellHost, Status, vfs};
 
 use super::words::{CondToken, binary_operator, conditional_tokens, unary_operator};
 use super::{Interp, ParsedChunk, SourceFile};
@@ -480,13 +480,27 @@ impl Parser<'_> {
         let path = || baash_sys::os::path_from_bytes(&operand.bytes);
         let metadata = || std::fs::metadata(path());
         let link = || std::fs::symlink_metadata(path());
+        // A mounted tree is read-only shell data: `-e`, `-f`, `-d`, `-s` and
+        // the access bits come from the table, and everything else in the tree
+        // is not a device, a socket or a link.
+        let mounted = self.interp.state.vfs.kind(&operand.bytes);
+        let mounted_size = self.interp.state.vfs.file(&operand.bytes).map(<[u8]>::len);
         Ok(match operator {
             b"-z" => operand.bytes.is_empty(),
             b"-n" => !operand.bytes.is_empty(),
-            b"-e" | b"-a" => metadata().is_ok(),
-            b"-f" => metadata().is_ok_and(|meta| meta.is_file()),
-            b"-d" => metadata().is_ok_and(|meta| meta.is_dir()),
-            b"-s" => metadata().is_ok_and(|meta| meta.len() > 0),
+            b"-e" | b"-a" => mounted.is_some() || metadata().is_ok(),
+            b"-f" => match mounted {
+                Some(kind) => kind == vfs::Kind::File,
+                None => metadata().is_ok_and(|meta| meta.is_file()),
+            },
+            b"-d" => match mounted {
+                Some(kind) => kind == vfs::Kind::Dir,
+                None => metadata().is_ok_and(|meta| meta.is_dir()),
+            },
+            b"-s" => match mounted_size {
+                Some(len) => len > 0,
+                None => metadata().is_ok_and(|meta| meta.len() > 0),
+            },
             b"-L" | b"-h" => link().is_ok_and(|meta| meta.file_type().is_symlink()),
             b"-p" | b"-S" | b"-b" | b"-c" => {
                 #[cfg(unix)]
@@ -506,6 +520,11 @@ impl Parser<'_> {
                 }
             }
             b"-r" | b"-w" | b"-x" => {
+                if let Some(kind) = mounted {
+                    // Files in a mount are readable, a directory is also
+                    // searchable, and nothing there is writable.
+                    return Ok(operator != b"-w" && (operator != b"-x" || kind == vfs::Kind::Dir));
+                }
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;

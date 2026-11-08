@@ -318,15 +318,21 @@ fn bi_source(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
         return Status(2);
     };
     let path = source_path(interp, &file).unwrap_or(file.clone());
-    let bytes = match std::fs::read(baash_sys::os::path_from_bytes(&path)) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            diagnose(
-                interp,
-                format!("{name}: {}: {error}", String::from_utf8_lossy(&path)),
-            );
-            return Status::FAILURE;
-        }
+    // A tree the binary carries (the bash-completion library) is read from
+    // memory: it is shell data, and on Windows writing 1106 files out to read
+    // them back cost 475 ms of the first start.
+    let bytes = match interp.state.vfs.file(&path) {
+        Some(bytes) => bytes.to_vec(),
+        None => match std::fs::read(baash_sys::os::path_from_bytes(&path)) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                diagnose(
+                    interp,
+                    format!("{name}: {}: {error}", String::from_utf8_lossy(&path)),
+                );
+                return Status::FAILURE;
+            }
+        },
     };
     // A sourced file is script text like any other: a byte order mark or
     // `\r\n` line endings are the file's, not the parser's, and are settled
@@ -368,7 +374,7 @@ fn bi_source(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
 /// which is why `. cmd` finds `./cmd` when `PATH` has no match.
 fn source_path(interp: &Interp, file: &[u8]) -> Option<Vec<u8>> {
     if baash_sys::paths::has_separator(file) {
-        return regular_file(file).then(|| file.to_vec());
+        return regular_file(interp, file).then(|| file.to_vec());
     }
     if let Some(path) = interp.state.vars.scalar(b"PATH") {
         for element in path.split(|&byte| byte == baash_sys::PATH_SEPARATOR) {
@@ -377,17 +383,22 @@ fn source_path(interp: &Interp, file: &[u8]) -> Option<Vec<u8>> {
                 candidate.push(baash_sys::PATH_JOIN);
             }
             candidate.extend_from_slice(file);
-            if regular_file(&candidate) {
+            if regular_file(interp, &candidate) {
                 return Some(candidate);
             }
         }
     }
-    regular_file(file).then(|| file.to_vec())
+    regular_file(interp, file).then(|| file.to_vec())
 }
 
 /// Whether `path` names a readable regular file (never a directory).
-fn regular_file(path: &[u8]) -> bool {
-    std::fs::metadata(baash_sys::os::path_from_bytes(path)).is_ok_and(|meta| meta.is_file())
+fn regular_file(interp: &Interp, path: &[u8]) -> bool {
+    match interp.state.vfs.kind(path) {
+        Some(kind) => kind == baash_runtime::vfs::Kind::File,
+        None => {
+            std::fs::metadata(baash_sys::os::path_from_bytes(path)).is_ok_and(|meta| meta.is_file())
+        }
+    }
 }
 
 /// `echo`, with bash's `-n`/`-e`/`-E` handling.

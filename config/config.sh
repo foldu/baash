@@ -32,14 +32,14 @@ alias grep='grep --color=auto'
 # milliseconds at startup and installs a `-D` rule that loads a command's script
 # on its first Tab, which is what bash does through its own startup files.
 #
-# The shell carries a copy of the library and unpacks it into the cache
-# directory on the first interactive start, so a machine with none installed —
-# a Windows one, or a machine running the static binary — still has one;
-# `BAASH_EMBEDDED_BASH_COMPLETION` names that copy. It is the last candidate
-# because a distribution's copy is the one the rest of the machine uses, and
-# because a newer one would know commands this build has not heard of. A system
-# with none, and a `BAASH_BASH_COMPLETION` pointing at nothing, still gets the
-# embedded library.
+# A binary can carry a copy of the library and mount it in memory, so a machine
+# with none installed — a Windows one, or a machine running a static build —
+# still has one; `BAASH_EMBEDDED_BASH_COMPLETION` names that mount (a path
+# inside the shell, not a file on disk). It is the last candidate because a
+# distribution's copy is the one the rest of the machine uses, and because a
+# newer one would know commands this build has not heard of. A system with
+# none, and a `BAASH_BASH_COMPLETION` pointing at nothing, still gets the
+# mounted library.
 #
 # `BAASH_BASH_COMPLETION` names a library explicitly (NixOS keeps it in the
 # store, not in the profile); an unreadable or absent path is skipped, as are

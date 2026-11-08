@@ -361,19 +361,22 @@ rediscover):
   retries the completion after the loader installs the command's script), so
   the scripts written for bash complete here. It is compiled in
   (`crates/baash/src/bash_completion.rs`, feature `embedded-bash-completion`,
-  embed folder `vendor/bash-completion/`) and unpacked on the first interactive
-  start into `$XDG_CACHE_HOME/baash/bash-completion/<tag>`, so Tab works on a
-  machine with none installed — which is what makes a single `baash.exe` enough
-  on Windows. `config/config.sh` sources a copy the system installed first and
-  the unpacked one last; `BAASH_BASH_COMPLETION` names one explicitly,
-  `BAASH_EMBEDDED_BASH_COMPLETION` names the unpacked copy, and
-  `BAASH_NO_BASH_COMPLETION=1` turns it off. `-C`/`-G` are still absent, and a
+  embed folder `vendor/bash-completion/`) and **mounted in memory** at
+  `/__baash__/bash-completion`, so Tab works on a machine with none installed —
+  which is what makes a single `baash.exe` enough on Windows — and nothing is
+  written to disk (`baash_runtime::vfs`; `source`, the file predicates and
+  pathname expansion consult it). `config/config.sh` sources a copy the system
+  installed first and the mounted one last; `BAASH_BASH_COMPLETION` names one
+  explicitly, `BAASH_EMBEDDED_BASH_COMPLETION` names the mounted copy, and
+  `BAASH_NO_BASH_COMPLETION=1` turns it off. The feature is on for Windows and
+  off elsewhere: a package manager there installs the library, and
+  `--features embedded-bash-completion` is the self-contained build. `-C`/`-G` are still absent, and a
   function runs to completion with no deadline (bash has none either, so a slow
   script delays that Tab).
 * **On Windows the library is there, and `=~` is what still holds it back.**
-  Verified on the guest: the exe unpacks into `%LOCALAPPDATA%`, the framework
-  sources, an embedded script registers its rule, a user's
-  `~/.bash_completion` runs and returns candidates, and `> /dev/null` /
+  Verified on the guest: the exe mounts the tree in memory (no file, no cache
+  directory), the framework sources, an embedded script registers its rule, a
+  user's `~/.bash_completion` runs and returns candidates, and `> /dev/null` /
   `>> /dev/null` / `< /dev/null` work (`open_cloexec` translates the device,
   which 556 of the 1097 scripts and the framework itself depend on).
   `[[ … =~ … ]]` is still `BAASH-E0204` there, and 46 scripts use it — `tar`'s

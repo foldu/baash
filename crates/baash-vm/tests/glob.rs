@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 
+use baash_runtime::vfs::Vfs;
 use baash_vm::glob::{Options, expand, has_meta};
 
 fn temp_dir(tag: &str) -> PathBuf {
@@ -19,7 +20,7 @@ fn temp_dir(tag: &str) -> PathBuf {
 /// Expand `pattern` with nothing quoted.
 fn expand_plain(pattern: &str, options: Options) -> Option<Vec<String>> {
     let quoted = vec![false; pattern.len()];
-    expand(pattern.as_bytes(), &quoted, &options).map(|matches| {
+    expand(pattern.as_bytes(), &quoted, &options, &Vfs::default()).map(|matches| {
         matches
             .iter()
             .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
@@ -114,7 +115,7 @@ fn quoted_metacharacters_are_literal_in_a_pathname() {
     let pattern = format!("{}/a*b", dir.display());
     let bytes = pattern.as_bytes();
     let quoted: Vec<bool> = bytes.iter().map(|&byte| byte == b'*').collect();
-    let found = expand(bytes, &quoted, &Options::default()).expect("matches");
+    let found = expand(bytes, &quoted, &Options::default(), &Vfs::default()).expect("matches");
     let found: Vec<String> = found
         .iter()
         .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
@@ -217,4 +218,54 @@ fn expand_keeps_a_literal_prefix_as_written() {
         "absolute patterns stay absolute: {found:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A mounted tree (the bash-completion library) expands like a directory.
+///
+/// This is the shape the library's own startup does:
+/// `dir=/__baash__/bash-completion; "$dir"/startup-core/*.bash`. Every literal
+/// component has to be seen as existing and the final one has to list, or the
+/// v2 compatibility layer silently does not load.
+#[test]
+fn a_mounted_tree_is_listed_like_a_directory() {
+    let mut vfs = Vfs::default();
+    vfs.mount(
+        b"/__baash__/bash-completion",
+        vec![
+            (
+                b"startup-core/000_bash_completion_compat.bash".to_vec(),
+                std::borrow::Cow::Borrowed(b"compat"),
+            ),
+            (
+                b"completions-core/tar.bash".to_vec(),
+                std::borrow::Cow::Borrowed(b"tar"),
+            ),
+            (
+                b"bash_completion".to_vec(),
+                std::borrow::Cow::Borrowed(b"framework"),
+            ),
+        ],
+    );
+    let pattern = b"/__baash__/bash-completion/startup-core/*.bash";
+    let quoted = vec![false; pattern.len()];
+    let found = expand(pattern, &quoted, &Options::default(), &vfs).expect("matches");
+    assert_eq!(
+        found,
+        vec![b"/__baash__/bash-completion/startup-core/000_bash_completion_compat.bash".to_vec()]
+    );
+
+    // A pattern that names the mount itself, and one that crosses it wrongly.
+    let all = b"/__baash__/bash-completion/*";
+    let quoted = vec![false; all.len()];
+    assert_eq!(
+        expand(all, &quoted, &Options::default(), &vfs).expect("matches"),
+        vec![
+            b"/__baash__/bash-completion/bash_completion".to_vec(),
+            b"/__baash__/bash-completion/completions-core".to_vec(),
+            b"/__baash__/bash-completion/startup-core".to_vec(),
+        ]
+    );
+    let missing = b"/__baash__/bash-completion/nope/*";
+    let quoted = vec![false; missing.len()];
+    assert!(expand(missing, &quoted, &Options::default(), &vfs).is_none());
 }

@@ -521,7 +521,7 @@ fn bash_completion_loads_a_command_on_the_first_tab() {
 /// The binary carries the library, so Tab works on a machine that has none.
 ///
 /// Nothing here is faked: the built-in startup file offers the copy the shell
-/// unpacked, the library's `-D` rule loads the command's script on the first
+/// mounted, the library's `-D` rule loads the command's script on the first
 /// Tab, and the script is the v2 `complete -F` form that every pre-2.18 script
 /// uses. The only thing the test supplies is a command to complete.
 #[test]
@@ -561,30 +561,26 @@ fn the_embedded_library_completes_without_an_installed_one() {
     );
     session.prompt();
 
-    // The first interactive start unpacks the tree into the cache directory,
-    // completions and all — the framework on its own would complete nothing.
-    // A binary built without `vendor/bash-completion/` carries no tree and
-    // writes nothing; `tests/embedded_completion.rs` is the test that says so
-    // out loud, so this one reports the skip instead of failing.
-    let Some(unpacked) = std::fs::read_dir(cache.join("baash").join("bash-completion"))
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| path.join("bash_completion").is_file())
-    else {
+    // A build without the tree (`vendor/bash-completion/` missing, or the
+    // feature off outside Windows) has nothing to complete here, so say so and
+    // leave; `tests/embedded_completion.rs` reports the same condition.
+    session.line(
+        "if [[ -e /__baash__/bash-completion/bash_completion ]]; then echo mounted; else echo unmounted; fi",
+    );
+    if find(&session.output, b"unmounted").is_some() {
         eprintln!("skipped: this binary carries no bash-completion tree");
         cleanup(&mut session, &home, &work);
         let _ = std::fs::remove_dir_all(&cache);
         let _ = std::fs::remove_dir_all(&data);
         let _ = std::fs::remove_dir_all(&config);
         return;
-    };
+    }
+    // The binary mounts the library in memory, so the shell has everything it
+    // needs without writing a cache: nothing under the test's cache directory.
     assert!(
-        unpacked.join("completions-core").is_dir(),
-        "the completions come with the framework: {}",
-        unpacked.display()
+        !cache.join("baash").exists(),
+        "the shell wrote a cache directory: {}",
+        cache.display()
     );
 
     session.line("mycmd () { echo \"args:$*\"; }");

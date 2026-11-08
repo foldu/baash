@@ -21,7 +21,7 @@
 use std::time::SystemTime;
 
 use crate::errors::codes;
-use crate::{ShellHost, Status};
+use crate::{ShellHost, Status, vfs};
 use baash_diag::Diagnostic;
 use baash_sys::Access;
 
@@ -348,17 +348,31 @@ impl Parser<'_, '_> {
     }
 
     fn unary_test(&mut self, operator: &[u8], argument: &[u8]) -> Result<bool, String> {
+        // A mounted tree is read-only shell data, so a path in one answers
+        // these from the table and not from the file system. Everything else
+        // (`-O`, `-N`, the device bits) has no meaning there and stays false.
+        let mounted = self.host.state().vfs.kind(argument);
+        let mounted_size = self.host.state().vfs.file(argument).map(<[u8]>::len);
         Ok(match operator[1] {
-            b'a' | b'e' => metadata(argument).is_some(),
-            b'r' => baash_sys::access(argument, Access::Read),
+            b'a' | b'e' => mounted.is_some() || metadata(argument).is_some(),
+            b'r' => mounted.is_some() || baash_sys::access(argument, Access::Read),
             b'w' => baash_sys::access(argument, Access::Write),
-            b'x' => baash_sys::access(argument, Access::Execute),
+            b'x' => mounted == Some(vfs::Kind::Dir) || baash_sys::access(argument, Access::Execute),
             b'O' => owned_by_user(argument),
             b'G' => owned_by_group(argument),
             b'N' => modified_later_than_read(argument),
-            b'f' => metadata(argument).is_some_and(|metadata| metadata.is_file()),
-            b'd' => metadata(argument).is_some_and(|metadata| metadata.is_dir()),
-            b's' => metadata(argument).is_some_and(|metadata| metadata.len() > 0),
+            b'f' => match mounted {
+                Some(kind) => kind == vfs::Kind::File,
+                None => metadata(argument).is_some_and(|metadata| metadata.is_file()),
+            },
+            b'd' => match mounted {
+                Some(kind) => kind == vfs::Kind::Dir,
+                None => metadata(argument).is_some_and(|metadata| metadata.is_dir()),
+            },
+            b's' => match mounted_size {
+                Some(len) => len > 0,
+                None => metadata(argument).is_some_and(|metadata| metadata.len() > 0),
+            },
             b'S' => unix_file_type(argument, FileType::Socket),
             b'c' => unix_file_type(argument, FileType::CharDevice),
             b'b' => unix_file_type(argument, FileType::BlockDevice),

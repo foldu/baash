@@ -1648,7 +1648,7 @@ impl baash_lang::Shell for Interp {
             globskipdots: self.state.opts.globskipdots || ignore_set,
         };
         let expand = |pattern: &baash_lang::Field| {
-            crate::glob::expand(&pattern.bytes, &pattern.quoted, &options)
+            crate::glob::expand(&pattern.bytes, &pattern.quoted, &options, &self.state.vfs)
         };
         // `GLOBIGNORE` is a match filter, not another pattern: a file is kept
         // only when no list entry matches it. Every entry is matched against

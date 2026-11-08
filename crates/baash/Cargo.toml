@@ -14,14 +14,14 @@ description = "The baash binary"
 mimalloc = ["dep:mimalloc"]
 # `baash --features builtin-utils`: use the embedded coreutils on Linux too.
 builtin-utils = ["baash-vm/builtin-utils"]
-# The bash-completion library, compiled into the binary so that `complete -F`
-# functions written for it run on a machine that has none installed — the
-# reason a Windows `baash.exe` can be shipped on its own. The tree is not
-# vendored: `flake.nix` (and the dev shell) copies the pinned nixpkgs copy into
-# `vendor/bash-completion/` before the build, and a build without it is not an
-# error, it is a binary that carries no library. See
-# `src/bash_completion.rs`.
-default = ["embedded-bash-completion"]
+# The bash-completion library, mounted inside the shell instead of installed.
+# On by default for Windows, where a bare `baash.exe` is the whole installation
+# and there is no package manager to put the library on disk; off elsewhere,
+# where a distribution's copy is the one in use and the smaller binary is the
+# better default. The tree is not vendored: `flake.nix` (and the dev shell)
+# copies the pinned nixpkgs copy into `vendor/bash-completion/` before the
+# build, and a build without it is not an error, it is a binary that carries no
+# library. See `src/bash_completion.rs`.
 embedded-bash-completion = ["dep:rust-embed"]
 
 [dependencies]
@@ -44,9 +44,13 @@ rust-embed = { version = "8", optional = true, default-features = false, feature
     "debug-embed",
 ] }
 
+
 # A Windows `PATH` has no coreutils, so the embedded fallback is not optional
 # there. The feature is still the switch; it is just on by default for this
 # target.
 [target.'cfg(windows)'.dependencies]
 baash-vm = { workspace = true, features = ["builtin-utils"] }
+# The library is on by default on Windows, so the embedder is a plain Windows
+# dependency rather than something the feature has to turn on.
+rust-embed = { version = "8", default-features = false, features = ["debug-embed"] }
 

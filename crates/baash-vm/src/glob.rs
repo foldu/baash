@@ -22,6 +22,7 @@
 //! quoted bytes into backslash escapes before anything is compiled.
 
 use baash_pattern::{Flags, compiled as compiled_pattern};
+use baash_runtime::vfs::Vfs;
 
 /// What the shell options say about pathname expansion.
 #[derive(Clone, Copy, Debug)]
@@ -75,7 +76,7 @@ pub fn has_meta(bytes: &[u8], quoted: &[bool], extglob: bool) -> bool {
 
 /// Pathname expansion: sorted matches, or `None` when nothing matched (POSIX's
 /// default, and `baash_lang::Shell::pathname`'s contract).
-pub fn expand(bytes: &[u8], quoted: &[bool], options: &Options) -> Option<Vec<Vec<u8>>> {
+pub fn expand(bytes: &[u8], quoted: &[bool], options: &Options, vfs: &Vfs) -> Option<Vec<Vec<u8>>> {
     let options = Options {
         flags: Flags {
             pathname: true,
@@ -87,7 +88,7 @@ pub fn expand(bytes: &[u8], quoted: &[bool], options: &Options) -> Option<Vec<Ve
     let absolute = bytes.first() == Some(&b'/');
     let start = if absolute { b"/".to_vec() } else { Vec::new() };
     let mut out = Vec::new();
-    walk(&start, &components, &options, &mut out);
+    walk(&start, &components, &options, vfs, &mut out);
     out.sort();
     out.dedup();
     (!out.is_empty()).then_some(out)
@@ -137,15 +138,21 @@ fn components<'a>(bytes: &'a [u8], quoted: &'a [bool]) -> Vec<Component<'a>> {
 
 /// Match the components left in `components` underneath `base`, appending each
 /// complete result to `out`.
-fn walk(base: &[u8], components: &[Component<'_>], options: &Options, out: &mut Vec<Vec<u8>>) {
+fn walk(
+    base: &[u8],
+    components: &[Component<'_>],
+    options: &Options,
+    vfs: &Vfs,
+    out: &mut Vec<Vec<u8>>,
+) {
     let Some((first, rest)) = components.split_first() else {
         out.push(base.to_vec());
         return;
     };
     if options.globstar && first.is_globstar() {
         // Zero directories: `**` matches the empty component list.
-        walk(base, rest, options, out);
-        for name in entries(base) {
+        walk(base, rest, options, vfs, out);
+        for name in entries(base, vfs) {
             if name.starts_with(b".") && !options.dotglob {
                 continue;
             }
@@ -155,24 +162,24 @@ fn walk(base: &[u8], components: &[Component<'_>], options: &Options, out: &mut 
             };
             // `**` walks real directories only; a symlink to one is not
             // followed (bash's behaviour, unlike zsh's `***/`).
-            if !is_directory(&child) {
+            if !is_directory(&child, vfs) {
                 continue;
             }
-            walk(&child, components, options, out);
+            walk(&child, components, options, vfs, out);
         }
         return;
     }
-    for candidate in step(base, first, options) {
-        walk(&candidate, rest, options, out);
+    for candidate in step(base, first, options, vfs) {
+        walk(&candidate, rest, options, vfs, out);
     }
 }
 
 /// The entries one component selects under `base`.
-fn step(base: &[u8], component: &Component<'_>, options: &Options) -> Vec<Vec<u8>> {
+fn step(base: &[u8], component: &Component<'_>, options: &Options, vfs: &Vfs) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     if !has_meta(component.bytes, component.quoted, options.flags.extglob) {
         // No metacharacter: the component is a literal path segment.
-        out.extend(join(base, component.bytes).filter(|path| os(path).exists()));
+        out.extend(join(base, component.bytes).filter(|path| exists(path, vfs)));
         return out;
     }
     let compiled = compiled_pattern(
@@ -180,7 +187,7 @@ fn step(base: &[u8], component: &Component<'_>, options: &Options) -> Vec<Vec<u8
         options.flags,
     );
     let leading_dot = component.leading_dot();
-    let mut names = entries(base);
+    let mut names = entries(base, vfs);
     if leading_dot && !options.globskipdots {
         // bash 5.2+ omits these unless `globskipdots` is off.
         names.push(b".".to_vec());
@@ -196,9 +203,20 @@ fn step(base: &[u8], component: &Component<'_>, options: &Options) -> Vec<Vec<u8
     out
 }
 
+/// Whether `path` is in a mounted tree or on the file system.
+///
+/// A mount is shell data, so this is the one question a literal pattern
+/// component has to ask before it can walk into the tree.
+fn exists(path: &[u8], vfs: &Vfs) -> bool {
+    vfs.kind(path).is_some() || os(path).exists()
+}
+
 /// The names in `base`, or nothing when it is not a readable directory.
-fn entries(base: &[u8]) -> Vec<Vec<u8>> {
+fn entries(base: &[u8], vfs: &Vfs) -> Vec<Vec<u8>> {
     let dir: &[u8] = if base.is_empty() { b"." } else { base };
+    if vfs.kind(dir) == Some(baash_runtime::vfs::Kind::Dir) {
+        return vfs.entries(dir);
+    }
     let Ok(entries) = std::fs::read_dir(os(dir)) else {
         return Vec::new();
     };
@@ -209,7 +227,10 @@ fn entries(base: &[u8]) -> Vec<Vec<u8>> {
 }
 
 /// Whether `path` is a directory itself, not a symlink to one.
-fn is_directory(path: &[u8]) -> bool {
+fn is_directory(path: &[u8], vfs: &Vfs) -> bool {
+    if let Some(kind) = vfs.kind(path) {
+        return kind == baash_runtime::vfs::Kind::Dir;
+    }
     std::fs::symlink_metadata(os(path)).is_ok_and(|meta| meta.is_dir())
 }
 

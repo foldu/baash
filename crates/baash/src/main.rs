@@ -475,17 +475,17 @@ fn read_startup_file(shell: &mut Interp, flags: &ShellFlags) {
     if flags.norc {
         return;
     }
-    // The bash-completion library the binary carries, unpacked once and named
-    // for the startup files: a machine with none installed still gets one, and
-    // `config/config.sh` prefers a copy the system has. A value already in the
-    // environment is the user's and is left alone.
+    // The bash-completion library the binary carries, mounted in memory and
+    // named for the startup files: a machine with none installed still gets
+    // one, and `config/config.sh` prefers a copy the system has. A value
+    // already in the environment is the user's and is left alone.
     if shell
         .state()
         .vars
         .scalar(b"BAASH_EMBEDDED_BASH_COMPLETION")
         .is_none()
     {
-        if let Some(path) = bash_completion::ensure_extracted() {
+        if let Some(path) = bash_completion::install(shell) {
             let _ = shell
                 .state()
                 .vars

@@ -36,6 +36,7 @@ mod errors;
 mod opts;
 mod traps;
 mod vars;
+pub mod vfs;
 
 #[cfg(test)]
 mod tests;
@@ -114,6 +115,10 @@ pub struct ShellState {
     /// inside a completion function changes the run in progress, and only the
     /// engine that finishes the completion decides what to save.
     pub completion: complete::CompletionRun,
+    /// The read-only trees the shell carries in memory (the bash-completion
+    /// library). Empty unless the binary mounted something; `source`, `test`
+    /// and pathname expansion consult it before the file system.
+    pub vfs: vfs::Vfs,
     /// Command history, the one ring the `history` built-in and the editor
     /// share. See `baash_history` for the database behind it.
     pub history: History,
@@ -169,6 +174,7 @@ impl ShellState {
             aliases: AliasTable::new(),
             completions: complete::CompletionTable::default(),
             completion: complete::CompletionRun::default(),
+            vfs: vfs::Vfs::default(),
             history: History::new(),
             dirs: Vec::new(),
             command_number: 0,

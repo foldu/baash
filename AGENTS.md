@@ -234,15 +234,17 @@ gets its own protocol.
 * If the checkout path contains non-ASCII bytes (this one contains `ß`),
   linking can fail; `docs/state.md` §1 keeps its worktrees under `/tmp` for
   that reason.
-* **`vendor/bash-completion/` is not in git.** The binary embeds the
-  bash-completion library, and the bytes come from nixpkgs: `flake.nix` copies
+* **`vendor/bash-completion/` is not in git.** A build with the
+  `embedded-bash-completion` feature mounts the bash-completion library inside
+  the shell, and the bytes come from nixpkgs: `flake.nix` copies
   `pkgs.bash-completion` into that folder in `preBuild`, and `nix develop` does
   the same when the shell starts (guarded by the recorded store path, so an
   unchanged tree is not recopied and the crate is not rebuilt). `nix build
-  .#bash-completion` prints the exact tree; a `cargo test` outside the dev
-  shell finds no folder, and `crates/baash/tests/embedded_completion.rs` and the
-  module's unit tests report a skip (`bash_completion.rs` says why). The
-  feature is on by default; `--no-default-features` is the build without it.
+  .#bash-completion` prints the exact tree. The feature is on for Windows and
+  off otherwise, so `cargo test --workspace` runs the library tests only with
+  `--all-features`; without the tree they print a skip
+  (`crates/baash/tests/embedded_completion.rs` and `bash_completion.rs` say
+  why).
 * `CARGO_TARGET_DIR` redirects where `cargo` writes, but `baash-spec` defaults
   to `target/debug/baash`; pass `--shell` explicitly, or you will measure the
   shell you built an hour ago.

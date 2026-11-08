@@ -1215,6 +1215,16 @@ Two status codes are deliberately not bash's, both annotated as bugs in the
 suite: `complete -p NAME` for an unknown NAME is 0 (bash 1), and `complete NAME`
 with no action is 2 (bash 0).
 
+**`baash_runtime::vfs` is a mount table, not a file system.** A `Mount` is a
+path prefix and a table of `(relative path, bytes)`; `Vfs` answers `file`,
+`kind` and `entries` from it, matching bytes after a trailing slash and
+requiring a component boundary (mounting `/a/b` never matches `/a/bc`). Only
+`source`, the file predicates and pathname expansion ask, which is why the
+mounted tree is invisible to `ls`, `cat` and any child process. There are no
+writes, no symlinks and no `.`/`..` resolution inside a mount; `ShellState`
+clones the table for a subshell, so paths and slices are copied and the bytes
+are not.
+
 `crates/baash` reads startup files only when the shell is interactive, and it
 reads two layers. First **the shell's defaults**: `$XDG_CONFIG_DIRS/baash/config.sh`
 when a distributor installed one, otherwise `config/config.sh` compiled into the
@@ -1231,29 +1241,31 @@ ignored rather than resolved against the working directory, and the first
 `$XDG_CONFIG_DIRS` entry with a `baash/config.sh` wins.
 
 The startup path also decides which bash-completion library runs.
-`crates/baash/src/bash_completion.rs` compiles one in (feature
+`crates/baash/src/bash_completion.rs` can compile one in (feature
 `embedded-bash-completion`; the embed folder is `vendor/bash-completion/`,
-which is not in git), unpacks it into
-`baash_sys::dirs::cache_home()/baash/bash-completion/<tag>` on the first
-interactive start, and names the file `BAASH_EMBEDDED_BASH_COMPLETION` before
-the startup files run — so a machine with no library installed still has one,
-and a single `baash.exe` is enough on Windows. `<tag>` is sixteen hex digits of
-FNV-1a over the tree's `PROVENANCE` file (the copy step's record of the store
-path): a different library never reuses an old extraction, and the cache path
-stays short enough for a Windows `MAX_PATH`. The marker `.complete` is written
-last, and a directory without it is half an extraction and is replaced, which
-is what makes a killed first start cost a retry rather than a broken library;
-the staging directory is renamed into place, and a rename that loses a race
-with another starting shell keeps the winner's tree.
+which is not in git) and **mounts it in memory** at
+`/__baash__/bash-completion`, naming
+`/__baash__/bash-completion/bash_completion` as
+`BAASH_EMBEDDED_BASH_COMPLETION` before the startup files run — so a machine
+with no library installed still has one, and a single `baash.exe` is enough on
+Windows. The mount is `baash_runtime::vfs::Vfs` in `ShellState`, and only three
+layers consult it: `.`/`source` reads `Vfs::file`, `test`/`[`/`[[` answer
+`-e`/`-f`/`-d`/`-s`/`-r`/`-x` from `Vfs::kind`, and pathname expansion lists
+`Vfs::entries`. Nothing is written to disk, and no external command can see
+the tree — it is shell data, not a file system. An earlier design unpacked it
+into the cache directory instead; on Windows that cost 475 ms of the first
+start and a cache directory to version.
 
 `config/config.sh` tries `BAASH_BASH_COMPLETION`, the two standard system
-paths, and then the embedded copy, so a distribution's library wins over the
-one in the binary. `flake.nix` copies `pkgs.bash-completion` into the embed
-folder in `preBuild` (the dev shell does the same for `cargo test`) and writes
-`PROVENANCE`; a build without the folder is not an error — the derive uses
-`allow_missing` and `bash_completion::ensure_extracted` answers `None` — so a
+paths, and then the mounted copy, so a distribution's library wins over the one
+in the binary. `flake.nix` copies `pkgs.bash-completion` into the embed folder
+in `preBuild` (the dev shell does the same for `cargo test`) and records the
+store path in `PROVENANCE`; a build without the folder is not an error — the
+derive uses `allow_missing` and `bash_completion::install` answers `None` — so a
 plain `cargo build` on a machine with no library is a shell without one.
-`--norc` skips the startup path and with it the unpacking.
+Windows mounts the tree by default; elsewhere the feature is off, and
+`--features embedded-bash-completion` is the self-contained build. `--norc`
+skips the startup path and with it the mount.
 
 ### Arithmetic: who expands the text
 

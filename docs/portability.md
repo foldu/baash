@@ -165,30 +165,32 @@ quoted, as msys does.
 
 One of those is now answered rather than pending, and by the mechanism that
 makes the binary self-sufficient: the bash-completion library is compiled into
-the executable (`crates/baash/src/bash_completion.rs`, feature
-`embedded-bash-completion`) and unpacked into
-`%LOCALAPPDATA%\baash\bash-completion\<tag>` on the first interactive start,
-so a Windows machine that never had bash gets the same `complete -F` functions
-its scripts were written for. The path is handed to the startup file with
-forward slashes, because that is how a Windows path in a shell word is written.
-nixpkgs' tree carries 576 version aliases (`gcc-5` → `gcc`, `python3.13` →
-`python3`) as symlinks; the unpacked copy has them as ordinary files, since
-creating a symlink on Windows needs a privilege the shell does not ask for.
+the executable (`crates/baash/src/bash_completion.rs`) and **mounted in
+memory** at `/__baash__/bash-completion` for the first interactive start, so a
+Windows machine that never had bash gets the same `complete -F` functions its
+scripts were written for. The path is handed to the startup file with forward
+slashes, because that is how a Windows path in a shell word is written. Nothing
+is written to disk: an earlier design unpacked the tree into `%LOCALAPPDATA%`
+and paid 475 ms on the first start for it — Defender reads every one of 1106
+files — which is what a shell that promises no lag cannot afford. The tree's
+576 version aliases (`gcc-5` → `gcc`, `python3.13` → `python3`) are symlinks in
+nixpkgs' copy; the mount has no symlinks at all, and every alias is its own
+path with the target's bytes.
+
 What is still outside the binary is the completion a tool ships for itself
 (git, docker, kubectl, systemd): bash-completion never contained those on any
 platform, so they complete only when `BASH_COMPLETION_COMPAT_DIR` or
 `BASH_COMPLETION_USER_DIR` names the directory the tool installed them in.
 
-Measured on the Windows 11 guest: the executable unpacks the tree into
-`%LOCALAPPDATA%` on the first interactive start, the framework sources
-(`_comp_load` and the v2 `_comp_initialize` are defined), an embedded script
-registers its rule (`complete -F _comp_cmd_tar tar`), and a user's
-`~/.bash_completion` — which is a single file, so it survives the library's
-`:`-separated directory lookups that a drive letter breaks — is sourced at
-startup and its function returns candidates through `COMPREPLY`. That needed
-`/dev/null` to work, which it now does (`>`, `>>` and `<` all reach the
-`NUL` device), because 556 of the 1097 scripts redirect to it and the
-framework does 62 times.
+Measured on the Windows 11 guest: the executable mounts the tree without
+touching the disk, the framework sources (`_comp_load` and the v2
+`_comp_initialize` are defined), an embedded script registers its rule
+(`complete -F _comp_cmd_tar tar`), and a user's `~/.bash_completion` — which is
+a single file, so it survives the library's `:`-separated directory lookups
+that a drive letter breaks — is sourced at startup and its function returns
+candidates through `COMPREPLY`. That needed `/dev/null` to work, which it now
+does (`>`, `>>` and `<` all reach the `NUL` device), because 556 of the 1097
+scripts redirect to it and the framework does 62 times.
 
 One shell gap still takes its toll: `[[ … =~ … ]]` has no engine on Windows
 (`BAASH-E0204`), and 46 scripts use it — `tar`'s option parser among them, so

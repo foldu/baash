@@ -1,15 +1,15 @@
-//! The bash-completion library the binary carries.
+//! The bash-completion library the binary can carry, end to end.
 //!
 //! `-i -c` is an interactive shell without a terminal: it reads the startup
-//! files, which is where the library is unpacked and offered, and then runs
-//! one command. That makes it the cheapest place to prove the embedding works
-//! on any platform — the Tab path itself needs a pty and is
-//! `interactive_complete.rs`.
+//! files, which is where the library is mounted and offered, and then runs one
+//! command. That makes it the cheapest place to prove the whole chain —
+//! `source`, the file predicates and pathname expansion all reach into the
+//! mounted tree, and nothing is written to disk. The Tab path itself needs a
+//! pty and is `interactive_complete.rs`.
 //!
-//! The state is a fresh `HOME`, cache and configuration, and an empty
-//! `XDG_CONFIG_DIRS`, so the run cannot pick up the machine's startup file (a
-//! developer on a machine with an installed `baash` would otherwise test that
-//! copy, which is a different `config.sh`).
+//! A binary built without `vendor/bash-completion/` (or without the feature,
+//! outside Windows) carries no tree; the tests report the skip, the same way
+//! the pty tests do.
 
 #![forbid(unsafe_code)]
 
@@ -40,18 +40,8 @@ fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-/// The unpacked library's directory: the cache has one tree, named by the
-/// digest of its provenance.
-fn unpacked(cache: &Path) -> Option<PathBuf> {
-    std::fs::read_dir(cache.join("baash").join("bash-completion"))
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| path.join("bash_completion").is_file())
-}
-
 #[test]
-fn an_interactive_shell_unpacks_and_sources_the_library() {
+fn an_interactive_shell_mounts_and_sources_the_library() {
     let home = dir("home");
     let cache = dir("cache");
     let config = dir("config");
@@ -64,7 +54,14 @@ if [[ -z ${BAASH_EMBEDDED_BASH_COMPLETION-} ]]; then
     echo skipped
     exit 0
 fi
-. "$BAASH_EMBEDDED_BASH_COMPLETION"
+library=$BAASH_EMBEDDED_BASH_COMPLETION
+[[ -e $library ]] && echo exists
+[[ -d ${library%/*} ]] && echo directory
+[[ -r $library ]] && echo readable
+for startup in "${library%/*}"/startup-core/*.bash; do
+    printf 'startup:%s\n' "${startup##*/}"
+done
+. "$library"
 printf 'status=%s\n' "$?"
 declare -F _comp_load >/dev/null && echo loader
 declare -F _comp_initialize >/dev/null && echo initialize
@@ -72,8 +69,6 @@ declare -F _comp_initialize >/dev/null && echo initialize
     );
     let text = stdout(&output);
     if text.contains("skipped") {
-        // A build without `vendor/bash-completion/` carries no library; that
-        // is a supported build, not a failure (the module doc says so).
         eprintln!("skipped: this binary carries no bash-completion tree");
         return;
     }
@@ -82,6 +77,29 @@ declare -F _comp_initialize >/dev/null && echo initialize
         Some(0),
         "the shell must exit cleanly; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("var=/__baash__/bash-completion/bash_completion"),
+        "the mount is named for the startup files: {text}"
+    );
+    // The three questions the library asks of its own location, answered from
+    // the table rather than the file system.
+    assert!(
+        text.contains("exists"),
+        "-e must see the mounted file: {text}"
+    );
+    assert!(
+        text.contains("directory"),
+        "-d must see the mounted directory: {text}"
+    );
+    assert!(
+        text.contains("readable"),
+        "-r must see the mounted file: {text}"
+    );
+    // Pathname expansion lists the mounted directory.
+    assert!(
+        text.contains("startup:000_bash_completion_compat.bash"),
+        "the startup glob must find the mounted file: {text}"
     );
     assert!(text.contains("status=0"), "sourcing failed: {text}");
     assert!(
@@ -92,33 +110,11 @@ declare -F _comp_initialize >/dev/null && echo initialize
         text.contains("initialize"),
         "the v2 compatibility layer must be sourced too: {text}"
     );
-
-    let tree = unpacked(&cache).unwrap_or_else(|| {
-        panic!(
-            "the library was not unpacked into {}: {text}",
-            cache.display()
-        )
-    });
+    // The point of the mount: the library never becomes files on disk.
     assert!(
-        tree.join("completions-core").is_dir(),
-        "the completions come with the framework: {}",
-        tree.display()
-    );
-    assert!(
-        tree.join("PROVENANCE").is_file(),
-        "the tree records where it came from: {}",
-        tree.display()
-    );
-
-    // A second start finds the marker and leaves the tree alone: a file put
-    // there by hand (or by the shell itself) stays.
-    let sentinel = tree.join("kept-by-the-test");
-    std::fs::write(&sentinel, b"keep me").expect("write into the tree");
-    let again = interactive(&home, &cache, &config.join("absent"), "echo second");
-    assert_eq!(again.status.code(), Some(0));
-    assert!(
-        sentinel.is_file(),
-        "an existing extraction must not be overwritten"
+        !cache.join("baash").exists(),
+        "the shell wrote a cache directory: {}",
+        cache.display()
     );
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&cache);

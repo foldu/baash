@@ -51,8 +51,8 @@ function written for bash-completion runs on a machine that never installed
 it. It is not vendored in this repository — [`flake.nix`](flake.nix) copies the
 pinned nixpkgs tree into `vendor/bash-completion/` before the build, so the
 bytes come from a pinned source rather than from a directory someone edited.
-`nix build .#bash-completion` prints that store path, and the unpacked copy
-records it in its `PROVENANCE` file.
+`nix build .#bash-completion` prints that store path, and the mounted copy
+carries it in its `PROVENANCE` file.
 
 The GPL's "or later" is what makes this combination possible: bash-completion
 is distributed under GPL-2.0-or-later, baash under GPL-3.0-or-later, and the

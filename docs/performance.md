@@ -21,30 +21,42 @@ the release column is `cargo build --release`.
 
 ### 2026-11-08: the bash-completion library inside the binary
 
-The library is compiled into the binary (`crates/baash/src/bash_completion.rs`)
-and unpacked on the first interactive start, so the price has two parts.
-
-`x86_64-linux`, release, the same tree nixpkgs pins (1106 files, 3.0 MB after
-extraction):
+The library is compiled into the binary (feature `embedded-bash-completion`,
+`crates/baash/src/bash_completion.rs`) and mounted in memory, so no part of it
+touches the disk. `x86_64-linux`, release, the tree nixpkgs pins (1106 paths,
+2.97 MB if it were written out):
 
 | | bytes / time |
 |---|---:|
-| `baash` without the tree | 25,852,728 |
-| `baash` with the tree | 27,149,688 (+1.3 MB) |
-| first interactive start, extracting to disk | 18 ms |
-| first interactive start, extracting to tmpfs | 14 ms |
-| every later interactive start | one `stat` |
+| `baash` without the tree | 25,868,864 |
+| `baash` with the tree | 27,259,280 (+1.39 MB) |
+| mount, at startup | below the 1 ms resolution |
+| first interactive start | 9 ms |
+| every later interactive start | 9 ms |
+| `--norc` (no startup file, no mount) | 1 ms |
 
-The binary is 1.3 MB larger, not 3.0 MB. nixpkgs adds 576 version-suffixed
-aliases (`gcc-5` → `gcc`, `python3.13` → `python3`) as symlinks, so the alias
-file *is* its target's bytes: 530 real files (1.04 MB) and 577 duplicate
-contents, which the linker merges into the one constant. Extraction has no such
-trick available — a Windows symlink needs a privilege the shell will not ask
-for — so the unpacked tree is the full 2.97 MB.
-Extraction writes 1106 files from a cold cache in 18 ms and nothing at all
-after that — the 8 ms an interactive start already spent sourcing the library
-(measured against `--norc`, which skips startup files and the unpacking) does
-not change.
+The 8 ms between `--norc` and a normal start is sourcing the library, which is
+what it cost before the mount existed; building the table and mounting it is
+not measurable (with `BAASH_NO_BASH_COMPLETION=1` — mount, no source — a start
+is 1 ms with the tree and 1 ms without). The binary grows by 1.39 MB rather
+than 2.97 MB because nixpkgs' 576 version aliases (`gcc-5` → `gcc`,
+`python3.13` → `python3`) are symlinks to their targets' bytes and the linker
+merges the identical constants.
+
+The first version of this feature unpacked the tree into the cache directory
+instead. Measured on the Windows 11 guest, best of five runs each, with the
+cache removed between runs:
+
+| | first start | later starts |
+|---|---:|---:|
+| unpacking the tree into the cache | 302 ms | 30 ms |
+| mounting it in memory | 16 ms | 16 ms |
+
+The first start is the one a user meets after installing, and it was dominated
+by writing 1106 files for Defender to read; the mount has no first start. (A
+*freshly copied* 21 MB `baash.exe` costs another few hundred milliseconds on
+its own first execution, at any design, because the operating system reads the
+new file once — that is not the shell.)
 
 ### 2026-11-01: dynamic specials, and two variable-table fast paths
 

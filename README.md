@@ -92,20 +92,21 @@ function prints is captured and painted above the prompt, where bash puts it
 bash-completion library itself: sourcing it registers its `-D` loader and a
 command's script is loaded on its first Tab (the loader's status `124` means
 "complete again"), so the scripts installed for bash complete here too.
-The library the shell needs is **inside the binary**, so Tab works on a
-machine that never installed it — a Windows one, or a static build on a
-minimal system. It is unpacked into the cache directory
-(`$XDG_CACHE_HOME/baash/bash-completion/<tag>`, `%LOCALAPPDATA%` on Windows) on
-the first interactive start, and [`config/config.sh`](config/config.sh) offers
-it after any copy the system has, so a distribution's newer library still wins.
-The tree is not vendored here: [`flake.nix`](flake.nix) copies the pinned
-nixpkgs `bash-completion` into `vendor/bash-completion/` before the build (the
-dev shell does the same) and the binary embeds it —
-`nix build .#bash-completion` is the exact tree. `BAASH_BASH_COMPLETION` names
-a library explicitly (the NixOS store path, say),
-`BAASH_EMBEDDED_BASH_COMPLETION` names the unpacked copy, and
-`BAASH_NO_BASH_COMPLETION=1` turns all of it off. `-C` and `-G`
-are not run yet.
+The library can also be **inside the binary**: a build with
+`embedded-bash-completion` mounts it in memory at
+`/__baash__/bash-completion`, so `source`, `test` and pathname expansion read
+it without a single file on disk. That is the default on Windows — where a
+bare `baash.exe` is the whole installation and there is no package manager to
+install the library — and off elsewhere, where the distribution's copy is the
+one in use and the smaller binary is the better default. The tree is not
+vendored: [`flake.nix`](flake.nix) copies the pinned nixpkgs
+`bash-completion` into `vendor/bash-completion/` before the build (the dev
+shell does the same), and `nix build .#bash-completion` is the exact tree.
+[`config/config.sh`](config/config.sh) offers the mounted copy after any copy
+the system has, so a distribution's newer library still wins;
+`BAASH_BASH_COMPLETION` names a library explicitly, `BAASH_EMBEDDED_BASH_COMPLETION`
+names the mounted one, and `BAASH_NO_BASH_COMPLETION=1` turns all of it off.
+`-C` and `-G` are not run yet.
 
 Not implemented yet: the directory stack (`pushd`/`popd`/`dirs`), `umask`,
 `let`, `ulimit`, `times`, `enable`, `$RANDOM`/`$SECONDS`/`$FUNCNAME`, xtrace

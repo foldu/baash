@@ -82,13 +82,15 @@
               strictDeps = true;
             };
 
-            # The bash-completion library the binary embeds is not vendored:
-            # this is the copy step. Pinning it to nixpkgs' package is what
-            # makes the embedded version move with the flake instead of with
-            # whoever remembered to update a directory. `PROVENANCE` names the
-            # store path, and the binary digests it to name the per-user
-            # cache directory it unpacks into — so a new library never reuses
-            # an old extraction.
+            # The bash-completion library the binary can embed is not
+            # vendored: this is the copy step. Pinning it to nixpkgs' package
+            # is what makes the embedded version move with the flake instead of
+            # with whoever remembered to update a directory. `PROVENANCE`
+            # records the store path, which is what an operator sees when they
+            # look at the mounted tree. The Windows build uses this; the Linux
+            # package leaves it out and links against the system's copy, so the
+            # copy is only compiled into a binary that enables
+            # `embedded-bash-completion`.
             embedCompletion = ''
               rm -rf vendor/bash-completion
               mkdir -p vendor

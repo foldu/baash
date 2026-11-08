@@ -106,31 +106,12 @@ pub fn data_home() -> Option<PathBuf> {
     xdg("XDG_DATA_HOME").or_else(|| home_dir().map(|home| home.join(".local").join("share")))
 }
 
-/// `$XDG_CACHE_HOME`, or `~/.cache`.
-///
-/// For data the shell can regenerate: the unpacked bash-completion library
-/// lives here rather than under [`data_home`], because losing a cache costs one
-/// extraction and losing data costs a user their history.
-#[cfg(unix)]
-pub fn cache_home() -> Option<PathBuf> {
-    xdg("XDG_CACHE_HOME").or_else(|| home_dir().map(|home| home.join(".cache")))
-}
-
 /// `%LOCALAPPDATA%`, or `~/AppData/Local`.
 #[cfg(windows)]
 pub fn data_home() -> Option<PathBuf> {
     non_empty("LOCALAPPDATA")
         .map(PathBuf::from)
         .or_else(|| home_dir().map(|home| home.join("AppData").join("Local")))
-}
-
-/// `%LOCALAPPDATA%`, or `~/AppData/Local`.
-///
-/// Windows has one local directory for data and caches both, so this is the
-/// same place [`data_home`] names; the XDG split has no second half there.
-#[cfg(windows)]
-pub fn cache_home() -> Option<PathBuf> {
-    data_home()
 }
 
 /// An XDG base directory variable, when the spec says it applies.
