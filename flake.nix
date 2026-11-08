@@ -57,7 +57,23 @@
 
             # Not `cleanCargoSource`: the binary `include_bytes!`s
             # `config/config.sh`, which a Cargo-only filter would drop.
-            src = nixpkgs.lib.cleanSource ./.;
+            #
+            # `vendor/bash-completion/` is filtered out on purpose. The build
+            # copies the pinned tree in (`preBuild`), so whether a checkout
+            # happens to have one — `nix develop` puts it there — must not
+            # change the source hash: a developer and CI would otherwise build
+            # two different derivations of the same commit and never share a
+            # store path.
+            src = nixpkgs.lib.cleanSourceWith {
+              src = ./.;
+              filter =
+                path: _type:
+                nixpkgs.lib.cleanSourceFilter path "regular"
+                && !(
+                  toString path == "${toString ./.}/vendor"
+                  || nixpkgs.lib.hasPrefix "${toString ./.}/vendor/" (toString path)
+                );
+            };
 
             commonArgs = {
               inherit src;
@@ -65,6 +81,24 @@
               version = "0.0.0";
               strictDeps = true;
             };
+
+            # The bash-completion library the binary embeds is not vendored:
+            # this is the copy step. Pinning it to nixpkgs' package is what
+            # makes the embedded version move with the flake instead of with
+            # whoever remembered to update a directory. `PROVENANCE` names the
+            # store path, and the binary digests it to name the per-user
+            # cache directory it unpacks into — so a new library never reuses
+            # an old extraction.
+            embedCompletion = ''
+              rm -rf vendor/bash-completion
+              mkdir -p vendor
+              # `--no-preserve=mode`: the store is read-only, and the copy has
+              # to be writable — `PROVENANCE` is written into it, and a
+              # checkout that cannot be cleaned up is not a checkout.
+              cp -r --no-preserve=mode ${pkgs.bash-completion}/share/bash-completion \
+                    vendor/bash-completion
+              printf '%s\n' ${pkgs.bash-completion} > vendor/bash-completion/PROVENANCE
+            '';
 
             # Everything the workspace builds, dependencies included, so each
             # check only relinks the crates that changed.
@@ -100,6 +134,7 @@
               pname = "baash-windows";
               version = "0.0.0";
               inherit src;
+              preBuild = embedCompletion;
 
               # No shared `cargoArtifacts` here: a second target's artifacts are
               # a second graph, so this builds its own. Nix caches the whole
@@ -166,6 +201,7 @@
               cargoArtifacts
               src
               commonArgs
+              embedCompletion
               licenses
               windows
               system
@@ -175,7 +211,7 @@
     in
     {
       packages = eachSystem (
-        { pkgs, craneLib, cargoArtifacts, commonArgs, windows, ... }:
+        { pkgs, craneLib, cargoArtifacts, commonArgs, embedCompletion, windows, ... }:
         {
           default = craneLib.buildPackage (
             commonArgs
@@ -183,6 +219,7 @@
               pname = "baash";
               version = "0.0.0";
               inherit cargoArtifacts;
+              preBuild = embedCompletion;
               # Tests are their own gate (`cargo test` in CI, on a real pty);
               # the package build stays a packaging check, as it was.
               doCheck = false;
@@ -207,6 +244,12 @@
             }
           );
           inherit windows;
+
+          # The library the binary embeds, exposed so the dev loop can copy the
+          # exact tree the package build would: it is not vendored, and `nix
+          # build .#bash-completion` is how `vendor/bash-completion/` is filled
+          # outside the dev shell.
+          bash-completion = pkgs.bash-completion;
         }
       );
 
@@ -270,6 +313,26 @@
             ];
 
             shellHook = ''
+              # The bash-completion library the binary embeds is not vendored;
+              # copy the pinned one in, the same way the package build does. The
+              # guard is on the recorded store path, not on existence, so an
+              # unchanged tree is not recopied (and the crate not rebuilt) every
+              # time the shell is entered. `git` is not required: without a
+              # repository the current directory is the checkout.
+              root=$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD")
+              if [ "$(cat "$root/vendor/bash-completion/PROVENANCE" 2>/dev/null)" \
+                 != "${pkgs.bash-completion}" ]; then
+                # A copy from before `--no-preserve=mode` is read-only.
+                chmod -R u+w "$root/vendor/bash-completion" 2>/dev/null || true
+                rm -rf "$root/vendor/bash-completion"
+                mkdir -p "$root/vendor"
+                cp -r --no-preserve=mode ${pkgs.bash-completion}/share/bash-completion \
+                      "$root/vendor/bash-completion"
+                printf '%s\n' ${pkgs.bash-completion} \
+                      > "$root/vendor/bash-completion/PROVENANCE"
+                echo "baash: bash-completion from ${pkgs.bash-completion}"
+              fi
+
               # A checkout path containing non-ASCII characters (the ß in
               # …/ßhell is enough) breaks linking: the mold linker wrapper
               # mangles the argument and rustc then reports missing object

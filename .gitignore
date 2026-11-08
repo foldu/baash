@@ -1,3 +1,8 @@
+# The bash-completion tree the binary embeds is not vendored: `flake.nix`
+# copies the pinned nixpkgs one in before the build, and `nix develop` does the
+# same for the dev loop. See `crates/baash/src/bash_completion.rs`.
+/vendor/bash-completion
+
 /target
 /result
 /result-*

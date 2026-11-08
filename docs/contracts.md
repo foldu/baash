@@ -1222,6 +1222,31 @@ portable way to ask for no startup file at all. The bases come from
 ignored rather than resolved against the working directory, and the first
 `$XDG_CONFIG_DIRS` entry with a `baash/config.sh` wins.
 
+The startup path also decides which bash-completion library runs.
+`crates/baash/src/bash_completion.rs` compiles one in (feature
+`embedded-bash-completion`; the embed folder is `vendor/bash-completion/`,
+which is not in git), unpacks it into
+`baash_sys::dirs::cache_home()/baash/bash-completion/<tag>` on the first
+interactive start, and names the file `BAASH_EMBEDDED_BASH_COMPLETION` before
+the startup files run — so a machine with no library installed still has one,
+and a single `baash.exe` is enough on Windows. `<tag>` is sixteen hex digits of
+FNV-1a over the tree's `PROVENANCE` file (the copy step's record of the store
+path): a different library never reuses an old extraction, and the cache path
+stays short enough for a Windows `MAX_PATH`. The marker `.complete` is written
+last, and a directory without it is half an extraction and is replaced, which
+is what makes a killed first start cost a retry rather than a broken library;
+the staging directory is renamed into place, and a rename that loses a race
+with another starting shell keeps the winner's tree.
+
+`config/config.sh` tries `BAASH_BASH_COMPLETION`, the two standard system
+paths, and then the embedded copy, so a distribution's library wins over the
+one in the binary. `flake.nix` copies `pkgs.bash-completion` into the embed
+folder in `preBuild` (the dev shell does the same for `cargo test`) and writes
+`PROVENANCE`; a build without the folder is not an error — the derive uses
+`allow_missing` and `bash_completion::ensure_extracted` answers `None` — so a
+plain `cargo build` on a machine with no library is a shell without one.
+`--norc` skips the startup path and with it the unpacking.
+
 ### Arithmetic: who expands the text
 
 `baash-vm/src/arith.rs` performs `$name`, `${name}` and `${name[expr]}` splicing

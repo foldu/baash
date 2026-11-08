@@ -32,15 +32,25 @@ alias grep='grep --color=auto'
 # milliseconds at startup and installs a `-D` rule that loads a command's script
 # on its first Tab, which is what bash does through its own startup files.
 #
+# The shell carries a copy of the library and unpacks it into the cache
+# directory on the first interactive start, so a machine with none installed —
+# a Windows one, or a machine running the static binary — still has one;
+# `BAASH_EMBEDDED_BASH_COMPLETION` names that copy. It is the last candidate
+# because a distribution's copy is the one the rest of the machine uses, and
+# because a newer one would know commands this build has not heard of. A system
+# with none, and a `BAASH_BASH_COMPLETION` pointing at nothing, still gets the
+# embedded library.
+#
 # `BAASH_BASH_COMPLETION` names a library explicitly (NixOS keeps it in the
 # store, not in the profile); an unreadable or absent path is skipped, as are
 # the standard ones on a system that has no bash-completion. Set
-# `BAASH_NO_BASH_COMPLETION=1` to turn it off.
+# `BAASH_NO_BASH_COMPLETION=1` to turn all of it off.
 if [[ -z ${BAASH_NO_BASH_COMPLETION-} ]]; then
     for _baash_bash_completion in \
         "${BAASH_BASH_COMPLETION-}" \
         /usr/share/bash-completion/bash_completion \
-        /etc/bash_completion; do
+        /etc/bash_completion \
+        "${BAASH_EMBEDDED_BASH_COMPLETION-}"; do
         [[ -n $_baash_bash_completion && -r $_baash_bash_completion ]] || continue
         . "$_baash_bash_completion"
         break

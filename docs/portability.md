@@ -162,6 +162,35 @@ globbing, drive letters and UNC paths in the parser's "is this a path" logic,
 and `\` remaining an escape — so Windows paths are written `C:/Users/...` or
 quoted, as msys does.
 
+One of those is now answered rather than pending, and by the mechanism that
+makes the binary self-sufficient: the bash-completion library is compiled into
+the executable (`crates/baash/src/bash_completion.rs`, feature
+`embedded-bash-completion`) and unpacked into
+`%LOCALAPPDATA%\baash\bash-completion\<tag>` on the first interactive start,
+so a Windows machine that never had bash gets the same `complete -F` functions
+its scripts were written for. The path is handed to the startup file with
+forward slashes, because that is how a Windows path in a shell word is written.
+nixpkgs' tree carries 576 version aliases (`gcc-5` → `gcc`, `python3.13` →
+`python3`) as symlinks; the unpacked copy has them as ordinary files, since
+creating a symlink on Windows needs a privilege the shell does not ask for.
+What is still outside the binary is the completion a tool ships for itself
+(git, docker, kubectl, systemd): bash-completion never contained those on any
+platform, so they complete only when `BASH_COMPLETION_COMPAT_DIR` or
+`BASH_COMPLETION_USER_DIR` names the directory the tool installed them in.
+
+Measured on the Windows 11 guest: the executable unpacks the tree into
+`%LOCALAPPDATA%` on the first interactive start, the framework sources
+(`_comp_load` and the v2 `_comp_initialize` are defined), an embedded script
+registers its rule (`complete -F _comp_cmd_tar tar`), and a user's
+`~/.bash_completion` — which is a single file, so it survives the library's
+`:`-separated directory lookups that a drive letter breaks — is sourced at
+startup and its function returns candidates through `COMPREPLY`. Two shell
+gaps still take their toll on the scripts that need them: `/dev/null` is not a
+path on Windows (556 of the 1097 scripts redirect to it, as does the framework
+62 times), and `[[ … =~ … ]]` has no engine there (46 scripts use it, `tar`'s
+option parser among them), so those completions report a diagnostic at Tab
+instead of completing. Both are gaps in the shell, not in the embedding.
+
 ### 5a. `rustix` stops at the Windows boundary
 
 On Unix, descriptors, termios, ptys and child waiting go through `rustix` rather

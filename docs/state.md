@@ -344,8 +344,10 @@ rediscover):
   `COMP_TYPE`/`COMP_KEY` set, the function's `$1`/`$2`/`$3` as bash passes
   them, the rule's `-o` options in force for `compopt`, and `COMPREPLY` read
   back. The function's standard output is captured (the `$(…)` mechanism) so it
-  cannot land in the editor's unflushed raw-mode frame, but it is *dropped*
-  rather than painted above the prompt as bash does.
+  cannot land in the editor's unflushed raw-mode frame, and it is painted above
+  the prompt where bash puts it — the frame is cleared, the output written,
+  and the single redraw after it paints the insertion and the menu, which is
+  what keeps a function's `echo` from erasing the line being completed.
   `-C` (run a command) and `-G` (expand a glob) are still not run; a rule whose
   only source is one of them is reported as absent, so the command keeps the
   default completion.
@@ -354,20 +356,37 @@ rediscover):
   on every prompt. A `complete -W '$list'` therefore offers the literal
   `$list`. (`compgen -W` *is* expanded, because it runs as a command, and that
   is the form bash-completion uses.)
-* **bash-completion works, with two version skews.** The 2.18 library sources
-  with status 0 and its `-D` loader is honoured (status `124` retries the
-  completion after the loader installs the command's script), so the scripts
-  installed for bash complete here; `config/config.sh` sources it at startup
-  when it finds it (`BAASH_BASH_COMPLETION` names one explicitly,
-  `BAASH_NO_BASH_COMPLETION=1` opts out). A function's stdout is captured but not painted above the
-  prompt (the editor erases the frame, paints the function's output where it
-  was and repaints below it), `-C`/`-G` are still absent, a function runs to
-  completion with no deadline (bash has none either, so a slow script delays
-  that Tab), and the
-  *installed* per-command scripts
-  are older than 2.18: 58 of the 229 call `_init_completion`, which 2.18 renamed
-  to `_comp_initialize`, so those report "command not found" here exactly as
-  they do under the 2.18 library in bash.
+* **bash-completion works, and the library is inside the binary.** The 2.18
+  library sources with status 0 and its `-D` loader is honoured (status `124`
+  retries the completion after the loader installs the command's script), so
+  the scripts written for bash complete here. It is compiled in
+  (`crates/baash/src/bash_completion.rs`, feature `embedded-bash-completion`,
+  embed folder `vendor/bash-completion/`) and unpacked on the first interactive
+  start into `$XDG_CACHE_HOME/baash/bash-completion/<tag>`, so Tab works on a
+  machine with none installed — which is what makes a single `baash.exe` enough
+  on Windows. `config/config.sh` sources a copy the system installed first and
+  the unpacked one last; `BAASH_BASH_COMPLETION` names one explicitly,
+  `BAASH_EMBEDDED_BASH_COMPLETION` names the unpacked copy, and
+  `BAASH_NO_BASH_COMPLETION=1` turns it off. `-C`/`-G` are still absent, and a
+  function runs to completion with no deadline (bash has none either, so a slow
+  script delays that Tab).
+* **On Windows the library is there and the shell has two gaps.** Verified on
+  the guest: the exe unpacks into `%LOCALAPPDATA%`, the framework sources, an
+  embedded script registers its rule, and a user's `~/.bash_completion` runs
+  and returns candidates. What is missing is the shell's own: `>/dev/null`
+  fails to open (556 of the 1097 scripts redirect to it) and `[[ … =~ … ]]`
+  is `BAASH-E0204` (46 scripts use it), so those completions print a
+  diagnostic at Tab instead of completing.
+* **Version skew is now the *system* library's problem.** The 229
+  per-command scripts this machine installed are older than 2.18: 58 of them
+  call `_init_completion`, which 2.18 renamed to `_comp_initialize`, so those
+  report "command not found" here exactly as they do under the 2.18 library in
+  bash. The embedded copy is version-consistent (its own `startup-core` ships
+  the v2 names), which is the argument for preferring it when a system copy is
+  absent. Tools that ship their own completion (git, docker, kubectl, systemd)
+  are not part of bash-completion on any platform: on Windows they complete
+  only if the tool installs the script and `BASH_COMPLETION_COMPAT_DIR` or
+  `BASH_COMPLETION_USER_DIR` points at it.
 * `-A setopt`, `shopt`, `user`, `group`, `hostname`, `job`, `service`,
   `binding`, `enabled`, `disabled`, `running` and `stopped` offer nothing at
   Tab: the engine has no shell state for them (`compgen -A` still answers them

@@ -92,9 +92,19 @@ function prints is captured and painted above the prompt, where bash puts it
 bash-completion library itself: sourcing it registers its `-D` loader and a
 command's script is loaded on its first Tab (the loader's status `124` means
 "complete again"), so the scripts installed for bash complete here too.
-When the system has the library, [`config/config.sh`](config/config.sh)
-sources it at startup; `BAASH_BASH_COMPLETION` names one explicitly (the NixOS
-store path, say) and `BAASH_NO_BASH_COMPLETION=1` turns it off. `-C` and `-G`
+The library the shell needs is **inside the binary**, so Tab works on a
+machine that never installed it — a Windows one, or a static build on a
+minimal system. It is unpacked into the cache directory
+(`$XDG_CACHE_HOME/baash/bash-completion/<tag>`, `%LOCALAPPDATA%` on Windows) on
+the first interactive start, and [`config/config.sh`](config/config.sh) offers
+it after any copy the system has, so a distribution's newer library still wins.
+The tree is not vendored here: [`flake.nix`](flake.nix) copies the pinned
+nixpkgs `bash-completion` into `vendor/bash-completion/` before the build (the
+dev shell does the same) and the binary embeds it —
+`nix build .#bash-completion` is the exact tree. `BAASH_BASH_COMPLETION` names
+a library explicitly (the NixOS store path, say),
+`BAASH_EMBEDDED_BASH_COMPLETION` names the unpacked copy, and
+`BAASH_NO_BASH_COMPLETION=1` turns all of it off. `-C` and `-G`
 are not run yet.
 
 Not implemented yet: the directory stack (`pushd`/`popd`/`dirs`), `umask`,

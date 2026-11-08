@@ -42,6 +42,16 @@ const SCRUBBED: &[&[u8]] = &[
     b"HISTFILESIZE",
     b"HISTIGNORE",
     b"BAASH_HISTORY_DB",
+    // The shell reads these under a test: which startup files exist, where
+    // the cache is, and whether a library is offered or suppressed. A test
+    // that wants one of them passes its own value.
+    b"XDG_CONFIG_HOME",
+    b"XDG_CONFIG_DIRS",
+    b"XDG_DATA_HOME",
+    b"XDG_CACHE_HOME",
+    b"BAASH_BASH_COMPLETION",
+    b"BAASH_EMBEDDED_BASH_COMPLETION",
+    b"BAASH_NO_BASH_COMPLETION",
     b"LC_ALL",
     b"NO_COLOR",
     b"PWD",
@@ -50,6 +60,12 @@ const SCRUBBED: &[&[u8]] = &[
 
 impl Session {
     fn spawn(home: &Path, cwd: &Path, environment: &[(&str, &str)]) -> Self {
+        Self::spawn_args(home, cwd, environment, &["baash", "--norc", "-i"])
+    }
+
+    /// The same, with the arguments the test chose: a test that wants the
+    /// startup files read must not pass `--norc`.
+    fn spawn_args(home: &Path, cwd: &Path, environment: &[(&str, &str)], args: &[&str]) -> Self {
         let pty = open_pty().expect("open a pty");
         let master = pty.master.as_raw_fd();
         let slave = pty.slave.as_raw_fd();
@@ -101,7 +117,7 @@ impl Session {
             let _ = close(master);
             let plan = match SpawnPlan::new_with_env(
                 binary,
-                ["baash", "--norc", "-i"],
+                args.iter().copied(),
                 entries.iter().map(Vec::as_slice),
             ) {
                 Ok(plan) => plan,
@@ -500,4 +516,76 @@ fn bash_completion_loads_a_command_on_the_first_tab() {
     session.expect(b"args:start", Duration::from_secs(10));
     session.prompt();
     cleanup(&mut session, &home, &work);
+}
+
+/// The binary carries the library, so Tab works on a machine that has none.
+///
+/// Nothing here is faked: the built-in startup file offers the copy the shell
+/// unpacked, the library's `-D` rule loads the command's script on the first
+/// Tab, and the script is the v2 `complete -F` form that every pre-2.18 script
+/// uses. The only thing the test supplies is a command to complete.
+#[test]
+fn the_embedded_library_completes_without_an_installed_one() {
+    let home = temp_dir("embedded-home");
+    let work = temp_dir("embedded-work");
+    let cache = temp_dir("embedded-cache");
+    let data = temp_dir("embedded-data");
+    let config = temp_dir("embedded-config");
+    let empty_config = config.join("empty");
+    std::fs::create_dir_all(&empty_config).expect("create the empty config dir");
+
+    let completions = data.join("bash-completion").join("completions");
+    std::fs::create_dir_all(&completions).expect("create the completions dir");
+    std::fs::write(
+        completions.join("mycmd.bash"),
+        "\n_mycmd() {\n    local cur=${COMP_WORDS[COMP_CWORD]}\n    COMPREPLY=( $(compgen -W 'start stop status' -- \"$cur\") )\n}\ncomplete -F _mycmd mycmd\n",
+    )
+    .expect("write the completion script");
+
+    let cache_text = cache.to_str().expect("utf-8 cache").to_owned();
+    let data_text = data.to_str().expect("utf-8 data").to_owned();
+    let config_text = empty_config.to_str().expect("utf-8 config").to_owned();
+
+    // No `--norc`: reading the startup files is the point, and `XDG_CONFIG_DIRS`
+    // points at nothing so the built-in one is what runs.
+    let mut session = Session::spawn_args(
+        &home,
+        &work,
+        &[
+            ("PS1", "P> "),
+            ("XDG_CACHE_HOME", &cache_text),
+            ("XDG_DATA_HOME", &data_text),
+            ("XDG_CONFIG_DIRS", &config_text),
+        ],
+        &["baash", "-i"],
+    );
+    session.prompt();
+
+    // The first interactive start unpacks the tree into the cache directory,
+    // completions and all — the framework on its own would complete nothing.
+    let unpacked = std::fs::read_dir(cache.join("baash").join("bash-completion"))
+        .expect("the cache directory exists")
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.join("bash_completion").is_file())
+        .expect("the library was unpacked into the cache");
+    assert!(
+        unpacked.join("completions-core").is_dir(),
+        "the completions come with the framework: {}",
+        unpacked.display()
+    );
+
+    session.line("mycmd () { echo \"args:$*\"; }");
+    session.send(b"mycmd st\t");
+    session.expect(b"start", Duration::from_secs(10));
+    // Enter accepts the menu selection, the next one submits the line.
+    session.send(b"\n");
+    session.send(b"\n");
+    session.expect(b"args:start", Duration::from_secs(10));
+    session.prompt();
+
+    cleanup(&mut session, &home, &work);
+    let _ = std::fs::remove_dir_all(&cache);
+    let _ = std::fs::remove_dir_all(&data);
+    let _ = std::fs::remove_dir_all(&config);
 }
