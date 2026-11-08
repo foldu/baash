@@ -155,8 +155,9 @@ work is concentrated and can be described as four boundaries:
    externals is possible later.
 
 Also needed, and easy to forget: no shebang (`#!` scripts must be detected and
-run by us), `NUL` instead of `/dev/null` (we can provide the virtual paths
-`/dev/null` and `/dev/tty`), CRLF in script files (strip a trailing `\r` before
+run by us), `NUL` instead of `/dev/null` (done: `open_cloexec` translates it
+through `paths::Flavour::host_device`, and `/dev/tty` is still a POSIX path),
+CRLF in script files (strip a trailing `\r` before
 the lexer's newline, script files only), case-insensitive completion and
 globbing, drive letters and UNC paths in the parser's "is this a path" logic,
 and `\` remaining an escape — so Windows paths are written `C:/Users/...` or
@@ -184,12 +185,16 @@ Measured on the Windows 11 guest: the executable unpacks the tree into
 registers its rule (`complete -F _comp_cmd_tar tar`), and a user's
 `~/.bash_completion` — which is a single file, so it survives the library's
 `:`-separated directory lookups that a drive letter breaks — is sourced at
-startup and its function returns candidates through `COMPREPLY`. Two shell
-gaps still take their toll on the scripts that need them: `/dev/null` is not a
-path on Windows (556 of the 1097 scripts redirect to it, as does the framework
-62 times), and `[[ … =~ … ]]` has no engine there (46 scripts use it, `tar`'s
-option parser among them), so those completions report a diagnostic at Tab
-instead of completing. Both are gaps in the shell, not in the embedding.
+startup and its function returns candidates through `COMPREPLY`. That needed
+`/dev/null` to work, which it now does (`>`, `>>` and `<` all reach the
+`NUL` device), because 556 of the 1097 scripts redirect to it and the
+framework does 62 times.
+
+One shell gap still takes its toll: `[[ … =~ … ]]` has no engine on Windows
+(`BAASH-E0204`), and 46 scripts use it — `tar`'s option parser among them, so
+`tar` prints a diagnostic at Tab and completes nothing. That is a gap in the
+shell, not in the embedding, and it is the next thing standing between Windows
+and bash-completion parity.
 
 ### 5a. `rustix` stops at the Windows boundary
 

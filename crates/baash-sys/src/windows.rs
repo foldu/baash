@@ -364,6 +364,12 @@ pub fn chdir(path: &[u8]) -> io::Result<()> {
 /// The Unix version opens with `O_CLOEXEC`; Windows hands descriptors to a
 /// child explicitly, so the flag has no meaning here.
 pub fn open_cloexec(path: &[u8], flags: c_int, mode: u32) -> io::Result<OwnedFd> {
+    // A shell writes `/dev/null`, which is not a path here; this is the one
+    // place a shell path becomes a Windows object, so the translation lives
+    // with it (`paths::Flavour::host_device` has the rule and the test).
+    let path = crate::paths::Flavour::Windows
+        .host_device(path)
+        .unwrap_or(path);
     let c_path = wide_path(path);
     let translated = translate_flags(flags) | O_BINARY;
     // SAFETY: `c_path` is a NUL-terminated UTF-16 string and the variadic

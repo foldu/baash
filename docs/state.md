@@ -370,13 +370,15 @@ rediscover):
   `BAASH_NO_BASH_COMPLETION=1` turns it off. `-C`/`-G` are still absent, and a
   function runs to completion with no deadline (bash has none either, so a slow
   script delays that Tab).
-* **On Windows the library is there and the shell has two gaps.** Verified on
-  the guest: the exe unpacks into `%LOCALAPPDATA%`, the framework sources, an
-  embedded script registers its rule, and a user's `~/.bash_completion` runs
-  and returns candidates. What is missing is the shell's own: `>/dev/null`
-  fails to open (556 of the 1097 scripts redirect to it) and `[[ … =~ … ]]`
-  is `BAASH-E0204` (46 scripts use it), so those completions print a
-  diagnostic at Tab instead of completing.
+* **On Windows the library is there, and `=~` is what still holds it back.**
+  Verified on the guest: the exe unpacks into `%LOCALAPPDATA%`, the framework
+  sources, an embedded script registers its rule, a user's
+  `~/.bash_completion` runs and returns candidates, and `> /dev/null` /
+  `>> /dev/null` / `< /dev/null` work (`open_cloexec` translates the device,
+  which 556 of the 1097 scripts and the framework itself depend on).
+  `[[ … =~ … ]]` is still `BAASH-E0204` there, and 46 scripts use it — `tar`'s
+  option parser among them — so those print a diagnostic at Tab. That is a
+  shell gap, not an embedding one.
 * **Version skew is now the *system* library's problem.** The 229
   per-command scripts this machine installed are older than 2.18: 58 of them
   call `_init_completion`, which 2.18 renamed to `_comp_initialize`, so those

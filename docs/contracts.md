@@ -101,6 +101,14 @@ of `SignalSet::set`, for a forked child that must not inherit the shell's
 blocked traps. `SIGALRM`, `SIGTERM`, `SIGINT`, `SIGQUIT` and `ECHILD` are
 re-exported so `baash-vm` needs no `libc`.
 
+**`Flavour::host_device` is where a shell path becomes a device name.**
+`/dev/null` is a POSIX path and a Windows device (`NUL`). The mapping is a
+value beside the rest of the path grammar (`baash_sys::paths`), so it is
+testable on Linux, and `open_cloexec` applies it on Windows — the one place a
+redirection's path becomes a Windows object. Only the exact spelling is
+renamed: `./dev/null` and `dev/null` stay ordinary files, so a script that
+means one can still say it.
+
 **`exec(plan) -> io::Error` replaces the process in place** and returns only on
 failure. The caveat is inherent to exec ordering: by the time `execve` fails,
 the plan's file actions, signal mask, `reset_signals` and process group have
