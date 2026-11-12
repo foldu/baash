@@ -280,6 +280,33 @@ fn a_lock_key_does_not_hide_a_binding() {
 }
 
 #[test]
+fn a_late_terminal_reply_is_not_typed_into_the_line() {
+    // The prompt asks the terminal for its background colour. A reply that
+    // arrives after that question gave up used to decode as Alt-`]` plus text:
+    // the line held `11;rgb:…`, looked empty, and Ctrl-D deleted instead of
+    // ending the session.
+    let (result, _) = run(
+        FakeTerminal::new(b"\x1b]11;rgb:1f1f/1f1f/2828\x07echo hi\r"),
+        &StubCompleter::empty(),
+        &baash_repl::NeverNeedsMore,
+        plain_config(),
+    );
+    assert_eq!(result, ReadResult::Line(b"echo hi\n".to_vec()));
+
+    let (result, _) = run(
+        FakeTerminal::new(b"\x1b]11;rgb:1f1f/1f1f/2828\x1b\\\x04"),
+        &StubCompleter::empty(),
+        &baash_repl::NeverNeedsMore,
+        plain_config(),
+    );
+    assert_eq!(
+        result,
+        ReadResult::Eof,
+        "the dropped reply leaves the line empty"
+    );
+}
+
+#[test]
 fn ctrl_c_abandons_the_line_and_restores_raw_mode() {
     let (result, term) = run(
         FakeTerminal::new(b"partial\x03\r"),

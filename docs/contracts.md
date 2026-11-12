@@ -1163,6 +1163,15 @@ because they are what the terminal said. Matching the raw bits made every
 modified binding depend on a lock key: `Ctrl-D` and `Alt-B` did nothing while
 plain typing kept working, which is how it was noticed.
 
+**A terminal reply is not a key.** `ESC ]` on the input side is the terminal
+answering a question — the background colour the prompt asks for, and whatever
+a command asks for while it runs. The decoder consumes the payload and its
+`BEL` or `ESC \` terminator and reports an unknown event, waiting at most
+150 ms, and only reads it as a reply when the code after `ESC ]` is numeric,
+so Alt-`]` from a keyboard is still a key. Without that, a reply that missed
+its query's wait decoded as Alt-`]` plus text: the line held `11;rgb:…` while
+looking empty, and `Ctrl-D` deleted instead of ending the session.
+
 **The line asks for unambiguous keys and gives them back.** While a line is
 read, `RealTerminal::enter_raw` writes `baash_sys::osc::KEYBOARD_ENABLE`
 (`CSI = 1 u`, kitty's `disambiguate` flag) and

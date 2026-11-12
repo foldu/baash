@@ -990,6 +990,28 @@ fn the_line_asks_for_unambiguous_keys_and_gives_the_terminal_back() {
     let _ = std::fs::remove_dir_all(&work);
 }
 
+/// A terminal reply that arrives late is dropped, not typed.
+///
+/// The prompt asks for the background colour with `OSC 11`, and the answer can
+/// arrive after the shell stopped waiting for it. It is a reply, not text.
+#[test]
+fn a_late_terminal_reply_does_not_become_command_text() {
+    let home = temp_dir("late-reply-home");
+    let work = temp_dir("late-reply-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.prompt(" $");
+    session.send(b"\x1b]11;rgb:1f1f/1f1f/2828\x07");
+    session.send(b"echo ok\r");
+    // The command mark carries the line that ran: `11;rgb:…` in front of it is
+    // only possible if the reply was typed into the buffer.
+    session.expect(b"cmdline_url=echo%20ok", Duration::from_secs(10));
+    session.expect(b"\x1b]133;D;0", Duration::from_secs(5));
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 /// The lock keys a terminal reports do not hide a binding.
 ///
 /// ghostty and kitty put Caps Lock and Num Lock in the modifier field, so

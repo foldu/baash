@@ -138,9 +138,9 @@ Traps, all met in practice:
   that takes the keys. Skip it by name.
 * **A lock key changes the modifier field** and nothing else; a fresh Xvfb has
   both off, so record which state a capture was taken in.
-* Under llvmpipe the reply to the startup `OSC 11` query can miss its 100 ms
-  wait and is then typed into the line. Send `Ctrl-U` before testing a key, or
-  a "dead" `Ctrl-D` is really a line that is not empty.
+* Under llvmpipe the reply to the startup `OSC 11` query misses its 100 ms
+  wait; the decoder drops it (`ESC ] … BEL|ST`), so a first prompt holding
+  `11;rgb:…` is a bug in baash, not an artefact of the harness.
 * `timeout dd` without `--foreground` puts `dd` in a background process group,
   the pty stops it with `SIGTTIN`, and the capture is empty with no error at
   all — that is why the script uses `--foreground`.

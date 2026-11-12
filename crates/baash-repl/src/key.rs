@@ -252,6 +252,19 @@ const MAX_SEQUENCE: usize = 32;
 /// The bracketed-paste terminator.
 const PASTE_END: &[u8] = b"\x1b[201~";
 
+/// How long the rest of a terminal reply may take to arrive.
+///
+/// A reply is written in one burst, so this is generous for a real one and
+/// short enough that a stray `ESC ]` from a keyboard cannot park the line: a
+/// person pressing Alt-`]` waits this long at most, and keeps typing.
+const OSC_WAIT: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// How much of a reply to accept before giving up on its terminator.
+///
+/// A real one is tens of bytes (`ESC ] 11 ; rgb: … BEL`); anything longer is
+/// not a reply, and must not become an unbounded allocation.
+const MAX_OSC: usize = 4096;
+
 /// Decodes keys from a [`Terminal`], keeping one byte of pushback.
 #[derive(Clone, Debug, Default)]
 pub struct Decoder {
@@ -391,6 +404,9 @@ impl Decoder {
         };
         match next {
             b'[' => self.decode_csi(term),
+            // An operating-system command on this channel is the terminal
+            // answering a question, never a key: see `decode_osc`.
+            b']' => self.decode_osc(term),
             b'O' => Ok(Some(self.decode_ss3(term)?)),
             0x1b => Ok(Some(Key::of(Code::Esc))),
             byte if byte.is_ascii_graphic() || byte == b' ' => Ok(Some(Key::alt(char::from(byte)))),
@@ -492,6 +508,56 @@ impl Decoder {
             b'F' => Key::of(Code::End),
             _ => Key::of(Code::Unknown(vec![b'O', byte])),
         })
+    }
+
+    /// Consume an operating-system command sent by the terminal.
+    ///
+    /// `ESC ]` on the way in is a reply: the shell asks the terminal for its
+    /// background colour while the prompt is painted, and a command can ask
+    /// for other things while it runs. A reply that arrives after the question
+    /// gave up waiting is not text to insert — typing `11;rgb:…` into the line
+    /// leaves it looking empty while holding bytes, and `Ctrl-D` then deletes
+    /// instead of ending the session.
+    ///
+    /// A reply starts with a numeric code, which is how it is told apart from
+    /// Alt-`]`: when the byte after `ESC ]` is not a digit it belongs to the
+    /// next key and goes back in the queue. The wait is bounded, so a reply
+    /// that stops mid-way costs one deadline rather than the line.
+    fn decode_osc(&mut self, term: &mut dyn Terminal) -> io::Result<Option<Key>> {
+        let deadline = std::time::Instant::now() + OSC_WAIT;
+        let mut payload = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let byte = match term.read_byte_timeout(remaining)? {
+                Some(byte) => byte,
+                // Nothing came at all: this was Alt-`]`, not a reply.
+                None if payload.is_empty() => return Ok(Some(Key::alt(']'))),
+                // A reply that never finished. It is still not text.
+                None => break,
+            };
+            if payload.is_empty() && !byte.is_ascii_digit() {
+                self.pending.push_front(byte);
+                return Ok(Some(Key::alt(']')));
+            }
+            match byte {
+                // BEL and `ESC \` end a reply; the bytes between them are the
+                // terminal's answer, not the user's typing.
+                0x07 => break,
+                0x1b => {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    match term.read_byte_timeout(remaining)? {
+                        Some(b'\\') => break,
+                        Some(other) => payload.extend_from_slice(&[0x1b, other]),
+                        None => break,
+                    }
+                }
+                byte => payload.push(byte),
+            }
+            if payload.len() >= MAX_OSC {
+                break;
+            }
+        }
+        Ok(Some(Key::of(Code::Unknown(payload))))
     }
 
     /// Read bracketed-paste payload up to `ESC [ 201 ~`.
@@ -1239,6 +1305,37 @@ mod tests {
             Modifiers::SHIFT
         );
         assert_eq!(Modifiers::NUM_LOCK.binding(), Modifiers::NONE);
+    }
+
+    #[test]
+    fn a_terminal_reply_is_not_typed_into_the_line() {
+        // The prompt asks the terminal for its background colour; the answer
+        // is `ESC ] 11 ; rgb:…` with BEL or `ESC \`. A reply that misses the
+        // question's timeout used to be decoded as Alt-`]` plus text, which
+        // left the line non-empty and made `Ctrl-D` delete instead of exit.
+        assert_eq!(
+            keys(b"\x1b]11;rgb:1f1f/1f1f/2828\x1b\\a"),
+            vec![
+                Key::of(Code::Unknown(b"11;rgb:1f1f/1f1f/2828".to_vec())),
+                Key::char('a'),
+            ],
+            "a reply with an ESC-backslash terminator"
+        );
+        assert_eq!(
+            keys(b"\x1b]11;rgb:ffff/ffff/ffff\x07b"),
+            vec![
+                Key::of(Code::Unknown(b"11;rgb:ffff/ffff/ffff".to_vec())),
+                Key::char('b'),
+            ],
+            "a reply with a BEL terminator"
+        );
+        // `ESC ]` from a keyboard is Alt-`]`: the byte after it is not a digit
+        // and belongs to the next key.
+        assert_eq!(
+            keys(b"\x1b]x"),
+            vec![Key::alt(']'), Key::char('x')],
+            "Alt-] is still a key"
+        );
     }
 
     #[test]
