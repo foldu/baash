@@ -57,6 +57,7 @@ jobs:
           mkdir -p "dist/$name/bin" "dist/$name/share/baash"
           cp -L result/bin/baash "dist/$name/bin/"
           cp config/config.sh "dist/$name/share/baash/"
+          cp -r result/share/icons "dist/$name/share/"
           cp LICENSE README.md THIRD-PARTY.md "dist/$name/"
           tar -C dist -czf "$name.tar.gz" "$name"
       - uses: actions/upload-artifact@v7

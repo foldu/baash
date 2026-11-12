@@ -299,6 +299,23 @@
           windowsFast,
           ...
         }:
+        let
+          # The icon theme files. `share/icons/hicolor` is freedesktop's
+          # fallback theme, and it is where an `Icon=baash` in a desktop entry
+          # is resolved from: one vector source under `scalable/apps`, plus a
+          # PNG at each size the theme spec names, for the consumers that will
+          # not read SVG. They are generated here instead of being checked in,
+          # so the PNGs follow `assets/logo.svg` rather than drifting from it.
+          icons = pkgs.runCommand "baash-icons" { nativeBuildInputs = [ pkgs.librsvg ]; } ''
+            for size in 16 24 32 48 64 128 256; do
+              install -d "$out/share/icons/hicolor/''${size}x''${size}/apps"
+              rsvg-convert -w "$size" -h "$size" ${./assets/logo.svg} \
+                -o "$out/share/icons/hicolor/''${size}x''${size}/apps/baash.png"
+            done
+            install -Dm644 ${./assets/logo.svg} \
+              "$out/share/icons/hicolor/scalable/apps/baash.svg"
+          '';
+        in
         {
           default = craneLib.buildPackage (
             commonArgs
@@ -319,6 +336,8 @@
               # someone adds it.
               postInstall = ''
                 install -Dm644 config/config.sh "$out/etc/xdg/baash/config.sh"
+                # The artwork, in the one place a Linux desktop looks for it.
+                cp -r --no-preserve=mode ${icons}/share "$out/share"
               '';
 
               meta = {

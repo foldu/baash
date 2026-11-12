@@ -223,6 +223,14 @@ cargo build --workspace
 nix build .#default
 ```
 
+`nix build .#default` installs more than the binary: `bin/baash`, the default
+`etc/xdg/baash/config.sh`, and the artwork in freedesktop's icon theme layout —
+`share/icons/hicolor/scalable/apps/baash.svg` plus a PNG at every size from 16
+to 256 px. There is deliberately no `.desktop` file: a shell is not a GUI
+program, and an entry that started `baash` without a terminal would fail. The
+icon sits where a desktop entry would look for it, waiting for something to
+name it.
+
 `just` wraps the loops the pipeline runs:
 
 ```sh
@@ -348,7 +356,9 @@ SHA256SUMS
 ```
 
 each archive holding `bin/baash` (or `bin/baash.exe`), the default
-`share/baash/config.sh`, `LICENSE` and `README.md`. A tag with a suffix
+`share/baash/config.sh`, `LICENSE` and `README.md`; the Linux archive also
+carries the icon theme tree under `share/icons/hicolor/`, so extracting it into
+`~/.local` puts the artwork where the desktop looks. A tag with a suffix
 (`v0.2.0-rc.1`) publishes as a prerelease. The tooling is `cargo-release`
 configured in `release.toml` and driven by the `justfile`.
 
