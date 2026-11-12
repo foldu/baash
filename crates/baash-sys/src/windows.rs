@@ -11,7 +11,9 @@
 //!   `_dup2`, `_close`). Redirection is built on `dup2` in the VM, so keeping
 //!   the same shape means that code does not change at all.
 //! * External commands go through `std::process::Command`, with descriptor
-//!   numbers converted to inheritable handles with `_get_osfhandle`.
+//!   numbers converted to duplicated, inheritable handles with
+//!   `_get_osfhandle` (see `stdio_from_fd`: the descriptors, not the process's
+//!   own standard handles, are what the child inherits).
 //! * Waiting is `WaitForSingleObject` through the `std` child, so a foreground
 //!   pipeline reaps the way it does on Unix.
 //! * The terminal: `RawMode`, `NoEcho` and `window_size_fd` are the console's
@@ -759,6 +761,44 @@ pub fn ignore_signals(_signals: &[c_int]) -> io::Result<SignalGuard> {
     Ok(SignalGuard { _private: () })
 }
 
+/// Keep `Ctrl-C` from ending an interactive shell.
+///
+/// Windows has no `SIGINT`. A console turns `Ctrl-C` into a `CTRL_C_EVENT`
+/// delivered to *every* process attached to it, and the default handler calls
+/// `ExitProcess` — which is why an interactive shell used to die on the very
+/// key that is supposed to abandon the command. Returning `TRUE` from a handler
+/// suppresses that default, so the foreground child (which receives the same
+/// event and has its own default) dies and the shell draws the next prompt, the
+/// way a Unix shell ignores `SIGINT` while it waits for a foreground job.
+///
+/// The handler is installed only for an interactive shell: `baash -c 'sleep'`
+/// must still die on `Ctrl-C`, exactly as a script does.
+pub fn install_console_control_handler() -> io::Result<()> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(u32) -> i32>,
+            add: i32,
+        ) -> i32;
+    }
+
+    /// `TRUE` for `CTRL_C_EVENT` (0) and `CTRL_BREAK_EVENT` (1): handled.
+    ///
+    /// The other events — close, logoff, shutdown — must still end the process,
+    /// so they fall through to the default handler.
+    unsafe extern "system" fn keep_running(event: u32) -> i32 {
+        if event <= 1 { 1 } else { 0 }
+    }
+
+    // SAFETY: the handler is a plain function with the signature the console
+    // expects, and it touches no state; `add` is 1, which appends it.
+    let ok = unsafe { SetConsoleCtrlHandler(Some(keep_running), 1) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Send `signal` to `pid`.
 pub fn send_signal(pid: i32, _signal: c_int) -> io::Result<()> {
     use std::os::windows::io::FromRawHandle;
@@ -978,33 +1018,54 @@ pub fn spawn(plan: SpawnPlan) -> io::Result<Child> {
             command.env(name, value);
         }
     }
-    // Descriptors are inherited through handles, not numbers: the CRT fd the
-    // shell redirected has to become the child's std handle.
-    let mut stdin = None;
-    let mut stdout = None;
-    let mut stderr = None;
+    // The child's standard handles come from this process's *descriptors*, not
+    // from the process's own standard handles. The shell redirects descriptor 1
+    // with `dup2` — a command substitution's capture file, a pipeline stage's
+    // buffer, `exec >file` — and only the CRT fd knows; `Stdio::Inherit` would
+    // hand the child the console, so `$(cd C:\; cmd /c echo hi)` would print on
+    // the terminal and capture nothing.
+    //
+    // Each descriptor is duplicated, because `Stdio` owns what it is given and
+    // `Command` closes it once `CreateProcess` returns (see `stdio_from_fd`).
+    let mut stdin = Some(stdio_for(0)?);
+    let mut stdout = Some(stdio_for(1)?);
+    let mut stderr = Some(stdio_for(2)?);
     for action in &plan.actions {
         match action {
-            FdAction::Dup2 { from, to } => match to {
-                0 => stdin = Some(stdio_from_fd(*from)?),
-                1 => stdout = Some(stdio_from_fd(*from)?),
-                2 => stderr = Some(stdio_from_fd(*from)?),
-                _ => {
-                    // A descriptor above 2 has no Windows equivalent to hand a
-                    // child; refuse instead of silently dropping the redirect.
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "only descriptors 0, 1 and 2 can be redirected on Windows",
-                    ));
+            FdAction::Dup2 { from, to } => {
+                let stdio = stdio_from_fd(*from)?;
+                match to {
+                    0 => stdin = Some(stdio),
+                    1 => stdout = Some(stdio),
+                    2 => stderr = Some(stdio),
+                    _ => {
+                        // A descriptor above 2 has no Windows equivalent to
+                        // hand a child; refuse instead of silently dropping
+                        // the redirect.
+                        return Err(io::Error::new(
+                            io::ErrorKind::Unsupported,
+                            "only descriptors 0, 1 and 2 can be redirected on Windows",
+                        ));
+                    }
                 }
-            },
+            }
             FdAction::Open { to, .. } => {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     format!("opening descriptor {to} for a child is not implemented on Windows"),
                 ));
             }
-            FdAction::Close { .. } => {}
+            // `2>&-` and friends: the closest Windows has to a closed standard
+            // descriptor is the null device, which is what `Stdio::null` opens.
+            FdAction::Close { fd } => {
+                let stdio = std::process::Stdio::null();
+                match fd {
+                    0 => stdin = Some(stdio),
+                    1 => stdout = Some(stdio),
+                    2 => stderr = Some(stdio),
+                    _ => {}
+                }
+            }
         }
     }
     if let Some(stdio) = stdin {
@@ -1024,11 +1085,69 @@ pub fn spawn(plan: SpawnPlan) -> io::Result<Child> {
 }
 
 /// A `Stdio` for an existing CRT descriptor.
+///
+/// The handle is duplicated first. `Stdio::from_raw_handle` takes ownership of
+/// what it is given and `Command` closes it after `CreateProcess`, so handing
+/// it a descriptor's own handle would close the shell's: `cmd /c echo hi 2>&1`
+/// hands descriptor 1's console handle to the child, and the shell would then
+/// be painting with a closed handle.
 fn stdio_from_fd(fd: c_int) -> io::Result<std::process::Stdio> {
     let handle = raw_handle(fd)?;
-    // SAFETY: the handle is a live OS handle owned by this process's CRT; the
-    // `Stdio` is consumed by `Command` before the fd is closed.
-    Ok(unsafe { std::process::Stdio::from_raw_handle(handle) })
+    let duplicate = duplicate_handle(handle)?;
+    // SAFETY: `duplicate` is a handle this function owns (a fresh duplicate
+    // from `DuplicateHandle`) and nobody else refers to; `Stdio` becomes its
+    // only owner.
+    Ok(unsafe { std::process::Stdio::from_raw_handle(duplicate) })
+}
+
+/// A `Stdio` for descriptor `fd`, or the null device when it is closed.
+///
+/// The shell can close a descriptor (`exec 1>&-`), and the child must not
+/// silently inherit the console in that case.
+fn stdio_for(fd: c_int) -> io::Result<std::process::Stdio> {
+    if fd_is_open(fd) {
+        stdio_from_fd(fd)
+    } else {
+        Ok(std::process::Stdio::null())
+    }
+}
+
+/// A new inheritable handle to the same object as `handle`.
+fn duplicate_handle(handle: RawHandle) -> io::Result<RawHandle> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> RawHandle;
+        fn DuplicateHandle(
+            process: RawHandle,
+            source: RawHandle,
+            target_process: RawHandle,
+            target: *mut RawHandle,
+            access: u32,
+            inherit: i32,
+            options: u32,
+        ) -> i32;
+    }
+    /// `DUPLICATE_SAME_ACCESS`: keep the source handle's access rights.
+    const SAME_ACCESS: u32 = 0x0000_0002;
+    let mut duplicate: RawHandle = std::ptr::null_mut();
+    // SAFETY: both process handles are the current process's pseudo-handle,
+    // which the call only reads and never closes; `duplicate` is a writable
+    // handle slot that is written only on success.
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle,
+            GetCurrentProcess(),
+            &mut duplicate,
+            0,
+            1,
+            SAME_ACCESS,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(duplicate)
 }
 
 /// The OS handle behind a CRT descriptor.
@@ -1075,6 +1194,21 @@ pub fn fork_child_status(_body: impl FnOnce() -> i32) -> io::Result<Child> {
 // Waiting
 // ---------------------------------------------------------------------------
 
+/// The shell's reading of a Windows exit status.
+///
+/// A console `Ctrl-C` ends the child with `STATUS_CONTROL_C_EXIT`, which is a
+/// signal death and not an exit code: a shell stores 130 (`128 + SIGINT`),
+/// while truncating the status to eight bits would store 58.
+fn wait_outcome(status: std::process::ExitStatus) -> WaitOutcome {
+    /// `STATUS_CONTROL_C_EXIT` (`0xC000013A`).
+    const CONTROL_C_EXIT: i32 = 0xC000_013A_u32 as i32;
+    match status.code() {
+        Some(CONTROL_C_EXIT) => WaitOutcome::Signaled(crate::SIGINT),
+        Some(code) => WaitOutcome::Exited(code as u8 as i32),
+        None => WaitOutcome::Exited(0),
+    }
+}
+
 /// Wait for `pid` to exit.
 pub fn wait_pid(pid: i32) -> io::Result<WaitOutcome> {
     let mut map = children()
@@ -1088,7 +1222,7 @@ pub fn wait_pid(pid: i32) -> io::Result<WaitOutcome> {
     };
     let status = child.wait()?;
     map.remove(&pid);
-    Ok(WaitOutcome::Exited(status.code().unwrap_or(0) as u8 as i32))
+    Ok(wait_outcome(status))
 }
 
 /// Reap any finished child, reporting its status like Unix's version.
@@ -1100,7 +1234,7 @@ pub fn wait_any_nohang() -> Option<(i32, WaitOutcome)> {
         if let Some(child) = map.get_mut(&pid)
             && let Ok(Some(status)) = child.try_wait()
         {
-            finished = Some((pid, WaitOutcome::Exited(status.code().unwrap_or(0))));
+            finished = Some((pid, wait_outcome(status)));
             break;
         }
     }

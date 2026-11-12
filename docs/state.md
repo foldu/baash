@@ -378,6 +378,21 @@ rediscover):
   self-contained build. `-C`/`-G` are still absent, and a
   function runs to completion with no deadline (bash has none either, so a slow
   script delays that Tab).
+* **The Windows console boundary stopped losing handles.** Three defects that
+  only a console session shows: the editor cached the process's standard-handle
+  *number*, and `_dup2` on descriptor 1 replaces that handle, so any command
+  substitution around an *external* command left a stale value and the next
+  prompt died with "the handle is invalid" (`ok(7)` → `INVALID(6)` measured by
+  a probe; with no child in between Windows reuses the number and the bug
+  hides); a child's stdio took ownership of the shell's descriptor, so
+  `cmd /c echo hi 2>&1; echo after` lost the `after`; and `Ctrl-C` during a
+  command ran the default console handler, which is `ExitProcess`. The console
+  now owns duplicated handles, every child gets descriptors 0–2 (duplicated,
+  `NUL` when closed), and an interactive shell
+  installs a `SetConsoleCtrlHandler` that keeps it alive while the child dies —
+  `$?` is 130 because `STATUS_CONTROL_C_EXIT` maps to `Signaled(SIGINT)`.
+  `docs/portability.md` §10 records the measurement and the residual coarseness
+  (a built-in loop is not interruptible, `trap INT` never runs).
 * **On Windows the library is there, and `=~` is what still holds it back.**
   Verified on the guest: the exe mounts the tree in memory (no file, no cache
   directory), the framework sources, an embedded script registers its rule, a

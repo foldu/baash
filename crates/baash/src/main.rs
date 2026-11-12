@@ -388,6 +388,14 @@ fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
             if !interactive && flags.rcfile.is_some() {
                 eprintln!("baash: warning: --rcfile is only read by interactive shells");
             }
+            // An interactive shell survives `Ctrl-C`: the console gives the
+            // event to the foreground child too, so the child dies and the
+            // prompt comes back, as a Unix shell ignores `SIGINT` while it
+            // waits for a foreground job. A script keeps the default handler.
+            #[cfg(windows)]
+            if interactive {
+                let _ = baash_sys::windows::install_console_control_handler();
+            }
             let mut shell = shell(interactive, &flags);
             // bash reads a startup file only for an interactive shell, and
             // `--rcfile` replaces the default rather than adding to it.

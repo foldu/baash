@@ -424,12 +424,13 @@ xterm sends, so `key.rs` decodes arrows and `Alt-…` unchanged.
 
 Two consequences are written into the code:
 
-* **`Ctrl-C` is a keystroke.** `ENABLE_PROCESSED_INPUT` is off (otherwise the
-  console turns `Ctrl-C` into a signal and the editor never sees it), so the
-  byte arrives as `0x03` and abandons the line the way it does on Unix. The
-  same switch means `Ctrl-Z` arrives as `0x1a`, so the editor honours it as
-  end-of-input on an empty line — the console's EOF key, where Unix uses
-  `Ctrl-D`.
+* **`Ctrl-C` is a keystroke at the prompt.** `ENABLE_PROCESSED_INPUT` is off
+  (otherwise the console turns `Ctrl-C` into a signal and the editor never sees
+  it), so the byte arrives as `0x03` and abandons the line the way it does on
+  Unix. The same switch means `Ctrl-Z` arrives as `0x1a`, so the editor honours
+  it as end-of-input on an empty line — the console's EOF key, where Unix uses
+  `Ctrl-D`. **While a command runs** that mode is restored, so the key becomes a
+  console event instead; see "Console handles, `Ctrl-C` and `$( … )`" below.
 * **There is no poll on a console handle.** `SetConsoleMode` is not a waitable
   object, so the prompt watcher (`docs/prompt-watch.md`) stays
   `#[cfg(target_os = "linux")]`; on Windows the prompt updates between lines.
@@ -454,6 +455,83 @@ Two bugs came out of that first run, both invisible under Wine:
   ends are opened read+write now, and the standard handle is preferred when it
   is a console.
 * Command lookup found nothing, for five reasons recorded in the next section.
+
+### Console handles, `Ctrl-C` and `$( … )` (2026-11-12)
+
+Three symptoms, one part of the console boundary, found in the same session on
+the guest:
+
+| symptom | what was actually wrong |
+|---|---|
+| `for i in $(seq 2); do echo "$i"; done` printed `1 2`, then `baash: The handle is invalid. (os error 6)` and the shell exited | the editor had cached the *process's* standard-handle number, and `_dup2` on descriptor 1 replaces the handle behind it |
+| `cmd /c echo hi 2>&1; echo after` printed `hi` and lost `after` | a child's stdio took ownership of the shell's descriptor and closed its handle after `CreateProcess` |
+| `Ctrl-C` during a running command ended the shell | no console control handler, so the event's default action was `ExitProcess` |
+
+**The stale number.** `Console` preferred the standard handle when it was a
+console, which is right — it is the same console, with both access bits already
+— but it kept the borrowed `HANDLE` value. `_dup2` on a standard descriptor
+closes the old handle and installs a new one; a later `_dup2` back puts *some*
+handle in that slot, and whether its number is the old one is luck. With no
+child process in between, Windows reuses the number and the bug hides; a
+command substitution around an external command allocates handles in the middle,
+the restored handle gets a different number, and the next `WriteConsoleW` on the
+cached one reports error 6. Measured with a purpose-built probe in a console
+session:
+
+```
+h0=112 start=ok(7)
+after-dup2 h0=INVALID(6) std=112
+no-spawn-restored h0=ok(7) std=112
+after-spawn h0=INVALID(6) std=112
+spawn-restored h0=INVALID(6) std=112
+```
+
+The console now **duplicates** its ends instead of borrowing them: `End` is one
+owned `File`, so redirecting descriptor 0/1/2 — a capture, a pipeline, `exec
+>file` — cannot invalidate the handle the editor paints and reads with. That is
+the Windows shape of `/dev/tty`.
+
+**The child's handles.** Capture and pipelines were already right: the shell
+redirects descriptor 1 with `_dup2`, and `_dup2` updates the process's standard
+handle for descriptors 0–2 as a side effect, so `Stdio::Inherit`'s
+`GetStdHandle` followed the capture (measured on the old build:
+`baash -c 'x=$(cmd /c echo hi); echo [$x]'` printed `[hi]`). What was wrong is
+the *other* path: when a command carries a redirection action, `spawn` wrapped
+the descriptor's own handle in `Stdio`, and `Stdio::from_raw_handle` takes
+ownership of what it is given — `Command` closes it after `CreateProcess`, so
+the shell's descriptor was left pointing at a closed handle. The old build's
+`cmd /c echo hi 2>&1; echo after` printed `hi` and nothing else. Every handle
+is duplicated now, and every child gets descriptors 0, 1 and 2 explicitly
+(duplicated, or `NUL` when the shell closed one), so the shell neither relies on
+the CRT's `SetStdHandle` side effect nor loses a descriptor to its own child.
+
+**`Ctrl-C` while a command runs.** Windows has no `SIGINT`: a console delivers
+`CTRL_C_EVENT` to every process attached to it, and the default handler calls
+`ExitProcess`. An interactive shell now installs a `SetConsoleCtrlHandler` that
+returns `TRUE` for `CTRL_C_EVENT` and `CTRL_BREAK_EVENT` (close/logoff/shutdown
+still fall through), which is the Windows analogue of bash ignoring `SIGINT`
+while it waits for a foreground job: the child receives the same event and dies
+on its own. `STATUS_CONTROL_C_EXIT` is reported as `Signaled(SIGINT)`, so `$?`
+is 130 rather than the low byte of `0xC000013A` (58). A non-interactive shell
+installs nothing, so `baash -c 'sleep 10'` still dies on `Ctrl-C` the way a
+script does.
+
+**Verified on the `winvm` guest** (2026-11-12), in a Windows Terminal tab
+(ConPTY) opened in the console session, with keystrokes injected through QMP:
+`x=$(cmd /c echo hi)` returns to the prompt and `echo $x` prints `hi`; the
+`for i in $(seq 2)` loop prints `1 2` and returns; `echo hi | cmd /c findstr hi`
+still prints `hi` and `cmd /c echo plain` still prints `plain`; `ping -n 30
+127.0.0.1` interrupted with `Ctrl-C` prints `Control-C`, returns to the prompt,
+and `echo $?` prints 130; `Ctrl-C` at the prompt still abandons the line
+(`echo abc^C` then a fresh prompt). The `2>&1` case was compared against the
+previous build in `-c` mode: the old one printed only `hi`, the new one prints
+`hi` and `after`.
+
+What is still coarse: the handler swallows the event for the whole interactive
+process, so a `Ctrl-C` pressed while a *built-in* loop runs does nothing until
+it returns (bash would abandon it at the next command boundary — that needs a
+pending-interrupt check in the interpreter), `trap INT` never runs for a console
+event, and `Ctrl-\` has no equivalent at all.
 
 ### Command resolution on Windows (2026-11-06)
 

@@ -33,7 +33,7 @@
 use std::ffi::c_void;
 use std::fs::File;
 use std::io;
-use std::os::windows::io::{AsRawHandle, RawHandle};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
 
 /// `(DWORD)-10`, the pseudo-handle kind `GetStdHandle` expects for stdin.
 const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
@@ -104,21 +104,26 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-/// One end of the console, owned when we opened it and borrowed when it is a
-/// standard handle.
-enum End {
-    /// A handle this module opened (`CONIN$`/`CONOUT$`) and closes on drop.
-    Owned(File),
-    /// `GetStdHandle`'s handle, which belongs to the process and is not ours.
-    Standard(RawHandle),
-}
+/// One end of the console: a handle this module owns and closes on drop.
+///
+/// It is never the process's own standard handle, even when that is where it
+/// came from: a borrowed number goes stale the moment the shell redirects the
+/// descriptor it names (see [`End::console`]).
+#[derive(Debug)]
+struct End(File);
 
 impl End {
     fn handle(&self) -> RawHandle {
-        match self {
-            Self::Owned(file) => file.as_raw_handle(),
-            Self::Standard(handle) => *handle,
-        }
+        self.0.as_raw_handle()
+    }
+
+    /// A console end this module owns, duplicated from a borrowed handle.
+    fn owned(handle: RawHandle) -> io::Result<Self> {
+        let duplicate = duplicate_handle(handle)?;
+        // SAFETY: `duplicate` is a handle this function just created and
+        // nobody else refers to, so the `File` becomes its only owner and
+        // closes it exactly once.
+        Ok(Self(unsafe { File::from_raw_handle(duplicate) }))
     }
 
     /// One end of the console: the standard handle when it is a console, the
@@ -138,11 +143,21 @@ impl End {
         if let Some(handle) = standard_handle(standard)
             && mode_of(handle).is_ok()
         {
-            return Ok(Self::Standard(handle));
+            // The standard handle is the process's, not this module's. `_dup2`
+            // on that descriptor — every command substitution, every `> file`,
+            // `exec 1>&2` — closes the handle behind it and installs a
+            // different one, so a saved number eventually names a closed
+            // handle and the prompt dies with "the handle is invalid" (only
+            // when the replacement number is not the old one by luck, which is
+            // why a capture with no child in it used to work). A duplicate is
+            // this module's own handle to the same console: redirection cannot
+            // invalidate it, and the editor keeps painting on the terminal the
+            // way `/dev/tty` lets it on Unix.
+            return Self::owned(handle);
         }
         let error = match File::options().read(true).write(true).open(device) {
             Ok(file) => {
-                let end = Self::Owned(file);
+                let end = Self(file);
                 return match mode_of(end.handle()) {
                     Ok(_) => Ok(end),
                     Err(error) => Err(error),
@@ -154,15 +169,6 @@ impl End {
             io::ErrorKind::Unsupported,
             format!("{device}: {error}"),
         ))
-    }
-}
-
-impl std::fmt::Debug for End {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Owned(file) => f.debug_tuple("Owned").field(&file.as_raw_handle()).finish(),
-            Self::Standard(handle) => f.debug_tuple("Standard").field(handle).finish(),
-        }
     }
 }
 
@@ -340,6 +346,47 @@ impl Console {
             saved_output,
         })
     }
+}
+
+/// A new handle to the same object, not inheritable by a child.
+///
+/// The console's duplicates stay out of a child's handle table: a child that
+/// inherited the editor's ends would keep the console alive past the shell.
+fn duplicate_handle(handle: RawHandle) -> io::Result<RawHandle> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> RawHandle;
+        fn DuplicateHandle(
+            process: RawHandle,
+            source: RawHandle,
+            target_process: RawHandle,
+            target: *mut RawHandle,
+            access: u32,
+            inherit: i32,
+            options: u32,
+        ) -> i32;
+    }
+    /// `DUPLICATE_SAME_ACCESS`: keep the source handle's access rights.
+    const SAME_ACCESS: u32 = 0x0000_0002;
+    let mut duplicate: RawHandle = std::ptr::null_mut();
+    // SAFETY: both process handles are the current process's pseudo-handle,
+    // which the call only reads and never closes; `duplicate` is a writable
+    // handle slot that is written only on success.
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle,
+            GetCurrentProcess(),
+            &mut duplicate,
+            0,
+            0,
+            SAME_ACCESS,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(duplicate)
 }
 
 /// The standard handle `kind` names, if the process has one.
