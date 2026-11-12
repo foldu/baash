@@ -415,6 +415,18 @@ rediscover):
   backreference is a literal, `{,n}` is rejected, and a nested-capture tie-break
   can name a different (still valid) extent — `docs/contracts.md` records the
   234-case measurement. `--regex-engine system` is a usage error on Windows.
+* **A `carapace` binary on the shell's `PATH` is asked before the tables are.**
+  Tab starts `carapace <command> export …` and the editor polls it from its wait
+  loop, so the prompt stays live; a keystroke kills and reaps the child, 500 ms
+  bounds a silent one, and a non-zero exit, invalid JSON, an empty `values`
+  array or a timeout all fall through. The precedence is external carapace →
+  static tables (only with the `carapace` feature) → `complete -F` → the data
+  engine; the binary is found through the shell's own `PATH`, so `PATH=` changes
+  what Tab does. Measured at 20.8 ms for a static answer and 30.7 ms for a
+  dynamic one (`docs/performance.md`), against 0.7 ms when the tables answer.
+  Not done there: the runtime provider is not consulted for the command word,
+  redirects, assignments or substitution bodies, and carapace's `messages` are
+  not shown.
 * **Version skew is now the *system* library's problem.** The 229
   per-command scripts this machine installed are older than 2.18: 58 of them
   call `_init_completion`, which 2.18 renamed to `_comp_initialize`, so those

@@ -16,7 +16,10 @@ use std::sync::Arc;
 use baash_complete::{History, ShellNames, Spec, SpecSource, VarNames};
 use baash_runtime::ShellHost;
 use baash_runtime::complete::CompletionTable;
+use baash_syntax::Expect;
 use baash_vm::Interp;
+
+use crate::carapace_ext;
 
 /// The most recent history entries offered as completion candidates.
 const HISTORY_LIMIT: usize = 2_000;
@@ -210,12 +213,125 @@ pub fn refresh(shell: &mut Interp, engine: &baash_complete::CompletionEngine) {
 pub struct ShellCompleter<'a> {
     shell: &'a mut Interp,
     engine: &'a baash_complete::CompletionEngine,
+    /// A runtime carapace process started by [`ShellCompletion::begin`] and
+    /// not yet answered or cancelled.
+    pending: Option<PendingCarapace>,
+}
+
+/// One runtime lookup that has started but not finished.
+struct PendingCarapace {
+    carapace: carapace_ext::Carapace,
+    /// The line and cursor the process was asked about. The editor cancels on
+    /// any keystroke, so this is still the line when the answer arrives.
+    line: Vec<u8>,
+    cursor: usize,
 }
 
 impl<'a> ShellCompleter<'a> {
     /// A hook for the line about to be read.
     pub fn new(shell: &'a mut Interp, engine: &'a baash_complete::CompletionEngine) -> Self {
-        Self { shell, engine }
+        Self {
+            shell,
+            engine,
+            pending: None,
+        }
+    }
+
+    /// The non-runtime precedence: static carapace tables, then `complete -F`,
+    /// then `None` for the data engine.
+    ///
+    /// This order is the product promise (`external carapace > carapace
+    /// builtin > bash completions`). The engine's own `complete` cannot express
+    /// it because a matching `complete` spec short-circuits its providers; the
+    /// static table is asked here first, by name, before the function rule is
+    /// even looked up.
+    fn finish(&mut self, line: &[u8], cursor: usize) -> Option<baash_repl::ShellMenu> {
+        if let Some(menu) = self.engine.carapace_menu(line, cursor) {
+            return Some(baash_repl::ShellMenu {
+                menu,
+                output: Vec::new(),
+            });
+        }
+        self.rule(line, cursor)
+    }
+
+    /// Run a `complete -F` function, if the slot names one.
+    fn rule(&mut self, line: &[u8], cursor: usize) -> Option<baash_repl::ShellMenu> {
+        // The function may install the command's real rule while it runs
+        // (bash-completion's loader sources the per-command script), so a
+        // `124` means the answer is stale: refresh the snapshot and look the
+        // rule up again. The bound is bash's own protection against a loader
+        // that keeps asking for a retry.
+        for _ in 0..4 {
+            let deferred = self.engine.deferred(line, cursor)?;
+            match self.run(&deferred) {
+                Run::Replies(replies, output) => {
+                    return Some(baash_repl::ShellMenu {
+                        menu: self.engine.deferred_menu(&deferred, &replies),
+                        output,
+                    });
+                }
+                Run::Retry => refresh(self.shell, self.engine),
+                Run::Fail => return None,
+            }
+        }
+        None
+    }
+
+    /// The argv/env for a runtime lookup, when one applies.
+    ///
+    /// The runtime provider mirrors the static provider's slot: an argument of
+    /// a named command, not the command word, a redirection, an assignment
+    /// value or a substitution body. `PATH` is the shell's own value, so a
+    /// `PATH=` assignment changes whether carapace is used.
+    fn invocation(&mut self, line: &[u8], cursor: usize) -> Option<carapace_ext::Invocation> {
+        let cursor = cursor.min(line.len());
+        let ctx = self.engine.context(line, cursor);
+        if ctx.expect != Expect::Word
+            || ctx.redirect
+            || ctx.assign
+            || ctx.param
+            || ctx.arith
+            || ctx.heredoc
+        {
+            return None;
+        }
+        let command = ctx.command_name.as_deref()?;
+        if command.is_empty() {
+            return None;
+        }
+
+        let state = self.shell.state();
+        let path = state.vars.scalar(b"PATH")?;
+        let program = carapace_ext::find(path)?;
+        let mut envp = state.vars.envp();
+        // `PATH` can be set without being exported (an assignment before the
+        // command then does not reach children). Carapace needs it to run the
+        // tools its dynamic actions call.
+        if !envp.iter().any(|entry| entry.starts_with(b"PATH=")) {
+            let mut entry = b"PATH=".to_vec();
+            entry.extend_from_slice(path);
+            envp.push(entry);
+        }
+        // A `COMP_LINE` inherited from a parent shell would make carapace's
+        // bash patch replace the words we pass with its own parse of that
+        // variable. This invocation carries the words in argv instead.
+        envp.retain(|entry| !entry.starts_with(b"COMP_"));
+        carapace_ext::invocation(program, &ctx, envp)
+    }
+
+    /// Build a menu from carapace's `export` answer.
+    fn answer(&self, bytes: &[u8], line: &[u8], cursor: usize) -> Option<baash_repl::ShellMenu> {
+        let answer = carapace_ext::parse_export(bytes)?;
+        let mut candidates = carapace_ext::candidates(&answer.values, &answer.nospace);
+        let mut seen = std::collections::HashSet::with_capacity(candidates.len());
+        candidates.retain(|candidate| seen.insert(candidate.insert.clone()));
+        candidates.truncate(self.engine.max_candidates());
+        let ctx = self.engine.context(line, cursor.min(line.len()));
+        Some(baash_repl::ShellMenu {
+            menu: baash_complete::Menu::new(ctx, candidates),
+            output: Vec::new(),
+        })
     }
 
     /// Set up `COMP_*`, run the function, and read `COMPREPLY` back.
@@ -273,25 +389,64 @@ impl<'a> ShellCompleter<'a> {
 
 impl baash_repl::ShellCompletion for ShellCompleter<'_> {
     fn complete(&mut self, line: &[u8], cursor: usize) -> Option<baash_repl::ShellMenu> {
-        // The function may install the command's real rule while it runs
-        // (bash-completion's loader sources the per-command script), so a
-        // `124` means the answer is stale: refresh the snapshot and look the
-        // rule up again. The bound is bash's own protection against a loader
-        // that keeps asking for a retry.
-        for _ in 0..4 {
-            let deferred = self.engine.deferred(line, cursor)?;
-            match self.run(&deferred) {
-                Run::Replies(replies, output) => {
-                    return Some(baash_repl::ShellMenu {
-                        menu: self.engine.deferred_menu(&deferred, &replies),
-                        output,
-                    });
+        // The editor uses `begin`/`poll`, which let the prompt stay live. This
+        // synchronous form exists for the trait's default and for callers that
+        // have no event loop; it waits out the same deadline.
+        match self.begin(line, cursor) {
+            baash_repl::ShellCompletionState::Ready(menu) => menu,
+            baash_repl::ShellCompletionState::Pending => loop {
+                match self.poll() {
+                    baash_repl::ShellCompletionState::Ready(menu) => break menu,
+                    baash_repl::ShellCompletionState::Pending => {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
                 }
-                Run::Retry => refresh(self.shell, self.engine),
-                Run::Fail => return None,
+            },
+        }
+    }
+
+    fn begin(&mut self, line: &[u8], cursor: usize) -> baash_repl::ShellCompletionState {
+        // A new Tab abandons the previous lookup: its answer is for a word the
+        // user has already replaced.
+        self.pending = None;
+        if let Some(invocation) = self.invocation(line, cursor) {
+            if let Ok(carapace) = carapace_ext::Carapace::start(&invocation) {
+                self.pending = Some(PendingCarapace {
+                    carapace,
+                    line: line.to_vec(),
+                    cursor,
+                });
+                return baash_repl::ShellCompletionState::Pending;
             }
         }
-        None
+        baash_repl::ShellCompletionState::Ready(self.finish(line, cursor))
+    }
+
+    fn poll(&mut self) -> baash_repl::ShellCompletionState {
+        let Some(pending) = self.pending.as_mut() else {
+            return baash_repl::ShellCompletionState::Ready(None);
+        };
+        match pending.carapace.poll() {
+            carapace_ext::Poll::Pending => baash_repl::ShellCompletionState::Pending,
+            carapace_ext::Poll::Failed => {
+                let pending = self.pending.take().expect("checked just above");
+                baash_repl::ShellCompletionState::Ready(self.finish(&pending.line, pending.cursor))
+            }
+            carapace_ext::Poll::Ready(bytes) => {
+                let pending = self.pending.take().expect("checked just above");
+                match self.answer(&bytes, &pending.line, pending.cursor) {
+                    Some(menu) => baash_repl::ShellCompletionState::Ready(Some(menu)),
+                    None => baash_repl::ShellCompletionState::Ready(
+                        self.finish(&pending.line, pending.cursor),
+                    ),
+                }
+            }
+        }
+    }
+
+    fn cancel(&mut self) {
+        // Dropping the process kills and reaps it.
+        self.pending = None;
     }
 }
 

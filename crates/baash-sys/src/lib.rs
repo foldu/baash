@@ -128,7 +128,7 @@ pub use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 pub use term::{NoEcho, RawMode, parent_pid, pid, set_window_size_fd, window_size, window_size_fd};
 pub use time::strftime_local;
 #[cfg(unix)]
-pub use wait::{wait_any_nohang, wait_pid};
+pub use wait::{wait_any_nohang, wait_pid, wait_pid_nohang};
 
 #[cfg(windows)]
 pub use windows::{

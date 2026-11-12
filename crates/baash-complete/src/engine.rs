@@ -10,6 +10,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
+#[cfg(feature = "carapace")]
+use baash_syntax::Expect;
 use baash_syntax::ParseOpts;
 
 use crate::candidate::{CandKind, Candidate, dedupe};
@@ -360,6 +362,59 @@ impl CompletionEngine {
         Menu::new(deferred.ctx().clone(), candidates)
     }
 
+    /// The static carapace tables' menu, when they have something to say.
+    ///
+    /// This is separate from [`Completer::complete`] because the required
+    /// precedence is *carapace before a `complete -F` rule*: `gather` gives a
+    /// matching spec priority (bash's order for `-W`/`-A`), so the binary's
+    /// shell hook asks this first and only then runs a function. `None` means
+    /// the feature is off, the slot is not an argument, or the tables have no
+    /// entry for the command — never that they answered with zero candidates.
+    pub fn carapace_menu(&self, line: &[u8], cursor: usize) -> Option<Menu> {
+        #[cfg(feature = "carapace")]
+        {
+            let cursor = cursor.min(line.len());
+            let ctx = self.context(line, cursor);
+            // The provider lives in the `WORD` table, where `-A file`-style
+            // actions never ask it; asking it directly has to repeat that
+            // gate, or a redirection target or assignment value would be
+            // completed as a subcommand.
+            if ctx.expect != Expect::Word
+                || ctx.redirect
+                || ctx.assign
+                || ctx.param
+                || ctx.arith
+                || ctx.heredoc
+                || !CarapaceProvider.applies(&ctx)
+            {
+                return None;
+            }
+            let mut candidates = CarapaceProvider.candidates(&ctx);
+            if candidates.is_empty() {
+                return None;
+            }
+            dedupe(&mut candidates);
+            let mut ranker = lock(&self.ranker);
+            ranker.rank(&mut candidates, &ctx.prefix);
+            // The provider is applicable for every argument of a known
+            // command, but that does not mean it has an answer: a positional
+            // slot (`git checkout <branch>`) has no subcommands in the table,
+            // and a prefix that matches nothing is not a reason to hide a
+            // `complete -F` rule. Empty after ranking means "no static
+            // answer", so the next source runs.
+            if candidates.is_empty() {
+                return None;
+            }
+            candidates.truncate(self.config.max_candidates);
+            Some(Menu::new(ctx, candidates))
+        }
+        #[cfg(not(feature = "carapace"))]
+        {
+            let _ = (line, cursor);
+            None
+        }
+    }
+
     /// Add or replace a provider.
     pub fn set_provider(&self, provider: Arc<dyn Provider>) {
         let id = provider.id();
@@ -369,6 +424,15 @@ impl CompletionEngine {
         } else {
             providers.push(provider);
         }
+    }
+
+    /// The largest menu this engine will return.
+    ///
+    /// The external carapace path builds its menu in the binary and needs the
+    /// same bound; keeping one value means a runtime answer and a table answer
+    /// are capped alike.
+    pub fn max_candidates(&self) -> usize {
+        self.config.max_candidates
     }
 
     /// The provider registered for `id`, if any.
@@ -688,5 +752,69 @@ impl Completer for CompletionEngine {
         let ctx = self.context(line, cursor);
         let candidates = self.gather(&ctx);
         Menu::new(ctx, candidates)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `-F` rule for one command, so the test proves the static tables do
+    /// not lose to it merely because a spec exists.
+    struct FunctionRule(&'static [u8]);
+
+    impl SpecSource for FunctionRule {
+        fn spec(&self, command: &[u8]) -> Option<Spec> {
+            (command == self.0).then(|| Spec {
+                function: Some(b"_complete_git".to_vec()),
+                ..Spec::default()
+            })
+        }
+    }
+
+    #[cfg(feature = "carapace")]
+    #[test]
+    fn static_carapace_answers_even_when_a_function_rule_exists() {
+        let engine = CompletionEngine::new()
+            .with_specs(Arc::new(FunctionRule(b"git")) as Arc<dyn SpecSource>);
+        let menu = engine
+            .carapace_menu(b"git ch", 6)
+            .expect("the tables know git");
+        assert!(
+            menu.candidates
+                .iter()
+                .any(|candidate| candidate.insert == b"checkout"),
+            "the static table still answers: {:?}",
+            menu.candidates
+                .iter()
+                .map(|candidate| String::from_utf8_lossy(&candidate.insert))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[cfg(feature = "carapace")]
+    #[test]
+    fn static_carapace_does_not_answer_a_redirection_target() {
+        let engine = CompletionEngine::new();
+        assert!(engine.carapace_menu(b"git > fi", 8).is_none());
+        assert!(engine.carapace_menu(b"FOO=git", 7).is_none());
+    }
+
+    #[cfg(feature = "carapace")]
+    #[test]
+    fn static_carapace_without_a_matching_candidate_is_no_answer() {
+        let engine = CompletionEngine::new();
+        // `git checkout <branch>` is a positional slot: the table has options
+        // for `checkout`, not branch values, so the static source must defer.
+        assert!(engine.carapace_menu(b"git checkout ", 13).is_none());
+        // A prefix no subcommand starts with must not suppress `-F`.
+        assert!(engine.carapace_menu(b"git qq", 6).is_none());
+    }
+
+    #[cfg(not(feature = "carapace"))]
+    #[test]
+    fn without_the_feature_there_is_no_static_answer() {
+        let engine = CompletionEngine::new();
+        assert!(engine.carapace_menu(b"git ch", 6).is_none());
     }
 }

@@ -234,6 +234,28 @@ impl Child {
     pub fn wait(&self) -> io::Result<WaitOutcome> {
         wait_pid(self.pid)
     }
+
+    /// Reap this child if it has exited, without blocking.
+    ///
+    /// The completion path owns exactly one child and cannot use
+    /// [`crate::wait_any_nohang`], which would also consume a status another
+    /// caller is waiting for.
+    pub fn try_wait(&self) -> io::Result<Option<WaitOutcome>> {
+        crate::wait::wait_pid_nohang(self.pid)
+    }
+
+    /// Send `SIGKILL` to this child (`TerminateProcess` on Windows).
+    ///
+    /// A completion that overran its deadline is abandoned, not signalled
+    /// politely: it may be blocked in a shelled-out command and there is no
+    /// second keystroke to wait for. The caller still has to [`Child::wait`]
+    /// (or [`Child::try_wait`]) to reap it.
+    pub fn kill(&self) -> io::Result<()> {
+        let pid = rustix::process::Pid::from_raw(self.pid)
+            .ok_or_else(|| io::Error::from_raw_os_error(libc::ECHILD))?;
+        rustix::process::kill_process(pid, rustix::process::Signal::KILL)?;
+        Ok(())
+    }
 }
 
 /// Execute `plan`, preferring `posix_spawn`.

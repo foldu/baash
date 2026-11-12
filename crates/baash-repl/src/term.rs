@@ -73,6 +73,9 @@ pub enum Input {
     /// The terminal's window changed size. No input was consumed; the frame's
     /// geometry is stale, so the editor re-anchors and paints again.
     Resize,
+    /// The requested wait elapsed with nothing to read. No input was consumed;
+    /// the editor uses this to poll work that is not a descriptor it owns.
+    Timeout,
 }
 
 /// The byte and terminal-state interface the editor owns.
@@ -148,6 +151,17 @@ pub trait Terminal {
     /// this method existing.
     fn await_input(&mut self) -> io::Result<Input> {
         Ok(Input::Key)
+    }
+
+    /// Wait at most `timeout` for input.
+    ///
+    /// This is [`Terminal::await_input`] with a bound: the editor uses it while
+    /// an asynchronous completion is outstanding, so it can poll that work
+    /// without being parked on the keyboard. The default ignores the bound and
+    /// blocks, which is correct for a fake with a script to play and wrong for
+    /// a real terminal; both real terminals override it.
+    fn await_input_timeout(&mut self, _timeout: std::time::Duration) -> io::Result<Input> {
+        self.await_input()
     }
 }
 
@@ -347,28 +361,36 @@ impl Terminal for RealTerminal {
         /// no resize event, so this is also the worst-case repaint delay.
         const POLL: std::time::Duration = std::time::Duration::from_millis(250);
         loop {
-            if !self.pending.is_empty() {
-                return Ok(Input::Key);
-            }
-            let ready = {
-                let Some(console) = self.console.as_ref() else {
-                    return Err(self.no_console());
-                };
-                console.wait_input(POLL)?
-            };
-            if ready {
-                return Ok(Input::Key);
-            }
-            let size = self.size();
-            match self.last_size {
-                Some(last) if last != size => {
-                    self.last_size = Some(size);
-                    return Ok(Input::Resize);
-                }
-                None => self.last_size = Some(size),
-                Some(_) => {}
+            match self.await_input_timeout(POLL)? {
+                Input::Timeout => {}
+                input => return Ok(input),
             }
         }
+    }
+
+    fn await_input_timeout(&mut self, timeout: std::time::Duration) -> io::Result<Input> {
+        if !self.pending.is_empty() {
+            return Ok(Input::Key);
+        }
+        let ready = {
+            let Some(console) = self.console.as_ref() else {
+                return Err(self.no_console());
+            };
+            console.wait_input(timeout)?
+        };
+        if ready {
+            return Ok(Input::Key);
+        }
+        let size = self.size();
+        match self.last_size {
+            Some(last) if last != size => {
+                self.last_size = Some(size);
+                return Ok(Input::Resize);
+            }
+            None => self.last_size = Some(size),
+            Some(_) => {}
+        }
+        Ok(Input::Timeout)
     }
 }
 
@@ -556,32 +578,20 @@ impl RealTerminal {
         }
         Ok(())
     }
-}
 
-#[cfg(unix)]
-impl Terminal for RealTerminal {
-    fn set_watch(&mut self, fd: Option<std::os::fd::OwnedFd>) {
-        // A registration failure is not worth failing the prompt over: the
-        // editor keeps waiting on the keyboard alone, which is the behaviour
-        // before there was a watcher.
-        self.watch = fd.and_then(|fd| compio::runtime::fd::PollFd::new(fd).ok());
-    }
-
-    fn await_input(&mut self) -> io::Result<Input> {
+    /// Wait for a keystroke, the watch, a resize or `timeout`.
+    ///
+    /// `None` means the wait bound elapsed. [`Terminal::await_input`] turns
+    /// that into its idle tick and [`Terminal::await_input_timeout`] into
+    /// [`Input::Timeout`].
+    ///
+    /// Keyboard readiness is re-checked rather than believed: a character
+    /// device can answer a readiness poll with no byte behind it, and taking
+    /// that for a keystroke parks the editor inside a read.
+    fn await_input_until(&mut self, timeout: std::time::Duration) -> io::Result<Option<Input>> {
         let runtime = compio::runtime::Runtime::current();
         self.prepare_read_source()?;
         let source = self.read_source.as_ref().expect("prepared just above");
-        // The keyboard, the watch, `SIGWINCH` and a timer are awaited
-        // together. The timer is a backstop: a completion-based poll is only as
-        // good as the kernel's willingness to complete it for this file type,
-        // and a watcher that silently stopped being awaited would leave the
-        // prompt frozen until the next keystroke. A backstop that finds nothing
-        // changed reads the watch and paints nothing.
-        //
-        // Keyboard readiness is re-checked rather than believed: a character
-        // device can answer a readiness poll with no byte behind it, and taking
-        // that for a keystroke parks the editor inside a read.
-        const BACKSTOP: std::time::Duration = std::time::Duration::from_secs(1);
         loop {
             let watch = async {
                 match self.watch.as_ref() {
@@ -595,17 +605,42 @@ impl Terminal for RealTerminal {
                 source.read_ready(),
                 watch,
                 compio::signal::unix::signal(baash_sys::SIGWINCH),
-                BACKSTOP,
+                timeout,
             ))?;
             match outcome {
-                Source::Resize => return Ok(Input::Resize),
-                Source::Watch | Source::Backstop => return Ok(Input::Watch),
+                Source::Resize => return Ok(Some(Input::Resize)),
+                Source::Watch => return Ok(Some(Input::Watch)),
+                Source::Backstop => return Ok(None),
                 Source::Key => {}
             }
             if baash_sys::bytes_available(self.fd) > 0 {
-                return Ok(Input::Key);
+                return Ok(Some(Input::Key));
             }
         }
+    }
+}
+
+#[cfg(unix)]
+impl Terminal for RealTerminal {
+    fn set_watch(&mut self, fd: Option<std::os::fd::OwnedFd>) {
+        // A registration failure is not worth failing the prompt over: the
+        // editor keeps waiting on the keyboard alone, which is the behaviour
+        // before there was a watcher.
+        self.watch = fd.and_then(|fd| compio::runtime::fd::PollFd::new(fd).ok());
+    }
+
+    fn await_input(&mut self) -> io::Result<Input> {
+        // The idle prompt samples the watch once a second even when nothing
+        // wakes it: a completion-based poll is only as good as the kernel's
+        // willingness to complete it, and a watcher that silently stopped
+        // being awaited would leave the prompt frozen.
+        const BACKSTOP: std::time::Duration = std::time::Duration::from_secs(1);
+        // The backstop is the idle prompt's "look again" tick either way.
+        Ok(self.await_input_until(BACKSTOP)?.unwrap_or(Input::Watch))
+    }
+
+    fn await_input_timeout(&mut self, timeout: std::time::Duration) -> io::Result<Input> {
+        Ok(self.await_input_until(timeout)?.unwrap_or(Input::Timeout))
     }
 
     fn read_byte_timeout(&mut self, timeout: std::time::Duration) -> io::Result<Option<u8>> {

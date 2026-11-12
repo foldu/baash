@@ -68,6 +68,14 @@ the read end means `exec` succeeded.
 **`SIGCHLD` is a wakeup hint, not an event.** Until `wait_any_nohang` returns
 `None`, there may be more children to reap.
 
+**A caller that owns exactly one child uses the per-pid forms.**
+`wait_pid_nohang(pid)` returns `Ok(None)` while that child runs, `Child::try_wait`
+wraps it, and `Child::kill` sends `SIGKILL` (`TerminateProcess` on Windows).
+`wait_any_nohang` is the event-loop form and must not be used for a child whose
+status belongs to a caller: it reaps whatever is ready, not the pid asked about.
+The runtime carapace lookup owns one child and uses this pair to poll without
+blocking and to abandon a lookup on a keystroke.
+
 **There is no terminal handover.** The job-control wave's `tcsetpgrp` wrappers,
 per-job process groups and `WUNTRACED` wait forms are gone. The shell and its
 children share one process group, which is why `Ctrl-Z` stops the shell too.
@@ -926,6 +934,43 @@ values (branches, containers, packages) are not in the tables and stay with
 `complete -F`; a position the walk cannot resolve ends at the last known node
 rather than guessing.
 
+**A `carapace` binary on `PATH` is asked at runtime, and the order is
+`external carapace > static tables > complete -F > the data engine`.** The
+runtime lookup lives in `crates/baash/src/carapace_ext.rs`, not in
+`baash-complete`: it needs `baash-sys` to spawn, and this crate deliberately
+has no process dependency. It is independent of the `carapace` feature —
+the tables may not be compiled in, and the binary is still asked. The command
+is invoked directly, not through carapace's bash integration:
+
+```text
+carapace <command> export <command> <argument>... <current-prefix>
+```
+
+`<command>` is the command word reduced to its basename; the words after
+`export` include the command again and the last one is the word being completed
+(an empty argument for an empty prefix). `export` is carapace's
+machine-readable shell format: one JSON object with `values` (`value`,
+`display`, `description`, `tag`), `messages`, `nospace` and `usage`. No
+`COMP_*`/`CARAPACE_*` environment is needed, and this code does not set
+`COMP_LINE`: carapace 1.8.1's bash patch would then replace the argv words with
+its own `shlex` split of that variable. (Verified against carapace 1.8.1;
+`carapace git export git checkout ''` lists branches, `carapace git export
+checkout --` answers root flags instead, an unknown command prints nothing and
+exits 0, and a dynamic action that cannot run exits 0 with `values: []` and
+`messages`.)
+
+The lookup is a polled state machine, not a blocking wait.
+`ShellCompletion::begin` starts the child and returns `Pending`; `poll` is a
+zero-timeout readiness check plus `waitpid(WNOHANG)`, driven by the editor's
+wait loop; a keystroke calls `cancel`, which kills and reaps; `TIMEOUT`
+(500 ms) bounds a silent process.
+Non-zero exit, I/O error, invalid JSON, an empty `values` array, and the
+deadline all fall through to the next source, never a panic and never a blocked
+prompt. `CompletionEngine::carapace_menu` is the static half of the same
+precedence: the hook asks it before `deferred`, because `gather` lets a matching
+`complete` spec short-circuit the providers (the requested order is static
+carapace *before* `-F`).
+
 Known copies: the builtin-name and keyword lists are duplicated from
 `baash-runtime` because the dependency runs the other way, and `SIGNALS` is
 spelled the way bash's `compgen -A signal` prints it (`SIGHUP`, `EXIT`, …).
@@ -1173,17 +1218,29 @@ preamble, the prompt marks, the command marks and the clipboard — is gated by
 `Terminal::supports_control_sequences`, which is `!TERM=dumb` on Unix and
 `true` on the console; a dumb terminal shows those bytes as garbage.
 
-**`ShellCompletion` is the per-read `complete -F` seam.** The editor still
-borrows one `&dyn Completer` for its whole life, but a completion function needs
-the interpreter, which the loop owns, so `Editor::read_line_with_shell(live,
-Some(hook))` lends a `&mut dyn ShellCompletion` for exactly one line. On Tab the
-editor asks the hook first; `None` means "no rule here needs shell code" and the
-data engine answers (a missing or failing function also ends in `None`). The
-hook answers with a `ShellMenu { menu, output }`: `output` is the function's
-stdout, and the editor erases the frame with `Renderer::clear_frame`, writes the
-output where the frame was and paints the prompt, line and menu below it, which
-is bash's order. `Editor::step` and `read_line` take no hook and are the plain
-editor.
+**`ShellCompletion` is the per-read shell seam, and it may answer later.**
+The editor still borrows one `&dyn Completer` for its whole life, but a
+completion function needs the interpreter, which the loop owns, so
+`Editor::read_line_with_shell(live, Some(hook))` lends a `&mut dyn
+ShellCompletion` for exactly one line. On Tab the editor calls
+`ShellCompletion::begin`; `ShellCompletionState::Ready(None)` means "no source
+here has an answer, the data engine should" (a missing or failing function also
+ends there), and `Ready(Some(ShellMenu))` is the menu. `Pending` is the new
+third answer: the hook started work that is not ready — an external carapace
+process — and the editor keeps reading keys while it polls
+`ShellCompletion::poll` from the wait loop. A keystroke calls `ShellCompletion::cancel` and the key
+is processed normally; the result is never for a stale line. `poll` must not
+block, `cancel` must release the process, and the default `begin` wraps the
+synchronous `complete`, so a hook with nothing asynchronous to do is unchanged.
+
+While a completion is pending, `Terminal::await_input_timeout` bounds the wait
+so the loop can poll; it returns the new `Input::Timeout` when the bound
+elapses. `await_input` keeps its one-second backstop and turns it into
+`Input::Watch`, so the idle prompt is unchanged. `ShellMenu { menu, output }`
+is still how a hook answers: `output` is the function's stdout, and the editor
+erases the frame with `Renderer::clear_frame`, writes the output where the frame
+was and paints the prompt, line and menu below it, which is bash's order.
+`Editor::step` and `read_line` take no hook and are the plain editor.
 
 **Continuation goes through `Syntax`, implemented in the binary** with
 `baash_syntax::parse_bytes`. The trait is deliberately thin, and that thinness has

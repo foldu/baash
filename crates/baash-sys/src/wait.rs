@@ -33,6 +33,24 @@ pub fn wait_pid(pid: libc::pid_t) -> io::Result<WaitOutcome> {
     }
 }
 
+/// Reap one child if it has already exited, without blocking.
+///
+/// `Ok(None)` means the child is still running, not that it is gone. This is
+/// the primitive a caller that owns one child needs: [`wait_any_nohang`] would
+/// also reap children it does not know about, which is wrong for completion
+/// (a `carapace` run must not consume a status another caller will wait for).
+pub fn wait_pid_nohang(pid: libc::pid_t) -> io::Result<Option<WaitOutcome>> {
+    let pid = Pid::from_raw(pid).ok_or_else(|| io::Error::from_raw_os_error(libc::ECHILD))?;
+    loop {
+        match rustix::process::waitpid(Some(pid), WaitOptions::NOHANG) {
+            Ok(Some((_, status))) => return decode(status).map(Some),
+            Ok(None) => return Ok(None),
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 /// Reap any child that has changed state, without blocking.
 ///
 /// Returns `None` when no child is ready, which includes "this shell has no

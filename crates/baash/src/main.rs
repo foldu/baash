@@ -34,6 +34,7 @@ use baash_syntax::{ParseOpts, ParseOutcome};
 use baash_vm::Interp;
 
 mod bash_completion;
+mod carapace_ext;
 mod complete;
 mod git_prompt;
 mod prompt_state;

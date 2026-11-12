@@ -50,6 +50,11 @@ use crate::term::{Input, Terminal};
 /// pays it on every prompt, so it must not be generous.
 const CURSOR_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// How often the read loop asks a pending shell completion whether it has an
+/// answer. The completion itself is bounded by its own deadline; this only
+/// decides how promptly a finished answer is painted while no key arrives.
+const COMPLETION_WAIT: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// What a single key did to the editing session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flow {
@@ -124,6 +129,44 @@ pub trait ShellCompletion {
     /// The menu for the word at `cursor`, or `None` when no rule needs the
     /// shell.
     fn complete(&mut self, line: &[u8], cursor: usize) -> Option<ShellMenu>;
+
+    /// Start a completion that may finish later.
+    ///
+    /// This is what makes a slow source (an external `carapace` lookup) not
+    /// block the prompt: the hook can spawn the process, return
+    /// [`ShellCompletionState::Pending`], and be polled while the editor keeps
+    /// reading keys. The default is the old synchronous answer, so a hook that
+    /// has nothing asynchronous to do does not implement this or
+    /// [`ShellCompletion::poll`].
+    fn begin(&mut self, line: &[u8], cursor: usize) -> ShellCompletionState {
+        ShellCompletionState::Ready(self.complete(line, cursor))
+    }
+
+    /// Continue a completion that [`ShellCompletion::begin`] left pending.
+    ///
+    /// Called repeatedly while the editor waits; it must not block. A hook
+    /// that returned [`ShellCompletionState::Pending`] from `begin` must
+    /// eventually answer `Ready`, and `Ready(None)` means "let the data engine
+    /// answer", exactly as `None` from `complete` does.
+    fn poll(&mut self) -> ShellCompletionState {
+        ShellCompletionState::Ready(None)
+    }
+
+    /// Abandon a pending completion because the user typed or the line is
+    /// over. Called at most once per `Pending`; the hook must not keep a
+    /// process or its pipe alive afterwards.
+    fn cancel(&mut self) {}
+}
+
+/// What a [`ShellCompletion`] has for the current Tab.
+#[derive(Clone, Debug)]
+pub enum ShellCompletionState {
+    /// The hook has an answer: `Some` is its menu, `None` means the data
+    /// engine should answer.
+    Ready(Option<ShellMenu>),
+    /// The answer is not available yet; call [`ShellCompletion::poll`] again
+    /// from the editor's wait loop.
+    Pending,
 }
 
 /// A menu that came from shell code, plus whatever the function printed.
@@ -257,6 +300,10 @@ pub struct Editor<'a> {
     /// without this there is nothing to measure them against; `None` means the
     /// terminal did not answer and clicks are ignored.
     prompt_row: Option<u16>,
+    /// A [`ShellCompletion::begin`] returned [`ShellCompletionState::Pending`]
+    /// and has not answered yet. While this is set the read loop polls the hook
+    /// instead of parking on the keyboard alone.
+    completion_pending: bool,
 }
 
 impl<'a> Editor<'a> {
@@ -298,6 +345,7 @@ impl<'a> Editor<'a> {
             dirty: true,
             preamble: Vec::new(),
             prompt_row: None,
+            completion_pending: false,
         }
     }
 
@@ -431,6 +479,9 @@ impl<'a> Editor<'a> {
             let _ = self.term.write_all(baash_sys::osc::PROMPT_START);
         }
         let result = self.read_line_loop(live, &mut shell, marked);
+        // The loop cancels before every normal exit; an error short-circuit
+        // could otherwise leave a completion child running with raw mode off.
+        self.abandon_completion(&mut shell);
         let _ = self.term.leave_raw();
         result
     }
@@ -480,6 +531,7 @@ impl<'a> Editor<'a> {
         self.suggestion_dismissed = false;
         self.history.reset_navigation();
         self.secondary = false;
+        self.completion_pending = false;
         self.renderer.reset();
         self.dirty = true;
     }
@@ -562,12 +614,26 @@ impl<'a> Editor<'a> {
             let _ = self.term.write_all(baash_sys::osc::PROMPT_END);
         }
         loop {
+            // Poll an outstanding asynchronous completion before waiting: its
+            // process may have answered while the loop was painting.
+            if self.completion_pending {
+                self.poll_shell(shell)?;
+                if !self.completion_pending {
+                    continue;
+                }
+            }
             // A key pushed back by the cursor-position query is already in the
             // decoder, so the kernel has nothing to wake on: waiting first
             // would park the line until the user typed again.
             if !self.decoder.has_pending() {
-                match self.term.await_input()? {
+                let waited = if self.completion_pending {
+                    self.term.await_input_timeout(COMPLETION_WAIT)?
+                } else {
+                    self.term.await_input()?
+                };
+                match waited {
                     Input::Key => {}
+                    Input::Timeout => continue,
                     Input::Resize => {
                         // The prompt's screen row is no longer known: the
                         // terminal reflowed and the next report is a prompt
@@ -596,8 +662,13 @@ impl<'a> Editor<'a> {
                 }
             }
             let Some(key) = self.decoder.next(self.term)? else {
+                self.abandon_completion(shell);
                 return self.finish_eof();
             };
+            // A keystroke means the pending answer is for a line the user has
+            // already moved on from. Cancel it before the key is processed so
+            // the process is reaped promptly rather than after the next Tab.
+            self.abandon_completion(shell);
             match self.step_with(key, shell)? {
                 Flow::Continue => {}
                 Flow::Submit => {
@@ -923,24 +994,66 @@ impl<'a> Editor<'a> {
     /// A `-F` rule is shell code; when the hook answers, that menu is offered
     /// instead of the data one. A hook that answers `None` (or no hook at all)
     /// keeps the engine's completion, which is also what a rule whose function
-    /// could not run falls back to.
+    /// could not run falls back to. A hook that answers `Pending` has started
+    /// work the loop polls; nothing is offered until it answers.
     fn complete_with(&mut self, shell: &mut Option<&mut dyn ShellCompletion>) -> io::Result<()> {
-        let from_shell = match shell {
-            Some(shell) => shell.complete(self.line.buffer(), self.line.cursor()),
-            None => None,
+        let state = match shell {
+            Some(shell) => shell.begin(self.line.buffer(), self.line.cursor()),
+            None => ShellCompletionState::Ready(None),
         };
-        let menu = match from_shell {
-            Some(shell_menu) => {
+        self.apply_completion(state)
+    }
+
+    /// Offer whatever the hook answered, or fall back to the data engine.
+    fn apply_completion(&mut self, state: ShellCompletionState) -> io::Result<()> {
+        match state {
+            ShellCompletionState::Pending => {
+                self.completion_pending = true;
+                Ok(())
+            }
+            ShellCompletionState::Ready(Some(shell_menu)) => {
+                self.completion_pending = false;
                 if !shell_menu.output.is_empty() {
                     self.print_above(&shell_menu.output)?;
                 }
-                shell_menu.menu
+                self.dirty = true;
+                self.offer(shell_menu.menu)
             }
-            None => self
-                .completer
-                .complete(self.line.buffer(), self.line.cursor()),
+            ShellCompletionState::Ready(None) => {
+                self.completion_pending = false;
+                let menu = self
+                    .completer
+                    .complete(self.line.buffer(), self.line.cursor());
+                self.dirty = true;
+                self.offer(menu)
+            }
+        }
+    }
+
+    /// Poll a pending hook; a finished answer is painted here, not by the key
+    /// path, because no key produced it.
+    fn poll_shell(&mut self, shell: &mut Option<&mut dyn ShellCompletion>) -> io::Result<()> {
+        let state = match shell {
+            Some(shell) => shell.poll(),
+            None => ShellCompletionState::Ready(None),
         };
-        self.offer(menu)
+        let was_pending = self.completion_pending;
+        self.apply_completion(state)?;
+        if was_pending && !self.completion_pending {
+            self.draw()?;
+        }
+        Ok(())
+    }
+
+    /// Stop polling and tell the hook to release its process.
+    fn abandon_completion(&mut self, shell: &mut Option<&mut dyn ShellCompletion>) {
+        if !self.completion_pending {
+            return;
+        }
+        if let Some(shell) = shell {
+            shell.cancel();
+        }
+        self.completion_pending = false;
     }
 
     /// Erase the frame, write `bytes` where it was, and repaint below.

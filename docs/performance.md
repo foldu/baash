@@ -74,9 +74,55 @@ The cost is dominated by a few large tools: bazel is 704 KB of carapace JSON,
 git 439 KB, kubectl 194 KB, uv 187 KB. The `carapace` feature is **opt-in** in
 `baash` (`--features carapace`), so the default build stays at 26.7 MB and the
 tables are a deliberate 14 MiB. `just carapace-data` regenerates them from the manifest
-(`crates/baash-complete-data/commands.txt`). Per-Tab latency was not measured
-here: the tables are static and the provider is a binary search plus a walk
-over the typed words.
+(`crates/baash-complete-data/commands.txt`). The tables are static — a binary
+search plus a walk over the typed words — and Tab with them costs 0.7 ms, the
+first row of the runtime measurement below.
+
+### 2026-11-12: runtime carapace lookups at Tab
+
+When a `carapace` binary is on the shell's `PATH`, Tab asks it (`carapace
+<command> export …`) instead of using the static tables. Debug build,
+`x86_64-linux`, `LC_ALL=C`, `TERM=dumb`, n=15 per row, in a git worktree, Tab
+sent through a pty and the first repaint containing the answer timed:
+
+| case | median | min | max |
+|---|---:|---:|---:|
+| `git ch<TAB>`, no carapace (static table) | 0.7 ms | 0.4 ms | 0.9 ms |
+| `git ch<TAB>`, carapace 1.8.1 on `PATH` | 20.8 ms | 20.5 ms | 21.0 ms |
+| `git checkout <TAB>`, carapace dynamic branches | 30.7 ms | 20.9 ms | 31.0 ms |
+
+The carapace numbers are dominated by the binary itself, not the shell: the same
+`carapace git export git ch` run directly from Python costs 13.1 ms median
+(12.0–15.6 ms), and a dynamic branch list (`carapace git export git checkout ''`)
+costs 24.0 ms median (17.9–45.1 ms). The extra milliseconds on the Tab rows are
+the editor's 10 ms poll interval: the answer is collected asynchronously, so the
+prompt stays live and a keystroke can abandon the lookup instead of waiting for
+it. The dynamic row needs `git` on the shell's `PATH` too — carapace runs it —
+and `carapace git export git checkout ''` in a directory that is not a
+repository exits 0 with `messages` and no values, which falls through. The bound is 500 ms (`carapace_ext::TIMEOUT`), after which the child is
+killed and the next source answers; a fake carapace that sleeps for ten seconds
+falls through in the same walk.
+
+
+The memo is bounded twice: 16 entries, and a 64 KiB limit on the pattern itself
+(`regex::MAX_PATTERN`), so a runaway generated pattern is refused rather than
+compiled and remembered. A one-entry cache would miss on every iteration of a
+loop rotating two patterns; with 16 slots both stay compiled. That loop
+(`^--(no-)?file` alternating with the tar ERE, 40 000 evaluations) costs 2.25 µs
+per `=~` on the system engine — the average of the two cached costs, as it
+should be — and 2.69 µs on MinRX. The one-entry version measured 16.9 µs
+(system) and 4.6 µs (MinRX) on the same loop, which is what the other fifteen
+slots are for.
+
+MinRX's compile is one pass into a flat Thompson program, matched by an NFA
+simulation (`docs/contracts.md`). Measured with an `LD_PRELOAD` counting
+allocator, one compile of the tar pattern makes **27 C allocator calls** on
+MinRX against **366** on glibc (glibc includes 202 reallocs of its growing node
+sets), which is the bulk of the compile-time difference; in the `C` locale
+MinRX also takes its byte path (`LC_CTYPE=C` → no `mbrtowc`, no wide
+characters, no Unicode tables). Forcing `C.UTF-8` makes its class-heavy compile
+1.64 → 8.26 µs, so a future `setlocale` call would change this picture.
+
 
 ### 2026-11-01: dynamic specials, and two variable-table fast paths
 
@@ -240,25 +286,6 @@ On the tar ERE the compile is 4.3× the match on glibc and 0.56× on MinRX, so
 the memo was nearly all of glibc's cost and a minority of MinRX's; that is the
 whole reason MinRX was worth keeping as a selectable engine rather than
 retiring once the platform engine stopped compiling on every evaluation.
-
-The memo is bounded twice: 16 entries, and a 64 KiB limit on the pattern itself
-(`regex::MAX_PATTERN`), so a runaway generated pattern is refused rather than
-compiled and remembered. A one-entry cache would miss on every iteration of a
-loop rotating two patterns; with 16 slots both stay compiled. That loop
-(`^--(no-)?file` alternating with the tar ERE, 40 000 evaluations) costs 2.25 µs
-per `=~` on the system engine — the average of the two cached costs, as it
-should be — and 2.69 µs on MinRX. The one-entry version measured 16.9 µs
-(system) and 4.6 µs (MinRX) on the same loop, which is what the other fifteen
-slots are for.
-
-MinRX's compile is one pass into a flat Thompson program, matched by an NFA
-simulation (`docs/contracts.md`). Measured with an `LD_PRELOAD` counting
-allocator, one compile of the tar pattern makes **27 C allocator calls** on
-MinRX against **366** on glibc (glibc includes 202 reallocs of its growing node
-sets), which is the bulk of the compile-time difference; in the `C` locale
-MinRX also takes its byte path (`LC_CTYPE=C` → no `mbrtowc`, no wide
-characters, no Unicode tables). Forcing `C.UTF-8` makes its class-heavy compile
-1.64 → 8.26 µs, so a future `setlocale` call would change this picture.
 
 ## What this says
 

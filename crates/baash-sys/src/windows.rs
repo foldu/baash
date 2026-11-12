@@ -996,6 +996,53 @@ impl Child {
     pub fn pid(&self) -> i32 {
         self.pid
     }
+
+    /// Wait for this child.
+    ///
+    /// `wait_pid` owns the map entry and removes it on exit, which is what the
+    /// completion path needs after a kill.
+    pub fn wait(&self) -> io::Result<WaitOutcome> {
+        wait_pid(self.pid)
+    }
+
+    /// Reap this child if it has exited, without blocking.
+    ///
+    /// The completion path owns exactly one child and cannot use
+    /// [`crate::wait_any_nohang`], which would also consume a status another
+    /// caller is waiting for.
+    pub fn try_wait(&self) -> io::Result<Option<WaitOutcome>> {
+        let mut map = children()
+            .lock()
+            .map_err(|_| io::Error::other("child table"))?;
+        let Some(child) = map.get_mut(&self.pid) else {
+            return Ok(None);
+        };
+        match child.try_wait()? {
+            Some(status) => {
+                let outcome = wait_outcome(status);
+                map.remove(&self.pid);
+                Ok(Some(outcome))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Terminate this child.
+    ///
+    /// A completion that overran its deadline is abandoned, not asked to
+    /// leave. The caller still has to [`Child::try_wait`] to reap it.
+    pub fn kill(&self) -> io::Result<()> {
+        let mut map = children()
+            .lock()
+            .map_err(|_| io::Error::other("child table"))?;
+        let Some(child) = map.get_mut(&self.pid) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no child with pid {}", self.pid),
+            ));
+        };
+        child.kill()
+    }
 }
 
 /// The children this process started, so `wait_pid` can find them again.
