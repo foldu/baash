@@ -1007,8 +1007,8 @@ fn short_host(host: &[u8]) -> &[u8] {
 /// * `↑N` commits ahead of the upstream and `↓N` commits behind it, then `!N`
 ///   tracked files that differ from `HEAD` or the index and `?N` untracked
 ///   files. Each is omitted at zero.
-/// * `$`, or `#` for a root user. There is one space before it and none after:
-///   the cursor sits directly after the marker.
+/// * `$`, or `#` for a root user, with a space on either side: the marker is
+///   separated from the line the user types.
 ///
 /// The major segments are two spaces apart; the counters are one segment whose
 /// members are single-spaced, which is the reference line's `↑23 !2 ?5`.
@@ -1157,9 +1157,11 @@ pub fn tide_prompt(
         }
         bytes.extend_from_slice(segment);
     }
-    // One space before the marker and none after: the reference line has two
-    // spaces between the path, the branch and the counters, and the prompt
-    // character is the last cell before the cursor.
+    // One space on either side of the marker. The reference line has two
+    // spaces between the path, the branch and the counters; the marker keeps
+    // its own space so the first character typed does not touch it, which is
+    // what `$echo` looked like. The space after is not painted, so it cannot
+    // take a background colour from the marker.
     bytes.push(b' ');
     painted(
         &mut bytes,
@@ -1167,6 +1169,7 @@ pub fn tide_prompt(
         if root { ROOT } else { USER },
         if root { b"#" } else { b"$" },
     );
+    bytes.push(b' ');
     ExpandedPrompt::from_bytes(bytes)
 }
 
@@ -2472,19 +2475,19 @@ mod tests {
             ),
             format!(
                 "{DIR_ICON} ~/sr/gith/fo/nixos-config  \
-                 {BRANCH_ICON} master  \u{2191}23 \u{2193}4 !2 ?5 $"
+                 {BRANCH_ICON} master  \u{2191}23 \u{2193}4 !2 ?5 $ "
             )
             .into_bytes()
         );
         // A clean repository keeps the branch and drops the counters.
         assert_eq!(
             render(b"~/sr/bshell", Some(b"main"), counts(0, 0, 0, 0)),
-            format!("{DIR_ICON} ~/sr/bshell  {BRANCH_ICON} main $").into_bytes()
+            format!("{DIR_ICON} ~/sr/bshell  {BRANCH_ICON} main $ ").into_bytes()
         );
         // No repository: no branch segment at all, so no gap where it was.
         assert_eq!(
             render(b"/x", None, None),
-            format!("{DIR_ICON} /x $").into_bytes()
+            format!("{DIR_ICON} /x $ ").into_bytes()
         );
     }
 
@@ -2505,14 +2508,14 @@ mod tests {
                 "\x1b[34m{DIR_ICON} ~/sr/gith/fo\x1b[96m/nixos-config\x1b[0m  \
                  \x1b[32m{BRANCH_ICON} master\x1b[0m  \
                  \x1b[33m\u{2191}23\x1b[0m \x1b[31m\u{2193}4\x1b[0m \
-                 \x1b[33m!2\x1b[0m \x1b[31m?5\x1b[0m \x1b[32m$\x1b[0m"
+                 \x1b[33m!2\x1b[0m \x1b[31m?5\x1b[0m \x1b[32m$\x1b[0m "
             )
             .into_bytes()
         );
         // Root keeps its distinction, and the escape covers the marker only.
         assert_eq!(
             tide_prompt(b"/x", None, None, None, true, true, false).into_bytes(),
-            format!("\x1b[34m{DIR_ICON} /x\x1b[0m \x1b[31m#\x1b[0m").into_bytes()
+            format!("\x1b[34m{DIR_ICON} /x\x1b[0m \x1b[31m#\x1b[0m ").into_bytes()
         );
     }
 
@@ -2565,7 +2568,7 @@ mod tests {
                 false
             )
             .into_bytes(),
-            format!("ada@jupiter  {DIR_ICON} ~/src/bshell  {BRANCH_ICON} main  \u{2191}1 $")
+            format!("ada@jupiter  {DIR_ICON} ~/src/bshell  {BRANCH_ICON} main  \u{2191}1 $ ")
                 .into_bytes()
         );
         assert_eq!(
@@ -2579,22 +2582,22 @@ mod tests {
                 false
             )
             .into_bytes(),
-            format!("\x1b[33mada@jupiter\x1b[0m  \x1b[34m{DIR_ICON} /x\x1b[0m \x1b[31m#\x1b[0m")
+            format!("\x1b[33mada@jupiter\x1b[0m  \x1b[34m{DIR_ICON} /x\x1b[0m \x1b[31m#\x1b[0m ")
                 .into_bytes()
         );
     }
 
     #[test]
-    fn the_prompt_ends_with_the_user_s_marker() {
+    fn the_prompt_ends_with_the_marker_and_a_space() {
         // `$` for an ordinary user, `#` for root: the same distinction `\$`
-        // makes in a template, and the last cell before the cursor.
+        // makes in a template, followed by the space the line starts after.
         assert_eq!(
             render(b"/x", None, None),
-            format!("{DIR_ICON} /x $").into_bytes()
+            format!("{DIR_ICON} /x $ ").into_bytes()
         );
         assert_eq!(
             tide_prompt(b"/x", None, None, None, true, false, false).into_bytes(),
-            format!("{DIR_ICON} /x #").into_bytes()
+            format!("{DIR_ICON} /x # ").into_bytes()
         );
         // The marker follows the counters rather than replacing them.
         assert_eq!(
@@ -2608,7 +2611,7 @@ mod tests {
                 false
             )
             .into_bytes(),
-            format!("{DIR_ICON} /x  {BRANCH_ICON} main  !2 ?1 #").into_bytes()
+            format!("{DIR_ICON} /x  {BRANCH_ICON} main  !2 ?1 # ").into_bytes()
         );
     }
 
@@ -2616,20 +2619,20 @@ mod tests {
     fn counters_are_suppressed_at_zero_and_keep_their_order() {
         assert_eq!(
             render(b"/x", None, counts(2, 0, 0, 0)),
-            format!("{DIR_ICON} /x  !2 $").into_bytes()
+            format!("{DIR_ICON} /x  !2 $ ").into_bytes()
         );
         assert_eq!(
             render(b"/x", None, counts(0, 1, 0, 0)),
-            format!("{DIR_ICON} /x  ?1 $").into_bytes()
+            format!("{DIR_ICON} /x  ?1 $ ").into_bytes()
         );
         // Singular, and large enough that a `u8` would wrap.
         assert_eq!(
             render(b"/x", None, counts(1, 1, 1, 1)),
-            format!("{DIR_ICON} /x  \u{2191}1 \u{2193}1 !1 ?1 $").into_bytes()
+            format!("{DIR_ICON} /x  \u{2191}1 \u{2193}1 !1 ?1 $ ").into_bytes()
         );
         assert_eq!(
             render(b"/x", None, counts(123_456, 987_654_321, 4_294_967_295, 1)),
-            format!("{DIR_ICON} /x  \u{2191}4294967295 \u{2193}1 !123456 ?987654321 $")
+            format!("{DIR_ICON} /x  \u{2191}4294967295 \u{2193}1 !123456 ?987654321 $ ")
                 .into_bytes()
         );
     }
@@ -2649,14 +2652,14 @@ mod tests {
         // survives exactly and cannot become U+FFFD.
         let mut expected = Vec::new();
         expected.extend_from_slice(DIR_ICON.as_bytes());
-        expected.extend_from_slice(b" ~/caf\xe9/\xff $");
+        expected.extend_from_slice(b" ~/caf\xe9/\xff $ ");
         assert_eq!(render(b"~/caf\xe9/\xff", None, None), expected);
 
         let mut expected = Vec::new();
         expected.extend_from_slice(DIR_ICON.as_bytes());
         expected.extend_from_slice(b" ~/\xff  ");
         expected.extend_from_slice(BRANCH_ICON.as_bytes());
-        expected.extend_from_slice(b" ma\xefn $");
+        expected.extend_from_slice(b" ma\xefn $ ");
         assert_eq!(render(b"~/\xff", Some(b"ma\xefn"), None), expected);
     }
 
@@ -2810,7 +2813,7 @@ mod tests {
         // directory and the marker are all that is left.
         let mut expected = "\u{f115} ".to_string();
         expected.push_str(&String::from_utf8_lossy(&as_bytes(&root)));
-        expected.push_str(" $");
+        expected.push_str(" $ ");
         assert_eq!(render(&as_bytes(&root), None, None), expected.into_bytes());
     }
 
