@@ -339,7 +339,13 @@ fn a_word_list_rule_filters_and_inserts() {
     session.line("complete -W 'alpha beta' mycmd");
 
     session.send(b"mycmd al\t");
-    session.expect(b"alpha", Duration::from_secs(10));
+    // Wait for the insertion, not for `alpha` anywhere in the stream: the
+    // typed `complete -W 'alpha beta' mycmd` line is still behind the cursor
+    // (`prompt()` stops at a redraw, not at the line's last frame), so
+    // `expect(b"alpha")` can match that echo and send Enter before the
+    // completion has run. With a carapace lookup the completion is pending,
+    // and that Enter cancels it — the line then runs as `mycmd al`.
+    session.expect(b"mycmd alpha", Duration::from_secs(10));
     session.send(b"\n");
     session.expect(b"args:alpha\r\n", Duration::from_secs(10));
     session.prompt();
