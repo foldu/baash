@@ -174,12 +174,12 @@ delegates everything else: line editing to `baash-repl`, execution to the
   branch (read from `.git/HEAD`, following a `.git` file and `packed-refs` for
   worktrees; a detached `HEAD` is its seven-character commit id), then `↑N`
   commits ahead of the upstream and `↓N` behind it, `!N` modified tracked files
-  and `?N` untracked files, each omitted at zero, then `$` (`#` for root). The major segments are
-  two spaces apart and there is no trailing space. The counters come from one
-  `git status --porcelain=v2 --branch -z` on a worker thread, rate-limited to
-  500 ms and coalesced; the prompt paints the last completed refresh, so a
-  cold or huge repository never delays it, and a `cd` drops the previous
-  directory's counters rather than showing them
+  and `?N` untracked files, each omitted at zero, then `$` (`#` for root). The
+  major segments are two spaces apart and there is no trailing space. The
+  counters come from one `git status --porcelain=v2 --branch -z` on a worker
+  thread, rate-limited to 500 ms and coalesced; the prompt paints the last
+  completed refresh, so a cold or huge repository never delays it, and a `cd`
+  drops the previous directory's counters rather than showing them
   (`docs/prompt-watch.md`). On a terminal the segments use ANSI SGR colours
   (blue directory, bright cyan last component, green branch, yellow `↑`/`!`,
   red `↓`/`?`/`#`); `NO_COLOR` gives the same text uncoloured. The glyphs are
