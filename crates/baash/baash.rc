@@ -1,0 +1,7 @@
+// The shell icon: Explorer, the taskbar, Alt-Tab and the console window title.
+// Windows reads the first RT_GROUP_ICON in the image, so the id is arbitrary.
+//
+// The icon file is found through `--include-dir`, which `build.rs` points at
+// the repository's `assets/`; a bare name here therefore means
+// `assets/baash.ico`.
+1 ICON "baash.ico"

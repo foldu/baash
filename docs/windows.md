@@ -17,7 +17,9 @@ cargo clippy --target x86_64-pc-windows-gnu -p baash -- -D warnings
 ```
 
 It needs the target installed (`rustup target add x86_64-pc-windows-gnu`;
-the flake's `windows` derivation pins a toolchain that has it). `--all-targets`
+the flake's `windows` derivation pins a toolchain that has it) and a resource
+compiler for the exe's icon, which `build.rs` runs even for a check — set
+`BAASH_WINDRES` to `llvm-windres`, or put `windres` on `PATH`. `--all-targets`
 does not work for it: the pty tests and `baash-spec` are Unix-only by design.
 
 ## Build it
@@ -40,6 +42,45 @@ Both are a cached dependency half plus a thin per-change half, so an edit under
 the two halves are configured identically: `nix eval .#windows-deps.drvPath`
 must not move when only `crates/*/src` changed, and if it does, the halves have
 drifted.
+
+## The exe icon
+
+Explorer, the taskbar, Alt-Tab and the console window's title read a program's
+icon from a PE resource, never from the code: the shell asks the loader for
+`RT_GROUP_ICON`, which names one `RT_ICON` per size. So the sheep is built into
+the image rather than drawn by it.
+
+| file | what it is |
+|---|---|
+| `assets/logo.svg` | the mascot; the source of truth |
+| `assets/baash.ico` | the same drawing at 16, 24, 32, 48, 64, 128 and 256 px |
+| `crates/baash/baash.rc` | one `1 ICON "baash.ico"` statement |
+| `crates/baash/build.rs` | compiles it for a Windows target, and only then |
+
+`build.rs` finds the resource compiler in `BAASH_WINDRES` — the flake's
+`prepare` phase already exports LLVM's `llvm-windres` there for
+`turso_sdk_kit` — then falls back to `windres` on `PATH` (the `ci/windres`
+shim) and to `llvm-windres`. It compiles the script to a COFF object under
+`OUT_DIR` and hands the binary target one `cargo:rustc-link-arg-bins`, so the
+object is linked into `baash.exe` and nowhere else. A non-Windows build returns
+before any of that: no Linux toolchain grows a resource compiler requirement.
+
+After editing the logo, regenerate both files:
+
+```sh
+magick -background none assets/logo.svg \
+    -define icon:auto-resize=256,128,64,48,32,24,16 assets/baash.ico
+```
+
+Verify it in the image, not in the source: `inspect_pe_resources` on the built
+`baash.exe` lists the `RT_GROUP_ICON` (type 14) and its seven `RT_ICON`
+(type 3) entries with their declared dimensions, and each group member's
+`declared_bytes` should equal the frame it names. A 256 px entry reports
+width 0, which is the ICO convention, not a bug.
+
+The artwork is drawn for 32 px and up. At 16 px the face is a dark blob with
+two pale dots: legible as "something with eyes", not as a sheep. A dedicated
+16 px cut would be a second drawing; none is checked in.
 
 ## Run it
 

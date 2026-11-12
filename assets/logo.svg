@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">baash</title>
+  <!-- A sheep, because a shell that goes baa is funnier than one that does not.
+       The head is tilted and the eyes disagree: a sheep holding its head
+       straight is a sheep that has understood something, and this one has not. -->
+  <g transform="rotate(-7 64 68)">
+    <!-- Wool: each puff drawn twice, once fat in the outline colour and once
+         in cream, so the union gets one clean rim and no seams. -->
+    <g fill="#24242b">
+      <circle cx="64" cy="24" r="24"/>
+      <circle cx="38" cy="34" r="21"/>
+      <circle cx="90" cy="34" r="21"/>
+      <circle cx="24" cy="54" r="17"/>
+      <circle cx="104" cy="54" r="17"/>
+      <circle cx="30" cy="76" r="16"/>
+      <circle cx="98" cy="76" r="16"/>
+      <circle cx="48" cy="92" r="14"/>
+      <circle cx="80" cy="92" r="14"/>
+      <circle cx="64" cy="100" r="15"/>
+      <circle cx="84" cy="14" r="13"/>
+    </g>
+    <g fill="#f3efe4">
+      <circle cx="64" cy="24" r="21"/>
+      <circle cx="38" cy="34" r="18"/>
+      <circle cx="90" cy="34" r="18"/>
+      <circle cx="24" cy="54" r="14"/>
+      <circle cx="104" cy="54" r="14"/>
+      <circle cx="30" cy="76" r="13"/>
+      <circle cx="98" cy="76" r="13"/>
+      <circle cx="48" cy="92" r="11"/>
+      <circle cx="80" cy="92" r="11"/>
+      <circle cx="64" cy="100" r="12"/>
+      <circle cx="84" cy="14" r="10"/>
+    </g>
+
+    <!-- Ears: high up, long, and each of them gave up at a different angle.
+         The roots sit inside the face, so the face hides where each begins. -->
+    <g transform="rotate(195 28 44)">
+      <ellipse cx="28" cy="44" rx="23" ry="8" fill="#2c2c35"/>
+      <ellipse cx="28" cy="44" rx="14" ry="3.6" fill="#b06a76" transform="translate(-4 1.2)"/>
+    </g>
+    <g transform="rotate(13 100 57)">
+      <ellipse cx="100" cy="57" rx="23" ry="8" fill="#2c2c35"/>
+      <ellipse cx="100" cy="57" rx="14" ry="3.6" fill="#b06a76" transform="translate(4 -1.2)"/>
+    </g>
+
+    <!-- Face, on top of the fleece, so its edge is one clean line. -->
+    <ellipse cx="64" cy="66" rx="26" ry="27" fill="#2c2c35"/>
+
+    <!-- Eyes: one big and certain, one small and lost, both aiming at the nose. -->
+    <circle cx="50" cy="57" r="9" fill="#f3efe4"/>
+    <circle cx="53.5" cy="60" r="4" fill="#14141a"/>
+    <circle cx="55" cy="58.5" r="1.4" fill="#f3efe4"/>
+    <circle cx="77" cy="63" r="5.5" fill="#f3efe4"/>
+    <circle cx="74" cy="61" r="2.5" fill="#14141a"/>
+    <circle cx="73" cy="60" r="0.8" fill="#f3efe4"/>
+
+    <!-- Nose. -->
+    <path d="M59 72 Q64 69.5 69 72 Q67.5 75.5 64 75.5 Q60.5 75.5 59 72 Z" fill="#d98a95"/>
+
+    <!-- Mouth: open, off-centre, one buck tooth. -->
+    <g transform="rotate(-12 60 81)">
+      <ellipse cx="60" cy="81" rx="9.5" ry="6" fill="#14141a"/>
+      <rect x="54" y="75.5" width="5.5" height="4.5" rx="1" fill="#f3efe4"/>
+    </g>
+  </g>
+</svg>
