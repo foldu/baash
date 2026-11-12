@@ -444,13 +444,14 @@ rediscover):
 * `compgen -A signal` prints the runtime's short names (`HUP`) while the Tab
   menu uses bash's spelling (`SIGHUP`); the runtime spelling is the outlier.
 
-**Known-untested:** terminal resize (there is a `TIOCGWINSZ` read; no `SIGWINCH`
-handling seen); whether the line editor is restored correctly when a child
+**Known-untested:** whether the line editor is restored correctly when a child
 leaves the tty in raw/cbreak mode; and an interactive shell started in the
 background (`baash -i &`), which now shares its foreground group with no terminal
 handover at all. `Ctrl-C` on a foreground command is covered by
 `interactive_signals.rs`; `Ctrl-Z` is deliberately unhandled (it stops the shell
-too) and is not tested.
+too) and is not tested. Terminal resize is covered:
+`interactive_prompt.rs` sends `SIGWINCH` at a real prompt and reads the
+repainted frame.
 
 Harnesses: `crates/baash-sys/tests/pty.rs` (real pty, termios, window size,
 `become_session_leader`), `crates/baash/tests/interactive_signals.rs`
@@ -459,7 +460,8 @@ Harnesses: `crates/baash-sys/tests/pty.rs` (real pty, termios, window size,
 (`!!`, designators, quick substitution, `:p`, `histverify`, `set +H`, failed
 events, and the expanded ring contents at a real prompt), `crates/baash/tests/interactive_prompt.rs` (the rendered
 prompt, `PROMPT_COMMAND`, prompt escapes, `PS1` from an rc file and from a
-command, `Ctrl-R` end to end), `crates/baash/tests/interactive_complete.rs`
+command, `Ctrl-R` end to end, the prompt marks and titles, click coordinates,
+resize repaint, `Ctrl-L`, OSC 52 and the unambiguous-keyboard request pair), `crates/baash/tests/interactive_complete.rs`
 (variable, keyword, function, `complete -W`, directory, `-o default`, history
 and quoted-filename completion at a real prompt),
 `crates/baash/tests/interactive_zoxide.rs` (the script `zoxide init bash` prints
