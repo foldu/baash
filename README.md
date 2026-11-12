@@ -138,6 +138,7 @@ crates/
   baash-complete   completion candidates and ranking
   baash-repl       line editor and terminal rendering
   baash-tools      dev helpers (stub)
+  baash-bench      the `=~` benchmarks (dev only)
   baash            the binary
 ```
 

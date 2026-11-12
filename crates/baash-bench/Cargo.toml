@@ -1,0 +1,18 @@
+[package]
+name = "baash-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Benchmarks: the `=~` engine, and the shell's own loop"
+
+[dependencies]
+baash-sys.workspace = true
+
+# `harness = false`: libtest's `#[bench]` is nightly-only and criterion is a
+# large dependency tree for two tables. The measurement is `Instant` around a
+# loop, which is all these numbers need (`benches/regex.rs` says why).
+[[bench]]
+name = "regex"
+harness = false

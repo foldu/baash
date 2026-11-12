@@ -5,7 +5,7 @@ documents a contract in its branch report, the next agent never sees it, and the
 two assumptions quietly disagree six weeks later.
 
 Each section is owned by the producing crate. If you are implementing a consumer
-(`baash-vm`, `baash-repl`, `baash-tools`) read the relevant sections before you start,
+(`baash-vm`, `baash-repl`, `baash-tools`, `baash-bench`) read the relevant sections before you start,
 and treat every item here as a fact about the API you are calling.
 
 Status: everything except the tooling has landed: `baash-diag`, `baash-sys`,
@@ -1233,6 +1233,10 @@ Contract points that the caller must honour:
   the system engine on Windows — the binary rejects the name before it gets
   there, with a usage error.
 - **`Regex` is neither `Send` nor `Sync` nor `Clone`**: one thread, one pattern.
+- **Measured by `crates/baash-bench`**, which calls this API and not a copy of
+  it: `cargo bench -p baash-bench` prints the engine table, and `--shell <baash>`
+  adds the in-shell loop and the rotating-pattern case. The numbers in
+  `docs/performance.md` come from it, and `just bench` runs it.
 - **`Cache` is a 16-slot LRU memo** keyed on (pattern bytes, case mode,
   engine). A miss compiles and inserts, evicting the least recently used
   pattern; a compile **error is not cached**; a clone starts empty; switching

@@ -143,6 +143,7 @@ commit and the tag cannot drift apart.
 | `baash-spec` | 3249 | the Oils-suite runner, comparator, ratchet |
 | `baash` | 1971 | the binary: argument parsing, startup files, REPL loop, history ownership swap |
 | `baash-tools` | 16 | dev helpers |
+| `baash-bench` | 388 | the `=~` benchmarks: engine-level compile/match, and the in-shell loop against bash |
 
 The evaluator is the runtime, and for now the only one: the bytecode backend is
 deferred until the bash surface is smaller (`docs/direction.md` §2), with the

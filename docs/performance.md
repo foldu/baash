@@ -172,57 +172,64 @@ why it is not in this commit.
 
 `=~` compiled the pattern on every evaluation, and compiling is what a loop
 pays for. A 16-slot LRU memo in the interpreter (`baash_sys::regex::Cache`)
-plus a selectable engine (the platform `regcomp`, or MinRX; `docs/contracts.md`) was
-measured with the harness the shell itself uses: `-c` scripts of 20 000
+plus a selectable engine (the platform `regcomp`, or MinRX; `docs/contracts.md`)
+was measured with the harness the shell itself uses: `-c` scripts of 20 000
 evaluations, release build, minimum of 11 interleaved process runs minus the
 same loop with `[[ -n $s ]]`, against bash 5.3.20 on the identical scripts.
-Re-measured on `7e0fbfd`; a second sample of the four closest rows agreed
-within 6%.
+
+The harness is `crates/baash-bench` (`just bench` builds the release shell and
+runs it), and it prints both tables below in the markdown they are written in,
+so a figure here and a figure there cannot drift apart. Measured on `7e0fbfd`,
+32 cores, ns per `=~`:
 
 | pattern | bash | system engine | MinRX |
 |---|---:|---:|---:|
-| `create` (literal) | 1.27 µs | 0.59 µs | 0.65 µs |
-| tar's `_longopt` ERE (84 B) | 36.6 µs | **3.35 µs** | 4.36 µs |
-| `^(foo|foobar|baz)([0-9]+)?$` | 4.19 µs | 0.54 µs | 0.48 µs |
-| `^--(no-)?file` | 1.71 µs | 0.48 µs | 0.51 µs |
-| no-match `^[[:blank:]]*--([[:alnum:]-]+)$` | 7.38 µs | 0.59 µs | 0.66 µs |
-| capture `^--([[:alnum:]-]+)=(.*)$` | 6.54 µs | 1.66 µs | 1.52 µs |
+| `create` (literal) | 1.29 µs | 0.69 µs | 0.71 µs |
+| tar's `_longopt` ERE (84 B) | 37.1 µs | 3.50 µs | 4.36 µs |
+| `^(foo|foobar|baz)([0-9]+)?$` | 8.65 µs | 1.20 µs | 1.07 µs |
+| `^--(no-)?file` | 3.69 µs | 0.96 µs | 0.69 µs |
+| no-match `^[[:blank:]]*--([[:alnum:]-]+)$` | 7.26 µs | 0.65 µs | 0.68 µs |
+| capture `^--([[:alnum:]-]+)=(.*)$` | 6.60 µs | 1.68 µs | 1.47 µs |
 
-One gap is wider than the run-to-run noise: the fat tar ERE, where glibc's
-`regcomp`-free match is **23%** quicker. Two rows repeat a small edge worth
-noting and not much else — the no-match pattern favours glibc by 11–14% and the
-capture pattern MinRX by 9% — and the rest are a wash. So on the patterns a
-completion actually runs, the engine choice is not a throughput decision at
-all: it is portability, which is why MinRX exists. Both engines are 8–11×
-faster than bash on the tar ERE.
+Every shape but `no-match` gets a subject it actually matches, so the match —
+and, for the capture shape, the group filling — is inside the timed work.
 
-The memo's own effect is measurable at the engine level (`baash_sys::Regex`,
-below): compiling the tar ERE costs 8.24 µs on glibc and 1.85 µs on MinRX,
-running it 2.3 and 3.5 µs, so a loop that recompiled paid 10.5 and 5.3 µs per
-`=~` and the memo removes 11.6× and 1.6× of that.
+Neither engine wins the set. glibc is **20%** quicker on the fat tar ERE, and
+MinRX is quicker on the three shapes a completion hits most: `^--(no-)?file` by
+28%, the capture pattern by 13%, the alternation by 11%. The remaining two rows
+are a few percent apart. Both engines are 8–11× faster than bash on the tar
+ERE, which is the pattern bash's own tar completion runs.
+
+The engine table explains the split, and the two tables agree row for row: once
+the memo has removed the compile, the shape of the *match* is what the shell
+pays, and glibc matches better on one pattern while MinRX matches better on
+three. Where the time goes (`baash_sys::Regex`, µs per call, minimum of
+7 × 20 000; the compile column moves 20–30% between runs because it is
+allocation-bound, the match column is stable to a few percent):
+
+| pattern | glibc compile / match | MinRX compile / match |
+|---|---:|---:|
+| `create` | 0.48 / 0.16 | 0.18 / 0.17 |
+| tar ERE | 9.98 / 2.30 | 1.83 / 3.27 |
+| `^(foo|foobar|baz)([0-9]+)?$` | 3.47 / 0.40 | 0.40 / 0.34 |
+| `^--(no-)?file` | 1.70 / 0.33 | 0.26 / 0.16 |
+| no-match pattern | 2.23 / 0.06 | 1.20 / 0.15 |
+| capture pattern | 1.97 / 0.90 | 0.80 / 0.75 |
+
+On the tar ERE the compile is 4.3× the match on glibc and 0.56× on MinRX, so
+the memo was nearly all of glibc's cost and a minority of MinRX's; that is the
+whole reason MinRX was worth keeping as a selectable engine rather than
+retiring once the platform engine stopped compiling on every evaluation.
 
 The memo is bounded twice: 16 entries, and a 64 KiB limit on the pattern itself
 (`regex::MAX_PATTERN`), so a runaway generated pattern is refused rather than
 compiled and remembered. A one-entry cache would miss on every iteration of a
 loop rotating two patterns; with 16 slots both stay compiled. That loop
-(`^--(no-)?file` alternating with the tar ERE, 40 000 evaluations) costs 1.93 µs
+(`^--(no-)?file` alternating with the tar ERE, 40 000 evaluations) costs 2.25 µs
 per `=~` on the system engine — the average of the two cached costs, as it
-should be — and 2.46 µs on MinRX. The one-entry version measured 16.9 µs
-(system) and 4.6 µs (MinRX) on the same loop, which is also the argument for
-keeping MinRX selectable rather than deleting it: glibc's `regcomp` is 8.2 µs
-on that pattern and MinRX's 1.8 µs.
-
-Where the time goes, engine-level (`baash_sys::Regex`, ns per call, minimum of
-7 × 20 000):
-
-| pattern | glibc compile / match | MinRX compile / match |
-|---|---:|---:|
-| `create` | 281 / 66 | 163 / 88 |
-| tar ERE | 8240 / 2297 | 1848 / 3539 |
-| `^(foo|foobar|baz)([0-9]+)?$` | 2534 / 392 | 382 / 337 |
-| `^--(no-)?file` | 1156 / 326 | 240 / 151 |
-| no-match pattern | 1688 / 37 | 1224 / 21 |
-| capture pattern | 1463 / 886 | 792 / 785 |
+should be — and 2.69 µs on MinRX. The one-entry version measured 16.9 µs
+(system) and 4.6 µs (MinRX) on the same loop, which is what the other fifteen
+slots are for.
 
 MinRX's compile is one pass into a flat Thompson program, matched by an NFA
 simulation (`docs/contracts.md`). Measured with an `LD_PRELOAD` counting
@@ -232,13 +239,6 @@ sets), which is the bulk of the compile-time difference; in the `C` locale
 MinRX also takes its byte path (`LC_CTYPE=C` → no `mbrtowc`, no wide
 characters, no Unicode tables). Forcing `C.UTF-8` makes its class-heavy compile
 1.64 → 8.26 µs, so a future `setlocale` call would change this picture.
-
-Reproducing this is manual: there is no `cargo bench` for it. The harness is one
-20 000-iteration `-c` script per pattern, driven by a Python loop that
-interleaves the shells and keeps the minimum of each, plus a scratch crate
-(`rxapi`) that calls `baash_sys::Regex` directly for the engine-level table.
-That is why each figure carries a commit and a date rather than a baseline CI
-enforces.
 
 ## What this says
 

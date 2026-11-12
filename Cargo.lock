@@ -231,6 +231,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "baash-bench"
+version = "0.0.0"
+dependencies = [
+ "baash-sys",
+]
+
+[[package]]
 name = "baash-complete"
 version = "0.0.0"
 dependencies = [

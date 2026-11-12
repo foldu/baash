@@ -14,6 +14,11 @@ check:
 test:
     cargo test --workspace --all-features
 
+# The `=~` benchmarks: the engine, and the shell's loop against bash.
+bench:
+    cargo build --release -p baash
+    cargo bench -p baash-bench -- --shell "${CARGO_TARGET_DIR:-target}/release/baash" --bash "$(command -v bash)"
+
 # The conformance ratchet against the vendored Oils suite.
 conformance:
     cargo build -p baash

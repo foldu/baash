@@ -40,6 +40,7 @@ just build           # nix build .#default -> result/bin/baash
 just windows         # nix build .#windows      -> result-windows/bin/baash.exe
 just windows-fast    # nix build .#windows-fast -> result-windows-fast/ (no LTO)
 just test            # cargo test --workspace --all-features
+just bench           # cargo bench -p baash-bench -> the `=~` tables
 just conformance     # the Oils ratchet against crates/baash-spec/baseline.txt
 just licenses        # cargo deny check licenses
 just check           # nix flake check: build + fmt + clippy + licenses + windows
@@ -115,6 +116,7 @@ crates/
   baash-repl       line editor and terminal rendering
   baash-spec       the Oils suite runner and the ratchet
   baash-tools      dev helpers (`fmt`/`lint`/`explain`; stub)
+  baash-bench      the `=~` benchmarks (`cargo bench -p baash-bench`)
   baash-utils      embedded coreutils (uutils), the fallback when `PATH` finds nothing
   baash            the binary: CLI, rc files, wiring
 ```
