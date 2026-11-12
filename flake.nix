@@ -328,6 +328,15 @@
                 license = pkgs.lib.licenses.gpl3Plus;
                 platforms = nixpkgs.lib.platforms.linux;
               };
+
+              # `environment.shells` takes a shell *package*, not a derivation
+              # that happens to contain a shell: NixOS's `toShellPath` checks for
+              # this attribute and builds `/run/current-system/sw/bin/baash` from
+              # it, which is what `/etc/shells`, `chsh` and PAM consult. Without
+              # it the module throws "is not a shell package" while the system
+              # is evaluated — `nix/check-module.nix` never forced `/etc/shells`,
+              # so the gate did not see it.
+              passthru.shellPath = "/bin/baash";
             }
           );
           # The release executable, and the same program without LTO for the

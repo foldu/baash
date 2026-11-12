@@ -271,7 +271,9 @@ It installs the package, adds it to `environment.shells` — `/etc/shells` is wh
 `chsh` and PAM consult before they let a shell be someone's login shell — and
 writes `/etc/xdg/baash/config.sh`, the one startup file a distribution owns. To
 make it the login shell as well,
-`users.users.<name>.shell = lib.getExe config.programs.baash.package;`.
+`users.users.<name>.shell = config.programs.baash.package;` — the package carries
+a `shellPath`, so this resolves to the same `/run/current-system/sw/bin/baash`
+that `/etc/shells` lists and PAM compares against.
 
 The generated file starts by sourcing the copy its own package installed,
 because a system config **replaces** the defaults built into the binary rather
