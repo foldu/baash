@@ -1011,21 +1011,33 @@ fn refresh_prompt(
     complete::refresh(shell, engine);
     std::mem::swap(editor.history_mut(), &mut shell.state().history);
     editor.set_prompt(baash_repl::Prompt::from_expanded(primary, secondary));
-    // Tell the terminal where the prompt is, once per prompt. Its copy of the
-    // directory is not the shell's: a child (`ssh`, a container) can leave it
-    // stale while `PWD` is right, so the report is re-sent rather than only
-    // after a `cd` — the same choice fish made after issue #12191. A dumb
-    // terminal cannot interpret it, and a path with no URI form (a Windows
-    // UNC path) is not guessed at.
+    // Tell the terminal where the prompt is and what to call the window,
+    // once per prompt. The terminal's copy of the directory is not the
+    // shell's: a child (`ssh`, a container) can leave it stale while `PWD` is
+    // right, so the report is re-sent rather than only after a `cd` — the same
+    // choice fish made after issue #12191. A dumb terminal can interpret
+    // neither, and a path with no URI form (a Windows UNC path) is not guessed
+    // at.
     let preamble = if baash_sys::is_dumb_terminal() {
         Vec::new()
     } else {
-        baash_sys::osc::cwd_report(
+        let ssh = baash_lang::prompt::ssh_context(&context.user, &context.host);
+        let ssh = ssh
+            .as_ref()
+            .map(|(user, host)| (user.as_slice(), host.as_slice()));
+        let mut bytes = baash_sys::osc::title(&baash_lang::prompt::window_title(
+            &context.cwd,
+            &context.home,
+            ssh,
+        ));
+        if let Some(report) = baash_sys::osc::cwd_report(
             &context.cwd,
             &baash_sys::hostname(),
             baash_sys::paths::Flavour::host(),
-        )
-        .unwrap_or_default()
+        ) {
+            bytes.extend_from_slice(&report);
+        }
+        bytes
     };
     editor.set_preamble(&preamble);
     stock

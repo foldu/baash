@@ -1323,6 +1323,42 @@ pub fn ssh_context(user: &[u8], host: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     Some((user.to_vec(), host.to_vec()))
 }
 
+/// The text a terminal puts in the window and tab title for this shell.
+///
+/// The directory is abbreviated at `~` only. The prompt's shortest-unique
+/// component form is right next to the cursor, where it saves columns, but in
+/// a title bar it reads as noise and costs a `read_dir` per component. A
+/// remote session is prefixed with `[user@host]`, the same context the prompt
+/// shows, so two windows on different machines are distinguishable from a
+/// task switcher.
+pub fn window_title(cwd: &[u8], home: &[u8], ssh: Option<(&[u8], &[u8])>) -> Vec<u8> {
+    let mut title = Vec::with_capacity(cwd.len() + 24);
+    if let Some((user, host)) = ssh {
+        title.push(b'[');
+        title.extend_from_slice(user);
+        title.push(b'@');
+        title.extend_from_slice(host);
+        title.extend_from_slice(b"] ");
+    }
+    if cwd.is_empty() {
+        title.extend_from_slice(b"baash");
+        return title;
+    }
+    let under_home = !home.is_empty()
+        && cwd.len() > home.len()
+        && cwd.starts_with(home)
+        && cwd[home.len()] == b'/';
+    if !home.is_empty() && cwd == home {
+        title.push(b'~');
+    } else if under_home {
+        title.push(b'~');
+        title.extend_from_slice(&cwd[home.len()..]);
+    } else {
+        title.extend_from_slice(cwd);
+    }
+    title
+}
+
 /// What the default prompt's git segment counts, as one `git status` reports
 /// it.
 ///
@@ -2730,6 +2766,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(git_branch(&as_bytes(&root)), Some(b"a1b2c3d".to_vec()));
+    }
+
+    #[test]
+    fn a_title_abbreviates_the_home_directory() {
+        assert_eq!(window_title(b"/home/ada/src", b"/home/ada", None), b"~/src");
+        assert_eq!(window_title(b"/home/ada", b"/home/ada", None), b"~");
+        // A sibling whose name merely starts with the home path is not under
+        // it: `/home/adal` is not `/home/ada` + `/l`.
+        assert_eq!(
+            window_title(b"/home/adal", b"/home/ada", None),
+            b"/home/adal"
+        );
+        assert_eq!(window_title(b"", b"/home/ada", None), b"baash");
+    }
+
+    #[test]
+    fn a_remote_title_names_the_machine() {
+        assert_eq!(
+            window_title(b"/home/ada/src", b"/home/ada", Some((b"ada", b"lab"))),
+            b"[ada@lab] ~/src"
+        );
     }
 
     #[test]

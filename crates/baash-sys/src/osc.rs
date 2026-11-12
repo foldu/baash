@@ -57,6 +57,37 @@ pub fn cwd_report(cwd: &[u8], host: &[u8], flavour: Flavour) -> Option<Vec<u8>> 
     Some(report)
 }
 
+/// OSC 0 (window title) and OSC 1 (tab title), both set to `text`.
+///
+/// The two are separate so a terminal can put the shell's directory in the
+/// tab and something else in the window; baash sets both, because a window
+/// with one title and a tab with another is a configuration the shell cannot
+/// guess. Control bytes become `?`: a directory name may contain `ESC`, and a
+/// title is not a place to inject a sequence. Bytes `0x80..=0x9f` are left
+/// alone — they are legal UTF-8 continuation bytes, and a title is not
+/// required to be ASCII.
+pub fn title(text: &[u8]) -> Vec<u8> {
+    let text: Vec<u8> = text
+        .iter()
+        .map(|&byte| {
+            if byte < 0x20 || byte == 0x7f {
+                b'?'
+            } else {
+                byte
+            }
+        })
+        .collect();
+    let mut out = Vec::with_capacity(text.len() * 2 + 12);
+    for selector in *b"01" {
+        out.extend_from_slice(b"\x1b]");
+        out.push(selector);
+        out.push(b';');
+        out.extend_from_slice(&text);
+        out.push(0x07);
+    }
+    out
+}
+
 /// The path part of the URI, already encoded, with a leading `/`.
 fn uri_path(cwd: &[u8], flavour: Flavour) -> Option<Vec<u8>> {
     if cwd.is_empty() {
@@ -122,6 +153,29 @@ mod tests {
 
     fn posix(cwd: &[u8], host: &[u8]) -> Vec<u8> {
         cwd_report(cwd, host, Flavour::Posix).expect("a report")
+    }
+
+    #[test]
+    fn the_title_is_set_for_the_window_and_the_tab() {
+        assert_eq!(
+            title(b"~/src/lab"),
+            b"\x1b]0;~/src/lab\x07\x1b]1;~/src/lab\x07".to_vec()
+        );
+    }
+
+    #[test]
+    fn control_bytes_in_a_title_cannot_start_a_sequence() {
+        // A directory named with an `ESC` must not be able to append to the
+        // title sequence and issue a command of its own.
+        assert_eq!(
+            title(b"a\x1b]2;owned\x07b\nc"),
+            b"\x1b]0;a?]2;owned?b?c\x07\x1b]1;a?]2;owned?b?c\x07".to_vec()
+        );
+    }
+
+    #[test]
+    fn an_empty_title_is_still_two_sequences() {
+        assert_eq!(title(b""), b"\x1b]0;\x07\x1b]1;\x07".to_vec());
     }
 
     #[test]

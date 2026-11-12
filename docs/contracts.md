@@ -505,17 +505,20 @@ them.
 before the next line's prompt: after `enter_raw`, before the first frame. They
 do not go through the frame because they have no display width and the
 renderer would count them, and they are written once per *line*, not once per
-repaint, so a keystroke cannot repeat them. The shell sets today's only
-preamble, the OSC 7 cwd report
-(`baash_sys::osc::cwd_report(cwd, host, flavour)`), and it re-sends it on every
-prompt: a child process (`ssh`, a container) can leave the terminal's copy of
-the directory stale while the shell's `PWD` is right. The payload is a file
-URI — the host is included, and the path is percent-encoded byte by byte, so a
-name that is not UTF-8 reproduces exactly and `?`, `#` and `%` cannot turn a
-directory name into a query or fragment. Windows also gets ConEmu's
-`OSC 9;9;"NATIVE\PATH"`; a path with no truthful URI form (UNC,
-drive-relative) returns `None` and writes nothing, and `TERM=dumb` suppresses
-the report entirely.
+repaint, so a keystroke cannot repeat them. The shell sets two announcements:
+the window/tab titles (`baash_sys::osc::title`, from
+`baash_lang::prompt::window_title`) and the OSC 7 cwd report
+(`baash_sys::osc::cwd_report(cwd, host, flavour)`). Both are re-sent on every
+prompt. The cwd is re-sent because a child process (`ssh`, a container) can
+leave the terminal's copy of the directory stale while the shell's `PWD` is
+right; the title is re-sent because it names the directory the prompt is
+about, and a title that only changes on `cd` would be wrong after `cd` through
+a symlink anyway. The cwd payload is a file URI — the host is included, and
+the path is percent-encoded byte by byte, so a name that is not UTF-8
+reproduces exactly and `?`, `#` and `%` cannot turn a directory name into a
+query or fragment. Windows also gets ConEmu's `OSC 9;9;"NATIVE\PATH"`; a path
+with no truthful URI form (UNC, drive-relative) writes no cwd report, and
+`TERM=dumb` suppresses the whole preamble.
 
 **The transform letter is a `Shell` seam.** The parser classifies every
 `${x@…}` as `ParamOp::Unsupported(UnsupportedOp::Transform)`; it does not copy

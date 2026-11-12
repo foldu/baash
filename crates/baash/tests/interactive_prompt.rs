@@ -705,3 +705,32 @@ fn every_prompt_reports_the_working_directory() {
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&work);
 }
+
+/// The window and tab titles name the shell's directory.
+///
+/// A title is not part of the prompt: it has no width, the user's `PS1`
+/// cannot set it, and it must be re-sent at every prompt for the same reason
+/// the cwd report is. Both selectors are set, because the shell cannot guess
+/// which one a terminal shows.
+#[test]
+fn the_window_and_tab_titles_name_the_directory() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let home = temp_dir("title-home");
+    let work = temp_dir("title-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    let directory = work.as_os_str().as_bytes();
+
+    session.expect(b"\x1b]0;", Duration::from_secs(10));
+    session.expect(directory, Duration::from_secs(10));
+    // The tab title follows the window title immediately, then the cwd report.
+    session.expect(b"\x07\x1b]1;", Duration::from_secs(10));
+    session.expect(directory, Duration::from_secs(10));
+    session.expect(b"\x07\x1b]7;file://", Duration::from_secs(10));
+    session.prompt(" $");
+
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}

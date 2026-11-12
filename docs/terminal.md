@@ -69,7 +69,29 @@ unit-tested through `Flavour::Windows`, but no Windows terminal has been
 observed consuming it yet. That is recorded in
 [portability.md](portability.md) rather than claimed here.
 
-## 3. What is next
+## 3. OSC 0/1: the window and tab titles
+
+```
+ESC ] 0 ; TEXT BEL      window title
+ESC ] 1 ; TEXT BEL      tab title
+```
+
+Both are set, to the same text, at every prompt: `~/src/lab` locally,
+`[ada@lab] ~/src` in an SSH session (detected the same way the prompt detects
+it, from `SSH_TTY`/`SSH_CONNECTION`/`SSH_CLIENT`), and `baash` when there is no
+directory. The directory is abbreviated at `~` only. The prompt's
+shortest-unique-component form belongs next to the cursor, where it saves
+columns; in a title bar it is noise, and it would cost a `read_dir` per
+component on every prompt.
+
+The text is sanitised: C0 controls and DEL become `?`. A directory name may
+contain `ESC`, and a title is not a place to inject a sequence. Bytes above
+`0x7f` pass through, because they may be UTF-8 continuation bytes.
+
+The title is set at the prompt. A foreground command that wants its own title
+is a separate decision and is not done yet.
+
+## 4. What is next
 
 In landing order, each with its own commit: window/tab titles (OSC 0/1),
 prompt marks (OSC 133 A–D), focus reporting, a cursor-position query for
