@@ -240,6 +240,11 @@ pub struct Editor<'a> {
     suggestion_dismissed: bool,
     secondary: bool,
     dirty: bool,
+    /// Bytes written to the terminal immediately before the next line's
+    /// prompt: announcements that are not part of the prompt itself, such as
+    /// the working-directory report (OSC 7). They are not painted through the
+    /// frame, because they have no width and the renderer would count them.
+    preamble: Vec<u8>,
 }
 
 impl<'a> Editor<'a> {
@@ -279,6 +284,7 @@ impl<'a> Editor<'a> {
             suggestion_dismissed: false,
             secondary: false,
             dirty: true,
+            preamble: Vec::new(),
         }
     }
 
@@ -323,6 +329,18 @@ impl<'a> Editor<'a> {
         self.dirty = true;
     }
 
+    /// Bytes to write once, immediately before the next line's prompt.
+    ///
+    /// For protocol announcements that are not part of the prompt and have no
+    /// display width — today the working-directory report (OSC 7). The shell
+    /// sets it with the prompt; the editor writes it once per line rather than
+    /// once per repaint, so a keystroke cannot repeat it. An empty slice
+    /// disables it.
+    pub fn set_preamble(&mut self, bytes: &[u8]) {
+        self.preamble.clear();
+        self.preamble.extend_from_slice(bytes);
+    }
+
     /// Wait for the history writes this session queued to reach the database.
     pub fn finish(&mut self) {
         self.history.flush();
@@ -358,6 +376,12 @@ impl<'a> Editor<'a> {
     ) -> io::Result<ReadResult> {
         self.begin();
         self.term.enter_raw()?;
+        // Announcements go before the prompt is painted, not inside it: the
+        // frame's column arithmetic must not see them, and a broken write is
+        // not worth failing the line over.
+        if !self.preamble.is_empty() {
+            let _ = self.term.write_all(&self.preamble);
+        }
         let result = self.read_line_loop(live, &mut shell);
         let _ = self.term.leave_raw();
         result

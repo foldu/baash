@@ -971,6 +971,11 @@ fn refresh_prompt(
     // Decided after `PROMPT_COMMAND`, because that is shell code and may have
     // assigned `PS1`.
     let stock = stock_prompt && shell.uses_default_prompt();
+    // Read once, after `PROMPT_COMMAND`: that command may have `cd`ed, and
+    // both the stock prompt and the terminal's cwd report have to name the
+    // directory the next command will run in, even when the prompt is the
+    // user's own `PS1`.
+    let context = shell.repl_prompt_context();
     let secondary = prompt_template(shell, b"PS2").unwrap_or_else(|| b"> ".to_vec());
     let secondary = shell.render_prompt(&secondary);
     let primary = if stock {
@@ -979,22 +984,13 @@ fn refresh_prompt(
         // next command will run in. The composer itself is cache-only: one
         // `.git/HEAD` read and no subprocess, so a slow repository cannot hold
         // the line up (`docs/prompt-watch.md` §2).
-        let context = shell.repl_prompt_context();
         let color = std::env::var_os("NO_COLOR").is_none() && baash_sys::is_tty(0);
         prompt.arm(&context, color);
         prompt.primary()
     } else {
         // The legacy `[branch ~N]` suffix is fed by the same worker cache, so
         // it needs the directory even when the stock prompt is not in use.
-        let cwd = shell
-            .state()
-            .vars
-            .scalar(b"PWD")
-            .map(baash_sys::os::path_from_bytes)
-            .or_else(|| std::env::current_dir().ok());
-        if let Some(cwd) = cwd {
-            prompt.tick(&cwd);
-        }
+        prompt.tick(&baash_sys::os::path_from_bytes(&context.cwd));
         let template = prompt_template(shell, b"PS1").unwrap_or_default();
         let primary = shell.render_prompt(&template);
         // The stock prompt carries the branch inline; the legacy bracketed
@@ -1015,6 +1011,23 @@ fn refresh_prompt(
     complete::refresh(shell, engine);
     std::mem::swap(editor.history_mut(), &mut shell.state().history);
     editor.set_prompt(baash_repl::Prompt::from_expanded(primary, secondary));
+    // Tell the terminal where the prompt is, once per prompt. Its copy of the
+    // directory is not the shell's: a child (`ssh`, a container) can leave it
+    // stale while `PWD` is right, so the report is re-sent rather than only
+    // after a `cd` — the same choice fish made after issue #12191. A dumb
+    // terminal cannot interpret it, and a path with no URI form (a Windows
+    // UNC path) is not guessed at.
+    let preamble = if baash_sys::is_dumb_terminal() {
+        Vec::new()
+    } else {
+        baash_sys::osc::cwd_report(
+            &context.cwd,
+            &baash_sys::hostname(),
+            baash_sys::paths::Flavour::host(),
+        )
+        .unwrap_or_default()
+    };
+    editor.set_preamble(&preamble);
     stock
 }
 

@@ -43,6 +43,10 @@
 //! * [`paths`] — the lexical path grammar: what a *root* is here, so a logical
 //!   `cd`, `PWD` and the directory stack agree on both platforms without the
 //!   kernel canonicalising anything.
+//! * [`osc::cwd_report`] — the working-directory announcement (OSC 7) that
+//!   terminals use for new tabs, splits and panes. It is a file URI, so the
+//!   path is percent-encoded and the host is not `localhost`; Windows also
+//!   gets ConEmu's `OSC 9;9` form.
 //! * [`wtf8`] — Windows' name encoding as bytes. UTF-8 extended with the lone
 //!   surrogates UTF-16 can hold but a scalar cannot, so a name that came from
 //!   `read_dir` or `argv` goes back to `CreateFileW` unchanged.
@@ -72,6 +76,7 @@ pub mod console;
 pub mod dirs;
 #[cfg(unix)]
 pub mod fd;
+pub mod osc;
 pub mod outcome;
 pub mod paths;
 #[cfg(unix)]
@@ -313,6 +318,15 @@ pub fn is_tty(fd: i32) -> bool {
         // SAFETY: `_isatty` only inspects the descriptor and cannot retain it.
         _ => unsafe { libc::isatty(fd) == 1 },
     }
+}
+
+/// Whether the terminal asked for no control sequences (`TERM=dumb`).
+///
+/// A dumb terminal still shows text, so the shell runs; prompt escapes, a
+/// window title and the cwd report are bytes it cannot interpret, and writing
+/// them only makes the transcript harder to read.
+pub fn is_dumb_terminal() -> bool {
+    std::env::var_os("TERM").is_some_and(|term| term == "dumb")
 }
 
 /// The machine's hostname, without a trailing newline.

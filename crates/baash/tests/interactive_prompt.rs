@@ -656,3 +656,52 @@ fn bracketed_paste_is_enabled_only_while_a_line_is_read() {
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&work);
 }
+
+/// Every prompt tells the terminal which directory it belongs to.
+///
+/// OSC 7 is what makes a new tab, a split or a tmux pane start where the
+/// shell is, and it is re-sent on every prompt rather than only after a `cd`:
+/// a child process (`ssh`, a container) can leave the terminal's copy stale
+/// while the shell's `PWD` is right. The payload is a file URI, so the path
+/// goes out percent-encoded, not as shell bytes.
+#[test]
+fn every_prompt_reports_the_working_directory() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let home = temp_dir("osc-home");
+    let work = temp_dir("osc-work");
+    std::fs::create_dir_all(work.join("sub")).expect("create a subdirectory");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+
+    // The first prompt names the starting directory, before the prompt bytes.
+    session.expect(b"\x1b]7;file://", Duration::from_secs(10));
+    session.expect(work.as_os_str().as_bytes(), Duration::from_secs(10));
+    session.expect(b"\x07", Duration::from_secs(10));
+    session.prompt(" $");
+
+    // A new directory is announced as well.
+    session.send(b"cd sub\n");
+    session.expect(b"\x1b]7;file://", Duration::from_secs(10));
+    session.expect(
+        work.join("sub").as_os_str().as_bytes(),
+        Duration::from_secs(10),
+    );
+    session.expect(b"\x07", Duration::from_secs(10));
+    session.prompt(" $");
+
+    // And an unchanged directory is repeated on the next prompt, which is the
+    // point: the terminal's state can be wrong even when the shell's is not.
+    session.send(b"true\n");
+    session.expect(b"\x1b]7;file://", Duration::from_secs(10));
+    session.expect(
+        work.join("sub").as_os_str().as_bytes(),
+        Duration::from_secs(10),
+    );
+    session.expect(b"\x07", Duration::from_secs(10));
+    session.prompt(" $");
+
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}

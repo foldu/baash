@@ -11,6 +11,7 @@ Guidance for agents (and humans) in this repository. Read first:
 | [docs/contracts.md](docs/contracts.md) | the landed API per crate, cross-crate rules |
 | [docs/portability.md](docs/portability.md) | Windows: behaviour and gaps |
 | [docs/windows.md](docs/windows.md) | the Windows protocol: compile, build, guest |
+| [docs/terminal.md](docs/terminal.md) | the escape sequences baash sends, and the rule for them |
 
 `baash` is a POSIX/bash-*similar* shell in Rust. Five commitments
 (`docs/direction.md` §1) decide most arguments:

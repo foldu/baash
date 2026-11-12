@@ -332,6 +332,13 @@ Known gaps, stated so they are not mistaken for behaviour:
   (`docs/direction.md` §7) the shell has not taken on.
 * **`^Z`** has no job table to stop a job against; the child stops with the
   shell.
+* **The terminal protocol is unverified on a Windows guest.** The cwd report
+  writes `file://HOST/C:/…` and ConEmu's `OSC 9;9`, but no Windows terminal has
+  been observed consuming either; a UNC, drive-relative or drive-rooted path
+  yields no report rather than a guessed one, and `TERM=dumb` suppresses every
+  announcement. The console also has no bracketed-paste protocol: a paste
+  arrives as keystrokes, so the editor's `\x1b[200~` handling is never reached
+  there (`docs/terminal.md` §2).
 
 Conformance is the other backlog, and it is measured: `docs/state.md` §6 and
 `docs/roadmap.md` carry the per-file picture, and `crates/baash-spec/baseline.txt`
