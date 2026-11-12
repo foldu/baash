@@ -326,10 +326,24 @@ its console delivers key events rather than a byte stream, so `Console`
 translates them to the legacy encodings and the same decoder maps them to the
 same keys (`docs/portability.md` §8).
 
-## 13. What is next
-In landing order, each with its own commit: nothing in this list. The cursor
-shape (DECSCUSR) has no second editing mode to switch between, so it is a
-scope decision — land the primitive with a test and leave it unwired, or drop
-it with that rationale. Drag-selection and the richer clipboard it would bring
-are the natural follow-ups to §10. The ordered list is the session's task
-list; this file records what has actually landed.
+## 13. What is not here, and why
+
+No terminal item is left. Two things were considered and are deliberately
+absent:
+
+**Cursor shape (DECSCUSR).** `CSI Ps SP q` sets the shape a terminal draws for
+its cursor, and it is only worth sending when the editor has a second mode —
+vi normal mode, a selection — for the shape to signal. baash has one editing
+mode, so the sequence would be written once at startup and never changed,
+which is a terminal setting rather than shell integration. When a second mode
+lands, DECSCUSR belongs to that change, next to the keys that enter it. There
+is deliberately no helper for it in `baash_sys::osc`: an escape sequence with
+no caller is not a primitive, it is dead code with a test.
+
+**Drag-selection.** Click-to-move (§10) is a press, not a drag: no selection
+model, no double-click word, no clipboard of a range. §9's `Ctrl-X` copies the
+whole line. A selection is the natural follow-up to §10 and would give DECSCUSR
+its second mode.
+
+The ordered list of terminal work is the session's task list; this file records
+what has actually landed.
