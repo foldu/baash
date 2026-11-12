@@ -392,7 +392,7 @@ rediscover):
   `NUL` when closed), and an interactive shell
   installs a `SetConsoleCtrlHandler` that keeps it alive while the child dies —
   `$?` is 130 because `STATUS_CONTROL_C_EXIT` maps to `Signaled(SIGINT)`.
-  `docs/portability.md` §10 records the measurement and the residual coarseness
+  `docs/portability.md` §9 records the measurement and the residual coarseness
   (a built-in loop is not interruptible, `trap INT` never runs).
 * **On Windows the library is there, and `=~` now has an engine.** Verified on
   the guest: the exe mounts the tree in memory (no file, no cache directory),
@@ -629,7 +629,7 @@ Where the waves stand:
   `baash-lang`'s prompt helpers are portable, and deleting the history file took
   the last unix-only code out of `baash-runtime`. `baash-sys`, `baash-lang`,
   `baash-history` (turso 0.8.3 included, with the `windres` wrapper in
-  `portability.md` §10), `baash-runtime`, `baash-vm`, `baash-repl` and `baash` itself
+  `portability.md` §9), `baash-runtime`, `baash-vm`, `baash-repl` and `baash` itself
   cross-compile to `x86_64-pc-windows-gnu`. `baash.exe -c 'echo hi'` runs under
   Wine, and so does a script with `$( … )`, `for`, `if`, a function, `case`,
   arithmetic, brace expansion and `while`. What is left: the standard utilities

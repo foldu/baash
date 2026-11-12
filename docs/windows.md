@@ -22,7 +22,7 @@ does not work for it: the pty tests and `baash-spec` are Unix-only by design.
 
 ## Build it
 
-Two builds of the same program. [portability.md](portability.md) §11 has the
+Two builds of the same program. [portability.md](portability.md) §10 has the
 profiles, the four derivations and the timings; this is the part that matters
 day to day.
 

@@ -11,7 +11,8 @@ an architecture that is not poisoned by `fork`. This document supersedes the
 1. **No `fork()`.** Subshells and command substitution are in-process
    subinterpreters with scoped state. Anything that cannot work that way is
    rejected with a diagnostic, not approximated.
-2. **Windows is a first-class target.** Cross-compiled, not CI-tested at first.
+2. **Windows is a first-class target.** Cross-compiled, built in CI, and verified
+   on a real guest for the behaviour that only exists there.
 3. **Interactive first.** No lag at the prompt, in completion, or in prompt
    refresh; enabled by a completion-based runtime (compio: io_uring on Linux,
    IOCP on Windows) and worker threads for pure CPU work.
@@ -36,7 +37,9 @@ an architecture that is not poisoned by `fork`. This document supersedes the
 
 ## 3. What this deletes
 
-* `fork_gate`, `ThreadGate`, `spawn_forked`, `fork_child`, `fork_child_status`.
+* `fork_gate`, `ThreadGate`, `spawn_forked`, `fork_child`. One helper stays,
+  `fork_child_status`: the pty harness needs to start a shell in its own session,
+  and it is single-threaded at that point.
 * Job control: `JobTable`, `Job`, `enable_job_control`, terminal handover,
   `TerminalGuard`, stopped-job handling, `WUNTRACED` waits, prompt notices,
   `SIGTTOU`/`SIGTTIN`/`SIGTSTP` manipulation, `%` job specifications.
@@ -56,8 +59,8 @@ shell does not have.* It must name the construct and the reason.
 | external command | works (`posix_spawn` / `CreateProcess`) | |
 | `( … )` subshell | works (scope push/pop) | no fork needed |
 | `$( … )` / backticks | works (scope + stdout capture) | the 95 % case |
-| `( exec cmd )` | rejected | `exec` would replace the shell |
-| `builtin \| builtin`, `fn \| fn` | **last stage in-process** (lastpipe), others rejected | `cmd \| while read` is everyday; see §7 |
+| `( exec cmd )` | works: runs the command, then ends the scope | POSIX says `exec` replaces the subshell; there is no process left to replace |
+| `builtin \| builtin`, `fn \| fn` | works: every stage runs in this process, and a non-final shell-code stage's output is buffered for the next one | `cmd \| while read` is everyday; see §7 |
 | `f &`, `{ … } &` | rejected | a job needs a pid |
 | `sleep &` | works | external, real process |
 | `jobs`/`fg`/`bg`/`disown` | rejected with `CAPABILITY` | job control removed |
@@ -112,6 +115,12 @@ simplifies it). No job control means no `tcsetpgrp`, no process groups, and
 `^C` is a console control event.
 
 ## 6. Milestones
+
+Planned 2026-10-30. W1–W4 are done. Two entries were overtaken by the
+implementation: W2's "non-last builtin pipeline stages rejected" (every stage
+runs in process now — `portability.md` §3) and W5's set, which landed smaller
+(`portability.md` §6). W6 is the conformance backlog, tracked by number in
+`state.md` §6.
 
 | # | milestone | acceptance |
 |---|---|---|
