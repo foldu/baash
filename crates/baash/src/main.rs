@@ -25,6 +25,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::ffi::OsString;
 use std::io::{BufRead, Read, Write};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use baash_diag::{Diagnostic, SourceFile};
 use baash_lang::histexpand;
@@ -975,6 +976,92 @@ fn prompt_icons(shell: &mut Interp) -> bool {
         .is_some_and(|value| ON.iter().any(|word| value.eq_ignore_ascii_case(word)))
 }
 
+/// How long the last command took, as the stock prompt should paint it.
+///
+/// `PROMPT_DURATION` picks the policy: `0`/`off`/`false`/`no` never paints, a
+/// truthy word always does, and unset — or anything else — paints only from
+/// [`baash_lang::prompt::DURATION_FLOOR`]. The default is the middle one
+/// because a prompt that
+/// reports every 20 ms `grep` is noise, and one that reports nothing is a
+/// feature nobody discovers. It is read at the next prompt, so an assignment
+/// typed at the prompt takes effect immediately (`docs/contracts.md`).
+fn prompt_duration(shell: &mut Interp, elapsed: Duration) -> Option<Duration> {
+    let setting = shell
+        .state()
+        .vars
+        .scalar(b"PROMPT_DURATION")
+        .map(<[u8]>::to_vec);
+    baash_lang::prompt::show_duration(setting.as_deref(), elapsed)
+}
+
+/// The shortest command worth a desktop notification, from `BAASH_NOTIFY`.
+///
+/// The value is a number of seconds; unset, empty, `0` or a false word turns
+/// notifications off, which is the default. A notification is an interruption,
+/// so it is opted into rather than sprung on a user who is already watching
+/// the screen.
+fn notify_minimum(shell: &mut Interp) -> Option<Duration> {
+    const OFF: [&[u8]; 4] = [b"0", b"off", b"false", b"no"];
+    let value = shell.state().vars.scalar(b"BAASH_NOTIFY")?;
+    if value.is_empty() || OFF.iter().any(|word| value.eq_ignore_ascii_case(word)) {
+        return None;
+    }
+    let seconds: u64 = std::str::from_utf8(value).ok()?.trim().parse().ok()?;
+    (seconds > 0).then(|| Duration::from_secs(seconds))
+}
+
+/// Ask the terminal to notify the user, if the command outlived
+/// `BAASH_NOTIFY`.
+///
+/// The shell cannot ask whether the terminal has focus while a child runs:
+/// focus reporting is off for the duration of a command, so that a child
+/// reading stdin is never handed `CSI I`/`CSI O`. The policy is therefore a
+/// threshold and not a focus test — a terminal that raises its own
+/// notification from `OSC 133 D` knows its focus and is doing the better
+/// version (`docs/terminal.md` §13). The body names the command and never its
+/// output, because an output line can be a secret.
+fn notify_long_command(
+    editor: &mut baash_repl::Editor<'_>,
+    shell: &mut Interp,
+    command: &[u8],
+    elapsed: Duration,
+    status: i32,
+) {
+    let Some(minimum) = notify_minimum(shell) else {
+        return;
+    };
+    if elapsed < minimum {
+        return;
+    }
+    let mut body = Vec::with_capacity(command.len() + 32);
+    body.extend_from_slice(b"baash: ");
+    body.extend_from_slice(&baash_lang::prompt::format_duration(elapsed));
+    if status != 0 {
+        body.extend_from_slice(format!(", exit {status}").as_bytes());
+    }
+    body.extend_from_slice(" \u{2014} ".as_bytes());
+    body.extend_from_slice(notification_command(command));
+    editor.notify(&body);
+}
+
+/// What a notification shows of a command: its first line, bounded.
+///
+/// A multi-line command — a pasted snippet, a `while` loop typed over several
+/// lines — would otherwise arrive as one long line or as several, and a
+/// notification is one line by design. The cut lands on a character boundary
+/// so a UTF-8 command does not end in a replacement glyph.
+fn notification_command(command: &[u8]) -> &[u8] {
+    let end = command
+        .iter()
+        .position(|&byte| byte == b'\n' || byte == b'\r')
+        .unwrap_or(command.len());
+    let mut end = end.min(120);
+    while end > 0 && end < command.len() && command[end] & 0xc0 == 0x80 {
+        end -= 1;
+    }
+    &command[..end]
+}
+
 /// The ring moves to the shell first so `PROMPT_COMMAND` sees the same
 /// history the user does, and because `\!` is the ring's next number, which is
 /// what the line about to be typed will get.
@@ -985,6 +1072,7 @@ fn refresh_prompt(
     prompt: &mut prompt_state::PromptState,
     stock_prompt: bool,
     light: bool,
+    duration: Option<Duration>,
 ) -> bool {
     std::mem::swap(editor.history_mut(), &mut shell.state().history);
     run_prompt_command(shell);
@@ -1005,7 +1093,15 @@ fn refresh_prompt(
         // `.git/HEAD` read and no subprocess, so a slow repository cannot hold
         // the line up (`docs/prompt-watch.md` §2).
         let color = std::env::var_os("NO_COLOR").is_none() && baash_sys::is_tty(0);
-        prompt.arm(&context, color, light, prompt_icons(shell));
+        prompt.arm(
+            &context,
+            baash_lang::prompt::Paint {
+                color,
+                light,
+                icons: prompt_icons(shell),
+            },
+            duration,
+        );
         prompt.primary()
     } else {
         // The legacy `[branch ~N]` suffix is fed by the same worker cache, so
@@ -1159,6 +1255,9 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
     // what lets the editor borrow it while a line is being read
     // (`docs/prompt-watch.md` §3).
     let mut prompt = prompt_state::PromptState::new();
+    // The last command's wall time, kept across the loop because the prompt
+    // that shows it is painted at the top of the *next* iteration.
+    let mut last_duration: Option<Duration> = None;
 
     let status = loop {
         // `PROMPT_COMMAND` runs and the prompt is rendered here, not at
@@ -1181,6 +1280,7 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
             &mut prompt,
             stock_prompt,
             light,
+            last_duration,
         );
         if stock {
             // Only the built-in prompt is live. A user's `PS1` is the result of
@@ -1216,7 +1316,9 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
                 let started = std::time::Instant::now();
                 let status = shell.run_named("<stdin>", &bytes);
                 let elapsed = started.elapsed();
+                last_duration = prompt_duration(shell, elapsed);
                 editor.command_finished(status.0);
+                notify_long_command(&mut editor, shell, command, elapsed, status.0);
                 // `cd` changes the shell's `PWD`; the completion engine and
                 // `PS1`'s `\w` must follow it (`docs/contracts.md`).
                 let after = shell.state().vars.scalar(b"PWD").map(<[u8]>::to_vec);

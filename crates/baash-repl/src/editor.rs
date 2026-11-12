@@ -426,6 +426,19 @@ impl<'a> Editor<'a> {
             .write_all(&baash_sys::osc::command_finished(status));
     }
 
+    /// Ask the terminal to raise a desktop notification (`OSC 9`).
+    ///
+    /// The shell decides *when* — it is the only party that knows the command
+    /// finished and how long it took — and the editor writes it, because it
+    /// owns the terminal and knows whether the terminal can read control
+    /// sequences at all. Written between commands, so a child never sees it.
+    pub fn notify(&mut self, text: &[u8]) {
+        if !self.term.supports_control_sequences() {
+            return;
+        }
+        let _ = self.term.write_all(&baash_sys::osc::notify(text));
+    }
+
     /// Wait for the history writes this session queued to reach the database.
     pub fn finish(&mut self) {
         self.history.flush();

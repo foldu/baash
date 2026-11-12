@@ -199,6 +199,29 @@ pub fn command_finished(status: i32) -> Vec<u8> {
     out
 }
 
+/// `OSC 9 ; TEXT BEL`: ask the terminal to raise a desktop notification.
+///
+/// iTerm2's sequence, and the one ghostty, kitty and wezterm read. `OSC 777`
+/// is the other convention and carries a title as well; this has none, so the
+/// shorter sequence is the one to send. The payload is text, so a `BEL`, an
+/// `ESC` or a newline would end it early or break the sequence: control bytes
+/// become spaces. There is no reply, so delivery cannot be confirmed — a
+/// terminal without notifications, or a user who turned them off, does
+/// nothing, and nothing breaks.
+pub fn notify(text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() + 8);
+    out.extend_from_slice(b"\x1b]9;");
+    for &byte in text {
+        out.push(if byte < 0x20 || byte == 0x7f {
+            b' '
+        } else {
+            byte
+        });
+    }
+    out.push(0x07);
+    out
+}
+
 /// `OSC 52 ; c ; BASE64 BEL`: put `text` on the terminal's clipboard.
 ///
 /// The clipboard belongs to the terminal, not to the process, which is what
@@ -319,6 +342,12 @@ mod tests {
 
     #[test]
     fn a_command_end_carries_the_status() {
+        // OSC 9 has no reply, so the only thing to get right is the framing:
+        // control bytes cannot end the sequence early.
+        assert_eq!(
+            notify(b"baash: 42s \x07\n"),
+            b"\x1b]9;baash: 42s   \x07".to_vec()
+        );
         assert_eq!(command_finished(0), b"\x1b]133;D;0\x1b\\".to_vec());
         assert_eq!(command_finished(130), b"\x1b]133;D;130\x1b\\".to_vec());
     }

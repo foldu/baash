@@ -19,6 +19,7 @@
 //! keystrokes.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use baash_lang::prompt::{ExpandedPrompt, Paint, PathAbbreviator, PromptContext};
 use baash_repl::{Editor, LivePrompt, Prompt};
@@ -36,13 +37,14 @@ pub struct PromptState {
     cwd_bytes: Vec<u8>,
     home: Vec<u8>,
     root: bool,
-    color: bool,
-    /// Whether the terminal's background is light; the stock prompt's accent
-    /// colours change with it (`tide_prompt`'s `light`).
-    light: bool,
-    /// Whether the stock prompt draws the Nerd Font folder and branch glyphs
-    /// (`tide_prompt`'s `icons`). Off unless `PROMPT_ICONS` says otherwise.
-    icons: bool,
+    /// What the stock prompt may paint: colours, the light palette and the
+    /// Nerd Font glyphs. `tide_prompt`'s [`Paint`], kept here because the
+    /// watcher recomposes the line without the shell that decided it.
+    paint: Paint,
+    /// The last command's wall time, when the shell decided it is worth
+    /// painting. It belongs to the command, so it stays until the next one
+    /// finishes rather than being recomputed per repaint.
+    duration: Option<Duration>,
     /// `user@host` when the session is remote, captured when the prompt was
     /// armed: an SSH session does not become local halfway through a line.
     ssh: Option<(Vec<u8>, Vec<u8>)>,
@@ -74,9 +76,8 @@ impl PromptState {
             cwd_bytes: Vec::new(),
             home: Vec::new(),
             root: false,
-            color: false,
-            light: false,
-            icons: false,
+            paint: Paint::default(),
+            duration: None,
             ssh: None,
             secondary: Vec::new(),
             last: Vec::new(),
@@ -113,15 +114,15 @@ impl PromptState {
     /// watch) this is what keeps the counters from freezing at the first
     /// snapshot until a `cd`; [`GitSegment::tick`] is what rate-limits it to
     /// one `git status` per half second, so a prompt loop cannot cost more.
-    /// `color`, `light` and `icons` decide what the stock prompt may paint:
-    /// ANSI colours, the palette for a light background, and the two Nerd Font
-    /// glyphs, which only a patched font draws.
-    pub fn arm(&mut self, context: &PromptContext, color: bool, light: bool, icons: bool) {
+    /// `paint` decides what the stock prompt may draw — ANSI colours, the
+    /// palette for a light background, the two Nerd Font glyphs that only a
+    /// patched font draws — and `duration` is how long the last command took,
+    /// or `None` when the shell decided not to show it.
+    pub fn arm(&mut self, context: &PromptContext, paint: Paint, duration: Option<Duration>) {
         self.home.clone_from(&context.home);
         self.root = context.root;
-        self.color = color;
-        self.light = light;
-        self.icons = icons;
+        self.paint = paint;
+        self.duration = duration;
         self.ssh = baash_lang::prompt::ssh_context(&context.user, &context.host);
 
         if self.cwd_bytes != context.cwd {
@@ -211,11 +212,8 @@ impl PromptState {
             facts.status,
             ssh,
             self.root,
-            Paint {
-                color: self.color,
-                light: self.light,
-                icons: self.icons,
-            },
+            self.duration,
+            self.paint,
         )
     }
 
@@ -292,8 +290,8 @@ mod tests {
             cwd: baash_sys::os::bytes_from_os(root.as_os_str()),
             ..PromptContext::default()
         };
-        state.arm(&context, false, false, false);
-        state.arm(&context, false, false, false);
+        state.arm(&context, Paint::default(), None);
+        state.arm(&context, Paint::default(), None);
         assert_eq!(state.git.ticks(), 2);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -308,7 +306,15 @@ mod tests {
             cwd: baash_sys::os::bytes_from_os(root.as_os_str()),
             ..PromptContext::default()
         };
-        state.arm(&context, true, true, true);
+        state.arm(
+            &context,
+            Paint {
+                color: true,
+                light: true,
+                icons: true,
+            },
+            None,
+        );
         let prompt = state.primary().into_bytes();
         let text = String::from_utf8_lossy(&prompt);
         assert!(
@@ -318,6 +324,41 @@ mod tests {
         assert!(
             !text.contains("\x1b[96m") && !text.contains("\x1b[33m"),
             "no bright cyan or yellow on a light background: {text:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_prompt_keeps_the_last_commands_duration_until_the_next_arm() {
+        // The duration belongs to the command, not to the directory: a
+        // watcher wake-up recomposes the line and must not lose it, and the
+        // next `arm` is what replaces it.
+        let mut state = PromptState::new();
+        let root =
+            std::env::temp_dir().join(format!("baash-prompt-duration-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let context = PromptContext {
+            cwd: baash_sys::os::bytes_from_os(root.as_os_str()),
+            ..PromptContext::default()
+        };
+        state.arm(
+            &context,
+            Paint::default(),
+            Some(Duration::from_millis(1_200)),
+        );
+        let timed = state.primary().into_bytes();
+        assert!(
+            timed.ends_with(b"1.2s $ "),
+            "the duration sits before the marker: {:?}",
+            String::from_utf8_lossy(&timed)
+        );
+        state.arm(&context, Paint::default(), None);
+        let next = state.primary().into_bytes();
+        assert!(
+            !next.windows(4).any(|window| window == b"1.2s"),
+            "the next prompt has no duration: {:?}",
+            String::from_utf8_lossy(&next)
         );
         let _ = std::fs::remove_dir_all(&root);
     }

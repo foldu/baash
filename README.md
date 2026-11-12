@@ -79,7 +79,13 @@ shortest prefix that is unique among their siblings, the last component is kept
 whole, and `$HOME` is `~`. `↑N` is commits
 ahead of the upstream and `↓N` commits behind it, `!N` tracked files with staged
 or unstaged changes, and `?N` untracked files; each is omitted at zero, `$` is
-`#` for root, and one plain space follows the marker. The branch is read from
+`#` for root, and one plain space follows the marker. A command that took
+long enough says so on the next prompt — `2.3s`, `1m02s` — dim, before the
+marker: 500 ms is the floor, `PROMPT_DURATION=0` turns the segment off and
+`PROMPT_DURATION=1` shows it for every command. A command that runs past
+`BAASH_NOTIFY` seconds (unset by default) also asks the terminal for a desktop
+notification when it finishes, with its duration and exit status but never its
+output. The branch is read from
 `.git/HEAD` on the prompt path; the counters come from a `gix` status on a
 worker (500 ms rate limit, coalesced, a 2 s deadline), so no `git` binary is
 needed and a slow repository never delays a prompt

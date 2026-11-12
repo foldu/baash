@@ -59,6 +59,8 @@
 //! that is a POSIX rule string rather than a file falls back to
 //! `/etc/localtime`; when nothing is readable the offset is zero.
 
+use std::time::Duration;
+
 use crate::Span;
 use crate::host::Shell;
 
@@ -1024,6 +1026,8 @@ pub struct Paint {
 /// * `↑N` commits ahead of the upstream and `↓N` commits behind it, then `!N`
 ///   tracked files that differ from `HEAD` or the index and `?N` untracked
 ///   files. Each is omitted at zero.
+/// * the last command's duration, dim, from [`format_duration`], when the
+///   caller passed one.
 /// * `$`, or `#` for a root user, with a space on either side: the marker is
 ///   separated from the line the user types.
 ///
@@ -1045,12 +1049,19 @@ pub struct Paint {
 /// [`Paint::color`] off is the same text with no escapes at all: `NO_COLOR` and
 /// a non-terminal get it. The palette is the portable sixteen-colour SGR set,
 /// so it follows the terminal's own theme.
+///
+/// `duration` is the last command's wall time, or `None` when the caller
+/// decided it is not worth showing — a command that took 20 ms is not news,
+/// and `PROMPT_DURATION` can overrule both directions in the shell. It is
+/// painted dim, because it describes a finished command rather than where the
+/// next one runs.
 pub fn tide_prompt(
     directory: &[u8],
     branch: Option<&[u8]>,
     git: Option<GitStatus>,
     ssh: Option<(&[u8], &[u8])>,
     root: bool,
+    duration: Option<Duration>,
     paint: Paint,
 ) -> ExpandedPrompt {
     let Paint {
@@ -1073,6 +1084,10 @@ pub fn tide_prompt(
     const UNTRACKED: &[u8] = b"\x1b[31m";
     const USER: &[u8] = b"\x1b[32m";
     const ROOT: &[u8] = b"\x1b[31m";
+    // Faint, for the duration: SGR 2, which the terminal's palette decides how
+    // to draw. It must not be one of the accent colours, or a finished
+    // command's time would compete with the branch for attention.
+    const DURATION: &[u8] = b"\x1b[2m";
 
     // On a light background the bright cyan of the current directory and the
     // yellow of the counters are both close to invisible. Magenta is the
@@ -1180,6 +1195,14 @@ pub fn tide_prompt(
         }
     }
 
+    // The duration is metadata about the command that just finished, so it
+    // sits last and dim; it is not a fact about where the next command runs.
+    if let Some(duration) = duration {
+        let mut segment = Vec::with_capacity(8);
+        painted(&mut segment, color, DURATION, &format_duration(duration));
+        segments.push(segment);
+    }
+
     let mut bytes = Vec::with_capacity(directory.len() + 64);
     for (index, segment) in segments.iter().enumerate() {
         if index > 0 {
@@ -1203,6 +1226,53 @@ pub fn tide_prompt(
     );
     bytes.push(b' ');
     ExpandedPrompt::from_bytes(bytes)
+}
+
+/// Whether a command's duration belongs in the prompt, and the value to paint.
+///
+/// `setting` is the shell's `PROMPT_DURATION`: `0`/`off`/`false`/`no` never
+/// paints, `1`/`on`/`true`/`yes` always does, and anything else — including an
+/// unset variable — paints from [`DURATION_FLOOR`], because a prompt that
+/// reports every 20 ms `grep` is noise and one that reports nothing is a
+/// feature nobody discovers. The words are matched without regard to ASCII
+/// case, like `PROMPT_ICONS`.
+pub fn show_duration(setting: Option<&[u8]>, elapsed: Duration) -> Option<Duration> {
+    const ON: [&[u8]; 4] = [b"1", b"on", b"true", b"yes"];
+    const OFF: [&[u8]; 4] = [b"0", b"off", b"false", b"no"];
+    if let Some(setting) = setting {
+        if OFF.iter().any(|word| setting.eq_ignore_ascii_case(word)) {
+            return None;
+        }
+        if ON.iter().any(|word| setting.eq_ignore_ascii_case(word)) {
+            return Some(elapsed);
+        }
+    }
+    (elapsed >= DURATION_FLOOR).then_some(elapsed)
+}
+
+/// The shortest command worth a segment, when `PROMPT_DURATION` does not say.
+pub const DURATION_FLOOR: Duration = Duration::from_millis(500);
+
+/// A command's wall time, short enough for a prompt.
+///
+/// Truncated, not rounded, so the number never claims more time than the
+/// command took: `1.2s` under ten seconds (one decimal is worth the cell),
+/// `42s` under a minute, `1m02s` under an hour, `1h05m` beyond it. The units
+/// change only where the text would otherwise grow without bound.
+pub fn format_duration(duration: Duration) -> Vec<u8> {
+    let millis = duration.as_millis();
+    let text = if millis < 10_000 {
+        format!("{}.{}s", millis / 1_000, millis % 1_000 / 100)
+    } else if millis < 60_000 {
+        format!("{}s", millis / 1_000)
+    } else if millis < 3_600_000 {
+        let seconds = millis / 1_000;
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
+    } else {
+        let minutes = millis / 60_000;
+        format!("{}h{:02}m", minutes / 60, minutes % 60)
+    };
+    text.into_bytes()
 }
 
 /// `cwd` with `$HOME` written as `~` and every outer component shortened.
@@ -1986,6 +2056,7 @@ mod tests {
             git,
             ssh,
             root,
+            None,
             Paint {
                 color,
                 light,
@@ -2657,11 +2728,119 @@ mod tests {
                 counts(2, 1, 0, 0),
                 None,
                 false,
+                None,
                 Paint::default()
             )
             .into_bytes(),
             b"/x main !2 ?1 $ ".to_vec()
         );
+    }
+
+    #[test]
+    fn a_command_that_took_time_shows_it_before_the_marker() {
+        // The duration is the *command's*, so it comes after the counters and
+        // before the marker: where the next command runs, then how long the
+        // last one took, then where to type.
+        assert_eq!(
+            tide_prompt(
+                b"/x",
+                Some(b"main"),
+                counts(2, 1, 0, 0),
+                None,
+                false,
+                Some(Duration::from_millis(1_234)),
+                Paint::default(),
+            )
+            .into_bytes(),
+            b"/x main !2 ?1 1.2s $ ".to_vec()
+        );
+        // No duration, no segment: the line is exactly what it was before
+        // timings existed, which is what keeps the fast path cheap to read.
+        assert_eq!(
+            tide_prompt(
+                b"/x",
+                Some(b"main"),
+                counts(2, 1, 0, 0),
+                None,
+                false,
+                None,
+                Paint::default(),
+            )
+            .into_bytes(),
+            b"/x main !2 ?1 $ ".to_vec()
+        );
+    }
+
+    #[test]
+    fn the_duration_is_dim_rather_than_an_accent_colour() {
+        // A finished command's time must not compete with the branch or the
+        // counters for attention, so it is SGR 2 and nothing else.
+        let prompt = tide_prompt(
+            b"/x",
+            None,
+            None,
+            None,
+            false,
+            Some(Duration::from_millis(2_000)),
+            Paint {
+                color: true,
+                light: false,
+                icons: false,
+            },
+        )
+        .into_bytes();
+        assert!(
+            prompt
+                .windows(b"\x1b[2m2.0s\x1b[0m".len())
+                .any(|window| window == b"\x1b[2m2.0s\x1b[0m"),
+            "dim and reset around the duration: {:?}",
+            String::from_utf8_lossy(&prompt)
+        );
+    }
+
+    #[test]
+    fn the_duration_floor_is_the_default_and_the_word_overrules_it() {
+        // Unset: only a command that took long enough to notice.
+        assert_eq!(show_duration(None, Duration::from_millis(400)), None);
+        assert_eq!(
+            show_duration(None, Duration::from_millis(600)),
+            Some(Duration::from_millis(600))
+        );
+        // `PROMPT_DURATION=1` paints even a fast command; `0` never paints.
+        assert_eq!(
+            show_duration(Some(b"1"), Duration::from_millis(1)),
+            Some(Duration::from_millis(1))
+        );
+        assert_eq!(show_duration(Some(b"off"), Duration::from_secs(30)), None);
+        // The words are ASCII-case-insensitive, and a word the option does not
+        // know falls back to the floor rather than guessing.
+        assert_eq!(
+            show_duration(Some(b"YES"), Duration::from_millis(1)),
+            Some(Duration::from_millis(1))
+        );
+        assert_eq!(show_duration(Some(b"No"), Duration::from_secs(30)), None);
+        assert_eq!(
+            show_duration(Some(b"maybe"), Duration::from_millis(600)),
+            Some(Duration::from_millis(600))
+        );
+    }
+
+    #[test]
+    fn a_duration_keeps_its_units_short() {
+        for (millis, expected) in [
+            (500u64, "0.5s"),
+            (9_999, "9.9s"),
+            (10_000, "10s"),
+            (42_000, "42s"),
+            (61_500, "1m01s"),
+            (3_661_000, "1h01m"),
+        ] {
+            assert_eq!(
+                format_duration(Duration::from_millis(millis)),
+                expected.as_bytes(),
+                "{millis} ms"
+            );
+        }
     }
 
     #[test]

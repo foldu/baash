@@ -344,7 +344,38 @@ other output — but the host observed on the guest ignores both: `Ctrl-M` still
 submits and `Ctrl-Left` arrives as a plain Left. The legacy encodings are
 therefore what the decoder sees there (`docs/portability.md` §8).
 
-## 13. What is not here, and why
+## 13. Desktop notifications (OSC 9)
+
+```
+ESC ] 9 ; TEXT BEL      ask the terminal to raise a notification
+```
+
+A command that outlived `BAASH_NOTIFY` seconds asks the terminal to notify the
+user, and one that failed says so:
+
+```
+baash: 42s — cargo build
+baash: 1m02s, exit 1 — make test
+```
+
+`BAASH_NOTIFY` is a number of seconds. Unset, empty, `0` and the false words
+turn it off, which is the default; a value that is not a number is ignored
+rather than guessed. The sequence goes out after `D`, so a terminal reacting to
+`OSC 133 D` has already had its chance, and `TERM=dumb` sends nothing. The body
+is the first line of the command, bounded to 120 bytes on a character boundary,
+and never its output — an output line can be a secret, and a desktop
+notification is readable by everything on the session.
+
+**The threshold is not a focus test, because there is no focus fact to read.**
+Focus reporting (§5) is on for the line and off again before a command runs: a
+child that reads stdin must never be handed `CSI I` or `CSI O` mixed into its
+input. While a command runs the shell therefore cannot see the terminal lose
+focus, and the state it had at the last keystroke was "focused", because typing
+takes focus. A terminal that raises its own notification from `OSC 133 D`
+knows its own focus and is doing the better version; the shell's is the one
+that works everywhere, which is why it is a threshold and not a guess.
+
+## 14. What is not here, and why
 
 No terminal item is left. Two things were considered and are deliberately
 absent:

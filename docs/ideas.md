@@ -53,9 +53,9 @@ feature — see §4.
 
 | idea | needs | cost | status |
 |---|---|---|---|
-| **Parse-as-you-type diagnostics** — a hard parse error's span and message under the line | the parser, already written for the editor's "is it finished?"; a debounce only if a line is huge | small | **this wave** |
-| **Command duration in the prompt** — `1.2s` before the marker | a timestamp the loop already takes for the history row | tiny | **this wave** |
-| **Completion notification for long commands** — `OSC 9` when a command outlives a threshold | `BAASH_NOTIFY`; the terminal's notification policy | tiny | **this wave** |
+| **Parse-as-you-type diagnostics** — a hard parse error's span and message under the line | the parser, already written for the editor's "is it finished?"; a debounce only if a line is huge | small | **landed** |
+| **Command duration in the prompt** — `1.2s` before the marker | a timestamp the loop already takes for the history row | tiny | **landed** |
+| **Completion notification for long commands** — `OSC 9` when a command outlives a threshold | `BAASH_NOTIFY`; the terminal's notification policy | tiny | **landed** |
 | **`OSC 133 C`/`D`** — command start, text and exit status | nothing new | tiny | landed (`6bea487`) |
 | **Resolution preview** — `ls` → `/run/…/bin/ls (alias: ls --color)` | the `PATH`/builtin/alias index built at the prompt | small | next |
 | **Expansion preview** — show what `*.txt` will become | pure expansions only (tilde, parameter, glob, brace) | medium | next |
@@ -66,7 +66,7 @@ feature — see §4.
 | **Right prompt** — exit status, duration, time at the right edge | width arithmetic the renderer already does | small | later |
 | **History search over the database**, with `$?` and duration beside each hit | a worker query, if the ring is bounded | medium | later |
 | **`Gauge<T>` extraction** | the second consumer outside the prompt | small | later |
-| **Selection, `DECSCUSR`, copying a range** | the second editing mode §13 defers the cursor shape for | medium | later |
+| **Selection, `DECSCUSR`, copying a range** | the second editing mode §14 defers the cursor shape for | medium | later |
 | **Undo/redo and a real kill ring** | nothing threaded at all | small | later |
 | **A command palette** — the shell's knobs (`PROMPT_ICONS`, completion switches) as a menu | the menu renderer | small | later |
 | **A probe cache** — remember the `OSC 11`/DA answers per terminal | a file keyed by `TERM` and version | small | later |
@@ -84,7 +84,7 @@ already see.
   typing requires focus. A terminal that does this from the shell-integration
   marks (`OSC 133 D`) knows its own focus and is the right place for it; the
   shell's own notification is therefore a threshold, not a focus test
-  (`docs/terminal.md` §14).
+  (`docs/terminal.md` §13).
 * **Painting while a child runs.** The screen belongs to the child. The title is
   the exception and is worth using.
 * **Running shell code between keystrokes** (a live `PS1`, a `PROMPT_COMMAND`

@@ -51,8 +51,13 @@ const SCRUBBED: &[&[u8]] = &[
     b"SSH_CLIENT",
     b"LC_ALL",
     b"NO_COLOR",
-    // The stock prompt's glyphs are an option; the tests set it themselves.
+    // The stock prompt's glyphs and the duration's floor are options; the
+    // tests set them themselves.
     b"PROMPT_ICONS",
+    b"PROMPT_DURATION",
+    // A notification is opted into, so an inherited value would make the
+    // "no notification" test measure the environment.
+    b"BAASH_NOTIFY",
     // A stale inherited `PWD` would win over the directory the test chdirs to,
     // and `\w` reads the shell's `PWD`.
     b"PWD",
@@ -206,6 +211,12 @@ impl Session {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    /// Whether the shell has written `needle` anywhere in this session.
+    fn saw(&mut self, needle: &[u8]) -> bool {
+        self.drain();
+        find(&self.output, needle).is_some()
     }
 
     /// Wait for a prompt containing `needle` (a suffix of the visible prompt).
@@ -836,6 +847,82 @@ fn a_command_is_marked_with_its_text_and_status() {
     );
     session.expect(b"\x1b]133;D;1\x1b\\", Duration::from_secs(10));
     session.prompt(" $");
+
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+/// A command that took long enough leaves its time on the next prompt.
+///
+/// The duration is the command's, not the prompt's: an `ls` that took 3 ms
+/// leaves the line as it was, and a build that took two minutes says so without
+/// the prompt ever running a clock. It sits before the marker, so the place to
+/// type is still the last thing on the line.
+#[test]
+fn a_slow_command_leaves_its_duration_on_the_prompt() {
+    let home = temp_dir("duration-home");
+    let work = temp_dir("duration-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.prompt(" $");
+
+    session.send(b"sleep 1\n");
+    // The tenths digit depends on how long the shell took to reap `sleep`;
+    // that it is there at all, and that it is about one second, is the claim.
+    session.expect(b"1.", Duration::from_secs(20));
+    session.expect(b"s $ ", Duration::from_secs(20));
+
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+/// A long command asks the terminal to notify the user, with its status.
+///
+/// `D` comes first: the terminal learns the command ended before it is asked to
+/// interrupt the user about it. The body names the command and never its
+/// output, because an output line can be a secret, and a multi-line command is
+/// cut at its first line.
+#[test]
+fn a_long_command_that_failed_is_notified_with_its_status() {
+    let home = temp_dir("notify-home");
+    let work = temp_dir("notify-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[("BAASH_NOTIFY", "1")]);
+    session.prompt(" $");
+
+    session.send(b"sleep 2; false\n");
+    session.expect(b"\x1b]133;D;1", Duration::from_secs(30));
+    session.expect(b"\x1b]9;baash: 2.", Duration::from_secs(30));
+    session.expect(b", exit 1", Duration::from_secs(30));
+    session.expect(b"sleep 2; false", Duration::from_secs(30));
+
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+/// A command under the threshold is not worth interrupting anyone for.
+///
+/// The default is no notification at all, and `BAASH_NOTIFY` is a floor rather
+/// than a switch: `true` takes milliseconds and must stay silent even when
+/// notifications are on.
+#[test]
+fn a_fast_command_is_not_worth_a_notification() {
+    let home = temp_dir("quiet-home");
+    let work = temp_dir("quiet-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[("BAASH_NOTIFY", "1")]);
+    session.prompt(" $");
+
+    session.send(b"true\n");
+    session.prompt(" $");
+    assert!(
+        !session.saw(b"\x1b]9;"),
+        "a millisecond command must not notify\n--- output ---\n{}",
+        String::from_utf8_lossy(&session.output)
+    );
 
     session.send(b"exit 0\n");
     session.wait_child();

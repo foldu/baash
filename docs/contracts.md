@@ -416,6 +416,25 @@ next one. With them on the line has one space after each glyph:
 colour, the light palette and the glyphs — so the composer takes one value
 rather than three flags; `Paint::default()` is plain text with no glyphs.
 
+The last command's duration is a segment of its own, dim, just before the
+marker — the only segment that describes the past:
+
+```text
+~/sr/gith/fo/nixos-config master ↑23 !2 ?5 2.3s $
+```
+
+`PROMPT_DURATION` decides whether it is painted, read when the prompt is armed
+like `PROMPT_ICONS`: `0`, `off`, `false` or `no` in any ASCII case never paint
+it, `1`, `on`, `true` or `yes` always do, and unset — or a word the option does
+not know — paints it from `baash_lang::prompt::DURATION_FLOOR`, 500 ms.
+`baash_lang::prompt::show_duration` is that decision and
+`baash_lang::prompt::format_duration` is the text (truncated, never rounded:
+`1.2s`, `42s`, `1m02s`, `1h05m`). The value is the wall time the loop already
+measures for the history row, so the prompt adds no clock of its own; the
+segment belongs to the command, so a watcher repaint keeps it and the next
+command replaces it. `tide_prompt` takes it as an `Option<Duration>`, because
+the decision is policy and the composer only paints.
+
 In a session that came in over `ssh`, `user@host` is the leading segment:
 
 ```text
@@ -462,6 +481,8 @@ Segments, in order:
 * **`?N`** files git does not track, only when `N > 0`. The status run uses
   `--untracked-files=all`, so a new directory counts as its files, not as one
   entry.
+* **the last command's duration**, when `PROMPT_DURATION` allows it: dim text
+  from `format_duration`, `2.3s` before the marker.
 * **`$`**, or `#` for root. One space on either side; the one after it is
   unpainted, so it cannot take the marker's colour.
 
@@ -559,6 +580,13 @@ suppresses them as well. The `C`/`D` pair is the loop's, not the editor's:
 bracket `run_named`, the text going out percent-encoded as kitty's
 `cmdline_url` with the submitting newline removed, and the status as the
 parameter of `D`.
+
+`Editor::notify(text)` writes `OSC 9` for a command that outlived
+`BAASH_NOTIFY`, after `D` and between commands, so a child never sees it;
+`TERM=dumb` suppresses it like the marks. The loop decides *when*, because only
+it knows how long the command took, and the editor writes it, because it owns
+the terminal and knows whether it can read control sequences
+(`docs/terminal.md` §13).
 
 **The transform letter is a `Shell` seam.** The parser classifies every
 `${x@…}` as `ParamOp::Unsupported(UnsupportedOp::Transform)`; it does not copy

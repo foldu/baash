@@ -184,7 +184,10 @@ delegates everything else: line editing to `baash-repl`, execution to the
   commits ahead of the upstream and `↓N` behind it, `!N` modified tracked files
   and `?N` untracked files, each omitted at zero, then `$` (`#` for root). The
   segments are one space apart and the marker is followed by one plain
-  (unpainted) space.
+  (unpainted) space. The last command's duration joins the line before the
+  marker when it took 500 ms or more, or when `PROMPT_DURATION` says so, and a
+  command longer than `BAASH_NOTIFY` seconds (off by default) asks the terminal
+  for a desktop notification when it ends.
   counters come from a `gix` status and commit-graph walk on a worker thread,
   rate-limited to 500 ms, coalesced and capped by a 2 s deadline; the prompt
   paints the last completed refresh, so a cold or huge repository never delays
