@@ -202,6 +202,13 @@ delegates everything else: line editing to `baash-repl`, execution to the
   *variable* keeps bash's value, so `${PS1@P}` and the conformance
   `default PS1` case are unchanged. An explicit `PS1` wins and is rendered by
   the ordinary escape expander;
+* **a parse error is visible before Enter**: while a line is edited, the parser
+  is asked about the whole logical buffer on each keystroke and a *certain*
+  error — `echo )`, a stray `fi` — marks its span (bright red, underlined) and
+  explains itself on one row under the line. An unfinished line (`if x; then`,
+  an open quote) says nothing, and the whole buffer is checked rather than the
+  live segment so a `fi` that only makes sense after its `then` is not called
+  an error on its own (`docs/contracts.md`);
 * **`promptvars`** (`shopt`, on by default): the decoded prompt is expanded a
   second time as if double-quoted, so `PS1='$PWD $ '` and
   `PS1='$(date +%H:%M) $ '` work and `$(…)` runs at prompt time; with the

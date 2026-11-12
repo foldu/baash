@@ -843,6 +843,32 @@ impl baash_repl::Syntax for ShellSyntax {
             ParseOutcome::NeedMoreInput { .. }
         )
     }
+
+    /// A rejected parse, for the hint under the line.
+    ///
+    /// Only `Failed` is reported: `NeedMoreInput` is a line still being typed —
+    /// an open quote, an `if` without its `fi` — and painting an error for it
+    /// would flash on every keystroke of a block the user is about to close.
+    /// The first diagnostic is the one at the front of the line, which is the
+    /// one a prompt-sized message should name; its help, if any, is appended
+    /// because the span alone does not say what to do.
+    fn check(&self, buffer: &[u8]) -> Option<baash_repl::LineError> {
+        let ParseOutcome::Failed(diagnostics) =
+            baash_syntax::parse_bytes(buffer, &ParseOpts::DEFAULT)
+        else {
+            return None;
+        };
+        let first = diagnostics.first()?;
+        let mut message = first.message.clone();
+        if let Some(help) = &first.help {
+            message.push_str(" — ");
+            message.push_str(help);
+        }
+        Some(baash_repl::LineError {
+            span: first.span.clone(),
+            message,
+        })
+    }
 }
 
 /// The `PROMPT_COMMAND` commands, in bash's order.

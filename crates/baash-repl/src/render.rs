@@ -25,7 +25,7 @@
 use std::io;
 use std::ops::Range;
 
-use baash_highlight::{Style, Styled, Theme};
+use baash_highlight::{Color, Style, Styled, Theme};
 use baash_lang::prompt::ExpandedPrompt;
 use unicode_width::UnicodeWidthChar;
 
@@ -61,7 +61,7 @@ pub struct MenuView<'a> {
 }
 
 /// Everything one repaint needs.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Frame<'a> {
     /// The `PS1` or `PS2` text, already expanded, with the stretches that
     /// were between `\[` and `\]` marked so they do not count toward the
@@ -75,6 +75,12 @@ pub struct Frame<'a> {
     pub menu: Option<MenuView<'a>>,
     /// Ghost-text continuation to paint after the line, when there is one.
     pub ghost: Option<&'a [u8]>,
+    /// One line to paint under the line: a syntax error's message, already
+    /// clipped to the terminal width by the renderer.
+    pub hint: Option<&'a str>,
+    /// The stretch of [`Frame::line`] the hint is about. Painted as an error
+    /// when colour is on, so the message has a place to point at.
+    pub bad: Option<Range<usize>>,
 }
 
 impl Frame<'_> {
@@ -87,9 +93,20 @@ impl Frame<'_> {
     pub fn height(&self, columns: u16, color: bool) -> u16 {
         let mut canvas = Canvas::measuring(columns);
         paint_prompt(&mut canvas, self.prompt);
-        let _ = paint_line(&mut canvas, self.line, self.cursor, &Theme::DARK, false);
+        let _ = paint_line(
+            &mut canvas,
+            self.line,
+            self.cursor,
+            &Theme::DARK,
+            false,
+            self.bad.as_ref(),
+        );
         if let Some(ghost) = self.ghost {
             paint_ghost(&mut canvas, ghost, color);
+        }
+        if let Some(hint) = self.hint {
+            canvas.newline();
+            canvas.row_text(hint);
         }
         canvas.position().0.saturating_add(1)
     }
@@ -171,9 +188,22 @@ impl Renderer {
             .0
             .saturating_mul(columns)
             .saturating_add(prompt_end.1);
-        let cursor_position = paint_line(&mut canvas, frame.line, frame.cursor, theme, color);
+        let cursor_position = paint_line(
+            &mut canvas,
+            frame.line,
+            frame.cursor,
+            theme,
+            color,
+            frame.bad.as_ref(),
+        );
         if let Some(ghost) = frame.ghost {
             paint_ghost(&mut canvas, ghost, color);
+        }
+        // Below the line and above the menu: it describes the line, and the
+        // menu is about the word the cursor is in.
+        if let Some(hint) = frame.hint {
+            canvas.newline();
+            paint_hint(&mut canvas, hint, color);
         }
         if let Some(menu) = frame.menu {
             for row in menu.rows {
@@ -471,6 +501,7 @@ fn paint_line(
     cursor: usize,
     theme: &Theme,
     color: bool,
+    bad: Option<&Range<usize>>,
 ) -> (u16, u16) {
     let expanded = Expanded::new(line);
     let spans: Vec<Styled> = if color {
@@ -485,7 +516,12 @@ fn paint_line(
         if cursor_position.is_none() && cursor <= segment.src.start {
             cursor_position = Some(canvas.position());
         }
-        let next_style = style_at(&spans, &mut span_index, segment.src.start);
+        let next_style = match bad {
+            // The error wins over the token it is in: an operator can be the
+            // rejected byte, and a yellow operator would hide the underline.
+            Some(range) if segment.src.start < range.end && range.start < segment.src.end => ERROR,
+            _ => style_at(&spans, &mut span_index, segment.src.start),
+        };
         if next_style != style {
             canvas.raw(RESET);
             if let Some(sgr) = next_style.sgr() {
@@ -509,6 +545,32 @@ fn style_at(spans: &[Styled], index: &mut usize, position: usize) -> Style {
     match spans.get(*index) {
         Some(span) if span.span.start <= position && position < span.span.end => span.style,
         _ => Style::PLAIN,
+    }
+}
+
+/// The style for a rejected stretch of the line.
+///
+/// Underlined as well as red, because a colour alone is not a distinction
+/// everyone sees, and the hint under the line says what is wrong.
+const ERROR: Style = Style {
+    color: Color::BrightRed,
+    bold: false,
+    italic: false,
+    underline: true,
+};
+
+/// Paint the syntax error's message under the line, dim and on one row.
+///
+/// Without colour it is painted as plain text: the message is the whole point,
+/// and a terminal that cannot dim the line would otherwise lose the feature
+/// rather than the shading.
+fn paint_hint(canvas: &mut Canvas, text: &str, color: bool) {
+    if color {
+        canvas.raw(b"\x1b[2m");
+    }
+    canvas.row_text(text);
+    if color {
+        canvas.raw(RESET);
     }
 }
 

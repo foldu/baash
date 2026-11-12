@@ -1176,7 +1176,12 @@ pub trait Terminal {                       // the pty wave implements these five
     // `TERM=dumb`).
 }
 
-pub trait Syntax { fn needs_more_input(&self, line: &[u8]) -> bool; }
+pub trait Syntax {
+    fn needs_more_input(&self, line: &[u8]) -> bool;
+    fn check(&self, line: &[u8]) -> Option<LineError>;   // default: None
+}
+
+pub struct LineError { pub span: Range<usize>, pub message: String }
 ```
 
 `RealTerminal` opens `/dev/tty` (falling back to stdio) and uses
@@ -1317,13 +1322,27 @@ erases the frame with `Renderer::clear_frame`, writes the output where the frame
 was and paints the prompt, line and menu below it, which is bash's order.
 `Editor::step` and `read_line` take no hook and are the plain editor.
 
-**Continuation goes through `Syntax`, implemented in the binary** with
-`baash_syntax::parse_bytes`. The trait is deliberately thin, and that thinness has
-a visible cost: it can say "more input" but not "incomplete, and now the user
-wants to stop", so Ctrl-D on an empty `PS2` line abandons the command instead of
-reporting the syntax error the way bash does. Widening it to a three-state
-status (`Complete | Incomplete | Invalid`) would fix that; it is a seam, not a
-wall.
+**Continuation and the hint both go through `Syntax`, implemented in the
+binary** with `baash_syntax::parse_bytes`. `needs_more_input` answers the
+two-state question the buffer has to ask on Enter; `check` answers the third
+state — *invalid* — for the hint painted under the line while it is typed. It
+reports only `ParseOutcome::Failed`, so `if x; then` and an unclosed quote stay
+silent: a message that flashed on every keystroke would teach the user to ignore
+it. `baash` checks the **whole logical buffer**, not the live segment, because a
+continuation line parsed alone (`fi`) is an error in isolation and fine in
+context; the editor maps the span into the editable segment's coordinates and
+drops the underline — keeping the message — when the span names an earlier line.
+The trait is still thin enough to have a visible cost: it can say "more input"
+but not "incomplete, and now the user wants to stop", so Ctrl-D on an empty
+`PS2` line abandons the command instead of reporting the syntax error the way
+bash does. Reporting that would be a call site for `check`, not a new method.
+
+**The hint is one row of the frame, below the line and above the menu**, and
+it is measured with the rest before anything is painted, so the menu gets the
+rows that are left (`Frame::height`). The rejected span is painted underlined
+bright red when colour is on; without colour the message alone remains, because
+the message is the part that says what is wrong. A watcher repaint and every
+keystroke recompute it, so a corrected line loses the hint with the next frame.
 
 **Raw mode is held only while `read_line` runs**, so a child command runs with
 the terminal cooked. Without job control that also means `Ctrl-Z` reaches the

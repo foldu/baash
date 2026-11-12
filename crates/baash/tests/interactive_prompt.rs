@@ -930,6 +930,73 @@ fn a_fast_command_is_not_worth_a_notification() {
     let _ = std::fs::remove_dir_all(&work);
 }
 
+/// A line the parser rejects says so under the line, before Enter.
+///
+/// The hint comes from the same parser the submit path uses, painted while the
+/// bytes are read: `echo )` is certainly wrong, so the user sees it before
+/// running it. Enter still submits — the editor advises, it does not refuse.
+#[test]
+fn a_certain_parse_error_is_shown_under_the_line() {
+    let home = temp_dir("check-home");
+    let work = temp_dir("check-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.prompt(" $");
+
+    session.send(b"echo ");
+    session.send(b")");
+    // No newline has been sent: this is the editor's hint, not the shell's
+    // report about a command it ran.
+    session.expect(b"unexpected", Duration::from_secs(10));
+    session.expect(b"waiting for", Duration::from_secs(10));
+
+    session.send(b"\n");
+    session.prompt(" $");
+
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+/// An unfinished line is not an error, however many keys it takes.
+///
+/// `if true; then` and each continuation line are lines being typed, not
+/// lines that are wrong: the parser answers `NeedMoreInput`, and the hint stays
+/// away — a message that flashed on every keystroke of a block would teach the
+/// user to ignore it. The same buffer is parsed whole each time, so a `fi` that
+/// only makes sense after its `then` is never called an error on its own.
+#[test]
+fn an_unfinished_line_is_not_an_error() {
+    let home = temp_dir("unfinished-home");
+    let work = temp_dir("unfinished-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.prompt(" $");
+
+    session.send(b"if true; then\n");
+    session.prompt("> ");
+    session.send(b"echo hi\n");
+    session.prompt("> ");
+    assert!(
+        !session.saw(b"unexpected"),
+        "an open `if` is unfinished, not wrong\n--- output ---\n{}",
+        String::from_utf8_lossy(&session.output)
+    );
+    session.send(b"fi\n");
+    // The block runs and prints nothing; the next prompt is the proof that it
+    // was accepted as a complete command rather than reported as bad syntax.
+    session.prompt(" $");
+    assert!(
+        !session.saw(b"unexpected"),
+        "a closed block is a valid command\n--- output ---\n{}",
+        String::from_utf8_lossy(&session.output)
+    );
+
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 /// Focus changes are requested while a line is read; a refocus repaints.
 ///
 /// Another window may paint over a terminal while a prompt sits idle, and a

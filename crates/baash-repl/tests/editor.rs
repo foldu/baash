@@ -4,7 +4,8 @@ mod common;
 
 use baash_complete::Candidate;
 use baash_repl::{
-    Code, Config, Editor, Flow, History, Key, Modifiers, Prompt, ReadResult, Size, Theme,
+    Code, Config, Editor, Flow, History, Key, LineError, Modifiers, Prompt, ReadResult, Size,
+    Syntax, Theme,
 };
 
 use common::{
@@ -1638,4 +1639,82 @@ fn a_click_without_a_cursor_report_is_ignored() {
     let mut editor = Editor::new(&mut term, &completer, &baash_repl::NeverNeedsMore);
     let result = editor.read_line().expect("read_line");
     assert_eq!(result, ReadResult::Line(b"abcdefX\n".to_vec()));
+}
+
+/// A parser that calls any `)` an error, to exercise the hint path.
+///
+/// The real parser decides this in `baash`; the editor only needs an answer
+/// with a span and a message to prove how it paints one.
+struct RejectsParens;
+
+impl Syntax for RejectsParens {
+    fn needs_more_input(&self, _buffer: &[u8]) -> bool {
+        false
+    }
+
+    fn check(&self, buffer: &[u8]) -> Option<LineError> {
+        let at = buffer.iter().position(|&byte| byte == b')')?;
+        Some(LineError {
+            span: at..at + 1,
+            message: "unexpected `)`".to_owned(),
+        })
+    }
+}
+
+/// The last frame's bytes: everything after the last erase.
+fn final_frame(text: &str) -> &str {
+    text.rsplit("\x1b[J").next().unwrap_or(text)
+}
+
+#[test]
+fn a_syntax_error_is_painted_under_the_line_and_marked_in_it() {
+    let mut term = FakeTerminal::new(b"echo )");
+    let handle = term.output_handle();
+    let completer = StubCompleter::empty();
+    let config = Config {
+        color: true,
+        ..plain_config()
+    };
+    {
+        let mut editor = Editor::with_config(&mut term, &completer, &RejectsParens, config);
+        // No Enter: the point is that the error is visible while typing, and
+        // that running the line is still up to the user.
+        let _ = editor.read_line().expect("read_line");
+    }
+    let text = output_text(&handle);
+    assert!(
+        text.contains("unexpected `)`"),
+        "the message is painted under the line: {text:?}"
+    );
+    assert!(
+        text.contains("\x1b[4;91m)"),
+        "the rejected span is underlined bright red: {text:?}"
+    );
+}
+
+#[test]
+fn fixing_the_line_takes_the_hint_away() {
+    // `)` then Backspace: the next frame repaints the line and erases the row
+    // the message was on, so a corrected line carries no stale error.
+    let mut term = FakeTerminal::new(b"echo )\x7f");
+    let handle = term.output_handle();
+    let completer = StubCompleter::empty();
+    let config = Config {
+        color: true,
+        ..plain_config()
+    };
+    {
+        let mut editor = Editor::with_config(&mut term, &completer, &RejectsParens, config);
+        let _ = editor.read_line().expect("read_line");
+    }
+    let text = output_text(&handle);
+    assert!(
+        text.contains("unexpected `)`"),
+        "the error was painted first"
+    );
+    assert!(
+        !final_frame(&text).contains("unexpected"),
+        "the corrected line is painted without the message: {:?}",
+        final_frame(&text)
+    );
 }

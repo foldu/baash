@@ -30,6 +30,7 @@
 //! the user with an unusable shell; the guard in `baash-sys` restores on drop.
 
 use std::io;
+use std::ops::Range;
 
 use baash_complete::{Completer, Menu};
 use baash_highlight::Theme;
@@ -88,6 +89,31 @@ pub enum ReadResult {
 pub trait Syntax {
     /// Whether `buffer` is unfinished — an open quote, `if`, here-doc, `$(`.
     fn needs_more_input(&self, buffer: &[u8]) -> bool;
+
+    /// A syntax error in `buffer`, for the hint under the line.
+    ///
+    /// The answer must be a *certain* error: `if x; then` and an unclosed
+    /// quote are lines still being typed, and the implementation is what
+    /// decides that, because only it has a parser. The default answers
+    /// `None`, so an editor driven by a parser that only knows "is it
+    /// finished?" invents nothing.
+    fn check(&self, _buffer: &[u8]) -> Option<LineError> {
+        None
+    }
+}
+
+/// A syntax error the editor can paint while the line is still being typed.
+///
+/// The editor does not parse; [`Syntax::check`] does. This is the small part
+/// the editor needs: where the error is, and what to say about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineError {
+    /// Byte range in the checked buffer the error is about. It may be empty —
+    /// a missing token has no bytes — and may sit in an earlier continuation
+    /// line, in which case only the message is painted.
+    pub span: Range<usize>,
+    /// One line, already short enough to be clipped to the terminal width.
+    pub message: String,
 }
 
 /// A prompt that can change while a line is being edited.
@@ -1391,6 +1417,34 @@ impl<'a> Editor<'a> {
             .map(<[u8]>::to_vec)
     }
 
+    /// The syntax error to paint under the line, if there is a certain one.
+    ///
+    /// The check runs over the whole logical buffer rather than the live
+    /// segment: a continuation line parsed alone (`fi`) is an error in
+    /// isolation and fine in context, so checking the segment would flash a
+    /// false error while a block is being finished. The span is then mapped
+    /// into the editable segment's own coordinates, and dropped when it names
+    /// an earlier line — the message is still worth showing, the underline is
+    /// not.
+    fn check(&self) -> (Option<String>, Option<Range<usize>>) {
+        if self.search.is_some() {
+            return (None, None);
+        }
+        let Some(issue) = self.syntax.check(self.line.buffer()) else {
+            return (None, None);
+        };
+        let start = self.line.start();
+        let end = start + self.line.editable().len();
+        // An empty span is "something is missing here", not "this byte is
+        // wrong": marking a byte would underline the token next to the point
+        // and say the wrong thing about it.
+        let bad = (issue.span.start < issue.span.end
+            && issue.span.start >= start
+            && issue.span.end <= end)
+            .then(|| (issue.span.start - start)..(issue.span.end - start));
+        (Some(issue.message), bad)
+    }
+
     fn draw(&mut self) -> io::Result<()> {
         if !self.dirty {
             return Ok(());
@@ -1411,12 +1465,15 @@ impl<'a> Editor<'a> {
         } else {
             self.suggestion()
         };
+        let (hint, bad) = self.check();
         let mut frame = Frame {
             prompt,
             line: self.line.editable(),
             cursor: self.line.editable_cursor(),
             menu: None,
             ghost: ghost.as_deref(),
+            hint: hint.as_deref(),
+            bad,
         };
         // A frame taller than the screen scrolls its own top row out of reach,
         // and the next repaint would then paint a second prompt below the

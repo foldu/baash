@@ -19,7 +19,7 @@
 //! | `key` | bytes → [`Key`], including bracketed paste |
 //! | `line` | the [`Line`] buffer, cursor and kill ring |
 //! | `display` | bytes → display cells (`unicode-width`) |
-//! | `render` | one frame: prompt, line, ghost text, menu ([`Frame`]) |
+//! | `render` | one frame: prompt, line, ghost text, hint, menu ([`Frame`]) |
 //! | `prompt` | the rendered `PS1`/`PS2` the shell hands in ([`expand`]) |
 //! | `editor` | the [`Editor`] state machine and read loop |
 //!
@@ -96,8 +96,8 @@ pub use baash_highlight::Theme;
 
 pub use baash_runtime::History;
 pub use editor::{
-    Config, Editor, Flow, LivePrompt, NeverNeedsMore, NeverRefreshes, ReadResult, ShellCompletion,
-    ShellCompletionState, ShellMenu, Syntax,
+    Config, Editor, Flow, LineError, LivePrompt, NeverNeedsMore, NeverRefreshes, ReadResult,
+    ShellCompletion, ShellCompletionState, ShellMenu, Syntax,
 };
 pub use key::{Code, Decoder, Key, Modifiers};
 pub use line::Line;

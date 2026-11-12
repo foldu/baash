@@ -93,6 +93,12 @@ needed and a slow repository never delays a prompt
 `NO_COLOR` keeps the text and drops the ANSI colours. Set `PS1` to get your own
 prompt back.
 
+While a line is being typed, a syntax error the parser is sure about — `echo )`,
+a `fi` with nothing to close — is underlined in the line and explained on one
+row under it, so it is visible before Enter. An unfinished line (`if x; then`, an
+open quote) says nothing: it is not an error yet, and a message that flashed on
+every keystroke of a block would teach you to ignore it.
+
 History expansion is bash's: the typed line is rewritten before parsing, so
 the expanded text is what runs. `!!`, `!$`, `!n`, `!?string?`, `!*`, `!^`, word designators,
 `:h :t :r :e :p :q :x :s :gs :&` and `^old^new^` follow the measured 5.3.20
