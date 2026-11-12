@@ -1004,8 +1004,9 @@ fn short_host(host: &[u8]) -> &[u8] {
 /// * the branch, from [`git_branch`], with a Nerd Font branch icon. A detached
 ///   `HEAD` is shown as the abbreviated commit id, because that is what the
 ///   file read resolves to.
-/// * `↑N` commits ahead of the upstream, `!N` tracked files that differ from
-///   `HEAD` or the index, and `?N` untracked files. Each is omitted at zero.
+/// * `↑N` commits ahead of the upstream and `↓N` commits behind it, then `!N`
+///   tracked files that differ from `HEAD` or the index and `?N` untracked
+///   files. Each is omitted at zero.
 /// * `$`, or `#` for a root user. There is one space before it and none after:
 ///   the cursor sits directly after the marker.
 ///
@@ -1039,6 +1040,7 @@ pub fn tide_prompt(
     const HERE: &[u8] = b"\x1b[96m";
     const BRANCH: &[u8] = b"\x1b[32m";
     const AHEAD: &[u8] = b"\x1b[33m";
+    const BEHIND: &[u8] = b"\x1b[31m";
     const MODIFIED: &[u8] = b"\x1b[33m";
     const UNTRACKED: &[u8] = b"\x1b[31m";
     const REMOTE: &[u8] = b"\x1b[33m";
@@ -1113,6 +1115,7 @@ pub fn tide_prompt(
         let mut counters: Vec<Vec<u8>> = Vec::with_capacity(3);
         for (count, symbol, code) in [
             (git.ahead, "\u{2191}", AHEAD),
+            (git.behind, "\u{2193}", BEHIND),
             (git.modified, "!", MODIFIED),
             (git.untracked, "?", UNTRACKED),
         ] {
@@ -1337,8 +1340,7 @@ pub struct GitStatus {
     pub untracked: u32,
     /// Commits on this branch that the upstream does not have.
     pub ahead: u32,
-    /// Commits on the upstream that this branch does not have. Parsed for the
-    /// record; the prompt deliberately does not paint a `↓N` segment.
+    /// Commits on the upstream that this branch does not have.
     pub behind: u32,
 }
 
@@ -2401,12 +2403,12 @@ mod tests {
         tide_prompt(directory, branch, git, None, false, false).into_bytes()
     }
 
-    fn counts(modified: u32, untracked: u32, ahead: u32) -> Option<GitStatus> {
+    fn counts(modified: u32, untracked: u32, ahead: u32, behind: u32) -> Option<GitStatus> {
         Some(GitStatus {
             modified,
             untracked,
             ahead,
-            behind: 0,
+            behind,
         })
     }
 
@@ -2421,17 +2423,17 @@ mod tests {
             render(
                 b"~/sr/gith/fo/nixos-config",
                 Some(b"master"),
-                counts(2, 5, 23)
+                counts(2, 5, 23, 4)
             ),
             format!(
                 "{DIR_ICON} ~/sr/gith/fo/nixos-config  \
-                 {BRANCH_ICON} master  \u{2191}23 !2 ?5 $"
+                 {BRANCH_ICON} master  \u{2191}23 \u{2193}4 !2 ?5 $"
             )
             .into_bytes()
         );
         // A clean repository keeps the branch and drops the counters.
         assert_eq!(
-            render(b"~/sr/bshell", Some(b"main"), counts(0, 0, 0)),
+            render(b"~/sr/bshell", Some(b"main"), counts(0, 0, 0, 0)),
             format!("{DIR_ICON} ~/sr/bshell  {BRANCH_ICON} main $").into_bytes()
         );
         // No repository: no branch segment at all, so no gap where it was.
@@ -2447,7 +2449,7 @@ mod tests {
             tide_prompt(
                 b"~/sr/gith/fo/nixos-config",
                 Some(b"master"),
-                counts(2, 5, 23),
+                counts(2, 5, 23, 4),
                 None,
                 false,
                 true
@@ -2456,8 +2458,8 @@ mod tests {
             format!(
                 "\x1b[34m{DIR_ICON} ~/sr/gith/fo\x1b[96m/nixos-config\x1b[0m  \
                  \x1b[32m{BRANCH_ICON} master\x1b[0m  \
-                 \x1b[33m\u{2191}23\x1b[0m \x1b[33m!2\x1b[0m \x1b[31m?5\x1b[0m \
-                 \x1b[32m$\x1b[0m"
+                 \x1b[33m\u{2191}23\x1b[0m \x1b[31m\u{2193}4\x1b[0m \
+                 \x1b[33m!2\x1b[0m \x1b[31m?5\x1b[0m \x1b[32m$\x1b[0m"
             )
             .into_bytes()
         );
@@ -2476,7 +2478,7 @@ mod tests {
             tide_prompt(
                 b"~/src/bshell",
                 Some(b"main"),
-                counts(0, 0, 1),
+                counts(0, 0, 1, 0),
                 Some((b"ada", b"jupiter")),
                 false,
                 false
@@ -2506,7 +2508,7 @@ mod tests {
         );
         // The marker follows the counters rather than replacing them.
         assert_eq!(
-            tide_prompt(b"/x", Some(b"main"), counts(2, 1, 0), None, true, false).into_bytes(),
+            tide_prompt(b"/x", Some(b"main"), counts(2, 1, 0, 0), None, true, false).into_bytes(),
             format!("{DIR_ICON} /x  {BRANCH_ICON} main  !2 ?1 #").into_bytes()
         );
     }
@@ -2514,21 +2516,22 @@ mod tests {
     #[test]
     fn counters_are_suppressed_at_zero_and_keep_their_order() {
         assert_eq!(
-            render(b"/x", None, counts(2, 0, 0)),
+            render(b"/x", None, counts(2, 0, 0, 0)),
             format!("{DIR_ICON} /x  !2 $").into_bytes()
         );
         assert_eq!(
-            render(b"/x", None, counts(0, 1, 0)),
+            render(b"/x", None, counts(0, 1, 0, 0)),
             format!("{DIR_ICON} /x  ?1 $").into_bytes()
         );
         // Singular, and large enough that a `u8` would wrap.
         assert_eq!(
-            render(b"/x", None, counts(1, 1, 1)),
-            format!("{DIR_ICON} /x  \u{2191}1 !1 ?1 $").into_bytes()
+            render(b"/x", None, counts(1, 1, 1, 1)),
+            format!("{DIR_ICON} /x  \u{2191}1 \u{2193}1 !1 ?1 $").into_bytes()
         );
         assert_eq!(
-            render(b"/x", None, counts(123_456, 987_654_321, 4_294_967_295)),
-            format!("{DIR_ICON} /x  \u{2191}4294967295 !123456 ?987654321 $").into_bytes()
+            render(b"/x", None, counts(123_456, 987_654_321, 4_294_967_295, 1)),
+            format!("{DIR_ICON} /x  \u{2191}4294967295 \u{2193}1 !123456 ?987654321 $")
+                .into_bytes()
         );
     }
 

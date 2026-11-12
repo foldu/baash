@@ -173,8 +173,8 @@ delegates everything else: line editing to `baash-repl`, execution to the
   unique prefix, the last one whole, `$HOME` as `~`), a branch icon and the git
   branch (read from `.git/HEAD`, following a `.git` file and `packed-refs` for
   worktrees; a detached `HEAD` is its seven-character commit id), then `↑N`
-  commits ahead of the upstream, `!N` modified tracked files and `?N` untracked
-  files, each omitted at zero, then `$` (`#` for root). The major segments are
+  commits ahead of the upstream and `↓N` behind it, `!N` modified tracked files
+  and `?N` untracked files, each omitted at zero, then `$` (`#` for root). The major segments are
   two spaces apart and there is no trailing space. The counters come from one
   `git status --porcelain=v2 --branch -z` on a worker thread, rate-limited to
   500 ms and coalesced; the prompt paints the last completed refresh, so a
@@ -182,7 +182,7 @@ delegates everything else: line editing to `baash-repl`, execution to the
   directory's counters rather than showing them
   (`docs/prompt-watch.md`). On a terminal the segments use ANSI SGR colours
   (blue directory, bright cyan last component, green branch, yellow `↑`/`!`,
-  red `?`/`#`); `NO_COLOR` gives the same text uncoloured. The glyphs are
+  red `↓`/`?`/`#`); `NO_COLOR` gives the same text uncoloured. The glyphs are
   width 1, and the editor measures the prompt with `unicode-width`, so the
   cursor column survives them. It is built from bytes in one pass, so non-UTF-8
   paths render exactly and nothing in the prompt is expanded twice. The `PS1`
@@ -303,8 +303,6 @@ delegates everything else: line editing to `baash-repl`, execution to the
   made while the line is idle appears within about a second (the editor's
   watcher backstop) or at the next prompt. If `git` hangs, the counters simply
   stay stale; the prompt is unaffected.
-* `behind` is parsed from `# branch.ab` but no `↓N` segment is painted; the
-  brief's line ends at `↑N`.
 * `\s` is `baash`, so the conformance case that greps for `bash|osh` still
   fails; `\v`/`\V` now report the crate version (`0.0` / `0.0.0`).
 * With `set -e`, a failing `PROMPT_COMMAND` exits bash and does not exit this

@@ -424,8 +424,8 @@ Segments, in order:
   seven-character commit id; a detached `HEAD` is a raw object id and is
   abbreviated directly. It is all file reads — no `git`, no fork. An unreadable
   or absent repository omits the segment, never guesses.
-* **`↑N`** commits ahead of the upstream, only when `N > 0` and the branch has
-  an upstream.
+* **`↑N`** commits ahead of the upstream and **`↓N`** commits behind it, each
+  only when `N > 0` and the branch has an upstream.
 * **`!N`** tracked files whose content, mode or existence differs from `HEAD` or
   the index (staged and unstaged count once; a rename is one file), only when
   `N > 0`.
@@ -447,13 +447,12 @@ and `?` records are untracked. Runs are rate-limited to one per 500 ms,
 coalesced down to the newest directory, and back off for 5 s after a silent
 failure. The prompt paints the last completed counters for the current
 directory; a `cd` drops them until the first run for the new directory lands.
-`behind` is parsed but deliberately not painted (`docs/prompt-watch.md`).
 
 On a terminal the prompt uses ANSI SGR colours only — never 24-bit values — so
 it follows the terminal's palette: blue for the directory and its icon, bright
 cyan for the last component, green for the branch, its icon and the `$`, yellow
-for `↑N` and `!N` (and for `user@host`), red for `?N` and `#`. `NO_COLOR` or a
-non-terminal gets the same text with no escapes. The glyphs stay: they are text,
+for `↑N` and `!N` (and for `user@host`), red for `↓N`, `?N` and `#`.
+`NO_COLOR` or a non-terminal gets the same text with no escapes. The glyphs stay: they are text,
 not colour. Every coloured run ends with an SGR reset, so a path or a branch
 containing an escape-looking sequence cannot paint the rest of the line.
 

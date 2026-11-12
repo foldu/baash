@@ -165,7 +165,5 @@ prompt granularity.
 * Not a general-purpose file-watch API for scripts.
 * Not a git client: no fetching, no hooks, no index writes, no credential
   prompts.
-* No `↓N` segment. `behind` is parsed because the header carries it, but the
-  brief's line ends at `↑N`; adding a segment would be a separate decision.
 * No shell hook. A `BAASH_PROMPT_WATCH` function would run shell code between
   keystrokes, which is the one thing this design refuses.

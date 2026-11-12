@@ -74,8 +74,8 @@ While `PS1` is untouched, the prompt is one tide-like line:
 The directory icon and the branch icon are Nerd Font glyphs; the outer path
 components are shortened to the shortest prefix that is unique among their
 siblings, the last component is kept whole, and `$HOME` is `~`. `↑N` is commits
-ahead of the upstream, `!N` tracked files with staged or unstaged changes, `?N`
-untracked files; each is omitted at zero. `$` is `#` for root, and there is no
+ahead of the upstream and `↓N` commits behind it, `!N` tracked files with
+staged or unstaged changes, and `?N` untracked files; each is omitted at zero. `$` is `#` for root, and there is no
 trailing space. The branch is read from `.git/HEAD` on the prompt path; the
 counters come from one `git status --porcelain=v2 --branch` run on a worker
 (500 ms rate limit, coalesced), so a slow repository never delays a prompt

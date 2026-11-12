@@ -397,7 +397,7 @@ fn the_default_prompt_is_tide_like() {
 /// tracked file and one untracked file. This is the brief's shape, through the
 /// real binary and a pty.
 #[test]
-fn the_prompt_counts_ahead_modified_and_untracked() {
+fn the_prompt_counts_ahead_behind_modified_and_untracked() {
     let home = temp_dir("counts-home");
     let work = home.join("repo");
     std::fs::create_dir_all(&work).expect("create work tree");
@@ -430,7 +430,29 @@ fn the_prompt_counts_ahead_modified_and_untracked() {
     git(&work, &["push", "-q", "-u", "origin", "main"]);
     // One commit the upstream does not have.
     std::fs::write(work.join("tracked.txt"), "two\n").expect("write tracked file");
+    let base = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&work)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .expect("utf-8 sha")
+    .trim()
+    .to_string();
     git(&work, &["commit", "-q", "-am", "two"]);
+    // A second commit on the upstream's side of the same base, so the branch
+    // is one ahead and one behind: a diverged branch, which the prompt has to
+    // show as `↑1 ↓1`, not as a clean or ahead-only branch.
+    git(&work, &["checkout", "-q", "-b", "upstream-side", &base]);
+    std::fs::write(work.join("upstream.txt"), "upstream\n").expect("write upstream file");
+    git(&work, &["add", "upstream.txt"]);
+    git(&work, &["commit", "-q", "-m", "upstream"]);
+    git(&work, &["push", "-q", "origin", "upstream-side:main"]);
+    git(&work, &["checkout", "-q", "main"]);
     // One tracked file with an unstaged change, one untracked file.
     std::fs::write(work.join("tracked.txt"), "three\n").expect("write tracked file");
     std::fs::write(work.join("untracked.txt"), "x\n").expect("write untracked file");
@@ -438,7 +460,7 @@ fn the_prompt_counts_ahead_modified_and_untracked() {
     let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
     // The directory is `~/repo`; the counters arrive from the worker, so wait
     // for the whole suffix rather than for the first prompt.
-    session.prompt("\u{f418} main  \u{2191}1 !1 ?1 $");
+    session.prompt("\u{f418} main  \u{2191}1 \u{2193}1 !1 ?1 $");
     // A long line and an editing key must not corrupt the prompt's column
     // arithmetic (the icons are width 1, the SGR sequences width 0).
     session.send(&[b'x'; 240]);
