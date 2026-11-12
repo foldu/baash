@@ -242,11 +242,16 @@ dependencies = [
 name = "baash-complete"
 version = "0.0.0"
 dependencies = [
+ "baash-complete-data",
  "baash-diag",
  "baash-lang",
  "baash-syntax",
  "nucleo-matcher",
 ]
+
+[[package]]
+name = "baash-complete-data"
+version = "0.0.0"
 
 [[package]]
 name = "baash-diag"

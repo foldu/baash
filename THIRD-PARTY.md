@@ -104,6 +104,45 @@ The gate for all of this is `cargo deny check --deny warnings licenses`,
 configured in [deny.toml](deny.toml): a dependency whose license is not in the
 allow-list fails the build, which is what keeps the paragraph below true.
 
+## carapace-bin — MIT
+
+`crates/baash-complete-data/src/data.rs` is generated from
+[carapace-bin][carapace] by `scripts/carapace-data.py`: for each command in
+`crates/baash-complete-data/commands.txt`, carapace's `export` backend prints its
+cobra command tree as JSON, and the generator compiles that into the
+`Cmd`/`Flag` tables the shell carries. The file
+is committed, so neither carapace nor Go is part of the build or the binary; the
+pinned version is named in the generated header and in `SOURCE`.
+
+carapace-bin is MIT-licensed:
+
+    Copyright (c) 2020 rsteube
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to
+    deal in the Software without restriction, including without limitation the
+    rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+    sell copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+
+MIT is GPL-3.0-compatible, so the tables can be distributed under baash's
+licence with this notice kept. Regenerating requires the pinned carapace
+(`nix build nixpkgs#carapace`); the diff is the review: a command or option that
+disappears upstream is a data change, not a build detail.
+
+[carapace]: https://github.com/carapace-sh/carapace-bin
+
 ## Rust dependencies
 
 The crates.io dependencies keep their own licenses — overwhelmingly

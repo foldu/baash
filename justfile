@@ -44,3 +44,7 @@ windows-fast:
 release version: check test conformance
     cargo release --execute {{version}}
     git push --follow-tags
+
+# Regenerate the embedded completion tables from the pinned carapace.
+carapace-data:
+    python3 scripts/carapace-data.py --carapace "${CARAPACE_BIN:-$(nix build --no-link --print-out-paths nixpkgs#carapace)/bin/carapace}"

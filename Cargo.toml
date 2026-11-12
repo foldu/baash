@@ -29,6 +29,7 @@ baash-runtime = { path = "crates/baash-runtime" }
 baash-vm = { path = "crates/baash-vm" }
 baash-sys = { path = "crates/baash-sys" }
 baash-complete = { path = "crates/baash-complete" }
+baash-complete-data = { path = "crates/baash-complete-data" }
 baash-repl = { path = "crates/baash-repl" }
 baash-tools = { path = "crates/baash-tools" }
 baash-utils = { path = "crates/baash-utils" }
