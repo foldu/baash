@@ -447,11 +447,27 @@ impl Terminal for RealTerminal {
     fn enter_raw(&mut self) -> io::Result<()> {
         if self.raw.is_none() {
             self.raw = Some(baash_sys::RawMode::enable(self.fd)?);
+            // Ask for bracketed paste for as long as the line is being read.
+            // Without the mode a terminal sends a pasted newline as a bare
+            // CR, which the decoder reads as Enter: a pasted script would run
+            // line by line instead of landing in the buffer. The mode also
+            // tells the decoder where the payload ends, so a pasted escape
+            // sequence is inserted as text rather than executed (the
+            // `Key::Paste` handling in `key.rs`). Failing to write it is not
+            // fatal — the editor still works, the paste is just unbracketed.
+            let _ = self.write_all(b"\x1b[?2004h");
         }
         Ok(())
     }
 
     fn leave_raw(&mut self) -> io::Result<()> {
+        if self.raw.is_some() {
+            // Turn the mode off before a command runs: the child inherits the
+            // terminal, and its own line editor must ask for what it wants.
+            // Ignoring a write error is deliberate — restoring the terminal
+            // mode matters more than a terminal that would not take this.
+            let _ = self.write_all(b"\x1b[?2004l");
+        }
         match self.raw.take() {
             Some(raw) => raw.restore(),
             None => Ok(()),

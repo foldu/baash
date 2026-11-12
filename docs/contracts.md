@@ -1018,6 +1018,16 @@ pub trait Syntax { fn needs_more_input(&self, line: &[u8]) -> bool; }
 `baash_sys::RawMode` plus `window_size_fd`, because `baash_sys::window_size()` is
 wired to stdout. A pty harness needs only those five methods; no editor change.
 
+**A line is read with bracketed paste on.** `enter_raw` writes
+`\x1b[?2004h` after the termios switch and `leave_raw` writes `\x1b[?2004l`
+before restoring it, so a pasted newline reaches the decoder inside
+`Key::Paste` instead of being read as Enter — otherwise the first line of a
+pasted script runs while the rest is still arriving — and a command started
+from the line never inherits the wrapper. A terminal that ignores the sequence
+still works; the paste is then unbracketed, which is the behaviour before the
+mode was requested. The Windows console has no such protocol: its paste goes
+into the input buffer, where the shell only sees the resulting keystrokes.
+
 **`ShellCompletion` is the per-read `complete -F` seam.** The editor still
 borrows one `&dyn Completer` for its whole life, but a completion function needs
 the interpreter, which the loop owns, so `Editor::read_line_with_shell(live,

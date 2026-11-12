@@ -628,3 +628,31 @@ fn ctrl_r_finds_an_earlier_command_and_enter_runs_it() {
     session.wait_child();
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// The terminal is asked for bracketed paste while a line is read, and only
+/// then.
+///
+/// `key.rs` has always understood `\x1b[200~`/`201~`, but a terminal only
+/// sends them when the mode is on, and the shell never asked. Without the
+/// mode a pasted script arrives as bare newlines, each of which the decoder
+/// reads as Enter: the first line runs before the rest is even in the buffer.
+/// The mode must also be off while a command runs, so an editor or `cat`
+/// started from the line does not inherit the wrapper and print the markers.
+#[test]
+fn bracketed_paste_is_enabled_only_while_a_line_is_read() {
+    let home = temp_dir("paste-home");
+    let work = temp_dir("paste-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    // The mode is on before the prompt text is painted: the editor writes it
+    // when it enters raw mode, and only then draws the frame.
+    session.expect(b"\x1b[?2004h", Duration::from_secs(10));
+    session.prompt(" $");
+    session.send(b"true\n");
+    // Off again before the command gets the terminal.
+    session.expect(b"\x1b[?2004l", Duration::from_secs(10));
+    session.prompt(" $");
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}
