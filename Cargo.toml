@@ -82,3 +82,15 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
+
+# The same program for the edit-compile-run loop: `flake.nix` builds it as
+# `windows-fast`, and `just windows-fast` puts it in `result-windows-fast`.
+# Fat LTO is the one optimisation that costs minutes per link rather than
+# seconds, so it is the one this drops; everything that decides *behaviour*
+# (opt-level, `panic = "abort"`, the feature set) is inherited, because a fast
+# build whose behaviour differs from the release build is not a fast build of
+# the same program. It is not what ships, and `docs/portability.md` says so.
+[profile.windows-fast]
+inherits = "windows"
+lto = false
+codegen-units = 16

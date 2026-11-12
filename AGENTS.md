@@ -37,7 +37,8 @@ one.
 ```sh
 just                 # list the tasks
 just build           # nix build .#default -> result/bin/baash
-just windows         # nix build .#windows  -> result/bin/baash.exe
+just windows         # nix build .#windows      -> result-windows/bin/baash.exe
+just windows-fast    # nix build .#windows-fast -> result-windows-fast/ (no LTO)
 just test            # cargo test --workspace --all-features
 just conformance     # the Oils ratchet against crates/baash-spec/baseline.txt
 just licenses        # cargo deny check licenses
@@ -163,12 +164,23 @@ unsafe blocks.
 Windows code is the part of this tree that a Linux `cargo` never sees, so it
 gets its own protocol.
 
-* **Compile it before claiming it.** `nix build .#windows` is the shape CI
-  uses. For a fast loop, the flake's `windows` derivation (`flake.nix`) is the
-  source of truth: `cargo zigbuild --profile windows --target
-  x86_64-pc-windows-gnu -p baash` with a `windres` shim on `PATH` and
-  `BAASH_WINDRES` pointing at LLVM's `windres`; `libmimalloc-sys` needs
-  `-Wno-error=date-time`, which the derivation sets.
+* **Compile it before claiming it.** There are two Windows builds of the same
+  program. `nix build .#windows` (`just windows`) is the release shape CI ships
+  and the guest runs: fat LTO, one codegen unit, stripped.
+  `nix build .#windows-fast` (`just windows-fast`) is the same profile with LTO
+  off — larger, a few percent slower, and the one to use while editing.
+  * Both are split into a cached dependency derivation and a thin per-change
+    one, so an edit under `crates/*/src` must cost seconds, not the graph.
+    `docs/portability.md` §11 has the numbers and the rule that keeps it true:
+    the two halves must be configured identically.
+  * `nix build .#windows-deps` builds the cached half on its own; its store
+    path must not move when only `crates/*/src` changed. If it does, the halves
+    have drifted.
+  * The derivation (`flake.nix`, `mkWindows`) is the source of truth for the
+    flags: `cargo zigbuild --profile windows --target x86_64-pc-windows-gnu -p
+    baash` with a `windres` shim on `PATH` and `BAASH_WINDRES` pointing at
+    LLVM's `windres`; `libmimalloc-sys` needs `-Wno-error=date-time`, which the
+    derivation sets.
 * **`cargo clippy --target x86_64-pc-windows-gnu -p baash -- -D warnings`** is
   the cheapest compile check for `cfg(windows)` code. It needs a toolchain with
   that target installed (the flake's `windows` derivation pins one; with rustup

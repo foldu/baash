@@ -27,9 +27,13 @@ licenses:
 build:
     nix build .#default
 
-# The Windows executable: `result/bin/baash.exe`.
+# The Windows executable for release: `result-windows/bin/baash.exe`.
 windows:
-    nix build .#windows
+    nix build .#windows -o result-windows
+
+# The same executable without LTO: `result-windows-fast/bin/baash.exe`.
+windows-fast:
+    nix build .#windows-fast -o result-windows-fast
 
 # Cut a release: gate, bump, commit, tag `v<version>`, push; the tag publishes.
 release version: check test conformance

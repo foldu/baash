@@ -670,3 +670,71 @@ easy to miss because it only bites where the wrapper was not in the picture:
 * The MinGW cross-`windres` shells out to `x86_64-w64-mingw32-gcc` and fails
   with `x86_64-w64-mingw32-gcc: command not found`, so that wrapper has to
   prepend the MinGW `bin` to `PATH` rather than just `exec` the one binary.
+
+## 11. The two Windows builds, and why there are four derivations (2026-11-12)
+
+`x86_64-pc-windows-gnu` is cross-compiled, so nothing about it is shared with
+the Linux build: no artifacts, no incremental state, no cache. That makes the
+edit / compile / copy-to-the-guest loop the slowest thing in the tree, and the
+default link step the most expensive part of it.
+
+Two builds of the same program, differing by one Cargo profile:
+
+| command | profile | fat LTO | codegen units | executable | for |
+|---|---|---|---|---|---|
+| `just windows` | `[profile.windows]` | yes | 1 | 20.6 MB | CI, the guest, a release |
+| `just windows-fast` | `[profile.windows-fast]` | no | 16 | 29.7 MB | editing |
+
+`windows-fast` inherits `windows` and overrides only `lto` and `codegen-units`,
+so `opt-level`, `panic = "abort"` and the feature set — everything that decides
+behaviour — are identical. A fast build that behaved differently would not be a
+fast build of the same program.
+
+### Four derivations, not two
+
+Both builds are split into a dependency half and a binary half, cached
+separately:
+
+* `packages.windows-deps` / `packages.windows-fast-deps` build the crates.io
+  graph from a *dummy* copy of the tree: crane's `mkDummySrc` keeps only
+  `Cargo.lock`, `.cargo/config.toml` and the manifests, and stubs every
+  workspace source. The derivation therefore does not depend on `crates/*/src`
+  at all — editing the shell cannot invalidate it.
+* `packages.windows` / `packages.windows-fast` inherit that `target/` and
+  compile the workspace crates and the link.
+
+The rule that keeps this working: **the two halves must be configured
+identically.** `flake.nix`'s `mkWindows` builds one argument set for both, and
+a linker, a C flag or a profile that appeared in only one of them would not be
+an error — it would be a silent full rebuild of every dependency in the other,
+which is the cost the split exists to remove. `nix eval
+.#windows-deps.drvPath` is the check: it must not move when only
+`crates/*/src` changed.
+
+### Measured
+
+32 cores, one added line in `crates/baash/src/main.rs`, `nix build -L`:
+
+| build | units compiled | wall clock |
+|---|---|---|
+| monolithic `.#windows` (before this split) | 413 | 193 s |
+| `.#windows` after an edit | 14 | 79–92 s |
+| `.#windows-fast` first build | 427 | 50 s |
+| `.#windows-fast` after an edit | 14 | 15 s |
+
+Reading it:
+
+* The split does not make a *cold* build faster; that is still the whole graph
+  (213 s for `.#windows`, 50 s for `.#windows-fast`). What it buys is the case
+  that happens twenty times an hour: the 14 units are the workspace, and 15 s is
+  the time to copy the new executable to the guest.
+* The two edit cases compile the same 14 units, and cargo *starts* all of them
+  within five seconds of each other, so the difference is not how many crates
+  there are but what happens afterwards: `baash` is the largest crate, and under
+  `[profile.windows]` it emits LTO bitcode which the link step then optimises
+  as one program — 71 s of the 78 s. `windows-fast` finishes the same work in
+  15 s. That is the whole argument for two profiles.
+* Fat LTO is also why `.#windows` costs four times the cold build of
+  `.#windows-fast` for the same 427 units: every dependency pays the same
+  bitcode-and-serial-codegen cost, not just `baash`. It is a fair trade for the
+  artifact that ships and a bad one for iterating.

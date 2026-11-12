@@ -132,66 +132,141 @@
               '';
             };
 
-            windows = windowsCraneLib.mkCargoDerivation {
-              pname = "baash-windows";
-              version = "0.0.0";
-              inherit src;
-              preBuild = embedCompletion;
+            # --- the Windows target -------------------------------------------
+            #
+            # Two builds of the same program. `windows` is the release shape —
+            # fat LTO, one codegen unit, stripped — which is what CI ships and
+            # what a guest runs. `windows-fast` is the iteration shape, the same
+            # code with LTO off, for the edit / compile / copy-to-the-guest
+            # loop. They differ by a profile name.
+            #
+            # Each is *two* derivations, because nearly all of the wall clock is
+            # the dependency graph rather than this workspace:
+            #
+            #   <name>-deps  the crates.io graph, built from a copy of the tree
+            #                whose workspace sources crane replaces with stubs
+            #                (`mkDummySrc`). Its store path therefore depends on
+            #                `Cargo.lock` and the manifests and *not* on any edit
+            #                under `crates/*/src`, so a source change reuses it.
+            #   <name>       the workspace crates and the final link, seeded
+            #                with that `target/`.
+            #
+            # The rule that makes the split work is that the halves must be
+            # configured identically. A linker, a C flag or a profile present in
+            # only one of them is not an error: it is a silent full rebuild of
+            # every dependency in the other, which is the cost the split exists
+            # to remove. So everything but `cargoArtifacts` and the install
+            # phase comes from one argument set, `windowsCommon`.
+            mkWindows =
+              {
+                pname,
+                profile,
+              }:
+              let
+                windowsCommon = {
+                  inherit pname src;
+                  version = "0.0.0";
+                  strictDeps = true;
+                  preBuild = embedCompletion;
+                  cargoVendorDir = windowsCraneLib.vendorCargoDeps { inherit src; };
 
-              # No shared `cargoArtifacts` here: a second target's artifacts are
-              # a second graph, so this builds its own. Nix caches the whole
-              # derivation instead.
-              cargoArtifacts = null;
-              doInstallCargoArtifacts = false;
-              cargoVendorDir = windowsCraneLib.vendorCargoDeps { inherit src; };
+                  # `cargo zigbuild` supplies the mingw linker through zig
+                  # rather than through a system MinGW — zig's sysroot is what
+                  # carries the `libpthread.a` that a windows-gnu dylib link
+                  # asks for by exact name, which the MinGW cross toolchain does
+                  # not have.
+                  #
+                  # `ci/windres` is the shim `turso_sdk_kit`'s build script
+                  # needs, because it asks for `windres` by name; the compiler
+                  # it execs preprocesses the script and looks for `clang` to do
+                  # it.
+                  nativeBuildInputs = [
+                    pkgs.cargo-zigbuild
+                    pkgs.zig
+                    pkgs.llvmPackages.bintools
+                    pkgs.llvmPackages.clang
+                    pkgs.coreutils
+                  ];
+                  # `libmimalloc-sys` builds C, and mimalloc's `options.c`
+                  # prints its build date with `__DATE__`. Nix's cc wrapper
+                  # makes that an error for reproducibility, which is the right
+                  # default for Nix's own packages but not for a vendored
+                  # allocator whose output is never compared: the flag is
+                  # relaxed for the C dependency only.
+                  env = {
+                    NIX_CFLAGS_COMPILE = "-Wno-error=date-time";
+                    # cc-rs appends these after its own flags, so the relaxed
+                    # warning wins over the `-Werror=date-time` the wrapper
+                    # adds.
+                    CFLAGS_x86_64_pc_windows_gnu = "-Wno-error=date-time";
+                    CFLAGS_x86_64-pc-windows-gnu = "-Wno-error=date-time";
+                  };
+                };
 
-              # `cargo zigbuild` supplies the mingw linker through zig rather
-              # than through a system MinGW — zig's sysroot is what carries the
-              # `libpthread.a` that a windows-gnu dylib link asks for by exact
-              # name, which the MinGW cross toolchain does not have.
-              #
-              # `ci/windres` is the shim `turso_sdk_kit`'s build script needs,
-              # because it asks for `windres` by name; the compiler it execs
-              # preprocesses the script and looks for `clang` to do it.
-              nativeBuildInputs = [
-                pkgs.cargo-zigbuild
-                pkgs.zig
-                pkgs.llvmPackages.bintools
-                pkgs.llvmPackages.clang
-                pkgs.coreutils
-              ];
-              # `libmimalloc-sys` builds C, and mimalloc's `options.c` prints
-              # its build date with `__DATE__`. Nix's cc wrapper makes that an
-              # error for reproducibility, which is the right default for Nix's
-              # own packages but not for a vendored allocator whose output is
-              # never compared: the flag is relaxed for the C dependency only.
-              env = {
-                NIX_CFLAGS_COMPILE = "-Wno-error=date-time";
-                # cc-rs appends these after its own flags, so the relaxed
-                # warning wins over the `-Werror=date-time` the wrapper adds.
-                CFLAGS_x86_64_pc_windows_gnu = "-Wno-error=date-time";
-                CFLAGS_x86_64-pc-windows-gnu = "-Wno-error=date-time";
+                # The shim, the resource compiler and the zig caches, in front
+                # of every cargo call in either half.
+                prepare = ''
+                  mkdir -p target/x86_64-pc-windows-gnu
+                  cp --no-preserve=mode ${./ci/windres} target/windres
+                  chmod 755 target/windres
+                  export PATH="$PWD/target:$PATH"
+                  # The unwrapped path, not `bintools`: that derivation's
+                  # `bin/llvm-windres` is a wrapper that needs the stdenv's
+                  # environment, and a build script does not have it.
+                  export BAASH_WINDRES="${pkgs.llvmPackages.bintools-unwrapped}/bin/llvm-windres"
+                  # Both caches want to live under $HOME, and the sandbox's home
+                  # is not writable.
+                  export HOME="$TMPDIR"
+                  export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global"
+                  export ZIG_LOCAL_CACHE_DIR="$TMPDIR/zig-local"
+                '';
+
+                # One command, spelled once, so the two halves cannot drift.
+                cargoBuild = ''
+                  cargo zigbuild --locked --profile ${profile} --target x86_64-pc-windows-gnu -p baash --features mimalloc
+                '';
+
+                deps = windowsCraneLib.buildDepsOnly (
+                  windowsCommon
+                  // {
+                    # The default `doCheck` also compiles every test target
+                    # (`--all-targets`), and the test targets here are Unix-only
+                    # by design.
+                    doCheck = false;
+                    buildPhaseCargoCommand = ''
+                      ${prepare}
+                      ${cargoBuild}
+                    '';
+                  }
+                );
+              in
+              {
+                inherit deps;
+                package = windowsCraneLib.mkCargoDerivation (
+                  windowsCommon
+                  // {
+                    cargoArtifacts = deps;
+                    doInstallCargoArtifacts = false;
+                    buildPhaseCargoCommand = ''
+                      ${prepare}
+                      ${cargoBuild}
+                    '';
+                    installPhaseCommand = ''
+                      mkdir -p $out/bin
+                      cp target/x86_64-pc-windows-gnu/${profile}/baash.exe $out/bin/
+                    '';
+                  }
+                );
               };
-              buildPhaseCargoCommand = ''
-                mkdir -p target/x86_64-pc-windows-gnu
-                cp --no-preserve=mode ${./ci/windres} target/windres
-                chmod 755 target/windres
-                export PATH="$PWD/target:$PATH"
-                # The unwrapped path, not `bintools`: that derivation's
-                # `bin/llvm-windres` is a wrapper that needs the stdenv's
-                # environment, and a build script does not have it.
-                export BAASH_WINDRES="${pkgs.llvmPackages.bintools-unwrapped}/bin/llvm-windres"
-                # Both caches want to live under $HOME, and the sandbox's home
-                # is not writable.
-                export HOME="$TMPDIR"
-                export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global"
-                export ZIG_LOCAL_CACHE_DIR="$TMPDIR/zig-local"
-                cargo zigbuild --profile windows --target x86_64-pc-windows-gnu -p baash --features mimalloc
-              '';
-              installPhaseCommand = ''
-                mkdir -p $out/bin
-                cp target/x86_64-pc-windows-gnu/windows/baash.exe $out/bin/
-              '';
+
+            windows = mkWindows {
+              pname = "baash-windows";
+              profile = "windows";
+            };
+
+            windowsFast = mkWindows {
+              pname = "baash-windows-fast";
+              profile = "windows-fast";
             };
 
           in
@@ -206,6 +281,7 @@
               embedCompletion
               licenses
               windows
+              windowsFast
               system
               ;
           }
@@ -213,7 +289,16 @@
     in
     {
       packages = eachSystem (
-        { pkgs, craneLib, cargoArtifacts, commonArgs, embedCompletion, windows, ... }:
+        {
+          pkgs,
+          craneLib,
+          cargoArtifacts,
+          commonArgs,
+          embedCompletion,
+          windows,
+          windowsFast,
+          ...
+        }:
         {
           default = craneLib.buildPackage (
             commonArgs
@@ -245,7 +330,18 @@
               };
             }
           );
-          inherit windows;
+          # The release executable, and the same program without LTO for the
+          # edit-compile-run loop. `nix build .#windows-fast` reuses a separate
+          # cached dependency build, so both are incremental in the only sense
+          # Nix has: the parts that did not change are not rebuilt.
+          windows = windows.package;
+          windows-fast = windowsFast.package;
+
+          # The cached halves on their own, so a drift in the split is visible:
+          # these two store paths must not move when only `crates/*/src`
+          # changed.
+          windows-deps = windows.deps;
+          windows-fast-deps = windowsFast.deps;
 
           # The library the binary embeds, exposed so the dev loop can copy the
           # exact tree the package build would: it is not vendored, and `nix
@@ -296,7 +392,8 @@
             }
           );
 
-          inherit licenses windows;
+          inherit licenses;
+          windows = windows.package;
 
           # The module's product is one generated startup file, and nothing
           # else in this gate ever sources it. This evaluates a system with the
