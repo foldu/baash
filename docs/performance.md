@@ -176,37 +176,53 @@ plus a selectable engine (the platform `regcomp`, or MinRX; `docs/contracts.md`)
 measured with the harness the shell itself uses: `-c` scripts of 20 000
 evaluations, release build, minimum of 11 interleaved process runs minus the
 same loop with `[[ -n $s ]]`, against bash 5.3.20 on the identical scripts.
+Re-measured on `7e0fbfd`; a second sample of the four closest rows agreed
+within 6%.
 
 | pattern | bash | system engine | MinRX |
 |---|---:|---:|---:|
-| `create` (literal) | 1.38 µs | 0.73 µs | 0.75 µs |
-| tar's `_longopt` ERE (84 B) | 38.3 µs | **3.64 µs** | 4.57 µs |
-| `^(foo|foobar|baz)([0-9]+)?$` | 4.44 µs | **0.48 µs** | 0.56 µs |
-| `^--(no-)?file` | 1.76 µs | **0.48 µs** | 0.67 µs |
-| no-match `^[[:blank:]]*--([[:alnum:]-]+)$` | 7.58 µs | 0.99 µs | **0.59 µs** |
-| capture `^--([[:alnum:]-]+)=(.*)$` | 6.81 µs | 2.09 µs | **1.68 µs** |
+| `create` (literal) | 1.27 µs | 0.59 µs | 0.65 µs |
+| tar's `_longopt` ERE (84 B) | 36.6 µs | **3.35 µs** | 4.36 µs |
+| `^(foo|foobar|baz)([0-9]+)?$` | 4.19 µs | 0.54 µs | 0.48 µs |
+| `^--(no-)?file` | 1.71 µs | 0.48 µs | 0.51 µs |
+| no-match `^[[:blank:]]*--([[:alnum:]-]+)$` | 7.38 µs | 0.59 µs | 0.66 µs |
+| capture `^--([[:alnum:]-]+)=(.*)$` | 6.54 µs | 1.66 µs | 1.52 µs |
 
-Before the cache the same tar pattern cost 29.0 µs on the system engine and
-7.1 µs on MinRX (same harness, cache removed), so the memo is an 8× win for
-glibc and 1.5× for MinRX, and `=~` on that pattern went from roughly
-bash-speed to 8–11× faster than bash.
+One gap is wider than the run-to-run noise: the fat tar ERE, where glibc's
+`regcomp`-free match is **23%** quicker. Two rows repeat a small edge worth
+noting and not much else — the no-match pattern favours glibc by 11–14% and the
+capture pattern MinRX by 9% — and the rest are a wash. So on the patterns a
+completion actually runs, the engine choice is not a throughput decision at
+all: it is portability, which is why MinRX exists. Both engines are 8–11×
+faster than bash on the tar ERE.
+
+The memo's own effect is measurable at the engine level (`baash_sys::Regex`,
+below): compiling the tar ERE costs 8.24 µs on glibc and 1.85 µs on MinRX,
+running it 2.3 and 3.5 µs, so a loop that recompiled paid 10.5 and 5.3 µs per
+`=~` and the memo removes 11.6× and 1.6× of that.
 
 The memo is bounded twice: 16 entries, and a 64 KiB limit on the pattern itself
 (`regex::MAX_PATTERN`), so a runaway generated pattern is refused rather than
 compiled and remembered. A one-entry cache would miss on every iteration of a
-loop rotating two patterns, and 16 slots keep both compiled. Measured with the one-entry version
-on the same harness, that loop cost 16.9 µs per `=~` on the system engine
-against 4.6 µs on MinRX — the argument for keeping MinRX selectable rather than
-deleting it, because glibc's `regcomp` is 8.7 µs on that pattern and MinRX's
-`regncomp` 1.8 µs.
+loop rotating two patterns; with 16 slots both stay compiled. That loop
+(`^--(no-)?file` alternating with the tar ERE, 40 000 evaluations) costs 1.93 µs
+per `=~` on the system engine — the average of the two cached costs, as it
+should be — and 2.46 µs on MinRX. The one-entry version measured 16.9 µs
+(system) and 4.6 µs (MinRX) on the same loop, which is also the argument for
+keeping MinRX selectable rather than deleting it: glibc's `regcomp` is 8.2 µs
+on that pattern and MinRX's 1.8 µs.
 
-Where the time goes, engine-level (`baash_sys::Regex`, ns per call):
+Where the time goes, engine-level (`baash_sys::Regex`, ns per call, minimum of
+7 × 20 000):
 
 | pattern | glibc compile / match | MinRX compile / match |
 |---|---:|---:|
-| `create` | 281 / 64 | 167 / 90 |
-| tar ERE | 8738 / 2329 | 1784 / 3348 |
-| `^(foo|foobar|baz)([0-9]+)?$` | 2708 / 425 | 374 / 337 |
+| `create` | 281 / 66 | 163 / 88 |
+| tar ERE | 8240 / 2297 | 1848 / 3539 |
+| `^(foo|foobar|baz)([0-9]+)?$` | 2534 / 392 | 382 / 337 |
+| `^--(no-)?file` | 1156 / 326 | 240 / 151 |
+| no-match pattern | 1688 / 37 | 1224 / 21 |
+| capture pattern | 1463 / 886 | 792 / 785 |
 
 MinRX's compile is one pass into a flat Thompson program, matched by an NFA
 simulation (`docs/contracts.md`). Measured with an `LD_PRELOAD` counting
@@ -216,6 +232,13 @@ sets), which is the bulk of the compile-time difference; in the `C` locale
 MinRX also takes its byte path (`LC_CTYPE=C` → no `mbrtowc`, no wide
 characters, no Unicode tables). Forcing `C.UTF-8` makes its class-heavy compile
 1.64 → 8.26 µs, so a future `setlocale` call would change this picture.
+
+Reproducing this is manual: there is no `cargo bench` for it. The harness is one
+20 000-iteration `-c` script per pattern, driven by a Python loop that
+interleaves the shells and keeps the minimum of each, plus a scratch crate
+(`rxapi`) that calls `baash_sys::Regex` directly for the engine-level table.
+That is why each figure carries a commit and a date rather than a baseline CI
+enforces.
 
 ## What this says
 
