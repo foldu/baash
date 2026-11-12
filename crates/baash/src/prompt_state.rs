@@ -96,9 +96,15 @@ impl PromptState {
 
     /// Copy the prompt context for the stock prompt and arm the watcher.
     ///
-    /// Re-arming is skipped while the directory is unchanged: inotify watches
-    /// are per directory, so rebuilding them per prompt would be a few hundred
-    /// syscalls between every command for no new information.
+    /// The *watcher* is re-armed only when the directory changes: inotify
+    /// watches are per directory, so rebuilding them per prompt would be a few
+    /// hundred syscalls between every command for no new information. The git
+    /// cache is ticked on every prompt instead, because a command can change
+    /// the tree while the prompt is away, and only the watcher covers the time
+    /// in between. Without a watch (Windows, or a repository too large to
+    /// watch) this is what keeps the counters from freezing at the first
+    /// snapshot until a `cd`; [`GitSegment::tick`] is what rate-limits it to
+    /// one `git status` per half second, so a prompt loop cannot cost more.
     pub fn arm(&mut self, context: &PromptContext, color: bool) {
         self.home.clone_from(&context.home);
         self.root = context.root;
@@ -109,8 +115,8 @@ impl PromptState {
             self.cwd_bytes.clone_from(&context.cwd);
             self.cwd = baash_sys::os::path_from_bytes(&context.cwd);
             self.last.clear();
-            self.git.tick(&self.cwd);
         }
+        self.git.tick(&self.cwd);
 
         #[cfg(target_os = "linux")]
         {
@@ -197,6 +203,11 @@ impl PromptState {
     }
 
     /// Recompute and answer the editor only when the bytes changed.
+    ///
+    /// The editor asks for this only while a watch is armed, which is Linux:
+    /// elsewhere the prompt is composed at the next prompt instead
+    /// ([`PromptState::arm`] ticks the cache there).
+    #[cfg(target_os = "linux")]
     fn repaint_if_changed(&mut self) -> Option<Prompt> {
         let next = self.compose();
         if next.bytes() == self.last {
@@ -252,6 +263,25 @@ impl LivePrompt for PromptState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_prompt_ticks_the_git_cache_not_only_a_cd() {
+        // Regression: `arm` used to tick only when the directory changed, so
+        // on a platform without a watcher (Windows) the counters froze at the
+        // first snapshot until the user left the directory.
+        let mut state = PromptState::new();
+        let root = std::env::temp_dir().join(format!("baash-prompt-tick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let context = PromptContext {
+            cwd: baash_sys::os::bytes_from_os(root.as_os_str()),
+            ..PromptContext::default()
+        };
+        state.arm(&context, false);
+        state.arm(&context, false);
+        assert_eq!(state.git.ticks(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn an_unarmed_state_has_no_legacy_segment() {

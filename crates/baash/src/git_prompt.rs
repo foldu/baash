@@ -80,6 +80,11 @@ struct State {
     cwd: Option<PathBuf>,
     /// When the next refresh may be requested.
     next_attempt: Option<Instant>,
+    /// How many times the prompt asked the cache for facts. Test-only: it is
+    /// what proves a prompt ticks the cache even when the directory did not
+    /// change, which is the only path a platform without a watcher has.
+    #[cfg(test)]
+    ticks: u64,
 }
 
 /// The prompt's git facts, owned by the prompt state and updated with the
@@ -113,6 +118,8 @@ impl GitSegment {
                 status: None,
                 cwd: None,
                 next_attempt: None,
+                #[cfg(test)]
+                ticks: 0,
             })),
         }
     }
@@ -148,6 +155,10 @@ impl GitSegment {
     pub fn tick(&self, cwd: &Path) {
         self.poll();
         let mut state = self.lock();
+        #[cfg(test)]
+        {
+            state.ticks += 1;
+        }
 
         if state.cwd.as_deref() != Some(cwd) {
             state.cwd = Some(cwd.to_path_buf());
@@ -205,6 +216,12 @@ impl GitSegment {
         }
         text.push(b']');
         Some(text)
+    }
+
+    /// How many times [`GitSegment::tick`] ran. Test-only.
+    #[cfg(test)]
+    pub fn ticks(&self) -> u64 {
+        self.lock().ticks
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
