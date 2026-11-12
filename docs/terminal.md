@@ -190,8 +190,21 @@ returns the same `Resize`. The wait is also what makes the console path stop
 blocking in a read, which is why the prompt there can notice anything at all
 while idle.
 
-## 8. What is next
+## 8. Clearing the screen
+
+`Ctrl-L` writes `ESC [ ROWS S` — ECMA-48's Scroll Up — before
+`ESC [ H ESC [ 2 J`. `2J` erases the viewport and keeps no text, and the output
+above the prompt is exactly what a user presses `Ctrl-L` to scroll back to;
+scrolling the page up first moves that text into the terminal's scrollback.
+The cursor does not move during `SU`, so the clear that follows homes it as it
+always did. A terminal that does not implement `SU` ignores it and clears as
+before; there is no capability query.
+
+Windows: the console's VT output support is assumed to include `SU`. That is
+unverified on a guest, like the rest of the Windows terminal path.
+
+## 9. What is next
 In landing order, each with its own commit: background-colour detection with a
-light theme, clipboard copy (OSC 52), a scrollback-preserving `Ctrl-L`, the
-kitty keyboard protocol, and prompt-line clicks. The ordered list is the
-session's task list; this file records what has actually landed.
+light theme, clipboard copy (OSC 52), the kitty keyboard protocol, and
+prompt-line clicks. The ordered list is the session's task list; this file
+records what has actually landed.

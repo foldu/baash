@@ -1441,3 +1441,25 @@ fn a_prompt_at_the_start_of_a_line_does_not_add_a_blank_one() {
         "the prompt already starts at column 1: {after_query:?}"
     );
 }
+
+/// `Ctrl-L` scrolls the page into the scrollback before clearing it.
+///
+/// `ESC [ 2 J` erases the viewport and keeps nothing; the output above the
+/// prompt is what a user presses `Ctrl-L` to go back to. ECMA-48 `SU` moves
+/// the page contents off the top first, which is where a terminal's scrollback
+/// lives, and leaves the cursor where it was.
+#[test]
+fn ctrl_l_pushes_the_screen_into_the_scrollback_before_clearing() {
+    let mut term = FakeTerminal::new(b"");
+    let completer = StubCompleter::empty();
+    let mut editor = Editor::new(&mut term, &completer, &baash_repl::NeverNeedsMore);
+    editor.step(Key::Ctrl(0x0c)).expect("step");
+    let output = term.text();
+    let scroll = output
+        .find("\u{1b}[24S")
+        .unwrap_or_else(|| panic!("the page is scrolled up first: {output:?}"));
+    let clear = output
+        .find("\u{1b}[H\u{1b}[2J")
+        .unwrap_or_else(|| panic!("then the screen is cleared: {output:?}"));
+    assert!(scroll < clear, "scroll before clear: {output:?}");
+}

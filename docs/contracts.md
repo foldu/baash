@@ -1083,6 +1083,12 @@ prompt compare the window size with its last sample. The editor then drops the
 frame's anchor and paints again; the renderer reads the size on every frame, so
 the new geometry needs no plumbing.
 
+**`Ctrl-L` clears without losing the output.** It writes `CSI rows S` (ECMA-48
+Scroll Up) before `CSI H CSI 2 J`: the scroll moves the page's text into the
+terminal's scrollback, and only then is the viewport erased. The count is the
+terminal's rows, read from `Terminal::size`, so a terminal with no `SU` support
+ignores the first sequence and clears exactly as before.
+
 **`ShellCompletion` is the per-read `complete -F` seam.** The editor still
 borrows one `&dyn Completer` for its whole life, but a completion function needs
 the interpreter, which the loop owns, so `Editor::read_line_with_shell(live,

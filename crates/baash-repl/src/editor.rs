@@ -734,6 +734,14 @@ impl<'a> Editor<'a> {
                 self.line.kill_to_end();
             }
             Key::Ctrl(0x0c) => {
+                // Push what is on screen into the scrollback before clearing
+                // it. `2J` erases the viewport and keeps no text, and the
+                // output above the prompt is exactly what a user scrolls back
+                // to; ECMA-48's `SU` scrolls the page contents off the top,
+                // which is where terminals put scrollback. The cursor does not
+                // move, so the clear that follows is the same one as before.
+                let rows = self.term.size().rows_or_fallback();
+                self.term.write_all(format!("\x1b[{rows}S").as_bytes())?;
                 self.term.write_all(b"\x1b[H\x1b[2J")?;
                 self.renderer.reset();
             }

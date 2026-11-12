@@ -884,3 +884,26 @@ fn resizing_the_terminal_repaints_the_prompt() {
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&work);
 }
+
+/// `Ctrl-L` puts the screen into the scrollback before clearing it.
+///
+/// The pty does not emulate scrollback, but it does show the sequence order:
+/// the page scrolls up by a screenful, then the viewport is cleared, and only
+/// then is the prompt painted again.
+#[test]
+fn ctrl_l_scrolls_the_page_before_clearing_it() {
+    let home = temp_dir("ctrl-l-home");
+    let work = temp_dir("ctrl-l-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.prompt(" $");
+    session.send(b"echo before-clear\n");
+    session.prompt(" $");
+    session.send(b"\x0c");
+    session.expect(b"\x1b[50S", Duration::from_secs(10));
+    session.expect(b"\x1b[H\x1b[2J", Duration::from_secs(10));
+    session.prompt(" $");
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}

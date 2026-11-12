@@ -343,7 +343,9 @@ Known gaps, stated so they are not mistaken for behaviour:
   end with a newline (`docs/terminal.md` §2, §5, §6). A resize is detected by
   sampling the window size every 250 ms during the input wait rather than by an
   event, and that sampling path has not been observed on a guest
-  (`docs/terminal.md` §7).
+  (`docs/terminal.md` §7). `Ctrl-L`'s scrollback push relies on ECMA-48 Scroll
+  Up reaching the console's scrollback, which is unverified too
+  (`docs/terminal.md` §8).
 
 Conformance is the other backlog, and it is measured: `docs/state.md` §6 and
 `docs/roadmap.md` carry the per-file picture, and `crates/baash-spec/baseline.txt`
