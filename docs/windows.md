@@ -52,7 +52,8 @@ the image rather than drawn by it.
 
 | file | what it is |
 |---|---|
-| `assets/logo.svg` | the mascot; the source of truth |
+| `assets/logo.svg` | the mascot; the source of truth, and what the icon is built from |
+| `assets/logo-dark.svg` | the same mark with a cream keyline on the ears, for dark surfaces; not used by the icon |
 | `assets/baash.ico` | the same drawing at 16, 24, 32, 48, 64, 128 and 256 px |
 | `crates/baash/baash.rc` | one `1 ICON "baash.ico"` statement |
 | `crates/baash/build.rs` | compiles it for a Windows target, and only then |
