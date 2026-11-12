@@ -484,6 +484,26 @@ fn a_keystroke_cancels_a_pending_lookup() {
     cleanup(&mut session, &home, &work);
 }
 
+/// bash completes synchronously, so a fast `Tab`-`Enter` runs the completed
+/// line. The asynchronous lookup must therefore keep `Enter` behind the answer
+/// instead of letting it cancel the run: both keys arrive here in one write,
+/// before the 500 ms carapace deadline, and the fall-through `-F` rule still
+/// has to run and its candidate be submitted.
+#[test]
+fn a_fast_enter_waits_for_a_pending_lookup() {
+    let bin = temp_dir("enter-bin");
+    fake_carapace(&bin, "slow", "mycmd");
+    let (mut session, home, work) = session("enter", &path_with(&bin, true));
+
+    session.line("mycmd () { echo \"args:$*\"; }");
+    session.line("_mycmd() { COMPREPLY=(FUNC-ONE); }");
+    session.line("complete -F _mycmd mycmd");
+    session.send(b"mycmd \t\r");
+    session.expect(b"args:FUNC-ONE", Duration::from_secs(10));
+
+    cleanup(&mut session, &home, &work);
+}
+
 #[test]
 fn a_hanging_carapace_is_bounded_and_falls_through() {
     let bin = temp_dir("slow-bin");

@@ -56,6 +56,13 @@ const CURSOR_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_mill
 /// decides how promptly a finished answer is painted while no key arrives.
 const COMPLETION_WAIT: std::time::Duration = std::time::Duration::from_millis(10);
 
+/// How long a submitted `Enter` waits for a pending completion to answer.
+///
+/// A hook's own deadline is shorter (carapace's is 500 ms), so this is only
+/// the backstop for a hook that never answers: the line is submitted as typed
+/// rather than held forever.
+const DEFERRED_KEY_WAIT: std::time::Duration = std::time::Duration::from_millis(1_000);
+
 /// What a single key did to the editing session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flow {
@@ -67,6 +74,14 @@ pub enum Flow {
     Interrupt,
     /// `Ctrl-D` on an empty line, or the terminal's input ended.
     Eof,
+}
+
+/// What one processed key did to the read loop.
+enum KeyStep {
+    /// Keep reading keys for this line.
+    Continue,
+    /// The line is over: submitted, interrupted, or end of input.
+    Done(ReadResult),
 }
 
 /// The outcome of a complete [`Editor::read_line`].
@@ -237,6 +252,12 @@ pub struct Config {
     pub max_menu_rows: usize,
     /// Whether to paint history ghost text after the cursor.
     pub auto_suggest: bool,
+    /// How long a submitted `Enter` waits for a pending completion to answer.
+    ///
+    /// A hook's own deadline is shorter (carapace's lookup is bounded at
+    /// 500 ms); this is the backstop for a hook that never answers, so the
+    /// line is submitted as typed rather than held forever.
+    pub submit_wait: std::time::Duration,
 }
 
 impl Default for Config {
@@ -248,6 +269,7 @@ impl Default for Config {
             history: History::new(),
             max_menu_rows: 8,
             auto_suggest: true,
+            submit_wait: DEFERRED_KEY_WAIT,
         }
     }
 }
@@ -330,6 +352,20 @@ pub struct Editor<'a> {
     /// and has not answered yet. While this is set the read loop polls the hook
     /// instead of parking on the keyboard alone.
     completion_pending: bool,
+    /// A key that has to wait for a pending completion to answer.
+    ///
+    /// Only `Enter` waits: bash performs completion synchronously, so a fast
+    /// Tab-Enter runs the completed line. For the asynchronous carapace lookup
+    /// that means keeping the process alive instead of cancelling it, and
+    /// processing the key once the answer is painted.
+    deferred_key: Option<Key>,
+    /// When a deferred key stops waiting for the hook.
+    ///
+    /// The hook is supposed to answer (carapace's own deadline is 500 ms); this
+    /// backstop only keeps a hook that never does from holding the line.
+    deferred_deadline: Option<std::time::Instant>,
+    /// How long a deferred key may wait (see [`Config::submit_wait`]).
+    submit_wait: std::time::Duration,
 }
 
 impl<'a> Editor<'a> {
@@ -372,6 +408,9 @@ impl<'a> Editor<'a> {
             preamble: Vec::new(),
             prompt_row: None,
             completion_pending: false,
+            deferred_key: None,
+            deferred_deadline: None,
+            submit_wait: config.submit_wait,
         }
     }
 
@@ -571,6 +610,8 @@ impl<'a> Editor<'a> {
         self.history.reset_navigation();
         self.secondary = false;
         self.completion_pending = false;
+        self.deferred_key = None;
+        self.deferred_deadline = None;
         self.renderer.reset();
         self.dirty = true;
     }
@@ -657,7 +698,27 @@ impl<'a> Editor<'a> {
             // process may have answered while the loop was painting.
             if self.completion_pending {
                 self.poll_shell(shell)?;
+                if self.completion_pending && self.deferred_key.is_some() {
+                    // A key is ordered behind the answer. Wait for it, but not
+                    // past the backstop: a hook that never answers must not
+                    // hold the line.
+                    if self
+                        .deferred_deadline
+                        .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+                    {
+                        self.abandon_completion(shell);
+                    } else {
+                        std::thread::sleep(COMPLETION_WAIT);
+                        continue;
+                    }
+                }
                 if !self.completion_pending {
+                    if let Some(key) = self.deferred_key.take() {
+                        self.deferred_deadline = None;
+                        if let KeyStep::Done(result) = self.process_key(key, shell)? {
+                            return Ok(result);
+                        }
+                    }
                     continue;
                 }
             }
@@ -702,38 +763,59 @@ impl<'a> Editor<'a> {
             }
             let Some(key) = self.decoder.next(self.term)? else {
                 self.abandon_completion(shell);
+                self.deferred_key = None;
+                self.deferred_deadline = None;
                 return self.finish_eof();
             };
             // A keystroke means the pending answer is for a line the user has
-            // already moved on from. Cancel it before the key is processed so
-            // the process is reaped promptly rather than after the next Tab.
+            // already moved on from. `Enter` is the exception: bash completes
+            // synchronously, so a fast Tab-Enter runs the completed line
+            // instead of cancelling the lookup. Keep it and process it once
+            // the answer has been painted.
+            if self.completion_pending && submits(&key) {
+                self.deferred_key = Some(key);
+                self.deferred_deadline = Some(std::time::Instant::now() + self.submit_wait);
+                continue;
+            }
             self.abandon_completion(shell);
-            match self.step_with(key, shell)? {
-                Flow::Continue => {}
-                Flow::Submit => {
-                    self.line.push_newline();
-                    if self.syntax.needs_more_input(self.line.buffer()) {
-                        self.renderer.goto_end(self.term)?;
-                        self.term.write_all(b"\r\n")?;
-                        self.renderer.reset();
-                        self.line.commit_prefix();
-                        self.secondary = true;
-                        self.menu = None;
-                        self.dirty = true;
-                        self.draw()?;
-                        continue;
-                    }
-                    let text = self.line.take();
-                    self.history.push(&text);
+            match self.process_key(key, shell)? {
+                KeyStep::Continue => {}
+                KeyStep::Done(result) => return Ok(result),
+            }
+        }
+    }
+
+    /// Apply one decoded key, finishing the line when it asks to.
+    fn process_key(
+        &mut self,
+        key: Key,
+        shell: &mut Option<&mut dyn ShellCompletion>,
+    ) -> io::Result<KeyStep> {
+        match self.step_with(key, shell)? {
+            Flow::Continue => Ok(KeyStep::Continue),
+            Flow::Submit => {
+                self.line.push_newline();
+                if self.syntax.needs_more_input(self.line.buffer()) {
                     self.renderer.goto_end(self.term)?;
                     self.term.write_all(b"\r\n")?;
                     self.renderer.reset();
-                    self.secondary = false;
-                    return Ok(ReadResult::Line(text));
+                    self.line.commit_prefix();
+                    self.secondary = true;
+                    self.menu = None;
+                    self.dirty = true;
+                    self.draw()?;
+                    return Ok(KeyStep::Continue);
                 }
-                Flow::Interrupt => return self.finish_interrupt(),
-                Flow::Eof => return self.finish_eof(),
+                let text = self.line.take();
+                self.history.push(&text);
+                self.renderer.goto_end(self.term)?;
+                self.term.write_all(b"\r\n")?;
+                self.renderer.reset();
+                self.secondary = false;
+                Ok(KeyStep::Done(ReadResult::Line(text)))
             }
+            Flow::Interrupt => Ok(KeyStep::Done(self.finish_interrupt()?)),
+            Flow::Eof => Ok(KeyStep::Done(self.finish_eof()?)),
         }
     }
 
@@ -1527,6 +1609,15 @@ fn shifted(character: char, mods: Modifiers) -> char {
     } else {
         character
     }
+}
+
+/// Whether `key` submits the line.
+///
+/// The same arm as [`Editor::handle_with`]'s `(Code::Enter, Modifiers::NONE)`,
+/// with the lock modifiers folded out, so a key that waits for a completion
+/// takes the path it would have taken if it had arrived later.
+fn submits(key: &Key) -> bool {
+    matches!(&key.code, Code::Enter) && key.mods.binding() == Modifiers::NONE
 }
 
 /// Whether `key` extends a kill sequence rather than ending one.

@@ -1035,8 +1035,8 @@ exits 0, and a dynamic action that cannot run exits 0 with `values: []` and
 The lookup is a polled state machine, not a blocking wait.
 `ShellCompletion::begin` starts the child and returns `Pending`; `poll` is a
 zero-timeout readiness check plus `waitpid(WNOHANG)`, driven by the editor's
-wait loop; a keystroke calls `cancel`, which kills and reaps; `TIMEOUT`
-(500 ms) bounds a silent process.
+wait loop; any editing keystroke calls `cancel`, which kills and reaps (Enter
+waits for the answer instead); `TIMEOUT` (500 ms) bounds a silent process.
 Non-zero exit, I/O error, invalid JSON, an empty `values` array, and the
 deadline all fall through to the next source, never a panic and never a blocked
 prompt. `CompletionEngine::carapace_menu` is the static half of the same
@@ -1324,10 +1324,16 @@ here has an answer, the data engine should" (a missing or failing function also
 ends there), and `Ready(Some(ShellMenu))` is the menu. `Pending` is the new
 third answer: the hook started work that is not ready — an external carapace
 process — and the editor keeps reading keys while it polls
-`ShellCompletion::poll` from the wait loop. A keystroke calls `ShellCompletion::cancel` and the key
-is processed normally; the result is never for a stale line. `poll` must not
-block, `cancel` must release the process, and the default `begin` wraps the
-synchronous `complete`, so a hook with nothing asynchronous to do is unchanged.
+`ShellCompletion::poll` from the wait loop. Any key that changes the line calls
+`ShellCompletion::cancel` and is processed normally; the result is never for a
+stale line. `Enter` is the exception: it is ordered behind the answer, because
+bash's completion is synchronous and a fast Tab-Enter must run the completed
+line, so the editor keeps the hook alive, paints the answer, and then processes
+the key (a unique match is inserted and submitted; an opened menu takes the
+`Enter` as its selection). `Config::submit_wait` backstops a hook that never
+answers, after which the line is submitted as typed. `poll` must not block,
+`cancel` must release the process, and the default `begin` wraps the synchronous
+`complete`, so a hook with nothing asynchronous to do is unchanged.
 
 While a completion is pending, `Terminal::await_input_timeout` bounds the wait
 so the loop can poll; it returns the new `Input::Timeout` when the bound

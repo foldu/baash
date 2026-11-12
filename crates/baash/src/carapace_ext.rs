@@ -45,9 +45,11 @@
 //! hundreds of milliseconds. The process is started when Tab is pressed, the
 //! editor keeps reading keys, and [`Carapace::poll`] is a non-blocking check
 //! (a zero-timeout readability check plus a non-blocking `waitpid`) driven by
-//! the editor's wait loop. A keystroke cancels the run; [`TIMEOUT`] bounds an otherwise
-//! silent process. Nothing here blocks, so the prompt stays live and the child
-//! is never left running after the line is over.
+//! the editor's wait loop. A keystroke that changes the line cancels the run;
+//! `Enter` waits for the answer instead, so a fast Tab-Enter runs the completed
+//! line the way bash's synchronous completion does. [`TIMEOUT`] bounds an
+//! otherwise silent process. Nothing here blocks, so the prompt stays live and
+//! the child is never left running after the line is over.
 
 use std::io;
 use std::time::{Duration, Instant};
@@ -64,7 +66,7 @@ use baash_sys::{
 /// generous for the dynamic actions that shell out (`kubectl`, `docker`, a
 /// package daemon) and short enough that a broken binary is not noticed as a
 /// hang. The wait is asynchronous, so a longer bound costs responsiveness only
-/// when the user is waiting for a menu; any keystroke cancels it.
+/// when the user is waiting for a menu; any editing keystroke cancels it.
 pub const TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Refuse output larger than this, so a broken completer cannot exhaust memory.
@@ -264,8 +266,8 @@ impl Carapace {
 
     /// Kill the child if it is still running and reap it.
     ///
-    /// Called on a keystroke (the line moved on), on the deadline, and by
-    /// `Drop`; idempotent.
+    /// Called when the line moves on, on the deadline, and by `Drop`;
+    /// idempotent.
     pub fn cancel(&mut self) {
         if let Some(child) = self.child.take() {
             let _ = child.kill();

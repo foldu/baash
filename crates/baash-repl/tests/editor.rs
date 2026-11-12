@@ -1488,6 +1488,133 @@ fn a_shell_completion_hook_answers_before_the_data_completer() {
     assert_eq!(declining.seen, vec![b"cmd al".to_vec()]);
 }
 
+/// A hook whose answer arrives after a few polls, like carapace's process.
+struct AsyncHook {
+    word: &'static str,
+    ready_after: usize,
+    polls: usize,
+    menu: Option<baash_repl::ShellMenu>,
+    cancelled: bool,
+}
+
+impl AsyncHook {
+    fn new(word: &'static str, ready_after: usize) -> Self {
+        Self {
+            word,
+            ready_after,
+            polls: 0,
+            menu: None,
+            cancelled: false,
+        }
+    }
+}
+
+impl baash_repl::ShellCompletion for AsyncHook {
+    fn complete(&mut self, _line: &[u8], _cursor: usize) -> Option<baash_repl::ShellMenu> {
+        // The editor uses `begin`/`poll`; this synchronous form is not reached.
+        None
+    }
+
+    fn begin(&mut self, line: &[u8], cursor: usize) -> baash_repl::ShellCompletionState {
+        let engine = baash_complete::CompletionEngine::new();
+        let ctx = engine.context(line, cursor);
+        let candidates = vec![baash_complete::Candidate::new(
+            self.word.as_bytes(),
+            baash_complete::CandKind::Other,
+        )];
+        self.menu = Some(baash_repl::ShellMenu {
+            menu: baash_complete::Menu::new(ctx, candidates),
+            output: Vec::new(),
+        });
+        baash_repl::ShellCompletionState::Pending
+    }
+
+    fn poll(&mut self) -> baash_repl::ShellCompletionState {
+        self.polls += 1;
+        if self.polls < self.ready_after {
+            baash_repl::ShellCompletionState::Pending
+        } else {
+            baash_repl::ShellCompletionState::Ready(self.menu.take())
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.cancelled = true;
+    }
+}
+
+/// bash completes synchronously, so `Tab` then `Enter` runs the completed line.
+/// With an asynchronous lookup the answer may still be in flight when `Enter`
+/// arrives; it waits for the answer instead of cancelling the process and
+/// submitting the word as typed.
+#[test]
+fn enter_waits_for_a_pending_completion() {
+    // Ready on the third poll: once after Tab, once while Enter waits.
+    let mut hook = AsyncHook::new("shell-alpha", 3);
+    let mut term = FakeTerminal::new(b"cmd al\t\r");
+    let completer = StubCompleter::empty();
+    let result = {
+        let mut editor = Editor::with_config(
+            &mut term,
+            &completer,
+            &baash_repl::NeverNeedsMore,
+            plain_config(),
+        );
+        editor
+            .read_line_with_shell(&mut baash_repl::NeverRefreshes, Some(&mut hook))
+            .expect("read_line")
+    };
+    assert_eq!(result, ReadResult::Line(b"cmd shell-alpha \n".to_vec()));
+    assert!(
+        !hook.cancelled,
+        "the deferred Enter must not cancel the lookup"
+    );
+}
+
+/// Any other key still cancels: it changes the word the lookup was asked
+/// about, so its answer is stale.
+#[test]
+fn typing_still_cancels_a_pending_completion() {
+    let mut hook = AsyncHook::new("shell-alpha", 3);
+    let mut term = FakeTerminal::new(b"cmd al\tx\r");
+    let completer = StubCompleter::empty();
+    let result = {
+        let mut editor = Editor::with_config(
+            &mut term,
+            &completer,
+            &baash_repl::NeverNeedsMore,
+            plain_config(),
+        );
+        editor
+            .read_line_with_shell(&mut baash_repl::NeverRefreshes, Some(&mut hook))
+            .expect("read_line")
+    };
+    assert_eq!(result, ReadResult::Line(b"cmd alx\n".to_vec()));
+    assert!(hook.cancelled, "typing cancels the pending lookup");
+}
+
+/// A hook that never answers must not hold `Enter` forever: at the deadline the
+/// line is submitted as typed.
+#[test]
+fn a_hook_that_never_answers_does_not_hold_enter() {
+    let mut hook = AsyncHook::new("shell-alpha", usize::MAX);
+    let config = Config {
+        submit_wait: std::time::Duration::from_millis(20),
+        ..plain_config()
+    };
+    let mut term = FakeTerminal::new(b"cmd al\t\r");
+    let completer = StubCompleter::empty();
+    let result = {
+        let mut editor =
+            Editor::with_config(&mut term, &completer, &baash_repl::NeverNeedsMore, config);
+        editor
+            .read_line_with_shell(&mut baash_repl::NeverRefreshes, Some(&mut hook))
+            .expect("read_line")
+    };
+    assert_eq!(result, ReadResult::Line(b"cmd al\n".to_vec()));
+    assert!(hook.cancelled, "the deadline abandons the lookup");
+}
+
 /// A completion function's `echo` is painted above the prompt, and the line is
 /// repainted under it — bash's order, so a warning does not garble the frame.
 #[test]
