@@ -443,9 +443,6 @@ rediscover):
   from the runtime).
 * `complete -G`/`-X` are not applied at Tab, and no rule is applied to a
   redirection target or an assignment value (those are filenames/words).
-* A completed filename containing `!` is inserted unescaped, so with history
-  expansion on it is treated as an event at Enter. Bash's readline quoting
-  avoids this; the completion insert path is out of this wave's scope.
 * Array subscripts (`${arr[`) are not completed. bash 5.3.20 rings the bell
   there too, so this matches the reference rather than missing a feature.
 * The fuzzy tier means a menu can be wider than bash's: `$HO<TAB>` lists

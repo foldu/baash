@@ -77,14 +77,19 @@ pub fn quote(bytes: &[u8], ctx: QuoteCtx) -> Vec<u8> {
                 }
             }
             QuoteCtx::DoubleQuoted => {
+                // A `!` cannot be escaped with a backslash here: the lexer
+                // keeps `\!` as two bytes inside double quotes, so argv would
+                // gain a backslash, and history expansion still runs on the
+                // result because double quotes do not inhibit it. Closing the
+                // string for one single-quoted bang leaves the argument byte
+                // for byte and puts the `!` where the expander cannot see it.
+                if b == b'!' {
+                    out.extend_from_slice(b"\"'!'\"");
+                    continue;
+                }
                 if matches!(b, b'$' | b'`' | b'"' | b'\\') {
                     out.push(b'\\');
                 }
-                // `!` is deliberately not escaped. `\!` inside double quotes
-                // would keep the backslash as a literal byte, and this
-                // function is also used for prompt text. A filename completed
-                // with a `!` is therefore expanded at the prompt; that is a
-                // known completion gap (`docs/state.md` §4), not a quote bug.
                 out.push(b);
             }
             QuoteCtx::SingleQuoted => {
@@ -131,6 +136,31 @@ mod tests {
         assert_eq!(
             quote(mixed, QuoteCtx::Unquoted),
             "src/ßhell/a\\ b".as_bytes()
+        );
+    }
+
+    #[test]
+    fn a_bang_inside_double_quotes_is_glued_as_a_single_quoted_piece() {
+        // `\!` would keep its backslash inside double quotes, and double
+        // quotes do not inhibit history expansion, so the only spelling that
+        // is right for both the lexer and the expander closes the string for
+        // one single-quoted bang.
+        assert_eq!(
+            quote(b"bang!name", QuoteCtx::DoubleQuoted),
+            b"bang\"'!'\"name"
+        );
+        // Unquoted, a backslash hides the `!` from history expansion and the
+        // lexer removes it, so no glue is needed.
+        assert_eq!(quote(b"bang!name", QuoteCtx::Unquoted), b"bang\\!name");
+        // Inside single quotes it was never special.
+        assert_eq!(quote(b"bang!name", QuoteCtx::SingleQuoted), b"bang!name");
+    }
+
+    #[test]
+    fn double_quotes_still_escape_what_the_lexer_would_read() {
+        assert_eq!(
+            quote(b"$x `y` \"z\" \\", QuoteCtx::DoubleQuoted),
+            b"\\$x \\`y\\` \\\"z\\\" \\\\"
         );
     }
 

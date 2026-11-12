@@ -380,6 +380,42 @@ fn a_filename_with_a_space_is_inserted_quoted_and_runs() {
     cleanup(&mut session, &home, &work);
 }
 
+/// A `!` in a completed filename is not a history event.
+///
+/// History expansion runs on the line the user submits, and double quotes do
+/// not inhibit it; a backslash inside double quotes would survive into argv.
+/// The completion therefore closes the string for one single-quoted bang, and
+/// the file still opens by its real name.
+#[test]
+fn a_bang_in_a_quoted_filename_is_not_history_expansion() {
+    let (mut session, home, work) = session("bangfile");
+    std::fs::write(work.join("bang!name"), b"PAYLOAD\n").expect("write the file");
+
+    session.send(b"cat \"bang\t");
+    // `cat "bang"'!'"name` — the double quote stays open around the argument
+    // and only the `!` sits in single quotes, where the expander ignores it.
+    session.expect(b"\"'!'\"", Duration::from_secs(10));
+    session.send(b"\"\n");
+    session.expect(b"PAYLOAD", Duration::from_secs(10));
+    session.prompt();
+    cleanup(&mut session, &home, &work);
+}
+
+/// Outside quotes a `!` is escaped with a backslash, which hides it from
+/// history expansion and is removed again by the lexer.
+#[test]
+fn a_bang_in_an_unquoted_filename_is_escaped() {
+    let (mut session, home, work) = session("bangplain");
+    std::fs::write(work.join("bang!plain"), b"PLAIN\n").expect("write the file");
+
+    session.send(b"cat bang\t");
+    session.expect(b"bang\\!plain", Duration::from_secs(10));
+    session.send(b"\n");
+    session.expect(b"PLAIN", Duration::from_secs(10));
+    session.prompt();
+    cleanup(&mut session, &home, &work);
+}
+
 #[test]
 fn directory_completion_stops_at_the_directory() {
     let (mut session, home, work) = session("dirfile");

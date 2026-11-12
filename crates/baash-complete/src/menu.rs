@@ -207,6 +207,20 @@ mod tests {
     }
 
     #[test]
+    fn a_literal_bang_inside_double_quotes_is_inserted_as_a_single_quoted_piece() {
+        // The menu only knows the insertion point's quote context; the bang
+        // itself is the quoting layer's problem (`baash_lang::quote`). This
+        // pins the seam: a filename completed inside `"…"` must keep the
+        // double quote open around the result, with the `!` outside it.
+        let menu = menu(b"cat \"bang", &[b"bang!name"]);
+        assert_eq!(menu.quote, QuoteCtx::DoubleQuoted);
+        let mut line = b"cat \"bang".to_vec();
+        let span = menu.apply(&mut line, 0).expect("a full insertion");
+        assert_eq!(line, b"cat \"bang\"'!'\"name");
+        assert_eq!(span.end, line.len());
+    }
+
+    #[test]
     fn a_common_prefix_can_be_applied_to_a_line() {
         let menu = menu(b"ls al", &[b"alpha", b"alpine"]);
         let mut line = b"ls al".to_vec();

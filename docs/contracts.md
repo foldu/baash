@@ -306,8 +306,10 @@ pub trait Shell: Vars {
   collects into it; the expansion layer does not guess the allocation strategy.
 - `quote(bytes, ctx)` covers `Unquoted`, `DoubleQuoted` and `SingleQuoted`, and
   emits `$'\n'` for an unquoted newline (a bare backslash-newline is a line
-  continuation and would corrupt the line). `baash-complete` must use this rather
-  than its own escaping.
+  continuation and would corrupt the line). In `DoubleQuoted` a `!` becomes
+  `"'!'"`: a backslash there would survive into argv, and double quotes do not
+  inhibit history expansion, so the string is closed for one single-quoted
+  bang. `baash-complete` must use this rather than its own escaping.
 
 **Two properties, deliberately separate.** A part is *quoted* (glob-inert) or
 not, and separately a part's bytes are *expansion results* (splittable) or not.
