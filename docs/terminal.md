@@ -203,8 +203,22 @@ before; there is no capability query.
 Windows: the console's VT output support is assumed to include `SU`. That is
 unverified on a guest, like the rest of the Windows terminal path.
 
-## 9. What is next
-In landing order, each with its own commit: background-colour detection with a
-light theme, clipboard copy (OSC 52), the kitty keyboard protocol, and
-prompt-line clicks. The ordered list is the session's task list; this file
-records what has actually landed.
+## 9. Clipboard (OSC 52)
+
+```
+ESC ] 52 ; c ; BASE64 BEL
+```
+
+`Ctrl-X` copies the current line. The clipboard belongs to the terminal, not to
+the process, which is what makes this work over `ssh`; base64 keeps a newline
+or a control byte in the line from ending the sequence early. There is no
+acknowledgement in the protocol: a terminal may ignore the sequence (xterm
+needs `allowWindowOps`) or cap the payload size, and the shell cannot tell.
+There is no selection yet, so the whole line is copied; mouse selection is what
+will make a partial copy possible.
+
+## 10. What is next
+In landing order, each with its own commit: prompt-line clicks (and the
+selection that goes with them), background-colour detection with a light
+theme, and the kitty keyboard protocol. The ordered list is the session's task
+list; this file records what has actually landed.

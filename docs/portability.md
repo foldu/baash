@@ -345,7 +345,9 @@ Known gaps, stated so they are not mistaken for behaviour:
   event, and that sampling path has not been observed on a guest
   (`docs/terminal.md` §7). `Ctrl-L`'s scrollback push relies on ECMA-48 Scroll
   Up reaching the console's scrollback, which is unverified too
-  (`docs/terminal.md` §8).
+  (`docs/terminal.md` §8). OSC 52 is written to the console like any other
+  escape, but whether its VT parser forwards the payload to the Windows
+  clipboard has not been observed (`docs/terminal.md` §9).
 
 Conformance is the other backlog, and it is measured: `docs/state.md` §6 and
 `docs/roadmap.md` carry the per-file picture, and `crates/baash-spec/baseline.txt`

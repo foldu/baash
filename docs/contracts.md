@@ -1039,9 +1039,10 @@ pub trait Terminal {                       // the pty wave implements these five
     fn size(&mut self) -> Size;            // Size { columns, rows }
     fn enter_raw(&mut self) -> io::Result<()>;
     fn leave_raw(&mut self) -> io::Result<()>;
-    // Two more, with defaults: `read_byte_timeout` (`Ok(None)` = no byte, no
-    // promise) and `reports_cursor_position` (false unless the terminal says
-    // otherwise).
+    // Three more, with defaults: `read_byte_timeout` (`Ok(None)` = no byte,
+    // no promise), `reports_cursor_position` (false unless the terminal says
+    // otherwise) and `supports_control_sequences` (true unless the terminal is
+    // `TERM=dumb`).
 }
 
 pub trait Syntax { fn needs_more_input(&self, line: &[u8]) -> bool; }
@@ -1088,6 +1089,13 @@ Scroll Up) before `CSI H CSI 2 J`: the scroll moves the page's text into the
 terminal's scrollback, and only then is the viewport erased. The count is the
 terminal's rows, read from `Terminal::size`, so a terminal with no `SU` support
 ignores the first sequence and clears exactly as before.
+
+**The terminal owns the clipboard.** `Ctrl-X` writes OSC 52 with the current
+line, base64-encoded so a newline or a control byte cannot end the sequence
+early. Everything that is a protocol announcement rather than text — the
+preamble, the prompt marks, the command marks and the clipboard — is gated by
+`Terminal::supports_control_sequences`, which is `!TERM=dumb` on Unix and
+`true` on the console; a dumb terminal shows those bytes as garbage.
 
 **`ShellCompletion` is the per-read `complete -F` seam.** The editor still
 borrows one `&dyn Completer` for its whole life, but a completion function needs

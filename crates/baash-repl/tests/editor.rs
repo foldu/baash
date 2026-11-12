@@ -1463,3 +1463,26 @@ fn ctrl_l_pushes_the_screen_into_the_scrollback_before_clearing() {
         .unwrap_or_else(|| panic!("then the screen is cleared: {output:?}"));
     assert!(scroll < clear, "scroll before clear: {output:?}");
 }
+
+/// `Ctrl-X` hands the line to the terminal's clipboard as OSC 52.
+///
+/// The clipboard belongs to the terminal, so this is the copy that works over
+/// `ssh`; the payload is base64 so a newline or a control byte in the line
+/// cannot end the sequence early.
+#[test]
+fn ctrl_x_copies_the_line_to_the_terminal_clipboard() {
+    let mut term = FakeTerminal::new(b"");
+    let sink = term.output_handle();
+    let completer = StubCompleter::empty();
+    let mut editor = Editor::new(&mut term, &completer, &baash_repl::NeverNeedsMore);
+    for key in chars("echo hi") {
+        editor.step(key).expect("step");
+    }
+    clear_output(&sink);
+    editor.step(Key::Ctrl(0x18)).expect("copy");
+    let output = output_text(&sink);
+    assert!(
+        output.contains("\u{1b}]52;c;ZWNobyBoaQ==\u{7}"),
+        "the whole line is base64 in the clipboard sequence: {output:?}"
+    );
+}

@@ -123,6 +123,49 @@ pub fn command_finished(status: i32) -> Vec<u8> {
     out
 }
 
+/// `OSC 52 ; c ; BASE64 BEL`: put `text` on the terminal's clipboard.
+///
+/// The clipboard belongs to the terminal, not to the process, which is what
+/// makes this work over `ssh` where no local clipboard API exists. The payload
+/// is base64 because the rest of the sequence is text: a newline, a `BEL` or a
+/// non-UTF-8 byte would otherwise end it early. There is no acknowledgement in
+/// the protocol, so delivery cannot be confirmed — a terminal may ignore the
+/// sequence (xterm needs `allowWindowOps`) or refuse a payload above its own
+/// size limit.
+pub fn clipboard(text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len().saturating_mul(4) / 3 + 16);
+    out.extend_from_slice(b"\x1b]52;c;");
+    base64_into(text, &mut out);
+    out.push(0x07);
+    out
+}
+
+/// Append `bytes` base64-encoded (RFC 4648 alphabet, `=` padding).
+fn base64_into(bytes: &[u8], out: &mut Vec<u8>) {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for chunk in bytes.chunks(3) {
+        let first = u32::from(chunk[0]);
+        let second = chunk.get(1).copied().map(u32::from);
+        let third = chunk.get(2).copied().map(u32::from);
+        out.push(TABLE[(first >> 2) as usize]);
+        out.push(TABLE[((first & 0x03) << 4 | second.unwrap_or(0) >> 4) as usize]);
+        match (second, third) {
+            (Some(second), Some(third)) => {
+                out.push(TABLE[((second & 0x0f) << 2 | third >> 6) as usize]);
+                out.push(TABLE[(third & 0x3f) as usize]);
+            }
+            (Some(second), None) => {
+                out.push(TABLE[((second & 0x0f) << 2) as usize]);
+                out.push(b'=');
+            }
+            (None, _) => {
+                out.push(b'=');
+                out.push(b'=');
+            }
+        }
+    }
+}
+
 /// The path part of the URI, already encoded, with a leading `/`.
 fn uri_path(cwd: &[u8], flavour: Flavour) -> Option<Vec<u8>> {
     if cwd.is_empty() {
@@ -202,6 +245,20 @@ mod tests {
     fn a_command_end_carries_the_status() {
         assert_eq!(command_finished(0), b"\x1b]133;D;0\x1b\\".to_vec());
         assert_eq!(command_finished(130), b"\x1b]133;D;130\x1b\\".to_vec());
+    }
+
+    #[test]
+    fn the_clipboard_sequence_is_base64() {
+        assert_eq!(clipboard(b""), b"\x1b]52;c;\x07".to_vec());
+        assert_eq!(clipboard(b"f"), b"\x1b]52;c;Zg==\x07".to_vec());
+        assert_eq!(clipboard(b"fo"), b"\x1b]52;c;Zm8=\x07".to_vec());
+        assert_eq!(clipboard(b"foo"), b"\x1b]52;c;Zm9v\x07".to_vec());
+        assert_eq!(
+            clipboard(b"echo hi"),
+            b"\x1b]52;c;ZWNobyBoaQ==\x07".to_vec()
+        );
+        // Bytes that are not text still round-trip; base64 is byte-oriented.
+        assert_eq!(clipboard(b"\xff"), b"\x1b]52;c;/w==\x07".to_vec());
     }
 
     #[test]

@@ -355,7 +355,7 @@ impl<'a> Editor<'a> {
     /// it returns. The mark is written outside raw mode, which is why it
     /// cannot go through the frame like the prompt marks do.
     pub fn command_started(&mut self, command: &[u8]) {
-        if baash_sys::is_dumb_terminal() {
+        if !self.term.supports_control_sequences() {
             return;
         }
         let _ = self.term.write_all(&baash_sys::osc::command_start(command));
@@ -364,7 +364,7 @@ impl<'a> Editor<'a> {
     /// Tell the terminal the command finished, with its exit status
     /// (OSC 133 `D`).
     pub fn command_finished(&mut self, status: i32) {
-        if baash_sys::is_dumb_terminal() {
+        if !self.term.supports_control_sequences() {
             return;
         }
         let _ = self
@@ -420,7 +420,7 @@ impl<'a> Editor<'a> {
         // what prompt-jump, command selection and per-command cwd are built
         // on. `B` is written once per line, not per frame, so a keystroke does
         // not repeat it.
-        let marked = !baash_sys::is_dumb_terminal();
+        let marked = self.term.supports_control_sequences();
         if marked {
             let _ = self.term.write_all(baash_sys::osc::PROMPT_START);
         }
@@ -732,6 +732,16 @@ impl<'a> Editor<'a> {
             }
             Key::Ctrl(0x0b) => {
                 self.line.kill_to_end();
+            }
+            Key::Ctrl(0x18) => {
+                // Copy the line to the terminal's clipboard (OSC 52). There is
+                // no selection yet, so the whole buffer is the payload; the
+                // clipboard belongs to the terminal, which is what makes this
+                // work over ssh. A terminal may ignore it or cap the size.
+                if self.term.supports_control_sequences() {
+                    let copy = baash_sys::osc::clipboard(self.line.buffer());
+                    self.term.write_all(&copy)?;
+                }
             }
             Key::Ctrl(0x0c) => {
                 // Push what is on screen into the scrollback before clearing

@@ -907,3 +907,26 @@ fn ctrl_l_scrolls_the_page_before_clearing_it() {
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&work);
 }
+
+/// `Ctrl-X` copies the current line to the terminal's clipboard.
+///
+/// OSC 52 is the clipboard that crosses `ssh`: the terminal owns it, so no
+/// local clipboard API is involved. The payload is base64 and the whole line
+/// is copied, because there is no selection yet.
+#[test]
+fn ctrl_x_copies_the_line_to_the_terminal_clipboard() {
+    let home = temp_dir("clipboard-home");
+    let work = temp_dir("clipboard-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.prompt(" $");
+    session.send(b"echo hi");
+    session.send(b"\x18");
+    session.expect(b"\x1b]52;c;ZWNobyBoaQ==\x07", Duration::from_secs(10));
+    // Abandon the line; the copy has already happened.
+    session.send(b"\x03");
+    session.prompt(" $");
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}

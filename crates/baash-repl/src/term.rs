@@ -122,6 +122,17 @@ pub trait Terminal {
         false
     }
 
+    /// Whether the terminal can interpret control sequences at all.
+    ///
+    /// A `TERM=dumb` terminal shows text and nothing else: prompt marks,
+    /// titles and the clipboard payload would be printed as garbage rather
+    /// than interpreted. The default is `true`, because a fake in a test and
+    /// the Windows console both take escapes; the unix terminal overrides it
+    /// with the environment's answer.
+    fn supports_control_sequences(&self) -> bool {
+        true
+    }
+
     /// Watch `fd` alongside the keyboard, taking ownership of it.
     ///
     /// `None` stops watching. The default ignores it, which is what a terminal
@@ -524,6 +535,10 @@ impl Terminal for RealTerminal {
     fn reports_cursor_position(&self) -> bool {
         // A dumb terminal would accept the query bytes and never answer, so it
         // is not asked at all.
+        self.supports_control_sequences()
+    }
+
+    fn supports_control_sequences(&self) -> bool {
         !baash_sys::is_dumb_terminal()
     }
 
