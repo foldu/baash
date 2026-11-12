@@ -1678,6 +1678,15 @@ inside an arithmetic expression: if the word layer ever expands first, the two
 must not both do it, or `\$x`, single quotes, `${x:-w}`, `$(…)` and backticks
 will double-expand.
 
+`(( … ))`, `$(( … ))` and the three clauses of `for (( … ))` are the exception:
+the evaluator re-reads each as one double-quoted word through
+`Interp::expand_arithmetic` before arithmetic sees it, because bash expands
+`${#a[@]}`, `$#` and `$(…)` there. The `for` condition and update are expanded
+again on every evaluation, so a body that appends to the array extends the loop
+(bash prints `8 6` for the same loop). Without that pass the header reaches the
+parser with a literal `${…}`, which it reports as `arithmetic: expected a
+name`.
+
 The evaluator is total: every input either produces an `i64` (wrapping, like
 bash) or an error with a message, never a panic and never a silently wrong
 value. Short-circuiting is enforced by a `dead` flag: the untaken operand is

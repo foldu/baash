@@ -3,5 +3,5 @@
 # Re-record with `baash-spec --record` after a change that improves the
 # numbers, and commit the result. `total` accepts `## OK <shell>`
 # alternatives; `strict` counts only the primary expectation.
-total = 2344
-strict = 2292
+total = 2350
+strict = 2298

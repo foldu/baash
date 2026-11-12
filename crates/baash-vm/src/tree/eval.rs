@@ -8,6 +8,7 @@
 //! of modelling control flow as unwinding instead of `Result` at every node.
 
 use baash_sys::{AsRawFd, OwnedFd, RawFd};
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use baash_diag::Diagnostic;
@@ -642,7 +643,13 @@ impl Interp {
         let init = parts.first().copied().unwrap_or_default();
         let condition = parts.get(1).copied().unwrap_or_default();
         let update = parts.get(2).copied().unwrap_or_default();
-        let init_outcome = crate::arith::eval(init, self);
+        // Each clause is word-expanded before arithmetic reads it, the same
+        // way `(( … ))` is (`NodeKind::ArithCommand`): `$#`, `${#a[@]}` and
+        // `$(…)` are operands, not names the parser should read.
+        let Some(init) = self.expand_for_clause(init, &header) else {
+            return Unwind::Status(Status::FAILURE);
+        };
+        let init_outcome = crate::arith::eval(&init, self);
         if let Some(unwind) = self.arith_nounset() {
             return unwind;
         }
@@ -665,7 +672,13 @@ impl Interp {
                 if let Some(exit) = self.run_debug_trap() {
                     return Unwind::Exit(exit);
                 }
-                let outcome = crate::arith::eval(condition, self);
+                // Expanded per evaluation, not once before the loop: a body
+                // that appends to the array really does extend the loop,
+                // which is what bash does.
+                let Some(condition) = self.expand_for_clause(condition, &header) else {
+                    return Unwind::Status(Status::FAILURE);
+                };
+                let outcome = crate::arith::eval(&condition, self);
                 if let Some(unwind) = self.arith_nounset() {
                     return unwind;
                 }
@@ -696,7 +709,10 @@ impl Interp {
             {
                 return Unwind::Exit(exit);
             }
-            let update_outcome = crate::arith::eval(update, self);
+            let Some(update) = self.expand_for_clause(update, &header) else {
+                return Unwind::Status(Status::FAILURE);
+            };
+            let update_outcome = crate::arith::eval(&update, self);
             if let Some(unwind) = self.arith_nounset() {
                 return unwind;
             }
@@ -710,6 +726,31 @@ impl Interp {
             }
         }
         Unwind::Status(last)
+    }
+
+    /// Expand one clause of a `for ((…))` header before arithmetic reads it.
+    ///
+    /// `(( … ))` expands its text first (see `NodeKind::ArithCommand`), and a
+    /// `for` header must do the same: `${#a[@]}`, `$#` and `$(…)` are
+    /// operands, not names. Left unexpanded, bash-completion's word
+    /// reassembly — `for ((i = 0; i < ${#words[@]}; i++, j++))` — reports
+    /// `arithmetic: expected a name` at Tab, and the completion then measures
+    /// the wrong word (`COMP_LINE` instead of the current one).
+    ///
+    /// `None` means the expansion failed and has been reported; the loop ends
+    /// with status 1, as an expansion error anywhere else does.
+    fn expand_for_clause<'t>(
+        &mut self,
+        text: &'t [u8],
+        span: &baash_diag::Span,
+    ) -> Option<Cow<'t, [u8]>> {
+        match self.expand_arithmetic(text, span) {
+            Ok(expanded) => Some(expanded),
+            Err(error) => {
+                self.diagnose(&error.diagnostic());
+                None
+            }
+        }
     }
 
     /// Read the file of a substitution whose body is only `< file`.

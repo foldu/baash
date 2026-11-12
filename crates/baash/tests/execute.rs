@@ -324,6 +324,26 @@ fn arithmetic_expansion_and_command() {
         out("for ((i = 0; i < 3; i++)); do echo $i; done"),
         "0\n1\n2\n"
     );
+    // The three clauses are word-expanded before arithmetic reads them, as
+    // `(( … ))` already was: `${#a[@]}` and `$(…)` are operands, not names.
+    // Left unexpanded this is `arithmetic: expected a name`, which is the
+    // diagnostic bash-completion's word reassembly used to paint at Tab.
+    assert_eq!(
+        out("a=(x y); for ((i = 0; i < ${#a[@]}; i++)); do echo $i; done"),
+        "0\n1\n"
+    );
+    assert_eq!(
+        out("for ((i = 0; i < $(echo 2); i++)); do echo $i; done"),
+        "0\n1\n"
+    );
+    // The condition is expanded on every evaluation, not once before the
+    // loop: a body that appends really does extend it (bash prints 8 6 too).
+    assert_eq!(
+        out(
+            "a=(x); for ((i = 0; i < ${#a[@]}; i++)); do a+=(y); ((i > 5)) && break; done; echo ${#a[@]} $i"
+        ),
+        "8 6\n"
+    );
 }
 
 #[test]

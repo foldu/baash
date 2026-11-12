@@ -366,6 +366,35 @@ fn a_function_rule_runs_the_shell_function() {
     cleanup(&mut session, &home, &work);
 }
 
+/// A `for (( … ))` header is word-expanded before arithmetic reads it.
+///
+/// bash-completion recovers the word to complete with a C-style `for` over
+/// `${#COMP_WORDS[@]}`; that is a number, not a name the arithmetic parser has
+/// to read. Before the header was expanded, Tab on `cd /` painted
+/// `arithmetic: expected a name [BAASH-E0203]` above the prompt and the
+/// function measured the whole line instead of the current word.
+#[test]
+fn a_for_header_in_a_completion_function_expands_the_array_length() {
+    let (mut session, home, work) = session("forheader");
+    session.line("mycmd () { echo \"args:$*\"; }");
+    session.line(
+        "f () { local words=(one two); for ((i = 0; i < ${#words[@]}; i++)); do :; done; COMPREPLY=(prefix-$2); }",
+    );
+    session.line("complete -F f mycmd");
+
+    session.send(b"mycmd al\t");
+    session.expect(b"prefix-al", Duration::from_secs(10));
+    assert!(
+        !session.output.windows(5).any(|window| window == b"E0203"),
+        "the for header reported an arithmetic diagnostic: {}",
+        String::from_utf8_lossy(&session.output)
+    );
+    session.send(b"\n");
+    session.expect(b"args:prefix-al\r\n", Duration::from_secs(10));
+    session.prompt();
+    cleanup(&mut session, &home, &work);
+}
+
 #[test]
 fn a_filename_with_a_space_is_inserted_quoted_and_runs() {
     let (mut session, home, work) = session("spacefile");

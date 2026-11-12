@@ -110,6 +110,7 @@
 //! Tier C). It is called out here because it is the one place a bash script
 //! may notice.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use baash_diag::{Diagnostic, SourceFile};
@@ -1721,13 +1722,17 @@ impl Interp {
     /// re-read as one double-quoted word, so a space never splits it and the
     /// same [`baash_lang`] pipeline does the expansion. `'1'` therefore stays a
     /// syntax error, as bash reports it.
-    fn expand_arithmetic(
+    ///
+    /// Text with nothing to expand is borrowed back unchanged: a `for ((…))`
+    /// header is re-expanded on every iteration, and the arithmetic loop
+    /// should not allocate a copy of `i < 1000000` per pass.
+    fn expand_arithmetic<'s>(
         &mut self,
-        source: &[u8],
+        source: &'s [u8],
         span: &baash_diag::Span,
-    ) -> Result<Vec<u8>, baash_lang::Error> {
+    ) -> Result<Cow<'s, [u8]>, baash_lang::Error> {
         if !source.iter().any(|&byte| byte == b'$' || byte == b'`') {
-            return Ok(source.to_vec());
+            return Ok(Cow::Borrowed(source));
         }
         let mut quoted = Vec::with_capacity(source.len() + 4);
         quoted.push(b'"');
@@ -1742,11 +1747,11 @@ impl Interp {
         let Ok(word) = baash_syntax::parse_word(&quoted, &opts) else {
             // A text the word parser rejects is left alone: arithmetic will
             // report the syntax error itself.
-            return Ok(source.to_vec());
+            return Ok(Cow::Borrowed(source));
         };
         let expanded = baash_lang::expand_assignment(&word, self)?;
         let _ = span;
-        Ok(expanded)
+        Ok(Cow::Owned(expanded))
     }
 }
 
