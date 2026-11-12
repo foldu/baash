@@ -783,6 +783,16 @@ already ordered by (tier, frecency, score). If a consumer filters, it must
 preserve order; it must not re-sort, because typed-prefix matches outranking
 fuzzy ones is the product promise (§6.5).
 
+Tier 2 is a "these characters, in order, somewhere in the name" match, not a
+case test — tier 0 is the tier that rewards the typed case. So a needle that
+carries uppercase is folded, with the name it is matched against: once the
+needle has case, nucleo is case-sensitive, and its prefilter loses matches
+that follow a non-ASCII prefix (`Yuyo` never found
+`ゆよゆっぺ (Yuyoyuppe) …` while `yuyo` did). A lowercase needle is already
+matched caselessly, so nothing is folded for it. A path candidate is scored on
+the component *before* a trailing `/`, so a directory is matched by its name
+and not by the empty string after the slash.
+
 **The snapshot traits are `Send + Sync` and return owned data.** `VarNames::names`,
 `History::entries`, `ShellNames::functions`/`aliases` all return
 `Vec<Vec<u8>>`. `baash-runtime` therefore cannot hand over a borrow of live

@@ -380,6 +380,31 @@ fn a_filename_with_a_space_is_inserted_quoted_and_runs() {
     cleanup(&mut session, &home, &work);
 }
 
+/// A name that matches in the middle of itself still completes.
+///
+/// The album directory is `ゆよゆっぺ (Yuyoyuppe) - SICK (やんでるEP) [WAV]`;
+/// `yuyo` is neither its prefix nor a caseless prefix, so the fuzzy tier is
+/// what has to find it. A directory used to be scored by the empty string
+/// after its trailing `/`, so a directory could only be completed by a literal
+/// prefix of its own name.
+#[test]
+fn a_directory_completes_on_a_match_inside_its_name() {
+    let (mut session, home, work) = session("fuzzy-dir");
+    let album = "ゆよゆっぺ (Yuyoyuppe) - SICK (やんでるEP) [WAV]";
+    let directory = work.join(album);
+    std::fs::create_dir(&directory).expect("create the album directory");
+    std::fs::write(directory.join("01.wav"), b"PAYLOAD\n").expect("write a track");
+
+    session.send(b"cat yuyo\t");
+    // Every character that is special to the shell is escaped, and the
+    // trailing `/` says the candidate is a directory.
+    session.expect(b"\\[WAV\\]/", Duration::from_secs(10));
+    session.send(b"01.wav\n");
+    session.expect(b"PAYLOAD", Duration::from_secs(10));
+    session.prompt();
+    cleanup(&mut session, &home, &work);
+}
+
 /// A `!` in a completed filename is not a history event.
 ///
 /// History expansion runs on the line the user submits, and double quotes do

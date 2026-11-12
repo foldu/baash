@@ -24,6 +24,15 @@ use crate::text;
 /// menu is built.
 const NO_MATCH: u8 = u8::MAX;
 
+/// `value` in lowercase, borrowed when there is nothing to fold.
+fn folded(value: &str) -> std::borrow::Cow<'_, str> {
+    if value.chars().any(char::is_uppercase) {
+        std::borrow::Cow::Owned(value.to_lowercase())
+    } else {
+        std::borrow::Cow::Borrowed(value)
+    }
+}
+
 /// Holds the reusable `nucleo-matcher` instances.
 ///
 /// `Matcher::new` allocates a fairly large score matrix, so one ranker lives for
@@ -59,10 +68,20 @@ impl Ranker {
     /// which also bounds the per-keystroke work; the tier rules below — not the
     /// fuzzy score — decide the product behaviour.
     pub fn score(&mut self, text: &str, needle: &str, path: bool) -> Option<u16> {
+        // The fuzzy tier is "these characters, in order, somewhere in the
+        // name" — not a case test; tier 0 is the tier that prefers the typed
+        // case exactly. So a needle with uppercase in it is folded, together
+        // with the name it is matched against: nucleo is case-sensitive once
+        // the needle has case, and its prefilter then loses matches that sit
+        // after a non-ASCII prefix (`Yuyo` never found
+        // `ゆよゆっぺ (Yuyoyuppe) …` while `yuyo` did). A lowercase needle is
+        // already matched caselessly, so nothing is folded for it.
+        let text = folded(text);
+        let needle = folded(needle);
         let mut haystack_buf = Vec::new();
         let mut needle_buf = Vec::new();
-        let haystack = Utf32Str::new(text, &mut haystack_buf);
-        let needle = Utf32Str::new(needle, &mut needle_buf);
+        let haystack = Utf32Str::new(&text, &mut haystack_buf);
+        let needle = Utf32Str::new(&needle, &mut needle_buf);
         if path {
             self.path.fuzzy_match_greedy(haystack, needle)
         } else {
@@ -89,13 +108,22 @@ impl Ranker {
                 candidate.score = 0;
             } else {
                 let is_path = candidate.kind == CandKind::Path;
-                let haystack = if is_path {
-                    match candidate.display.rsplit_once('/') {
-                        Some((_, component)) => component,
-                        None => candidate.display.as_str(),
-                    }
+                // A directory's `insert` ends with `/`, so splitting the raw
+                // display at the last slash would leave an empty component and
+                // the fuzzy tier would have nothing to score: `yuyo` has to
+                // find `Yuyoyuppe …/` by the name before that slash.
+                let display = if is_path {
+                    candidate.display.trim_end_matches('/')
                 } else {
                     candidate.display.as_str()
+                };
+                let haystack = if is_path {
+                    match display.rsplit_once('/') {
+                        Some((_, component)) => component,
+                        None => display,
+                    }
+                } else {
+                    display
                 };
                 let score =
                     needle_component.and_then(|needle| self.score(haystack, needle, is_path));
@@ -178,6 +206,44 @@ mod tests {
         ranker.rank(&mut candidates, b"ch");
         assert_eq!(candidates[0].insert, b"cherry");
         assert_eq!(candidates[1].insert, b"checkout");
+    }
+
+    #[test]
+    fn a_directory_is_matched_by_its_name_not_its_trailing_slash() {
+        // `insert` of a directory ends with `/`. Splitting the display there
+        // left an empty component, so the fuzzy tier scored nothing and
+        // `yuyo` never reached `Yuyoyuppe …/` — a directory could only be
+        // completed by a literal prefix of its name.
+        let mut ranker = Ranker::new();
+        let mut candidates = vec![
+            Candidate::new("ゆよゆっぺ (Yuyoyuppe) - SICK [WAV]/", CandKind::Path),
+            Candidate::new("other/", CandKind::Path),
+        ];
+        ranker.rank(&mut candidates, b"yuyo");
+        assert_eq!(candidates.len(), 1, "the fuzzy tier matches a directory");
+        assert_eq!(candidates[0].tier, 2);
+        assert_eq!(
+            candidates[0].display,
+            "ゆよゆっぺ (Yuyoyuppe) - SICK [WAV]/"
+        );
+    }
+
+    #[test]
+    fn a_needle_matches_regardless_of_case() {
+        // The fuzzy tier is not a case test: tier 0 already prefers the typed
+        // case, so `Yuyo` and `yuyo` must find the same name. It is also the
+        // only way the match survives: with an uppercase letter nucleo's
+        // prefilter lost matches sitting after a non-ASCII prefix.
+        for needle in [&b"yuyo"[..], b"Yuyo", b"YUYO"] {
+            let mut ranker = Ranker::new();
+            let mut candidates = vec![Candidate::new(
+                "ゆよゆっぺ (Yuyoyuppe) - SICK [WAV]/",
+                CandKind::Path,
+            )];
+            ranker.rank(&mut candidates, needle);
+            assert_eq!(candidates.len(), 1, "{:?}", std::str::from_utf8(needle));
+            assert_eq!(candidates[0].tier, 2);
+        }
     }
 
     #[test]
