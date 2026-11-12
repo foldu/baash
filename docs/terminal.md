@@ -272,8 +272,64 @@ Bytes typed while the question is outstanding are not an answer; they are put
 back for the editor. The question is asked in raw mode, because a cooked
 terminal would echo it and wait for a newline the reply does not have.
 
-## 12. What is next
-In landing order, each with its own commit: the kitty keyboard protocol.
-Drag-selection and the clipboard integration it would bring are the natural
-follow-ups to §10. The ordered list is the session's task list; this file
-records what has actually landed.
+## 12. The keyboard: unambiguous keys
+
+```
+ESC [ = 1 u        kitty: set the progressive-enhancement flags to `disambiguate`
+ESC [ > 4 ; 1 m    xterm: modifyOtherKeys, level 1
+ESC [ > 4 ; 0 m    xterm: turn it off again
+ESC [ = 0 u        kitty: clear the flags
+```
+
+Both requests are written when a line starts being read, after bracketed paste
+and focus reporting, and are undone when the line ends, so a command is handed
+the terminal in the encoding it expects.
+
+The legacy encoding cannot say several different things: `Ctrl-I` *is* the tab
+byte, `Ctrl-M` *is* Enter, `Ctrl-Shift-R` is `Ctrl-R`, and `Ctrl-Left` is its
+own sequence only if the terminal has `modifyCursorKeys` on. The two protocols
+above fix that:
+
+* kitty's `disambiguate` flag makes every key that does not produce text
+  arrive as `CSI code ; mods u`, with the modifiers in a bit field (shift 1,
+  alt 2, ctrl 4, super 8, hyper 16, meta 32, then the lock bits). `Ctrl-I` is
+  `CSI 105 ; 5 u`, and `Esc` is `CSI 27 u`, so the shell no longer needs a
+  timeout to tell Escape from Alt.
+* `modifyOtherKeys` level 1 does the same for keys that have *no* legacy
+  encoding at all: `Ctrl-Tab`, `Ctrl-.`, `Ctrl-;`. Level 2 is not requested —
+  it reports shifted letters as escape codes too, which turns ordinary typing
+  into sequences the editor would have to undo.
+* modified arrows, Home, End and Delete use the legacy shape with a modifier
+  field (`CSI 1 ; 5 D`, `CSI 3 ; 5 ~`), and shift+Tab is `CSI 9 ; 2 u` or the
+  legacy `CSI Z`.
+
+The editor's key is a code plus the modifiers held — `Key { code, mods }`, with
+`Code` and `Modifiers` in `baash-repl/src/key.rs` — so a binding reads
+`(Code::Char('r'), Modifiers::CTRL)` and all three encodings converge on it.
+The legacy control bytes map to the same keys (`0x12` is `Ctrl-R`), which is
+what keeps a terminal that answers neither request working.
+
+What the disambiguation buys today: `Ctrl-Left`/`Ctrl-Right` and
+`Alt-Left`/`Alt-Right` move by a word, `Ctrl-Delete` kills the next word, and
+`Ctrl-I`/`Ctrl-M`/`Ctrl-Shift-R` stop meaning tab, Enter and `Ctrl-R`.
+Everything else is unchanged.
+
+A release report is ignored; the editor edits on presses. Neither protocol is
+asked to report release or repeat events, so a terminal sending one is
+answering a different application's request.
+
+The byte constants are `baash_sys::osc::KEYBOARD_ENABLE`/`KEYBOARD_DISABLE` and
+`MODIFY_OTHER_KEYS_ENABLE`/`MODIFY_OTHER_KEYS_DISABLE`; the decoding tests are
+in `key.rs`; the pty tests prove the pair is written and undone around a real
+line, and that a `CSI u` key edits the line. Windows does not take this path:
+its console delivers key events rather than a byte stream, so `Console`
+translates them to the legacy encodings and the same decoder maps them to the
+same keys (`docs/portability.md` §8).
+
+## 13. What is next
+In landing order, each with its own commit: nothing in this list. The cursor
+shape (DECSCUSR) has no second editing mode to switch between, so it is a
+scope decision — land the primitive with a test and leave it unwired, or drop
+it with that rationale. Drag-selection and the richer clipboard it would bring
+are the natural follow-ups to §10. The ordered list is the session's task
+list; this file records what has actually landed.

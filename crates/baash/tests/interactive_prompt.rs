@@ -948,3 +948,73 @@ fn the_background_colour_is_asked_for_once() {
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&work);
 }
+
+/// The modes that make keys unambiguous are asked for while a line is read,
+/// and given back before a command runs.
+///
+/// A pty is not a terminal emulator, so nothing here answers the requests; the
+/// proof is the bytes the shell writes, and that a command does not inherit
+/// them. The decoding itself is tested in `baash-repl`'s `key.rs`, where the
+/// same bytes can be fed to the decoder directly.
+#[test]
+fn the_line_asks_for_unambiguous_keys_and_gives_the_terminal_back() {
+    let home = temp_dir("keyboard-home");
+    let work = temp_dir("keyboard-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.prompt(" $");
+    for request in [
+        &b"\x1b[=1u"[..], // kitty: disambiguate
+        b"\x1b[>4;1m",    // xterm: modifyOtherKeys, level 1
+    ] {
+        assert!(
+            find(&session.output, request).is_some(),
+            "the first line asks for {request:?}: {:?}",
+            String::from_utf8_lossy(&session.output)
+        );
+    }
+    // A command gets the legacy encoding back: it may be a full-screen
+    // program with its own idea of which modes it wants.
+    session.line("echo ran", " $");
+    for request in [
+        &b"\x1b[>4;0m"[..], // xterm: off again
+        b"\x1b[=0u",        // kitty: flags cleared
+    ] {
+        assert!(
+            find(&session.output, request).is_some(),
+            "the command is handed {request:?}"
+        );
+    }
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+/// Keys from the unambiguous encoding edit the line on a real terminal.
+///
+/// `CSI 1 ; 5 D` is Ctrl-Left; `CSI 109 ; 5 u` is Ctrl-M, which in the legacy
+/// encoding is the carriage return that runs the line. The line must still be
+/// waiting when the `.` after it is typed.
+#[test]
+fn csi_u_keys_move_and_do_not_submit_the_line() {
+    let home = temp_dir("csi-u-home");
+    let work = temp_dir("csi-u-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.prompt(" $");
+    session.send(b"echo one two");
+    // Ctrl-Left: to the start of `two`.
+    session.send(b"\x1b[1;5D");
+    session.send(b"X");
+    // Ctrl-M: must not be Enter.
+    session.send(b"\x1b[109;5u");
+    session.send(b".\r");
+    // The command mark carries the line that ran: the `.` typed after Ctrl-M
+    // is part of it, which is only true if Ctrl-M did not submit the line.
+    session.expect(b"cmdline_url=echo%20one%20X.two", Duration::from_secs(10));
+    session.expect(b"one X.two", Duration::from_secs(10));
+    session.prompt(" $");
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}

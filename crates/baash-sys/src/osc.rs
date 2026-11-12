@@ -74,6 +74,30 @@ pub const PROMPT_START: &[u8] = b"\x1b]133;A;click_events=1\x1b\\";
 /// `OSC 133 ; B`: the prompt ends here, and the command line begins.
 pub const PROMPT_END: &[u8] = b"\x1b]133;B\x1b\\";
 
+/// Ask the terminal for unambiguous key reports while a line is read.
+///
+/// `CSI = flags u` is the kitty keyboard protocol's progressive-enhancement
+/// setter. Flag 1 is `disambiguate`: Escape, Alt+key, Ctrl+key and Ctrl+Alt+key
+/// stop sharing bytes with other keys, so `Ctrl-I` is no longer a tab and
+/// `Ctrl-M` no longer submits the line. `CSI = 0 u` clears the flags again,
+/// which is written before a command runs so it gets the legacy encoding.
+pub const KEYBOARD_ENABLE: &[u8] = b"\x1b[=1u";
+
+/// Clear the kitty keyboard protocol's flags.
+pub const KEYBOARD_DISABLE: &[u8] = b"\x1b[=0u";
+
+/// Ask for xterm's `modifyOtherKeys`, level 1.
+///
+/// Level 1 reports only keys that have no legacy encoding at all — Ctrl-Tab,
+/// Ctrl-`.` and the rest — and leaves the ambiguous ones alone. Level 2, which
+/// reports shifted letters as escape codes too, is deliberately not asked for:
+/// it would turn ordinary typing into sequences this editor then has to undo.
+/// A terminal that implements both protocols ignores one of the two requests.
+pub const MODIFY_OTHER_KEYS_ENABLE: &[u8] = b"\x1b[>4;1m";
+
+/// Turn `modifyOtherKeys` back off.
+pub const MODIFY_OTHER_KEYS_DISABLE: &[u8] = b"\x1b[>4;0m";
+
 /// OSC 0 (window title) and OSC 1 (tab title), both set to `text`.
 ///
 /// The two are separate so a terminal can put the shell's directory in the
@@ -439,6 +463,24 @@ mod tests {
                 .expect("the OSC 7 half"),
             b"\x1b]7;file://PC/C:/Users/ada"
         );
+    }
+
+    #[test]
+    fn the_keyboard_requests_name_the_mode_they_reset() {
+        // Each enable is a CSI with an intermediate byte and each disable
+        // repeats the final byte, so a terminal that ignores the first also
+        // ignores the second rather than reading it as something else.
+        for (enable, disable) in [
+            (KEYBOARD_ENABLE, KEYBOARD_DISABLE),
+            (MODIFY_OTHER_KEYS_ENABLE, MODIFY_OTHER_KEYS_DISABLE),
+        ] {
+            assert!(enable.starts_with(b"\x1b["));
+            assert_eq!(enable.last(), disable.last());
+        }
+        // Kitty sets flags with `=` (CSI = flags u); xterm sets its resource
+        // with `>` (CSI > 4 ; level m).
+        assert_eq!(KEYBOARD_ENABLE[2], b'=');
+        assert_eq!(MODIFY_OTHER_KEYS_ENABLE[2], b'>');
     }
 
     #[test]

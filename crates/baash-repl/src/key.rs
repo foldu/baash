@@ -5,6 +5,15 @@
 //! and friends, and bracketed paste, whose payload must never be interpreted
 //! as keys.
 //!
+//! A key is a [`Code`] and the [`Modifiers`] held with it. The legacy encoding
+//! cannot express most combinations — `Ctrl-I` is a tab, `Ctrl-M` is Enter,
+//! `Ctrl-Shift-R` is `Ctrl-R` — so while a line is read the terminal is asked
+//! for two unambiguous encodings instead (`docs/terminal.md` §12): the kitty
+//! keyboard protocol's `CSI u`, and xterm's `modifyOtherKeys` for keys with no
+//! legacy encoding at all. Legacy bytes still decode to the same keys, so a
+//! terminal that answers neither request keeps working with the ambiguity it
+//! always had.
+//!
 //! The decoder keeps one byte of pushback. A control byte arriving in the
 //! middle of a CSI sequence cancels that sequence but belongs to the next key;
 //! swallowing it would silently lose a keystroke (an `Enter` after a truncated
@@ -14,9 +23,18 @@ use std::io;
 
 use crate::term::Terminal;
 
-/// One editing key.
+/// One editing key: what was pressed, and which modifiers were held.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Key {
+pub struct Key {
+    /// What was pressed.
+    pub code: Code,
+    /// The modifiers held with it.
+    pub mods: Modifiers,
+}
+
+/// The key itself, without its modifiers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Code {
     /// A decoded Unicode scalar (valid UTF-8 input).
     Char(char),
     /// A byte that is not part of a valid UTF-8 scalar. Shell text is bytes, so
@@ -26,8 +44,6 @@ pub enum Key {
     Enter,
     /// Horizontal tab.
     Tab,
-    /// Shift-Tab (CSI `Z`), used to move backwards in the completion menu.
-    BackTab,
     /// Backspace, either `DEL` (0x7f) or `BS` (0x08).
     Backspace,
     /// Delete (CSI `3~`).
@@ -46,15 +62,6 @@ pub enum Key {
     Home,
     /// End.
     End,
-    /// A control byte, e.g. `Ctrl(0x01)` for Ctrl-A.
-    Ctrl(u8),
-    /// Alt plus a printable ASCII character, which is what the terminal sends as
-    /// `ESC <char>`.
-    Alt(char),
-    /// Alt-Backspace: `ESC DEL` (0x7f) or `ESC BS` (0x08), readline's
-    /// `backward-kill-word`. Terminals differ in which of the two they send, so
-    /// both decode to this.
-    AltBackspace,
     /// The left mouse button was pressed on the prompt or command line
     /// (SGR mouse, `CSI < 0 ; column ; row M`), both coordinates one-based.
     ///
@@ -79,6 +86,148 @@ pub enum Key {
     /// A sequence the decoder does not understand. It is ignored whole: its
     /// bytes never reach the line.
     Unknown(Vec<u8>),
+}
+
+/// The modifier keys held for one key event.
+///
+/// The bit values are the kitty keyboard protocol's; xterm's
+/// `modifyOtherKeys` encodes the same four it knows in the same order, so one
+/// type decodes both. Lock modifiers are decoded for completeness: a terminal
+/// that reports them should not make `A` stop looking like the letter `A`.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct Modifiers(u8);
+
+impl Modifiers {
+    /// No modifiers.
+    pub const NONE: Self = Self(0);
+    /// Shift.
+    pub const SHIFT: Self = Self(1);
+    /// Alt, or Option.
+    pub const ALT: Self = Self(2);
+    /// Control.
+    pub const CTRL: Self = Self(4);
+    /// Super, or Command.
+    pub const SUPER: Self = Self(8);
+    /// Hyper.
+    pub const HYPER: Self = Self(16);
+    /// Meta.
+    pub const META: Self = Self(32);
+    /// Caps Lock was on.
+    pub const CAPS_LOCK: Self = Self(64);
+    /// Num Lock was on.
+    pub const NUM_LOCK: Self = Self(128);
+
+    /// The bits as one byte.
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    /// Whether `other` is part of this set.
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Whether no modifier is held.
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Whether this key event still produces the character it carries.
+    ///
+    /// Shift, Caps Lock and Num Lock change *which* character a key produces,
+    /// and the terminal has already applied that when it hands over a code
+    /// point. The four that turn a key into a command — Ctrl, Alt, Super,
+    /// Hyper, Meta — mean the character itself is not text to insert.
+    pub const fn is_text(self) -> bool {
+        self.0 & (Self::CTRL.0 | Self::ALT.0 | Self::SUPER.0 | Self::HYPER.0 | Self::META.0) == 0
+    }
+
+    /// Decode the protocol's `1 + bits` encoding.
+    ///
+    /// A missing field means no modifiers; the caller passes the default. The
+    /// encoding of 0 is not valid (it would mean `-1`), and is treated as no
+    /// modifiers for the same reason a malformed field is: the key still
+    /// happened.
+    pub const fn from_encoded(value: u32) -> Self {
+        Self(value.saturating_sub(1) as u8)
+    }
+}
+
+impl std::ops::BitOr for Modifiers {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+impl std::fmt::Debug for Modifiers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_empty() {
+            return f.write_str("NONE");
+        }
+        let names = [
+            (Self::SHIFT, "SHIFT"),
+            (Self::ALT, "ALT"),
+            (Self::CTRL, "CTRL"),
+            (Self::SUPER, "SUPER"),
+            (Self::HYPER, "HYPER"),
+            (Self::META, "META"),
+            (Self::CAPS_LOCK, "CAPS_LOCK"),
+            (Self::NUM_LOCK, "NUM_LOCK"),
+        ];
+        let mut first = true;
+        for (bit, name) in names {
+            if self.contains(bit) {
+                if !first {
+                    f.write_str("|")?;
+                }
+                f.write_str(name)?;
+                first = false;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Key {
+    /// A key with no modifiers.
+    pub const fn of(code: Code) -> Self {
+        Self {
+            code,
+            mods: Modifiers::NONE,
+        }
+    }
+
+    /// A key with explicit modifiers.
+    pub const fn with(code: Code, mods: Modifiers) -> Self {
+        Self { code, mods }
+    }
+
+    /// A character as typed.
+    pub const fn char(character: char) -> Self {
+        Self::of(Code::Char(character))
+    }
+
+    /// Control plus a character, which is how both protocols report `Ctrl-A`.
+    pub const fn ctrl(character: char) -> Self {
+        Self::with(Code::Char(character), Modifiers::CTRL)
+    }
+
+    /// Alt plus a character.
+    pub const fn alt(character: char) -> Self {
+        Self::with(Code::Char(character), Modifiers::ALT)
+    }
+
+    /// A raw byte that is not valid UTF-8.
+    pub const fn byte(byte: u8) -> Self {
+        Self::of(Code::Byte(byte))
+    }
+
+    /// Whether this is `code` with no modifiers held.
+    pub fn is(&self, code: Code) -> bool {
+        self.code == code && self.mods.is_empty()
+    }
 }
 
 /// How many bytes of one CSI sequence to accept before giving up.
@@ -108,18 +257,25 @@ impl Decoder {
 
     /// Decode one key, or `None` at end of input.
     pub fn next(&mut self, term: &mut dyn Terminal) -> io::Result<Option<Key>> {
-        let Some(byte) = self.read(term)? else {
-            return Ok(None);
-        };
-        Ok(Some(match byte {
-            0x1b => self.decode_escape(term)?,
-            b'\r' | b'\n' => Key::Enter,
-            b'\t' => Key::Tab,
-            0x7f | 0x08 => Key::Backspace,
-            b if b < 0x20 => Key::Ctrl(b),
-            b if b < 0x7f => Key::Char(char::from(b)),
-            b => self.decode_utf8(term, b)?,
-        }))
+        loop {
+            let Some(byte) = self.read(term)? else {
+                return Ok(None);
+            };
+            let key = match byte {
+                0x1b => self.decode_escape(term)?,
+                b'\r' | b'\n' => Some(Key::of(Code::Enter)),
+                b'\t' => Some(Key::of(Code::Tab)),
+                0x7f | 0x08 => Some(Key::of(Code::Backspace)),
+                b if b < 0x20 => control_key(b),
+                b if b < 0x7f => Some(Key::char(char::from(b))),
+                b => Some(self.decode_utf8(term, b)?),
+            };
+            // `None` means the bytes were an event the editor should not see,
+            // such as a key-release report: read the next one.
+            if let Some(key) = key {
+                return Ok(Some(key));
+            }
+        }
     }
 
     /// Read one byte, preferring the pushback slot.
@@ -180,14 +336,14 @@ impl Decoder {
 
     /// Collect the continuation bytes of a UTF-8 scalar starting with `first`.
     ///
-    /// Falls back to [`Key::Byte`] for a malformed or truncated sequence, so an
-    /// undecodable name still gets inserted byte for byte.
+    /// Falls back to [`Code::Byte`] for a malformed or truncated sequence, so
+    /// an undecodable name still gets inserted byte for byte.
     fn decode_utf8(&mut self, term: &mut dyn Terminal, first: u8) -> io::Result<Key> {
         let length = match first {
             0xc2..=0xdf => 2,
             0xe0..=0xef => 3,
             0xf0..=0xf4 => 4,
-            _ => return Ok(Key::Byte(first)),
+            _ => return Ok(Key::byte(first)),
         };
         let mut buffer = [0u8; 4];
         buffer[0] = first;
@@ -198,45 +354,48 @@ impl Decoder {
                 // that was not a continuation be its own key.
                 Some(byte) => {
                     self.pending.push_front(byte);
-                    return Ok(Key::Byte(first));
+                    return Ok(Key::byte(first));
                 }
-                None => return Ok(Key::Byte(first)),
+                None => return Ok(Key::byte(first)),
             }
         }
         match std::str::from_utf8(&buffer[..length]) {
             Ok(text) => match text.chars().next() {
-                Some(character) => Ok(Key::Char(character)),
-                None => Ok(Key::Byte(first)),
+                Some(character) => Ok(Key::char(character)),
+                None => Ok(Key::byte(first)),
             },
-            Err(_) => Ok(Key::Byte(first)),
+            Err(_) => Ok(Key::byte(first)),
         }
     }
 
     /// Decode what follows an `ESC`.
-    fn decode_escape(&mut self, term: &mut dyn Terminal) -> io::Result<Key> {
+    fn decode_escape(&mut self, term: &mut dyn Terminal) -> io::Result<Option<Key>> {
         let Some(next) = self.read(term)? else {
             // A lone Escape at end of input (this is how a fake terminal
             // expresses the key; a real tty needs a read timeout to tell it
-            // apart from Alt).
-            return Ok(Key::Esc);
+            // apart from Alt, unless the terminal speaks `CSI 27 u`).
+            return Ok(Some(Key::of(Code::Esc)));
         };
         match next {
             b'[' => self.decode_csi(term),
-            b'O' => self.decode_ss3(term),
-            0x1b => Ok(Key::Esc),
-            byte if byte.is_ascii_graphic() || byte == b' ' => Ok(Key::Alt(char::from(byte))),
-            0x7f | 0x08 => Ok(Key::AltBackspace),
-            byte => Ok(Key::Unknown(vec![0x1b, byte])),
+            b'O' => Ok(Some(self.decode_ss3(term)?)),
+            0x1b => Ok(Some(Key::of(Code::Esc))),
+            byte if byte.is_ascii_graphic() || byte == b' ' => Ok(Some(Key::alt(char::from(byte)))),
+            // Alt-Backspace. Terminals differ in which of `ESC DEL` and
+            // `ESC BS` they send, and readline calls both
+            // `backward-kill-word`, so one key comes out of either.
+            0x7f | 0x08 => Ok(Some(Key::with(Code::Backspace, Modifiers::ALT))),
+            byte => Ok(Some(Key::of(Code::Unknown(vec![0x1b, byte])))),
         }
     }
 
     /// Decode a CSI sequence: `ESC [`, parameter bytes, one final byte.
-    fn decode_csi(&mut self, term: &mut dyn Terminal) -> io::Result<Key> {
+    fn decode_csi(&mut self, term: &mut dyn Terminal) -> io::Result<Option<Key>> {
         let mut sequence = Vec::new();
         let mut final_byte = None;
         while sequence.len() < MAX_SEQUENCE {
             let Some(byte) = self.read(term)? else {
-                return Ok(Key::Unknown(sequence));
+                return Ok(Some(Key::of(Code::Unknown(sequence))));
             };
             if (0x40..=0x7e).contains(&byte) {
                 final_byte = Some(byte);
@@ -246,52 +405,79 @@ impl Decoder {
                 // Not part of a CSI sequence: abort and keep it for the next
                 // key, so an Enter after a truncated sequence still submits.
                 self.pending.push_front(byte);
-                return Ok(Key::Unknown(sequence));
+                return Ok(Some(Key::of(Code::Unknown(sequence))));
             }
             sequence.push(byte);
         }
         let Some(final_byte) = final_byte else {
-            return Ok(Key::Unknown(sequence));
+            return Ok(Some(Key::of(Code::Unknown(sequence))));
         };
         let parameters = sequence.as_slice();
         Ok(match (parameters, final_byte) {
-            (b"", b'A') => Key::Up,
-            (b"", b'B') => Key::Down,
-            (b"", b'C') => Key::Right,
-            (b"", b'D') => Key::Left,
-            (b"", b'H') => Key::Home,
-            (b"", b'F') => Key::End,
-            (b"", b'Z') => Key::BackTab,
+            (b"", b'A') => Some(Key::of(Code::Up)),
+            (b"", b'B') => Some(Key::of(Code::Down)),
+            (b"", b'C') => Some(Key::of(Code::Right)),
+            (b"", b'D') => Some(Key::of(Code::Left)),
+            (b"", b'H') => Some(Key::of(Code::Home)),
+            (b"", b'F') => Some(Key::of(Code::End)),
+            // Shift-Tab. The kitty protocol reports `Tab` with the shift bit
+            // (`CSI 9 ; 2 u`); this is the form every other terminal sends.
+            (b"", b'Z') => Some(Key::with(Code::Tab, Modifiers::SHIFT)),
             // Focus reporting: `ESC [ I` and `ESC [ O`. They are keys only in
             // the sense that the terminal sends them between keystrokes.
-            (b"", b'I') => Key::FocusIn,
-            (b"", b'O') => Key::FocusOut,
+            (b"", b'I') => Some(Key::of(Code::FocusIn)),
+            (b"", b'O') => Some(Key::of(Code::FocusOut)),
             // SGR mouse: `< button ; column ; row` then `M` for a press and
             // `m` for a release. Only the left button with no modifiers is an
             // editing gesture yet.
-            (parameters, b'M') if parameters.first() == Some(&b'<') => mouse_left(&parameters[1..]),
-            (b"1" | b"7", b'~') => Key::Home,
-            (b"4" | b"8", b'~') => Key::End,
-            (b"3", b'~') => Key::Delete,
-            (b"200", b'~') => self.decode_paste(term)?,
-            _ => Key::Unknown(sequence),
+            (parameters, b'M') if parameters.first() == Some(&b'<') => {
+                Some(mouse_left(&parameters[1..]))
+            }
+            (b"200", b'~') => Some(self.decode_paste(term)?),
+            (parameters, final_byte) => self.decode_parameters(parameters, final_byte)?,
         })
+    }
+
+    /// Decode the parameterised forms: `CSI code ; mods u`,
+    /// `CSI 1 ; mods A`, `CSI code ; mods ~` and xterm's
+    /// `CSI 27 ; mods ; code ~`.
+    ///
+    /// Returning `None` means the sequence was a key event the editor must not
+    /// act on, such as a release report.
+    fn decode_parameters(&mut self, parameters: &[u8], final_byte: u8) -> io::Result<Option<Key>> {
+        let Some(fields) = Fields::parse(parameters) else {
+            return Ok(Some(Key::of(Code::Unknown(parameters.to_vec()))));
+        };
+        let key = match final_byte {
+            b'u' => csi_u(&fields),
+            // modifyOtherKeys: the first field is 27 (ESC's code), the second
+            // the modifiers, the third the key's code point.
+            b'~' if fields.get(0) == Some(27) && fields.get(2).is_some() => other_key(&fields),
+            b'~' => cursor_key(&fields),
+            b'A' | b'B' | b'C' | b'D' | b'H' | b'F' | b'Z'
+                if fields.get(0).is_none_or(|number| number == 1) =>
+            {
+                functional_key(&fields, final_byte)
+            }
+            _ => Some(Key::of(Code::Unknown(parameters.to_vec()))),
+        };
+        Ok(key)
     }
 
     /// Decode an SS3 sequence: `ESC O <byte>`, the other encoding for arrows
     /// and Home/End.
     fn decode_ss3(&mut self, term: &mut dyn Terminal) -> io::Result<Key> {
         let Some(byte) = self.read(term)? else {
-            return Ok(Key::Unknown(vec![b'O']));
+            return Ok(Key::of(Code::Unknown(vec![b'O'])));
         };
         Ok(match byte {
-            b'A' => Key::Up,
-            b'B' => Key::Down,
-            b'C' => Key::Right,
-            b'D' => Key::Left,
-            b'H' => Key::Home,
-            b'F' => Key::End,
-            _ => Key::Unknown(vec![b'O', byte]),
+            b'A' => Key::of(Code::Up),
+            b'B' => Key::of(Code::Down),
+            b'C' => Key::of(Code::Right),
+            b'D' => Key::of(Code::Left),
+            b'H' => Key::of(Code::Home),
+            b'F' => Key::of(Code::End),
+            _ => Key::of(Code::Unknown(vec![b'O', byte])),
         })
     }
 
@@ -303,15 +489,196 @@ impl Decoder {
         let mut payload = Vec::new();
         loop {
             match self.read(term)? {
-                None => return Ok(Key::Paste(payload)),
+                None => return Ok(Key::of(Code::Paste(payload))),
                 Some(byte) => payload.push(byte),
             }
             if payload.ends_with(PASTE_END) {
                 payload.truncate(payload.len() - PASTE_END.len());
-                return Ok(Key::Paste(payload));
+                return Ok(Key::of(Code::Paste(payload)));
             }
         }
     }
+}
+
+/// The key a legacy control byte stands for.
+///
+/// The mapping is the one every terminal uses: `Ctrl-A` is `0x01`, and the
+/// letters run in order to `Ctrl-Z` at `0x1a`. The rest are the keys that have
+/// no letter to name them. Tab, Enter, Backspace and Escape are their own keys
+/// and are decoded before this function sees them.
+fn control_key(byte: u8) -> Option<Key> {
+    let character = match byte {
+        // Ctrl-Space, also reported as Ctrl-@ by terminals that have no
+        // separate space mapping.
+        0x00 => ' ',
+        0x09 | 0x0a | 0x0d | 0x1b => return None,
+        0x1c => '\\',
+        0x1d => ']',
+        0x1e => '^',
+        0x1f => '_',
+        0x01..=0x1a => char::from(b'a' + byte - 0x01),
+        _ => return None,
+    };
+    Some(Key::ctrl(character))
+}
+
+/// The numeric fields of a CSI parameter string, as far as the decoder reads
+/// them.
+///
+/// The kitty protocol has subfields (`code:shifted:base`), so each field is
+/// split on `:` and only its first subfield is used: the shifted and base
+/// layout keys exist for shortcut matching across layouts, which this editor
+/// does not do. The one subfield that matters is the event type after the
+/// modifiers, because a release report must not edit the line.
+#[derive(Clone, Copy, Default)]
+struct Fields {
+    values: [u32; 4],
+    present: [bool; 4],
+    /// `mods:event` — 1 press, 2 repeat, 3 release.
+    event: Option<u32>,
+}
+
+impl Fields {
+    /// Split `parameters` into fields, or `None` if it is not all numbers.
+    fn parse(parameters: &[u8]) -> Option<Self> {
+        let mut fields = Self::default();
+        if parameters.is_empty() {
+            return Some(fields);
+        }
+        for (position, field) in parameters.split(|&byte| byte == b';').enumerate() {
+            if position >= fields.values.len() {
+                return None;
+            }
+            let mut subfields = field.split(|&byte| byte == b':');
+            let first = subfields.next()?;
+            if !first.is_empty() {
+                fields.values[position] = number(first)?;
+                fields.present[position] = true;
+            }
+            if position == 1
+                && let Some(event) = subfields.next()
+                && !event.is_empty()
+            {
+                fields.event = Some(number(event)?);
+            }
+        }
+        Some(fields)
+    }
+
+    /// Field `index` if it was present and non-empty.
+    fn get(&self, index: usize) -> Option<u32> {
+        match self.present.get(index).copied() {
+            Some(true) => Some(self.values[index]),
+            _ => None,
+        }
+    }
+
+    /// The modifiers carried by the second field, defaulting to none.
+    fn modifiers(&self) -> Modifiers {
+        self.get(1)
+            .map(Modifiers::from_encoded)
+            .unwrap_or(Modifiers::NONE)
+    }
+}
+
+/// Parse one decimal field, saturating rather than overflowing into a panic.
+fn number(bytes: &[u8]) -> Option<u32> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut value: u32 = 0;
+    for &byte in bytes {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value
+            .saturating_mul(10)
+            .saturating_add(u32::from(byte - b'0'));
+    }
+    Some(value)
+}
+
+/// Decode the code point a protocol reports as a key.
+///
+/// The C0 values are the keys that keep their legacy meaning in both
+/// protocols; everything else is a character. A code in the Private Use Area
+/// is a functional key (F1, Left Shift, keypad) that this editor does not
+/// bind, and must not be inserted as if it were text.
+fn code_point(code: u32) -> Option<Code> {
+    const FUNCTIONAL_START: u32 = 0xe000;
+    const FUNCTIONAL_END: u32 = 0xf8ff;
+    match code {
+        9 => Some(Code::Tab),
+        13 => Some(Code::Enter),
+        27 => Some(Code::Esc),
+        127 => Some(Code::Backspace),
+        (FUNCTIONAL_START..=FUNCTIONAL_END) => None,
+        _ => char::from_u32(code).map(Code::Char),
+    }
+}
+
+/// `CSI code ; mods u` — the kitty protocol's canonical key event.
+///
+/// `None` for a release report: the editor edits on presses, and a terminal
+/// that reports releases is only doing so because some other program asked it
+/// to.
+fn csi_u(fields: &Fields) -> Option<Key> {
+    if fields.event == Some(3) {
+        return None;
+    }
+    let Some(code) = fields.get(0) else {
+        // A bare `CSI u` is SCORC, a cursor restore, not a key.
+        return Some(Key::of(Code::Unknown(Vec::new())));
+    };
+    match code_point(code) {
+        Some(code) => Some(Key::with(code, fields.modifiers())),
+        None => Some(Key::of(Code::Unknown(Vec::new()))),
+    }
+}
+
+/// `CSI 27 ; mods ; code ~` — xterm's `modifyOtherKeys`.
+///
+/// Level 1 is what the editor asks for: only keys with no legacy encoding are
+/// reported this way, so the shifted-character soup of level 2 never arrives.
+fn other_key(fields: &Fields) -> Option<Key> {
+    let (Some(encoded), Some(code)) = (fields.get(1), fields.get(2)) else {
+        return Some(Key::of(Code::Unknown(Vec::new())));
+    };
+    match code_point(code) {
+        Some(code) => Some(Key::with(code, Modifiers::from_encoded(encoded))),
+        None => Some(Key::of(Code::Unknown(Vec::new()))),
+    }
+}
+
+/// `CSI number ; mods ~` for Home, End and Delete.
+fn cursor_key(fields: &Fields) -> Option<Key> {
+    let code = match fields.get(0) {
+        Some(1 | 7) => Code::Home,
+        Some(4 | 8) => Code::End,
+        Some(3) => Code::Delete,
+        _ => return Some(Key::of(Code::Unknown(Vec::new()))),
+    };
+    Some(Key::with(code, fields.modifiers()))
+}
+
+/// `CSI 1 ; mods A` and friends: the arrows and Home/End with modifiers.
+fn functional_key(fields: &Fields, final_byte: u8) -> Option<Key> {
+    let code = match final_byte {
+        b'A' => Code::Up,
+        b'B' => Code::Down,
+        b'C' => Code::Right,
+        b'D' => Code::Left,
+        b'H' => Code::Home,
+        b'F' => Code::End,
+        b'Z' => Code::Tab,
+        _ => return Some(Key::of(Code::Unknown(Vec::new()))),
+    };
+    let mut mods = fields.modifiers();
+    if final_byte == b'Z' && mods.is_empty() {
+        // Shift-Tab with the number written out and no modifier field.
+        mods = Modifiers::SHIFT;
+    }
+    Some(Key::with(code, mods))
 }
 
 /// Decode the parameters of an SGR mouse press.
@@ -324,25 +691,22 @@ fn mouse_left(parameters: &[u8]) -> Key {
     let mut count = 0;
     for part in parameters.split(|&byte| byte == b';') {
         if count == numbers.len() || part.is_empty() {
-            return Key::Unknown(parameters.to_vec());
+            return Key::of(Code::Unknown(parameters.to_vec()));
         }
-        let Ok(text) = std::str::from_utf8(part) else {
-            return Key::Unknown(parameters.to_vec());
-        };
-        let Ok(value) = text.parse::<u32>() else {
-            return Key::Unknown(parameters.to_vec());
+        let Some(value) = number(part) else {
+            return Key::of(Code::Unknown(parameters.to_vec()));
         };
         numbers[count] = value;
         count += 1;
     }
     let [button, column, row] = numbers;
     if count != 3 || button != 0 || column == 0 || row == 0 {
-        return Key::Unknown(parameters.to_vec());
+        return Key::of(Code::Unknown(parameters.to_vec()));
     }
-    Key::MouseLeft {
+    Key::of(Code::MouseLeft {
         column: u16::try_from(column).unwrap_or(u16::MAX),
         row: u16::try_from(row).unwrap_or(u16::MAX),
-    }
+    })
 }
 
 /// What a partial byte string says about a cursor-position report.
@@ -470,13 +834,39 @@ mod tests {
         assert_eq!(
             keys(b"a\t\r\x01\x7f"),
             vec![
-                Key::Char('a'),
-                Key::Tab,
-                Key::Enter,
-                Key::Ctrl(0x01),
-                Key::Backspace
+                Key::char('a'),
+                Key::of(Code::Tab),
+                Key::of(Code::Enter),
+                Key::ctrl('a'),
+                Key::of(Code::Backspace)
             ]
         );
+    }
+
+    #[test]
+    fn legacy_control_bytes_name_the_letter_they_hold() {
+        // The mapping both protocols use: Ctrl-A is 0x01 and the alphabet runs
+        // in order. Ctrl-Space is the NUL byte, and the four punctuation keys
+        // that have a control byte of their own are the tail of the table.
+        let cases: &[(u8, char)] = &[
+            (0x00, ' '),
+            (0x01, 'a'),
+            (0x07, 'g'),
+            (0x0b, 'k'),
+            (0x12, 'r'),
+            (0x1a, 'z'),
+            (0x1c, '\\'),
+            (0x1d, ']'),
+            (0x1e, '^'),
+            (0x1f, '_'),
+        ];
+        for &(byte, character) in cases {
+            assert_eq!(
+                keys(&[byte]),
+                vec![Key::ctrl(character)],
+                "byte {byte:#04x}"
+            );
+        }
     }
 
     #[test]
@@ -484,14 +874,14 @@ mod tests {
         assert_eq!(
             keys(b"\x1b[A\x1b[B\x1b[C\x1b[D\x1bOA\x1bOB\x1bOC\x1bOD"),
             vec![
-                Key::Up,
-                Key::Down,
-                Key::Right,
-                Key::Left,
-                Key::Up,
-                Key::Down,
-                Key::Right,
-                Key::Left
+                Key::of(Code::Up),
+                Key::of(Code::Down),
+                Key::of(Code::Right),
+                Key::of(Code::Left),
+                Key::of(Code::Up),
+                Key::of(Code::Down),
+                Key::of(Code::Right),
+                Key::of(Code::Left)
             ]
         );
     }
@@ -501,27 +891,34 @@ mod tests {
         assert_eq!(
             keys(b"\x1b[H\x1b[F\x1b[1~\x1b[4~\x1b[7~\x1b[8~\x1b[3~"),
             vec![
-                Key::Home,
-                Key::End,
-                Key::Home,
-                Key::End,
-                Key::Home,
-                Key::End,
-                Key::Delete
+                Key::of(Code::Home),
+                Key::of(Code::End),
+                Key::of(Code::Home),
+                Key::of(Code::End),
+                Key::of(Code::Home),
+                Key::of(Code::End),
+                Key::of(Code::Delete)
             ]
         );
     }
 
     #[test]
     fn shift_tab_is_its_own_key() {
-        assert_eq!(keys(b"\x1b[Z"), vec![Key::BackTab]);
+        assert_eq!(
+            keys(b"\x1b[Z\x1b[1;2Z\x1b[9;2u"),
+            vec![
+                Key::with(Code::Tab, Modifiers::SHIFT),
+                Key::with(Code::Tab, Modifiers::SHIFT),
+                Key::with(Code::Tab, Modifiers::SHIFT)
+            ]
+        );
     }
 
     #[test]
     fn alt_letters() {
         assert_eq!(
             keys(b"\x1bb\x1bf\x1bd"),
-            vec![Key::Alt('b'), Key::Alt('f'), Key::Alt('d')]
+            vec![Key::alt('b'), Key::alt('f'), Key::alt('d')]
         );
     }
 
@@ -531,24 +928,27 @@ mod tests {
         // are readline's `backward-kill-word`, so both decode to one key.
         assert_eq!(
             keys(b"\x1b\x7f\x1b\x08"),
-            vec![Key::AltBackspace, Key::AltBackspace]
+            vec![
+                Key::with(Code::Backspace, Modifiers::ALT),
+                Key::with(Code::Backspace, Modifiers::ALT)
+            ]
         );
     }
 
     #[test]
     fn a_lone_escape_at_end_of_input() {
-        assert_eq!(keys(b"\x1b"), vec![Key::Esc]);
+        assert_eq!(keys(b"\x1b"), vec![Key::of(Code::Esc)]);
     }
 
     #[test]
     fn a_truncated_sequence_is_ignored_whole() {
         assert_eq!(
             keys(b"\x1b[3"),
-            vec![Key::Unknown(b"3".to_vec())],
+            vec![Key::of(Code::Unknown(b"3".to_vec()))],
             "a partial CSI must not insert its parameters as text"
         );
-        assert_eq!(keys(b"\x1b["), vec![Key::Unknown(Vec::new())]);
-        assert_eq!(keys(b"\x1bO"), vec![Key::Unknown(b"O".to_vec())]);
+        assert_eq!(keys(b"\x1b["), vec![Key::of(Code::Unknown(Vec::new()))]);
+        assert_eq!(keys(b"\x1bO"), vec![Key::of(Code::Unknown(b"O".to_vec()))]);
     }
 
     #[test]
@@ -557,7 +957,7 @@ mod tests {
         // the Enter back as the next key.
         assert_eq!(
             keys(b"\x1b[3\r"),
-            vec![Key::Unknown(b"3".to_vec()), Key::Enter]
+            vec![Key::of(Code::Unknown(b"3".to_vec())), Key::of(Code::Enter)]
         );
     }
 
@@ -592,9 +992,9 @@ mod tests {
         assert_eq!(
             keys,
             vec![
-                Key::Char('a'),
-                Key::Char('b'),
-                Key::Unknown(b"1;1".to_vec())
+                Key::char('a'),
+                Key::char('b'),
+                Key::of(Code::Unknown(b"1;1".to_vec()))
             ]
         );
     }
@@ -617,13 +1017,19 @@ mod tests {
     fn a_left_click_is_a_mouse_key_and_nothing_else_is() {
         assert_eq!(
             keys(b"\x1b[<0;12;5M"),
-            vec![Key::MouseLeft { column: 12, row: 5 }]
+            vec![Key::of(Code::MouseLeft { column: 12, row: 5 })]
         );
         // Release, modified buttons (`4` is shift+left) and scroll (`64`) are
         // not editing gestures.
         for sequence in [&b"\x1b[<0;12;5m"[..], b"\x1b[<4;12;5M", b"\x1b[<64;12;5M"] {
             assert!(
-                matches!(keys(sequence).as_slice(), [Key::Unknown(_)]),
+                matches!(
+                    keys(sequence).as_slice(),
+                    [Key {
+                        code: Code::Unknown(_),
+                        ..
+                    }]
+                ),
                 "{:?}",
                 sequence
             );
@@ -632,9 +1038,12 @@ mod tests {
 
     #[test]
     fn focus_events_are_decoded() {
-        assert_eq!(keys(b"\x1b[I\x1b[O"), vec![Key::FocusIn, Key::FocusOut]);
+        assert_eq!(
+            keys(b"\x1b[I\x1b[O"),
+            vec![Key::of(Code::FocusIn), Key::of(Code::FocusOut)]
+        );
         // Not to be confused with SS3 `ESC O`, which is an arrow key prefix.
-        assert_eq!(keys(b"\x1bOA"), vec![Key::Up]);
+        assert_eq!(keys(b"\x1bOA"), vec![Key::of(Code::Up)]);
     }
 
     #[test]
@@ -643,29 +1052,188 @@ mod tests {
         let mut input = b"\x1b[200~".to_vec();
         input.extend_from_slice(pasted);
         input.extend_from_slice(b"\x1b[201~");
-        assert_eq!(keys(&input), vec![Key::Paste(pasted.to_vec())]);
+        assert_eq!(keys(&input), vec![Key::of(Code::Paste(pasted.to_vec()))]);
     }
 
     #[test]
     fn an_unterminated_paste_still_arrives() {
-        assert_eq!(keys(b"\x1b[200~text"), vec![Key::Paste(b"text".to_vec())]);
+        assert_eq!(
+            keys(b"\x1b[200~text"),
+            vec![Key::of(Code::Paste(b"text".to_vec()))]
+        );
     }
 
     #[test]
     fn multibyte_utf8_is_one_key() {
         assert_eq!(
             keys("é€😀".as_bytes()),
-            vec![Key::Char('é'), Key::Char('€'), Key::Char('😀')]
+            vec![Key::char('é'), Key::char('€'), Key::char('😀')]
         );
     }
 
     #[test]
     fn invalid_utf8_is_a_byte_and_does_not_eat_the_next_key() {
-        assert_eq!(keys(b"\xff"), vec![Key::Byte(0xff)]);
+        assert_eq!(keys(b"\xff"), vec![Key::byte(0xff)]);
         assert_eq!(
             keys(b"\xc3("),
-            vec![Key::Byte(0xc3), Key::Char('(')],
+            vec![Key::byte(0xc3), Key::char('(')],
             "the non-continuation byte is pushed back"
         );
+    }
+
+    #[test]
+    fn csi_u_names_the_key_that_legacy_bytes_cannot() {
+        // The whole point of asking for the protocol: `Ctrl-I` is no longer
+        // Tab, and `Ctrl-M` is no longer Enter. The protocol always reports
+        // the unshifted code point and puts shift in the modifier field.
+        assert_eq!(
+            keys(b"\x1b[105;5u\x1b[109;5u\x1b[114;6u\x1b[97;3u"),
+            vec![
+                Key::ctrl('i'),
+                Key::ctrl('m'),
+                Key::with(Code::Char('r'), Modifiers::CTRL | Modifiers::SHIFT),
+                Key::alt('a'),
+            ]
+        );
+    }
+
+    #[test]
+    fn csi_u_carries_the_keys_that_keep_a_legacy_byte() {
+        // Escape, Enter, Tab and Backspace keep their bytes in the legacy
+        // protocol; the unambiguous one reports them as code points.
+        assert_eq!(
+            keys(b"\x1b[27u\x1b[13u\x1b[9u\x1b[127u\x1b[32;5u"),
+            vec![
+                Key::of(Code::Esc),
+                Key::of(Code::Enter),
+                Key::of(Code::Tab),
+                Key::of(Code::Backspace),
+                Key::ctrl(' '),
+            ]
+        );
+    }
+
+    #[test]
+    fn csi_u_ignores_alternate_keys_but_reads_the_event_type() {
+        // `97;6;65u` is Ctrl-Shift-A with the shifted key reported as `A`.
+        // The shifted key would matter to a shortcut matcher that wanted
+        // `Ctrl-+` to match `Ctrl-Shift-=`; this editor matches on the
+        // modifier bits, so it is skipped.
+        assert_eq!(
+            keys(b"\x1b[97;6;65u"),
+            vec![Key::with(
+                Code::Char('a'),
+                Modifiers::CTRL | Modifiers::SHIFT
+            )]
+        );
+        // Press and repeat edit; release does nothing and must not swallow the
+        // key after it.
+        assert_eq!(
+            keys(b"\x1b[105;5:2u"),
+            vec![Key::ctrl('i')],
+            "a repeat is a press"
+        );
+        assert_eq!(
+            keys(b"\x1b[105;5:3ux"),
+            vec![Key::char('x')],
+            "a release is not an edit"
+        );
+    }
+
+    #[test]
+    fn csi_u_functional_keys_are_not_inserted_as_text() {
+        // F1 is U+E000 + 1 in the functional range; a terminal that reports
+        // every key sends it, and it is not a character to put in the line.
+        assert!(matches!(
+            keys(b"\x1b[57353;5u").as_slice(),
+            [Key {
+                code: Code::Unknown(_),
+                ..
+            }]
+        ));
+        // A bare `CSI u` is SCORC, not a key.
+        assert!(matches!(
+            keys(b"\x1b[u").as_slice(),
+            [Key {
+                code: Code::Unknown(_),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn modified_functional_keys_carry_their_modifiers() {
+        assert_eq!(
+            keys(b"\x1b[1;5C\x1b[1;3D\x1b[1;5H\x1b[3;5~\x1b[3;2~"),
+            vec![
+                Key::with(Code::Right, Modifiers::CTRL),
+                Key::with(Code::Left, Modifiers::ALT),
+                Key::with(Code::Home, Modifiers::CTRL),
+                Key::with(Code::Delete, Modifiers::CTRL),
+                Key::with(Code::Delete, Modifiers::SHIFT),
+            ]
+        );
+    }
+
+    #[test]
+    fn modify_other_keys_reports_what_has_no_legacy_encoding() {
+        // `CSI 27 ; mods ; code ~`: Ctrl-Tab, Alt-. and Ctrl-Shift-I.
+        assert_eq!(
+            keys(b"\x1b[27;5;9~\x1b[27;3;46~\x1b[27;6;105~"),
+            vec![
+                Key::with(Code::Tab, Modifiers::CTRL),
+                Key::alt('.'),
+                Key::with(Code::Char('i'), Modifiers::CTRL | Modifiers::SHIFT),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_modifier_field_of_one_means_none() {
+        assert_eq!(
+            keys(b"\x1b[1;1D"),
+            vec![Key::with(Code::Left, Modifiers::NONE)]
+        );
+        assert_eq!(Modifiers::from_encoded(1), Modifiers::NONE);
+        assert_eq!(
+            Modifiers::from_encoded(2 | 4 | 1),
+            Modifiers::CTRL | Modifiers::ALT
+        );
+        // Zero is not a valid encoding; it is read as no modifiers rather
+        // than losing the key.
+        assert_eq!(Modifiers::from_encoded(0), Modifiers::NONE);
+    }
+
+    #[test]
+    fn a_malformed_parameter_string_is_unknown_not_a_key() {
+        for sequence in [
+            // `?` is a parameter byte; a letter would have ended the CSI.
+            &b"\x1b[1;?u"[..],
+            b"\x1b[;;u",
+            b"\x1b[1;2;3;4;5;6u",
+            b"\x1b[1;?~",
+        ] {
+            assert!(
+                matches!(
+                    keys(sequence).as_slice(),
+                    [Key {
+                        code: Code::Unknown(_),
+                        ..
+                    }]
+                ),
+                "{:?}",
+                sequence
+            );
+        }
+    }
+
+    #[test]
+    fn modifiers_render_for_test_failures() {
+        assert_eq!(format!("{:?}", Modifiers::NONE), "NONE");
+        assert_eq!(
+            format!("{:?}", Modifiers::CTRL | Modifiers::SHIFT),
+            "SHIFT|CTRL"
+        );
+        assert_eq!(format!("{:?}", Modifiers::CAPS_LOCK), "CAPS_LOCK");
     }
 }

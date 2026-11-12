@@ -288,7 +288,7 @@ pub fn last_frame(keys: &[baash_repl::Key], columns: u16) -> String {
 
 /// Build a list of character keys from ASCII text.
 pub fn chars(text: &str) -> Vec<baash_repl::Key> {
-    text.chars().map(baash_repl::Key::Char).collect()
+    text.chars().map(baash_repl::Key::char).collect()
 }
 
 /// Decode an output handle that outlives the editor's borrow.

@@ -1081,7 +1081,7 @@ wired to stdout. A pty harness needs only those five methods; no editor change.
 **A line is read with bracketed paste on.** `enter_raw` writes
 `\x1b[?2004h` after the termios switch and `leave_raw` writes `\x1b[?2004l`
 before restoring it, so a pasted newline reaches the decoder inside
-`Key::Paste` instead of being read as Enter — otherwise the first line of a
+`Code::Paste` instead of being read as Enter — otherwise the first line of a
 pasted script runs while the rest is still arriving — and a command started
 from the line never inherits the wrapper. A terminal that ignores the sequence
 still works; the paste is then unbracketed, which is the behaviour before the
@@ -1090,6 +1090,32 @@ same window: `ESC [ I` repaints the frame (another window may have painted
 over it) and `ESC [ O` leaves it alone. The Windows console has no such
 protocols: its paste goes into the input buffer, where the shell only sees the
 resulting keystrokes, and it has no focus sequence at all.
+
+**A key is a code and its modifiers.** `Key { code: Code, mods: Modifiers }`
+replaces the old one-variant-per-combination enum: `Modifiers` is a bit set
+with the kitty keyboard protocol's values (shift 1, alt 2, ctrl 4, super 8,
+hyper 16, meta 32, caps lock 64, num lock 128), and `Code` is what was pressed
+— `Char`, `Byte`, `Enter`, `Tab`, `Backspace`, `Delete`, `Esc`, the arrows,
+`Home`/`End`, `Paste`, `FocusIn`/`FocusOut`, `MouseLeft`, `Unknown`. The legacy
+control bytes decode through the standard table (`0x12` is
+`(Code::Char('r'), Modifiers::CTRL)`), so a binding is written once and the
+same key arrives from the legacy encoding, from `CSI code ; mods u` (kitty,
+including its `code:shifted:base` subfields, of which only the code is used),
+from `CSI 1 ; mods A` (modified arrows/Home/End), from `CSI 3 ; 5 ~` (modified
+Delete) and from xterm's `CSI 27 ; mods ; code ~` (`modifyOtherKeys`).
+
+**The line asks for unambiguous keys and gives them back.** While a line is
+read, `RealTerminal::enter_raw` writes `baash_sys::osc::KEYBOARD_ENABLE`
+(`CSI = 1 u`, kitty's `disambiguate` flag) and
+`MODIFY_OTHER_KEYS_ENABLE` (`CSI > 4 ; 1 m`, xterm level 1);
+`leave_raw` writes the two matching disables before restoring the terminal, so
+a command does not inherit either mode. Both writes are best-effort and are
+skipped for `TERM=dumb`. A terminal that implements neither keeps sending the
+legacy bytes, which still decode; the ambiguity the mode removes is what
+`Ctrl-I` vs `Tab` and `Ctrl-M` vs Enter were. Release and repeat reports are
+not requested; a release that arrives anyway is dropped without consuming the
+next key. Windows never requests them: its console hands over key events, not
+bytes.
 
 **The prompt asks where the cursor is before painting.** A child can leave the
 cursor mid-line (`printf x`), and a frame anchors at column 0, so `read_line`
@@ -1128,7 +1154,7 @@ dark palette. By the time this is read it is historical: there is no
 theme-change subscription, so a live change is picked up at the next restart.
 
 **Click-to-move is a cursor move with no key behind it.** The terminal sends
-`Key::MouseLeft { column, row }` (SGR mouse, one-based) only because the
+`Code::MouseLeft { column, row }` (SGR mouse, one-based) only because the
 prompt-start mark asks for `click_events=1`. The editor maps it through two
 recorded facts: `prompt_row`, from the cursor-position report that started the
 line, and `Renderer::prompt_cells`, the cells the prompt took in the last frame

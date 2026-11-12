@@ -99,7 +99,7 @@ pub use editor::{
     Config, Editor, Flow, LivePrompt, NeverNeedsMore, NeverRefreshes, ReadResult, ShellCompletion,
     ShellMenu, Syntax,
 };
-pub use key::{Decoder, Key};
+pub use key::{Code, Decoder, Key, Modifiers};
 pub use line::Line;
 pub use prompt::{ExpandedPrompt, Prompt, PromptState, expand, is_root};
 pub use render::{Frame, MenuRow, MenuView, Renderer};

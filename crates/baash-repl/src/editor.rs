@@ -37,7 +37,7 @@ use baash_highlight::Theme;
 use baash_runtime::History;
 
 use crate::completion::MenuState;
-use crate::key::{Decoder, Key};
+use crate::key::{Code, Decoder, Key, Modifiers};
 use crate::line::Line;
 use crate::prompt::{ExpandedPrompt, Prompt};
 use crate::render::{Frame, MenuView, Renderer};
@@ -673,7 +673,7 @@ impl<'a> Editor<'a> {
         if !is_kill(&key) {
             self.line.kill_reset();
         }
-        if key != Key::Tab {
+        if !key.is(Code::Tab) {
             // The second `Tab` is only special immediately after a prefix
             // completion; any other key starts a new completion sequence.
             self.prefix_tab = false;
@@ -684,65 +684,91 @@ impl<'a> Editor<'a> {
             self.suggestion_dismissed = false;
         }
         self.dirty = true;
-        match key {
-            Key::Char(character) => {
-                self.line.insert_char(character);
+        match (key.code, key.mods) {
+            // A character is text unless a command modifier is held: shift,
+            // caps and num lock are already reflected in the code point (or,
+            // from the kitty protocol, applied here for ASCII letters).
+            (Code::Char(character), mods) if mods.is_text() => {
+                self.line.insert_char(shifted(character, mods));
             }
-            Key::Byte(byte) => {
+            (Code::Byte(byte), _) => {
                 self.line.insert(&[byte]);
             }
-            Key::Paste(bytes) => {
+            (Code::Paste(bytes), _) => {
                 self.line.insert(&bytes);
             }
-            Key::Enter => return Ok(Flow::Submit),
-            Key::Tab => self.complete_with(shell)?,
-            Key::Esc => {
+            (Code::Enter, Modifiers::NONE) => return Ok(Flow::Submit),
+            (Code::Tab, Modifiers::NONE) => self.complete_with(shell)?,
+            // Shift-Tab is the menu's backward step; on the line it is not a
+            // gesture.
+            (Code::Tab, Modifiers::SHIFT) => {}
+            (Code::Esc, _) => {
                 // Dismiss the ghost text for this line. Typing refines the
                 // line and brings it back.
                 self.suggestion_dismissed = true;
             }
-            Key::FocusIn => {
+            (Code::FocusIn, _) => {
                 // Another window may have painted over this one while the line
                 // sat idle, so the frame is drawn again. Losing focus changes
                 // nothing on screen.
             }
-            Key::FocusOut => self.dirty = false,
-            Key::BackTab => {}
-            Key::Backspace => {
+            (Code::FocusOut, _) => self.dirty = false,
+            (Code::Backspace, Modifiers::NONE) => {
                 self.line.backspace();
             }
-            Key::Delete => {
+            // Alt-Backspace: `ESC DEL` or `ESC BS` in the legacy encoding, and
+            // `CSI 127 ; 3 u` from a terminal that disambiguates. Both are
+            // readline's `backward-kill-word`.
+            (Code::Backspace, Modifiers::ALT) => {
+                self.line.kill_word_backward();
+            }
+            (Code::Delete, Modifiers::NONE) => {
                 self.line.delete();
             }
-            Key::Left => {
+            // `Ctrl-Delete` has no legacy encoding at all, so this arm only
+            // fires on a terminal that speaks one of the enhanced protocols.
+            (Code::Delete, Modifiers::CTRL) => {
+                self.line.kill_word_forward();
+            }
+            (Code::Left, Modifiers::NONE) => {
                 self.line.move_left();
             }
-            Key::Right => {
+            (Code::Left, Modifiers::CTRL | Modifiers::ALT) => {
+                self.line.move_word_left();
+            }
+            (Code::Right, Modifiers::NONE) => {
                 if !self.line.move_right() {
                     self.accept_suggestion();
                 }
             }
-            Key::Home => {
+            (Code::Right, Modifiers::CTRL | Modifiers::ALT) => {
+                self.line.move_word_right();
+            }
+            (Code::Home, Modifiers::NONE) => {
                 self.line.move_home();
             }
-            Key::End => {
+            (Code::End, Modifiers::NONE) => {
                 if !self.line.move_end() {
                     // Already at the end: End accepts history ghost text, the
                     // same as Right does.
                     self.accept_suggestion();
                 }
             }
-            Key::Ctrl(0x12) => self.begin_search(),
-            Key::Up | Key::Ctrl(0x10) => self.history_previous(),
-            Key::Down | Key::Ctrl(0x0e) => self.history_next(),
-            Key::Ctrl(0x01) => {
+            (Code::Char('r'), Modifiers::CTRL) => self.begin_search(),
+            (Code::Up, Modifiers::NONE) | (Code::Char('p'), Modifiers::CTRL) => {
+                self.history_previous();
+            }
+            (Code::Down, Modifiers::NONE) | (Code::Char('n'), Modifiers::CTRL) => {
+                self.history_next();
+            }
+            (Code::Char('a'), Modifiers::CTRL) => {
                 self.line.move_home();
             }
-            Key::Ctrl(0x02) => {
+            (Code::Char('b'), Modifiers::CTRL) => {
                 self.line.move_left();
             }
-            Key::Ctrl(0x03) => return Ok(Flow::Interrupt),
-            Key::Ctrl(0x04) => {
+            (Code::Char('c'), Modifiers::CTRL) => return Ok(Flow::Interrupt),
+            (Code::Char('d'), Modifiers::CTRL) => {
                 if self.line.buffer().is_empty() && !self.line.in_continuation() {
                     return Ok(Flow::Eof);
                 }
@@ -760,20 +786,20 @@ impl<'a> Editor<'a> {
             // means `Ctrl-Z` arrives as a byte; without this arm a Windows
             // user would have no key that ends the session.
             #[cfg(windows)]
-            Key::Ctrl(0x1a) => {
+            (Code::Char('z'), Modifiers::CTRL) => {
                 if self.line.buffer().is_empty() && !self.line.in_continuation() {
                     return Ok(Flow::Eof);
                 }
             }
-            Key::Ctrl(0x05) => {
+            (Code::Char('e'), Modifiers::CTRL) => {
                 // `End`'s readline spelling. Moving to the end is the same
                 // gesture as pressing End there, so being there already
-                // accepts the ghost text, as it does for `Key::End`.
+                // accepts the ghost text, as it does for `Code::End`.
                 if !self.line.move_end() {
                     self.accept_suggestion();
                 }
             }
-            Key::Ctrl(0x06) => {
+            (Code::Char('f'), Modifiers::CTRL) => {
                 // `Right`'s readline spelling, and fish's `forward-char`:
                 // forward at the end of the line is how the suggestion is
                 // taken, so `Ctrl-F` does what `Right` does.
@@ -781,13 +807,13 @@ impl<'a> Editor<'a> {
                     self.accept_suggestion();
                 }
             }
-            Key::Ctrl(0x0b) => {
+            (Code::Char('k'), Modifiers::CTRL) => {
                 self.line.kill_to_end();
             }
-            Key::MouseLeft { column, row } => {
+            (Code::MouseLeft { column, row }, _) => {
                 self.move_cursor_to_click(column, row);
             }
-            Key::Ctrl(0x18) => {
+            (Code::Char('x'), Modifiers::CTRL) => {
                 // Copy the line to the terminal's clipboard (OSC 52). There is
                 // no selection yet, so the whole buffer is the payload; the
                 // clipboard belongs to the terminal, which is what makes this
@@ -797,7 +823,7 @@ impl<'a> Editor<'a> {
                     self.term.write_all(&copy)?;
                 }
             }
-            Key::Ctrl(0x0c) => {
+            (Code::Char('l'), Modifiers::CTRL) => {
                 // Push what is on screen into the scrollback before clearing
                 // it. `2J` erases the viewport and keeps no text, and the
                 // output above the prompt is exactly what a user scrolls back
@@ -809,29 +835,26 @@ impl<'a> Editor<'a> {
                 self.term.write_all(b"\x1b[H\x1b[2J")?;
                 self.renderer.reset();
             }
-            Key::Ctrl(0x15) => {
+            (Code::Char('u'), Modifiers::CTRL) => {
                 self.line.kill_to_start();
             }
-            Key::Ctrl(0x17) => {
+            (Code::Char('w'), Modifiers::CTRL) => {
                 self.line.kill_word();
             }
-            Key::Ctrl(0x19) => {
+            (Code::Char('y'), Modifiers::CTRL) => {
                 self.line.yank();
             }
-            Key::Ctrl(0x14) => {
+            (Code::Char('t'), Modifiers::CTRL) => {
                 self.line.transpose();
             }
-            Key::Alt('b') => {
+            (Code::Char('b'), Modifiers::ALT) => {
                 self.line.move_word_left();
             }
-            Key::Alt('f') => {
+            (Code::Char('f'), Modifiers::ALT) => {
                 self.line.move_word_right();
             }
-            Key::Alt('d') => {
+            (Code::Char('d'), Modifiers::ALT) => {
                 self.line.kill_word_forward();
-            }
-            Key::AltBackspace => {
-                self.line.kill_word_backward();
             }
             _ => self.dirty = false,
         }
@@ -839,39 +862,44 @@ impl<'a> Editor<'a> {
     }
 
     fn handle_menu(&mut self, key: Key) -> io::Result<Flow> {
-        match key {
+        let Key { code, mods } = key;
+        match (code, mods) {
             // Tab and Shift-Tab cycle the menu (fish's pager behaviour), and
             // Enter inserts the selection. Up/Down and Ctrl-P/Ctrl-N are the
             // readline spellings of the same movement.
-            Key::Tab | Key::Down | Key::Ctrl(0x0e) => {
+            (Code::Tab, Modifiers::NONE)
+            | (Code::Down, Modifiers::NONE)
+            | (Code::Char('n'), Modifiers::CTRL) => {
                 if let Some(menu) = self.menu.as_mut() {
                     menu.next();
                 }
                 self.dirty = true;
                 Ok(Flow::Continue)
             }
-            Key::BackTab | Key::Up | Key::Ctrl(0x10) => {
+            (Code::Tab, Modifiers::SHIFT)
+            | (Code::Up, Modifiers::NONE)
+            | (Code::Char('p'), Modifiers::CTRL) => {
                 if let Some(menu) = self.menu.as_mut() {
                     menu.previous();
                 }
                 self.dirty = true;
                 Ok(Flow::Continue)
             }
-            Key::Enter => {
+            (Code::Enter, Modifiers::NONE) => {
                 self.accept_selection();
                 Ok(Flow::Continue)
             }
-            Key::Esc => {
+            (Code::Esc, _) => {
                 self.menu = None;
                 self.prefix_tab = false;
                 self.dirty = true;
                 Ok(Flow::Continue)
             }
-            other => {
+            (code, mods) => {
                 self.menu = None;
                 self.prefix_tab = false;
                 self.dirty = true;
-                self.handle(other)
+                self.handle(Key { code, mods })
             }
         }
     }
@@ -1026,25 +1054,26 @@ impl<'a> Editor<'a> {
         key: Key,
         shell: &mut Option<&mut dyn ShellCompletion>,
     ) -> io::Result<Flow> {
-        match key {
-            Key::Ctrl(0x12) => {
+        let Key { code, mods } = key;
+        match (code, mods) {
+            (Code::Char('r'), Modifiers::CTRL) => {
                 self.search_older();
                 Ok(Flow::Continue)
             }
-            Key::Ctrl(0x07) | Key::Esc => {
+            (Code::Char('g'), Modifiers::CTRL) | (Code::Esc, _) => {
                 self.abort_search();
                 Ok(Flow::Continue)
             }
-            Key::Ctrl(0x03) => {
+            (Code::Char('c'), Modifiers::CTRL) => {
                 // The whole line is abandoned; there is nothing to restore.
                 self.search = None;
                 Ok(Flow::Interrupt)
             }
-            Key::Enter => {
+            (Code::Enter, Modifiers::NONE) => {
                 self.search = None;
                 Ok(Flow::Submit)
             }
-            Key::Backspace => {
+            (Code::Backspace, Modifiers::NONE) => {
                 if let Some(search) = self.search.as_mut()
                     && search.query.pop().is_some()
                 {
@@ -1052,19 +1081,19 @@ impl<'a> Editor<'a> {
                 }
                 Ok(Flow::Continue)
             }
-            Key::Char(character) => {
-                self.search_insert(character.to_string().as_bytes());
+            (Code::Char(character), mods) if mods.is_text() => {
+                self.search_insert(shifted(character, mods).to_string().as_bytes());
                 Ok(Flow::Continue)
             }
-            Key::Byte(byte) => {
+            (Code::Byte(byte), _) => {
                 self.search_insert(&[byte]);
                 Ok(Flow::Continue)
             }
-            other => {
+            (code, mods) => {
                 // Accept and let the key act on the accepted line.
                 self.search = None;
                 self.dirty = true;
-                self.handle_with(other, shell)
+                self.handle_with(Key { code, mods }, shell)
             }
         }
     }
@@ -1297,27 +1326,49 @@ fn contains(text: &[u8], query: &[u8]) -> bool {
     contains_at(text, query).is_some()
 }
 
+/// Apply shift to a character a terminal reported unshifted.
+///
+/// The kitty protocol always reports the unshifted code point, so a
+/// shift-only `CSI 97 ; 2 u` means `A`. Only ASCII has a case mapping the
+/// editor can apply without knowing the keyboard layout; anything else is
+/// inserted as the terminal reported it.
+fn shifted(character: char, mods: Modifiers) -> char {
+    if mods.contains(Modifiers::SHIFT) && character.is_ascii_lowercase() {
+        character.to_ascii_uppercase()
+    } else {
+        character
+    }
+}
+
 /// Whether `key` extends a kill sequence rather than ending one.
 fn is_kill(key: &Key) -> bool {
     matches!(
-        key,
-        Key::Ctrl(0x0b) | Key::Ctrl(0x15) | Key::Ctrl(0x17) | Key::Alt('d') | Key::AltBackspace
+        (&key.code, key.mods),
+        (Code::Char('k'), Modifiers::CTRL)
+            | (Code::Char('u'), Modifiers::CTRL)
+            | (Code::Char('w'), Modifiers::CTRL)
+            | (Code::Char('d'), Modifiers::ALT)
+            | (Code::Backspace, Modifiers::ALT)
+            | (Code::Delete, Modifiers::CTRL)
     )
 }
 
 /// Whether `key` changes the line, and so may change the ghost text.
 fn edits_line(key: &Key) -> bool {
+    if matches!(&key.code, Code::Char(_)) && key.mods.is_text() {
+        return true;
+    }
     matches!(
-        key,
-        Key::Char(_)
-            | Key::Byte(_)
-            | Key::Paste(_)
-            | Key::Backspace
-            | Key::AltBackspace
-            | Key::Alt('d')
-            | Key::Delete
-            | Key::Up
-            | Key::Down
-            | Key::Ctrl(0x04 | 0x0b | 0x0e | 0x10 | 0x14 | 0x15 | 0x17 | 0x19)
+        (&key.code, key.mods),
+        (Code::Byte(_), _)
+            | (Code::Paste(_), _)
+            | (Code::Backspace, _)
+            | (Code::Delete, _)
+            | (Code::Up, Modifiers::NONE)
+            | (Code::Down, Modifiers::NONE)
+            | (
+                Code::Char('d' | 'k' | 'n' | 'p' | 't' | 'u' | 'w' | 'y'),
+                Modifiers::CTRL
+            )
     )
 }

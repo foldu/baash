@@ -697,6 +697,17 @@ impl Terminal for RealTerminal {
             // Like the paste mode it lasts only for the line: a command gets
             // the terminal without either switch on.
             let _ = self.write_all(b"\x1b[?1004h");
+            // Unambiguous key reports, for as long as the line is read. The
+            // kitty protocol covers terminals that speak it and xterm's
+            // `modifyOtherKeys` the ones that do not; a terminal that knows
+            // neither ignores both, and the decoder falls back to the legacy
+            // bytes unchanged (`docs/terminal.md` §12). Both are cleared
+            // again in `leave_raw`, so a command is handed the terminal in
+            // the mode it expects.
+            if self.supports_control_sequences() {
+                let _ = self.write_all(baash_sys::osc::KEYBOARD_ENABLE);
+                let _ = self.write_all(baash_sys::osc::MODIFY_OTHER_KEYS_ENABLE);
+            }
         }
         Ok(())
     }
@@ -707,6 +718,10 @@ impl Terminal for RealTerminal {
             // terminal, and its own line editor must ask for what it wants.
             // Ignoring a write error is deliberate — restoring the terminal
             // mode matters more than a terminal that would not take this.
+            if self.supports_control_sequences() {
+                let _ = self.write_all(baash_sys::osc::MODIFY_OTHER_KEYS_DISABLE);
+                let _ = self.write_all(baash_sys::osc::KEYBOARD_DISABLE);
+            }
             let _ = self.write_all(b"\x1b[?1004l");
             let _ = self.write_all(b"\x1b[?2004l");
         }

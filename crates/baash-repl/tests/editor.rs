@@ -3,7 +3,9 @@
 mod common;
 
 use baash_complete::Candidate;
-use baash_repl::{Config, Editor, Flow, History, Key, Prompt, ReadResult, Size, Theme};
+use baash_repl::{
+    Code, Config, Editor, Flow, History, Key, Modifiers, Prompt, ReadResult, Size, Theme,
+};
 
 use common::{
     FakeTerminal, Screen, Session, StubCompleter, StubSyntax, apply_keys, chars, clear_output,
@@ -35,17 +37,29 @@ fn typing_a_line_and_submitting_returns_it_newline_terminated() {
 fn control_keys_edit_the_buffer() {
     // (keys after typing "abc", expected buffer, expected cursor)
     let cases: Vec<(Vec<Key>, &[u8], usize)> = vec![
-        (vec![Key::Left, Key::Char('X')], b"abXc", 3),
-        (vec![Key::Home, Key::Char('X')], b"Xabc", 1),
-        (vec![Key::Home, Key::End, Key::Char('X')], b"abcX", 4),
-        (vec![Key::Left, Key::Left, Key::Backspace], b"bc", 0),
-        (vec![Key::Home, Key::Delete], b"bc", 0),
-        (vec![Key::Ctrl(0x17)], b"", 0),
-        (vec![Key::Home, Key::Ctrl(0x0b)], b"", 0),
-        (vec![Key::Ctrl(0x15)], b"", 0),
-        (vec![Key::Ctrl(0x14)], b"acb", 3),
-        (vec![Key::Alt('b')], b"abc", 0),
-        (vec![Key::Ctrl(0x01), Key::Ctrl(0x05)], b"abc", 3),
+        (vec![Key::of(Code::Left), Key::char('X')], b"abXc", 3),
+        (vec![Key::of(Code::Home), Key::char('X')], b"Xabc", 1),
+        (
+            vec![Key::of(Code::Home), Key::of(Code::End), Key::char('X')],
+            b"abcX",
+            4,
+        ),
+        (
+            vec![
+                Key::of(Code::Left),
+                Key::of(Code::Left),
+                Key::of(Code::Backspace),
+            ],
+            b"bc",
+            0,
+        ),
+        (vec![Key::of(Code::Home), Key::of(Code::Delete)], b"bc", 0),
+        (vec![Key::ctrl('w')], b"", 0),
+        (vec![Key::of(Code::Home), Key::ctrl('k')], b"", 0),
+        (vec![Key::ctrl('u')], b"", 0),
+        (vec![Key::ctrl('t')], b"acb", 3),
+        (vec![Key::alt('b')], b"abc", 0),
+        (vec![Key::ctrl('a'), Key::ctrl('e')], b"abc", 3),
     ];
     for (keys, buffer, cursor) in cases {
         let mut all = chars("abc");
@@ -60,41 +74,95 @@ fn control_keys_edit_the_buffer() {
 }
 
 #[test]
+fn the_unambiguous_encoding_keeps_ctrl_m_off_the_enter_key() {
+    // `Ctrl-M` is `\r` in the legacy encoding, so a terminal that reported it
+    // as Enter would run the line the moment the key was pressed. The kitty
+    // protocol reports it as `CSI 109 ; 5 u`, a key of its own, which the
+    // editor ignores: the text typed around it is what runs.
+    let (result, _) = run(
+        FakeTerminal::new(b"echo hi\x1b[109;5u there\r"),
+        &StubCompleter::empty(),
+        &baash_repl::NeverNeedsMore,
+        plain_config(),
+    );
+    assert_eq!(result, ReadResult::Line(b"echo hi there\n".to_vec()));
+
+    // `Ctrl-I` is the tab byte; it must not open the completion menu either.
+    let (result, _) = run(
+        FakeTerminal::new(b"echo a\x1b[105;5ub\r"),
+        &StubCompleter::empty(),
+        &baash_repl::NeverNeedsMore,
+        plain_config(),
+    );
+    assert_eq!(result, ReadResult::Line(b"echo ab\n".to_vec()));
+}
+
+#[test]
+fn modified_arrows_and_delete_reach_the_editor() {
+    // `CSI 1 ; 5 D` is Ctrl-Left. It used to be an unknown sequence: the
+    // decoder only knew the unmodified arrow, so a terminal that sent the
+    // modified form lost the key. Ctrl-Left moves by a word, the same as
+    // Alt-B.
+    let mut ctrl = chars("echo one two");
+    ctrl.extend([Key::with(Code::Left, Modifiers::CTRL), Key::char('X')]);
+    let mut alt = chars("echo one two");
+    alt.extend([Key::alt('b'), Key::char('X')]);
+    assert_eq!(apply_keys(&ctrl).0, apply_keys(&alt).0);
+
+    // `Ctrl-Delete` has no legacy encoding at all, so it only arrives from a
+    // terminal speaking one of the enhanced protocols. It kills the next word,
+    // like Alt-D.
+    let mut ctrl = chars("one two");
+    ctrl.extend([
+        Key::of(Code::Home),
+        Key::with(Code::Delete, Modifiers::CTRL),
+    ]);
+    let mut alt = chars("one two");
+    alt.extend([Key::of(Code::Home), Key::alt('d')]);
+    assert_eq!(apply_keys(&ctrl).0, apply_keys(&alt).0);
+}
+
+#[test]
 fn alt_keys_kill_words_and_move_by_them() {
     // Alt-Backspace is `backward-kill-word`: word characters only, so the
     // dash stops it where Ctrl-W would have taken `foo-bar` whole.
     let mut keys = chars("foo-bar");
-    keys.push(Key::AltBackspace);
+    keys.push(Key::with(Code::Backspace, Modifiers::ALT));
     assert_eq!(apply_keys(&keys).0, b"foo-");
 
     // Alt-D kills forward from the cursor to the end of the next word, and two
     // presses accumulate into one kill that a single yank puts back.
     let mut keys = chars("one two three");
-    keys.extend([Key::Home, Key::Alt('f')]);
+    keys.extend([Key::of(Code::Home), Key::alt('f')]);
     assert_eq!(apply_keys(&keys).0, b"one two three");
-    keys.extend([Key::Alt('d'), Key::Alt('d')]);
+    keys.extend([Key::alt('d'), Key::alt('d')]);
     assert_eq!(apply_keys(&keys).0, b"one");
-    keys.push(Key::Ctrl(0x19));
+    keys.push(Key::ctrl('y'));
     assert_eq!(apply_keys(&keys).0, b"one two three");
 }
 
 #[test]
 fn kill_and_yank_round_trip_through_the_editor() {
     let mut keys = chars("one two");
-    keys.push(Key::Ctrl(0x17));
+    keys.push(Key::ctrl('w'));
     assert_eq!(apply_keys(&keys).0, b"one ");
-    keys.push(Key::Ctrl(0x19));
+    keys.push(Key::ctrl('y'));
     assert_eq!(apply_keys(&keys).0, b"one two");
 }
 
 #[test]
 fn utf8_is_inserted_and_deleted_by_character() {
     let mut keys = chars("héllo");
-    keys.push(Key::Backspace);
+    keys.push(Key::of(Code::Backspace));
     assert_eq!(apply_keys(&keys).0, "héll".as_bytes());
 
     // A wide character is one editing unit even though it is three bytes.
-    let keys = vec![Key::Char('你'), Key::Char('好'), Key::Left, Key::Backspace];
+    let keys = vec![
+        Key::char('你'),
+        Key::char('好'),
+        Key::of(Code::Left),
+        Key::of(Code::Backspace),
+    ];
     assert_eq!(apply_keys(&keys).0, "好".as_bytes());
 }
 
@@ -227,7 +295,7 @@ fn a_coloured_prompt_does_not_count_its_non_printing_stretches() {
     };
     let mut editor =
         Editor::with_config(&mut term, &completer, &baash_repl::NeverNeedsMore, config);
-    editor.step(Key::Char('x')).expect("step");
+    editor.step(Key::char('x')).expect("step");
     let frame = term.take_output();
     assert!(
         frame.contains("\x1b[31m$\x1b[0m x"),
@@ -269,9 +337,9 @@ fn a_repaint_moves_up_over_a_multi_row_edit_region() {
 #[test]
 fn the_cursor_is_placed_on_the_right_wrapped_row() {
     let mut keys = chars("abcdef");
-    keys.push(Key::Home);
-    keys.push(Key::Right);
-    keys.push(Key::Right);
+    keys.push(Key::of(Code::Home));
+    keys.push(Key::of(Code::Right));
+    keys.push(Key::of(Code::Right));
     let frame = last_frame(&keys, 5);
     assert!(
         frame.ends_with("\x1b[1A\r\x1b[4C"),
@@ -323,7 +391,7 @@ fn the_prompt_expands_its_escapes() {
     };
     let mut editor = Editor::new(&mut term, &completer, &baash_repl::NeverNeedsMore);
     editor.set_prompt(config.prompt.clone());
-    editor.step(Key::Char('x')).unwrap();
+    editor.step(Key::char('x')).unwrap();
     assert!(term.text().contains("ada $ x"));
 
     let mut term = FakeTerminal::new(b"");
@@ -337,7 +405,7 @@ fn the_prompt_expands_its_escapes() {
     };
     let mut editor =
         Editor::with_config(&mut term, &completer, &baash_repl::NeverNeedsMore, config);
-    editor.step(Key::Char('x')).unwrap();
+    editor.step(Key::char('x')).unwrap();
     assert!(term.text().contains("# x"));
 }
 
@@ -355,7 +423,7 @@ fn a_prompt_rendered_for_a_directory_shows_it() {
     };
     let mut editor =
         Editor::with_config(&mut term, &completer, &baash_repl::NeverNeedsMore, config);
-    editor.step(Key::Char('x')).unwrap();
+    editor.step(Key::char('x')).unwrap();
     assert!(term.text().contains("/tmp/place$ x"));
 }
 
@@ -439,7 +507,7 @@ fn a_multi_line_prompt_keeps_the_cursor_on_the_right_row() {
     };
     let mut editor =
         Editor::with_config(&mut term, &completer, &baash_repl::NeverNeedsMore, config);
-    editor.step(Key::Char('x')).unwrap();
+    editor.step(Key::char('x')).unwrap();
     let output = term.text();
     assert!(
         output.contains("one\r\ntwo$ x"),
@@ -543,30 +611,30 @@ fn several_candidates_open_a_menu_and_insert_the_selection() {
         let mut editor =
             Editor::with_config(&mut term, &completer, &baash_repl::NeverNeedsMore, config);
         for key in [
-            Key::Char('l'),
-            Key::Char('s'),
-            Key::Char(' '),
-            Key::Char('a'),
+            Key::char('l'),
+            Key::char('s'),
+            Key::char(' '),
+            Key::char('a'),
         ] {
             editor.step(key).unwrap();
         }
         clear_output(&sink);
         // The first Tab inserts the unambiguous prefix and opens nothing.
-        assert_eq!(editor.step(Key::Tab).unwrap(), Flow::Continue);
+        assert_eq!(editor.step(Key::of(Code::Tab)).unwrap(), Flow::Continue);
         assert_eq!(editor.line().buffer(), b"ls alp");
         assert!(
             !output_text(&sink).contains("> alpha"),
             "the first Tab must not paint the menu"
         );
         // The second opens it; Down moves the selection and Enter inserts.
-        assert_eq!(editor.step(Key::Tab).unwrap(), Flow::Continue);
+        assert_eq!(editor.step(Key::of(Code::Tab)).unwrap(), Flow::Continue);
         let frame = output_text(&sink);
         assert!(frame.contains("> alpha"), "the menu is painted: {frame:?}");
         assert!(frame.contains("  alpine"));
-        editor.step(Key::Down).unwrap();
-        assert_eq!(editor.step(Key::Enter).unwrap(), Flow::Continue);
+        editor.step(Key::of(Code::Down)).unwrap();
+        assert_eq!(editor.step(Key::of(Code::Enter)).unwrap(), Flow::Continue);
         assert_eq!(editor.line().buffer(), b"ls alpine");
-        assert_eq!(editor.step(Key::Enter).unwrap(), Flow::Submit);
+        assert_eq!(editor.step(Key::of(Code::Enter)).unwrap(), Flow::Submit);
     }
     assert!(term.text().contains("ls alpine"));
 }
@@ -592,20 +660,20 @@ fn escape_cancels_the_menu_without_inserting() {
     let mut editor =
         Editor::with_config(&mut term, &completer, &baash_repl::NeverNeedsMore, config);
     for key in [
-        Key::Char('l'),
-        Key::Char('s'),
-        Key::Char(' '),
-        Key::Char('a'),
+        Key::char('l'),
+        Key::char('s'),
+        Key::char(' '),
+        Key::char('a'),
     ] {
         editor.step(key).unwrap();
     }
     // Two Tabs: the prefix, then the menu. Escape closes the menu without
     // inserting the selection; the prefix is already part of the word.
-    editor.step(Key::Tab).unwrap();
-    editor.step(Key::Tab).unwrap();
-    assert_eq!(editor.step(Key::Esc).unwrap(), Flow::Continue);
+    editor.step(Key::of(Code::Tab)).unwrap();
+    editor.step(Key::of(Code::Tab)).unwrap();
+    assert_eq!(editor.step(Key::of(Code::Esc)).unwrap(), Flow::Continue);
     clear_output(&sink);
-    editor.step(Key::Char('!')).unwrap();
+    editor.step(Key::char('!')).unwrap();
     assert_eq!(editor.line().buffer(), b"ls alp!");
     assert!(
         !output_text(&sink).contains("alpha"),
@@ -631,7 +699,12 @@ fn ghost_text_completes_from_history_and_is_accepted_by_movement_keys() {
     // `Right`/`End` and their readline spellings `Ctrl-F`/`Ctrl-E`: forward
     // past the end of the line is how the suggestion is taken, so the four
     // mean the same thing at the end of the line.
-    for accept in [Key::Right, Key::End, Key::Ctrl(0x06), Key::Ctrl(0x05)] {
+    for accept in [
+        Key::of(Code::Right),
+        Key::of(Code::End),
+        Key::ctrl('f'),
+        Key::ctrl('e'),
+    ] {
         let mut history = History::new();
         history.push(b"echo hello\n");
         let mut term = FakeTerminal::sized(b"", 80, 24);
@@ -667,7 +740,7 @@ fn ctrl_f_and_ctrl_e_move_before_they_accept() {
     // Away from the end of the line the two are plain movement: they carry
     // the cursor to where an accept would start, and only the next press
     // takes the suggestion.
-    for (key, presses) in [(Key::Ctrl(0x05), 2), (Key::Ctrl(0x06), 3)] {
+    for (key, presses) in [(Key::ctrl('e'), 2), (Key::ctrl('f'), 3)] {
         let mut history = History::new();
         history.push(b"echo hello\n");
         let mut term = FakeTerminal::new(b"");
@@ -682,8 +755,8 @@ fn ctrl_f_and_ctrl_e_move_before_they_accept() {
         for key in chars("echo h") {
             editor.step(key).unwrap();
         }
-        editor.step(Key::Left).unwrap();
-        editor.step(Key::Left).unwrap();
+        editor.step(Key::of(Code::Left)).unwrap();
+        editor.step(Key::of(Code::Left)).unwrap();
         // `Ctrl-E` moves to the end in one press; `Ctrl-F` needs one per byte
         // moved. The first press of either must not insert anything.
         editor.step(key.clone()).unwrap();
@@ -715,7 +788,7 @@ fn without_colour_there_is_no_ghost_text_to_accept() {
     for key in chars("echo h") {
         editor.step(key).unwrap();
     }
-    editor.step(Key::Right).unwrap();
+    editor.step(Key::of(Code::Right)).unwrap();
     assert_eq!(editor.line().buffer(), b"echo h");
 }
 
@@ -741,22 +814,22 @@ fn escape_dismisses_the_ghost_and_typing_brings_it_back() {
     // Escape removes it for this line; Right/End cannot accept text that is
     // not painted.
     clear_output(&sink);
-    editor.step(Key::Esc).unwrap();
+    editor.step(Key::of(Code::Esc)).unwrap();
     assert!(
         !output_text(&sink).contains("\x1b[2m"),
         "the ghost is gone after Escape"
     );
-    editor.step(Key::Right).unwrap();
+    editor.step(Key::of(Code::Right)).unwrap();
     assert_eq!(editor.line().buffer(), b"echo h");
 
     // Typing refines the line and the suggestion returns.
-    editor.step(Key::Char('e')).unwrap();
+    editor.step(Key::char('e')).unwrap();
     assert_eq!(editor.line().buffer(), b"echo he");
     assert!(
         output_text(&sink).contains("\x1b[2mllo\x1b[22m"),
         "typing after Escape re-enables the suggestion"
     );
-    editor.step(Key::End).unwrap();
+    editor.step(Key::of(Code::End)).unwrap();
     assert_eq!(editor.line().buffer(), b"echo hello");
 }
 
@@ -794,7 +867,7 @@ fn a_candidate_display_is_flattened_in_the_menu() {
         editor.step(key).unwrap();
     }
     clear_output(&sink);
-    editor.step(Key::Tab).unwrap();
+    editor.step(Key::of(Code::Tab)).unwrap();
     let frame = output_text(&sink);
     assert!(
         frame.contains("bad name"),
@@ -812,14 +885,17 @@ fn the_menu_cycles_with_tab_and_inserts_with_enter() {
         editor.step(key).unwrap();
     }
     // Tab: common prefix; Tab: menu; Tab: next candidate; Enter: insert it.
-    assert_eq!(editor.step(Key::Tab).unwrap(), Flow::Continue);
+    assert_eq!(editor.step(Key::of(Code::Tab)).unwrap(), Flow::Continue);
     assert_eq!(editor.line().buffer(), b"ls alp");
-    assert_eq!(editor.step(Key::Tab).unwrap(), Flow::Continue);
-    assert_eq!(editor.step(Key::Tab).unwrap(), Flow::Continue);
-    assert_eq!(editor.step(Key::Enter).unwrap(), Flow::Continue);
+    assert_eq!(editor.step(Key::of(Code::Tab)).unwrap(), Flow::Continue);
+    assert_eq!(editor.step(Key::of(Code::Tab)).unwrap(), Flow::Continue);
+    assert_eq!(editor.step(Key::of(Code::Enter)).unwrap(), Flow::Continue);
     assert_eq!(editor.line().buffer(), b"ls alpine");
     // Shift-Tab walks backwards, wrapping to the same entry here.
-    assert_eq!(editor.step(Key::BackTab).unwrap(), Flow::Continue);
+    assert_eq!(
+        editor.step(Key::with(Code::Tab, Modifiers::SHIFT)).unwrap(),
+        Flow::Continue
+    );
     assert_eq!(editor.line().buffer(), b"ls alpine");
 }
 
@@ -837,9 +913,9 @@ fn a_menu_description_column_is_painted() {
     for key in chars("git ch") {
         editor.step(key).unwrap();
     }
-    editor.step(Key::Tab).unwrap(); // common prefix `che`
+    editor.step(Key::of(Code::Tab)).unwrap(); // common prefix `che`
     clear_output(&sink);
-    editor.step(Key::Tab).unwrap(); // menu
+    editor.step(Key::of(Code::Tab)).unwrap(); // menu
     let frame = output_text(&sink);
     assert!(frame.contains("> checkout"), "{frame:?}");
     assert!(
@@ -887,8 +963,8 @@ fn the_menu_never_pushes_the_prompt_off_a_short_screen() {
     for key in chars("ls a") {
         editor.step(key).unwrap();
     }
-    editor.step(Key::Tab).unwrap(); // prefix
-    editor.step(Key::Tab).unwrap(); // menu
+    editor.step(Key::of(Code::Tab)).unwrap(); // prefix
+    editor.step(Key::of(Code::Tab)).unwrap(); // menu
     let screen = Screen::of(&term);
     assert_eq!(screen.row(0), "$ ls al", "the prompt is still painted");
     assert_eq!(screen.scrolls(), 0, "the frame fits: {:?}", screen.lines());
@@ -910,8 +986,8 @@ fn open_menu(columns: u16, rows: u16) -> Screen {
         for key in chars("ls a") {
             editor.step(key).unwrap();
         }
-        editor.step(Key::Tab).unwrap(); // common prefix: `ls al`
-        editor.step(Key::Tab).unwrap(); // the menu
+        editor.step(Key::of(Code::Tab)).unwrap(); // common prefix: `ls al`
+        editor.step(Key::of(Code::Tab)).unwrap(); // the menu
     }
     let mut screen = Screen::new(columns, rows);
     screen.feed(&sink.borrow());
@@ -944,9 +1020,9 @@ fn typing_after_the_menu_repaints_over_it_instead_of_below_it() {
         for key in chars("ls a") {
             editor.step(key).unwrap();
         }
-        editor.step(Key::Tab).unwrap(); // common prefix
-        editor.step(Key::Tab).unwrap(); // the menu
-        editor.step(Key::Char('t')).unwrap();
+        editor.step(Key::of(Code::Tab)).unwrap(); // common prefix
+        editor.step(Key::of(Code::Tab)).unwrap(); // the menu
+        editor.step(Key::char('t')).unwrap();
     }
     let mut screen = Screen::new(20, 12);
     screen.feed(&sink.borrow());
@@ -972,8 +1048,8 @@ fn a_long_line_leaves_the_menu_only_the_rows_below_it() {
     for key in line {
         editor.step(key).unwrap();
     }
-    editor.step(Key::Tab).unwrap(); // common prefix
-    editor.step(Key::Tab).unwrap(); // menu
+    editor.step(Key::of(Code::Tab)).unwrap(); // common prefix
+    editor.step(Key::of(Code::Tab)).unwrap(); // menu
     let screen = Screen::of(&term);
     assert_eq!(
         screen.scrolls(),
@@ -1037,7 +1113,7 @@ fn the_terminal_size_is_respected_when_it_is_unknown() {
     );
     let completer = StubCompleter::empty();
     let mut editor = Editor::new(&mut term, &completer, &baash_repl::NeverNeedsMore);
-    editor.step(Key::Char('x')).unwrap();
+    editor.step(Key::char('x')).unwrap();
     assert!(output_text(&sink).contains("$ x"));
 }
 
@@ -1060,8 +1136,8 @@ fn a_session_leaves_raw_mode_balanced_after_every_line() {
 // ---------------------------------------------------------------------------
 
 /// The keys a search uses, spelled out so the tests read like the interaction.
-const CTRL_R: Key = Key::Ctrl(0x12);
-const CTRL_G: Key = Key::Ctrl(0x07);
+const CTRL_R: Key = Key::ctrl('r');
+const CTRL_G: Key = Key::ctrl('g');
 
 /// `Ctrl-R` followed by `text`.
 fn search(text: &str) -> Vec<Key> {
@@ -1090,14 +1166,14 @@ fn ctrl_r_again_walks_to_the_next_older_match() {
     let entries = ["a one", "a two", "m three"];
     let (buffer, _, _) = drive(&entries, &search("a"));
     assert_eq!(buffer, b"a two");
-    let (buffer, _, _) = drive(&entries, &[CTRL_R, Key::Char('a'), CTRL_R]);
+    let (buffer, _, _) = drive(&entries, &[CTRL_R, Key::char('a'), CTRL_R]);
     assert_eq!(buffer, b"a one", "a second Ctrl-R finds the older match");
 }
 
 #[test]
 fn a_query_with_no_older_match_reports_failure_and_keeps_the_last_match() {
     let entries = ["first alpha", "second alpha"];
-    let (buffer, _, output) = drive(&entries, &[CTRL_R, Key::Char('a'), CTRL_R, CTRL_R]);
+    let (buffer, _, output) = drive(&entries, &[CTRL_R, Key::char('a'), CTRL_R, CTRL_R]);
     assert_eq!(buffer, b"first alpha", "the last match stays on the line");
     assert!(
         output.contains("(failed reverse-i-search)`a': first alpha"),
@@ -1120,7 +1196,7 @@ fn enter_accepts_the_match_and_executes_it() {
 fn escape_restores_the_line_the_search_started_from() {
     let mut keys = chars("draft");
     keys.extend(search("hi"));
-    keys.push(Key::Esc);
+    keys.push(Key::of(Code::Esc));
     let (buffer, cursor, _) = drive(&["echo hi there"], &keys);
     assert_eq!(buffer, b"draft", "the original line comes back");
     assert_eq!(cursor, 5);
@@ -1155,7 +1231,7 @@ fn ctrl_c_abandons_the_whole_line() {
 #[test]
 fn a_query_that_matches_nothing_says_so_and_does_not_change_the_line() {
     let mut keys = search("zzz");
-    keys.push(Key::Esc);
+    keys.push(Key::of(Code::Esc));
     let (buffer, cursor, output) = drive(&["echo hi there"], &keys);
     assert_eq!(
         (buffer.as_slice(), cursor),
@@ -1195,7 +1271,7 @@ fn empty_history_does_not_panic_and_leaves_the_line_alone() {
 fn backspace_edits_the_query_and_searches_again() {
     let entries = ["echo hi there"];
     let mut keys = search("hiz");
-    keys.push(Key::Backspace);
+    keys.push(Key::of(Code::Backspace));
     let (buffer, _, output) = drive(&entries, &keys);
     assert_eq!(buffer, b"echo hi there");
     assert!(
@@ -1209,9 +1285,9 @@ fn left_and_right_accept_the_match_and_put_the_cursor_on_it() {
     // `wor` matches at index 11 of "echo hello world"; `->` puts the cursor at
     // 12, so the typed byte lands between `w` and `o`.
     let mut keys = search("wor");
-    keys.push(Key::Right);
-    keys.push(Key::Char('X'));
-    keys.push(Key::Enter);
+    keys.push(Key::of(Code::Right));
+    keys.push(Key::char('X'));
+    keys.push(Key::of(Code::Enter));
     let (result, _) = run(
         FakeTerminal::new(b"\x12wor\x1b[CX\r"),
         &StubCompleter::empty(),
@@ -1260,7 +1336,7 @@ fn a_multiline_history_entry_is_painted_as_lines() {
     let mut editor =
         Editor::with_config(&mut term, &completer, &baash_repl::NeverNeedsMore, config);
     clear_output(&sink);
-    editor.step(Key::Up).unwrap();
+    editor.step(Key::of(Code::Up)).unwrap();
     let frame = output_text(&sink);
     assert!(
         !frame.contains("^J"),
@@ -1453,7 +1529,7 @@ fn ctrl_l_pushes_the_screen_into_the_scrollback_before_clearing() {
     let mut term = FakeTerminal::new(b"");
     let completer = StubCompleter::empty();
     let mut editor = Editor::new(&mut term, &completer, &baash_repl::NeverNeedsMore);
-    editor.step(Key::Ctrl(0x0c)).expect("step");
+    editor.step(Key::ctrl('l')).expect("step");
     let output = term.text();
     let scroll = output
         .find("\u{1b}[24S")
@@ -1479,7 +1555,7 @@ fn ctrl_x_copies_the_line_to_the_terminal_clipboard() {
         editor.step(key).expect("step");
     }
     clear_output(&sink);
-    editor.step(Key::Ctrl(0x18)).expect("copy");
+    editor.step(Key::ctrl('x')).expect("copy");
     let output = output_text(&sink);
     assert!(
         output.contains("\u{1b}]52;c;ZWNobyBoaQ==\u{7}"),

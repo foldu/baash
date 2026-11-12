@@ -352,7 +352,12 @@ Known gaps, stated so they are not mistaken for behaviour:
   cursor-position report, and the console provides neither
   (`docs/terminal.md` §10). The background-colour query has no console answer
   either, so Windows keeps the dark palette
-  (`docs/terminal.md` §11).
+  (`docs/terminal.md` §11). The unambiguous-keyboard requests are not written
+  there: the console hands over key events rather than a byte stream, so
+  `Console` synthesises the legacy encodings and the decoder never sees a
+  `CSI u` or a `modifyOtherKeys` report. The new `Ctrl-Left`/`Ctrl-Delete`
+  bindings therefore depend on what the console's translation produces, which
+  has not been observed on a guest (`docs/terminal.md` §12).
 
 Conformance is the other backlog, and it is measured: `docs/state.md` §6 and
 `docs/roadmap.md` carry the per-file picture, and `crates/baash-spec/baseline.txt`
