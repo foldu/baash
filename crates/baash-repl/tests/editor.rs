@@ -257,6 +257,29 @@ fn ctrl_d_eof_and_delete() {
 }
 
 #[test]
+fn a_lock_key_does_not_hide_a_binding() {
+    // ghostty and kitty report Caps Lock and Num Lock in the modifier field:
+    // `Ctrl-D` with Num Lock on is `CSI 100 ; 133 u`, `Alt-B` is
+    // `CSI 98 ; 131 u`. A binding is written without the locks, so the key is
+    // still Ctrl-D or Alt-B — matching the raw bits made both vanish.
+    let (result, _) = run(
+        FakeTerminal::new(b"\x1b[100;133u"),
+        &StubCompleter::empty(),
+        &baash_repl::NeverNeedsMore,
+        plain_config(),
+    );
+    assert_eq!(result, ReadResult::Eof, "Ctrl-D with Num Lock is still EOF");
+
+    let mut keys = chars("echo one two");
+    keys.extend([
+        Key::with(Code::Char('b'), Modifiers::ALT | Modifiers::NUM_LOCK),
+        Key::with(Code::Char('b'), Modifiers::ALT | Modifiers::CAPS_LOCK),
+        Key::char('X'),
+    ]);
+    assert_eq!(apply_keys(&keys).0, b"echo Xone two");
+}
+
+#[test]
 fn ctrl_c_abandons_the_line_and_restores_raw_mode() {
     let (result, term) = run(
         FakeTerminal::new(b"partial\x03\r"),

@@ -1154,6 +1154,15 @@ including its `code:shifted:base` subfields, of which only the code is used),
 from `CSI 1 ; mods A` (modified arrows/Home/End), from `CSI 3 ; 5 ~` (modified
 Delete) and from xterm's `CSI 27 ; mods ; code ~` (`modifyOtherKeys`).
 
+**A lock key is not part of a binding.** The kitty protocol reports Caps Lock
+and Num Lock in the same modifier field as Ctrl and Alt, so ghostty sends
+`Ctrl-D` as `CSI 100 ; 5 u` with the locks off and `CSI 100 ; 133 u` with Num
+Lock on. `Modifiers::binding()` drops those two bits before a binding is
+matched (`is_text()` already ignored them); the decoder still records them,
+because they are what the terminal said. Matching the raw bits made every
+modified binding depend on a lock key: `Ctrl-D` and `Alt-B` did nothing while
+plain typing kept working, which is how it was noticed.
+
 **The line asks for unambiguous keys and gives them back.** While a line is
 read, `RealTerminal::enter_raw` writes `baash_sys::osc::KEYBOARD_ENABLE`
 (`CSI = 1 u`, kitty's `disambiguate` flag) and

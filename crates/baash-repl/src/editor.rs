@@ -755,7 +755,11 @@ impl<'a> Editor<'a> {
             self.suggestion_dismissed = false;
         }
         self.dirty = true;
-        match (key.code, key.mods) {
+        // A lock key is not part of what a key means: the kitty protocol
+        // reports it in the modifier field, so `Ctrl-D` with Num Lock on
+        // arrives as `CSI 100 ; 133 u` and still has to be Ctrl-D.
+        let (code, mods) = (key.code, key.mods.binding());
+        match (code, mods) {
             // A character is text unless a command modifier is held: shift,
             // caps and num lock are already reflected in the code point (or,
             // from the kitty protocol, applied here for ASCII letters).
@@ -934,6 +938,7 @@ impl<'a> Editor<'a> {
 
     fn handle_menu(&mut self, key: Key) -> io::Result<Flow> {
         let Key { code, mods } = key;
+        let mods = mods.binding();
         match (code, mods) {
             // Tab and Shift-Tab cycle the menu (fish's pager behaviour), and
             // Enter inserts the selection. Up/Down and Ctrl-P/Ctrl-N are the
@@ -1168,6 +1173,7 @@ impl<'a> Editor<'a> {
         shell: &mut Option<&mut dyn ShellCompletion>,
     ) -> io::Result<Flow> {
         let Key { code, mods } = key;
+        let mods = mods.binding();
         match (code, mods) {
             (Code::Char('r'), Modifiers::CTRL) => {
                 self.search_older();
@@ -1456,7 +1462,7 @@ fn shifted(character: char, mods: Modifiers) -> char {
 /// Whether `key` extends a kill sequence rather than ending one.
 fn is_kill(key: &Key) -> bool {
     matches!(
-        (&key.code, key.mods),
+        (&key.code, key.mods.binding()),
         (Code::Char('k'), Modifiers::CTRL)
             | (Code::Char('u'), Modifiers::CTRL)
             | (Code::Char('w'), Modifiers::CTRL)
@@ -1472,7 +1478,7 @@ fn edits_line(key: &Key) -> bool {
         return true;
     }
     matches!(
-        (&key.code, key.mods),
+        (&key.code, key.mods.binding()),
         (Code::Byte(_), _)
             | (Code::Paste(_), _)
             | (Code::Backspace, _)

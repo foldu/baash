@@ -142,6 +142,19 @@ impl Modifiers {
         self.0 & (Self::CTRL.0 | Self::ALT.0 | Self::SUPER.0 | Self::HYPER.0 | Self::META.0) == 0
     }
 
+    /// The modifiers that decide what a key *means*.
+    ///
+    /// Caps Lock and Num Lock say which character a key produces, never which
+    /// command it is, and a binding is written without them. They are dropped
+    /// here because the kitty protocol reports them in the modifier field:
+    /// ghostty sends `Ctrl-D` as `CSI 100 ; 5 u` with the locks off and
+    /// `CSI 100 ; 133 u` with Num Lock on, and matching on the raw bits would
+    /// make every binding depend on a lock key. Between one press and the next
+    /// nothing about the command has changed.
+    pub const fn binding(self) -> Self {
+        Self(self.0 & !(Self::CAPS_LOCK.0 | Self::NUM_LOCK.0))
+    }
+
     /// Decode the protocol's `1 + bits` encoding.
     ///
     /// A missing field means no modifiers; the caller passes the default. The
@@ -1202,6 +1215,30 @@ mod tests {
         // Zero is not a valid encoding; it is read as no modifiers rather
         // than losing the key.
         assert_eq!(Modifiers::from_encoded(0), Modifiers::NONE);
+    }
+
+    #[test]
+    fn the_decoder_keeps_lock_state_and_a_binding_drops_it() {
+        // ghostty reports the locks in the modifier field, so `Ctrl-D` reads
+        // `CSI 100 ; 133 u` with Num Lock on. The bits are decoded — they are
+        // what the terminal said — and dropped when a binding is matched.
+        assert_eq!(
+            keys(b"\x1b[100;133u\x1b[98;131u\x1b[97;65u"),
+            vec![
+                Key::with(Code::Char('d'), Modifiers::CTRL | Modifiers::NUM_LOCK),
+                Key::with(Code::Char('b'), Modifiers::ALT | Modifiers::NUM_LOCK),
+                Key::with(Code::Char('a'), Modifiers::CAPS_LOCK),
+            ]
+        );
+        assert_eq!(
+            (Modifiers::CTRL | Modifiers::NUM_LOCK | Modifiers::CAPS_LOCK).binding(),
+            Modifiers::CTRL
+        );
+        assert_eq!(
+            (Modifiers::SHIFT | Modifiers::NUM_LOCK).binding(),
+            Modifiers::SHIFT
+        );
+        assert_eq!(Modifiers::NUM_LOCK.binding(), Modifiers::NONE);
     }
 
     #[test]

@@ -990,6 +990,30 @@ fn the_line_asks_for_unambiguous_keys_and_gives_the_terminal_back() {
     let _ = std::fs::remove_dir_all(&work);
 }
 
+/// The lock keys a terminal reports do not hide a binding.
+///
+/// ghostty and kitty put Caps Lock and Num Lock in the modifier field, so
+/// `Ctrl-D` with Num Lock on is `CSI 100 ; 133 u` and `Alt-B` is
+/// `CSI 98 ; 131 u`. Both are still the keys they were without the locks.
+#[test]
+fn lock_keys_do_not_hide_ctrl_d_and_alt_b() {
+    let home = temp_dir("lock-keys-home");
+    let work = temp_dir("lock-keys-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.prompt(" $");
+    session.send(b"echo one two");
+    session.send(b"\x1b[98;131u");
+    session.send(b"X\r");
+    session.expect(b"cmdline_url=echo%20one%20Xtwo", Duration::from_secs(10));
+    session.expect(b"one Xtwo", Duration::from_secs(10));
+    session.prompt(" $");
+    // Ctrl-D at an empty line ends the session.
+    session.send(b"\x1b[100;133u");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 /// Keys from the unambiguous encoding edit the line on a real terminal.
 ///
 /// `CSI 1 ; 5 D` is Ctrl-Left; `CSI 109 ; 5 u` is Ctrl-M, which in the legacy
