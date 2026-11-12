@@ -315,6 +315,14 @@ What the disambiguation buys today: `Ctrl-Left`/`Ctrl-Right` and
 `Ctrl-I`/`Ctrl-M`/`Ctrl-Shift-R` stop meaning tab, Enter and `Ctrl-R`.
 Everything else is unchanged.
 
+**Observed, not only specified.** Ghostty 1.4.0 sends `Ctrl-D` as
+`CSI 100 ; 5 u` and `Alt-B` as `CSI 98 ; 3 u` with the locks off, and
+`CSI 100 ; 133 u` / `CSI 98 ; 131 u` with Num Lock on: the lock bits are 64 and
+128 in the same field as Ctrl, which is why a binding is matched through
+`Modifiers::binding()` (`docs/contracts.md`). Letters still arrive as plain
+text. `AGENTS.md`, "Harness a real terminal", says how those bytes were taken
+and how to take them again.
+
 A release report is ignored; the editor edits on presses. Neither protocol is
 asked to report release or repeat events, so a terminal sending one is
 answering a different application's request.

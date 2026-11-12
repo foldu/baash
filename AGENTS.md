@@ -7,7 +7,7 @@ Guidance for agents (and humans) in this repository. Read first:
 | [README.md](README.md) | what works, what does not |
 | [DESIGN.md](DESIGN.md) | why the shell is shaped this way |
 | [docs/direction.md](docs/direction.md) | the commitments, current waves |
-| [docs/state.md](docs/state.md) | what exists, what is proven, what is next |
+| [docs/state.md](docs/state.md) | what exists, what is proven, what is next; which crate owns what |
 | [docs/contracts.md](docs/contracts.md) | the landed API per crate, cross-crate rules |
 | [docs/portability.md](docs/portability.md) | Windows: behaviour and gaps |
 | [docs/windows.md](docs/windows.md) | the Windows protocol: compile, build, guest |
@@ -86,17 +86,68 @@ The gate is green *and* the behaviour was verified — not "it compiles".
   tests honestly; pty-driven binaries lose their libtest summary when stdout is
   redirected.
 
-## Where a change belongs
+## Harness a real terminal
 
-Builtins: `baash-vm/src/tree/builtins.rs` plus its registry. Expansion:
-`baash-lang`. Lexing and word syntax: `baash-syntax`. Anything that differs by
-platform: `baash-sys` (`fd.rs`/`term.rs` versus `windows.rs`/`console.rs`, the
-neutral grammar in `paths.rs`). Editor, keys, rendering: `baash-repl`.
-Candidates and ranking: `baash-complete`.
+A pty is not a terminal emulator. The `interactive_*` tests prove what baash
+*writes*; only a real terminal proves what comes back — how a key is encoded,
+what answers `OSC 11`, what a reflow does. The terminal here is ghostty from
+nixpkgs on a throwaway X server, so nothing needs a desktop:
 
-What each crate is responsible for is `docs/state.md` §3; the layering is
-`DESIGN.md` §4.1. `baash-sys` is the only crate permitted `unsafe`, and it
-denies undocumented blocks.
+```sh
+nix shell nixpkgs#ghostty nixpkgs#xvfb-run nixpkgs#xdotool nixpkgs#imagemagick \
+    --command xvfb-run -a -s "-screen 0 1280x800x24" bash
+export LIBGL_ALWAYS_SOFTWARE=1     # llvmpipe; there is no GPU in the sandbox
+```
+
+**What a key sends.** `scripts/ghostty-keys.sh ctrl+d alt+b` makes the line
+editor's own request (`CSI = 1 u`, `CSI > 4 ; 1 m`), presses the keys with
+`xdotool`, and hexdumps the answer. `LOCKS=Num_Lock` holds a lock, because the
+lock bits travel in the modifier field. Ghostty 1.4.0:
+
+| key | bytes | with Num Lock on |
+|---|---|---|
+| `Ctrl-D` | `CSI 100 ; 5 u` | `CSI 100 ; 133 u` |
+| `Alt-B` | `CSI 98 ; 3 u` | `CSI 98 ; 131 u` |
+| `a` | `a` (plain text) | `a` |
+
+**Driving baash.** Start it in ghostty's pty and steer the window from outside.
+The window exists before the program in it has run, so poll for a readiness
+marker or for the title baash sets (`OSC 0`), never sleep a fixed time:
+
+```sh
+ghostty -e "${CARGO_TARGET_DIR:-target}/debug/baash" --norc -i >/tmp/ghostty.log 2>&1 &
+for _ in $(seq 1 80); do                       # baash titles the window: `OSC 0`
+    wid=$(xdotool search --name '^/tmp$' | head -1) && break
+    sleep 0.25
+done
+xdotool windowfocus "$wid"; xdotool windowraise "$wid"
+xdotool type --delay 40 'echo foo bar'
+xdotool key --clearmodifiers alt+b             # a key, not text
+import -window root /tmp/shot.png              # then look at the picture
+```
+
+Traps, all met in practice:
+
+* **`pkill -x ghostty`**, never `pkill -f ghostty`: the pattern matches the
+  script driving it, and the run kills itself.
+* There is **no window manager**, so nothing focuses the window for you.
+  `windowfocus`/`windowraise` are yours to call, and keys sent to nothing look
+  exactly like a bug in baash — type one character and read a screenshot before
+  believing a negative result.
+* A broken ghostty config opens a second window named `Configuration Errors`
+  that takes the keys. Skip it by name.
+* **A lock key changes the modifier field** and nothing else; a fresh Xvfb has
+  both off, so record which state a capture was taken in.
+* Under llvmpipe the reply to the startup `OSC 11` query can miss its 100 ms
+  wait and is then typed into the line. Send `Ctrl-U` before testing a key, or
+  a "dead" `Ctrl-D` is really a line that is not empty.
+* `timeout dd` without `--foreground` puts `dd` in a background process group,
+  the pty stops it with `SIGTTIN`, and the capture is empty with no error at
+  all — that is why the script uses `--foreground`.
+
+Limits: synthetic X keys are not a keyboard (no IME, no dead keys), no
+compositor means focus semantics differ from a desktop, and the ghostty version
+is whatever nixpkgs pins — quote it with the bytes.
 
 ## Invariants
 

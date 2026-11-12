@@ -146,6 +146,14 @@ commit and the tag cannot drift apart.
 | `baash-tools` | 16 | dev helpers |
 | `baash-bench` | 388 | the `=~` benchmarks: engine-level compile/match, and the in-shell loop against bash |
 
+**Where a change belongs.** Builtins: `baash-vm/src/tree/builtins.rs` plus its
+registry. Expansion: `baash-lang`. Lexing and word syntax: `baash-syntax`.
+Anything that differs by platform: `baash-sys` (`fd.rs`/`term.rs` versus
+`windows.rs`/`console.rs`, the neutral grammar in `paths.rs`). Editor, keys,
+rendering: `baash-repl`. Candidates and ranking: `baash-complete`. The layering
+is `DESIGN.md` §4.1, and `baash-sys` is the only crate permitted `unsafe` — it
+denies undocumented blocks.
+
 The evaluator is the runtime, and for now the only one: the bytecode backend is
 deferred until the bash surface is smaller (`docs/direction.md` §2), with the
 design kept in `DESIGN.md` §5. Dispatch is not where a shell spends its time — a
