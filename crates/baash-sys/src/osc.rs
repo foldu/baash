@@ -100,6 +100,29 @@ pub fn title(text: &[u8]) -> Vec<u8> {
     out
 }
 
+/// `OSC 133 ; C`: a command is starting; `command` is its text.
+///
+/// The text rides along as kitty's `cmdline_url` extension, percent-encoded so
+/// a `;`, a newline or an `ESC` in the command cannot end the sequence early.
+/// A terminal that does not know the parameter ignores it; the status is the
+/// part every OSC 133 consumer reads.
+pub fn command_start(command: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(command.len() + 24);
+    out.extend_from_slice(b"\x1b]133;C;cmdline_url=");
+    percent_encode_into(command, Flavour::Posix, &mut out);
+    out.extend_from_slice(b"\x1b\\");
+    out
+}
+
+/// `OSC 133 ; D`: the command finished, with its exit status.
+pub fn command_finished(status: i32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16);
+    out.extend_from_slice(b"\x1b]133;D;");
+    out.extend_from_slice(status.to_string().as_bytes());
+    out.extend_from_slice(b"\x1b\\");
+    out
+}
+
 /// The path part of the URI, already encoded, with a leading `/`.
 fn uri_path(cwd: &[u8], flavour: Flavour) -> Option<Vec<u8>> {
     if cwd.is_empty() {
@@ -165,6 +188,20 @@ mod tests {
 
     fn posix(cwd: &[u8], host: &[u8]) -> Vec<u8> {
         cwd_report(cwd, host, Flavour::Posix).expect("a report")
+    }
+
+    #[test]
+    fn a_command_start_carries_its_text_encoded() {
+        assert_eq!(
+            command_start(b"echo 'a;b'"),
+            b"\x1b]133;C;cmdline_url=echo%20%27a%3Bb%27\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn a_command_end_carries_the_status() {
+        assert_eq!(command_finished(0), b"\x1b]133;D;0\x1b\\".to_vec());
+        assert_eq!(command_finished(130), b"\x1b]133;D;130\x1b\\".to_vec());
     }
 
     #[test]

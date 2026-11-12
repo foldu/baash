@@ -341,6 +341,30 @@ impl<'a> Editor<'a> {
         self.preamble.extend_from_slice(bytes);
     }
 
+    /// Tell the terminal a command is starting (OSC 133 `C`).
+    ///
+    /// The editor does not see execution, so the loop calls this between
+    /// reading the line and running it, and [`Editor::command_finished`] when
+    /// it returns. The mark is written outside raw mode, which is why it
+    /// cannot go through the frame like the prompt marks do.
+    pub fn command_started(&mut self, command: &[u8]) {
+        if baash_sys::is_dumb_terminal() {
+            return;
+        }
+        let _ = self.term.write_all(&baash_sys::osc::command_start(command));
+    }
+
+    /// Tell the terminal the command finished, with its exit status
+    /// (OSC 133 `D`).
+    pub fn command_finished(&mut self, status: i32) {
+        if baash_sys::is_dumb_terminal() {
+            return;
+        }
+        let _ = self
+            .term
+            .write_all(&baash_sys::osc::command_finished(status));
+    }
+
     /// Wait for the history writes this session queued to reach the database.
     pub fn finish(&mut self) {
         self.history.flush();

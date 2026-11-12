@@ -763,3 +763,40 @@ fn the_prompt_is_marked_for_the_terminal() {
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&work);
 }
+
+/// A command is bracketed by OSC 133 `C` and `D`, with its text and status.
+///
+/// `C` tells the terminal what is about to run; `D` tells it the exit status so
+/// the prompt can show it and the command's output can be selected as a unit.
+/// The pair is written by the loop, which is the only party that sees a
+/// command start and finish.
+#[test]
+fn a_command_is_marked_with_its_text_and_status() {
+    let home = temp_dir("command-marks-home");
+    let work = temp_dir("command-marks-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.prompt(" $");
+
+    session.send(b"true\n");
+    session.expect(
+        b"\x1b]133;C;cmdline_url=true\x1b\\",
+        Duration::from_secs(10),
+    );
+    session.expect(b"\x1b]133;D;0\x1b\\", Duration::from_secs(10));
+    // The next prompt starts with its own `A` mark.
+    session.expect(b"\x1b]133;A\x1b\\", Duration::from_secs(10));
+    session.prompt(" $");
+
+    session.send(b"false\n");
+    session.expect(
+        b"\x1b]133;C;cmdline_url=false\x1b\\",
+        Duration::from_secs(10),
+    );
+    session.expect(b"\x1b]133;D;1\x1b\\", Duration::from_secs(10));
+    session.prompt(" $");
+
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}

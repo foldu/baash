@@ -524,8 +524,11 @@ The editor brackets the prompt itself with OSC 133 `A`/`B`
 (`baash_sys::osc::PROMPT_START`/`PROMPT_END`): `A` after the preamble and
 before the prompt's first byte, `B` after the first frame. They are written
 once per `read_line`, so a repaint does not repeat them, and `TERM=dumb`
-suppresses them as well. The `C`/`D` pair is not written yet — the editor does
-not see execution, so it will be the loop's job.
+suppresses them as well. The `C`/`D` pair is the loop's, not the editor's:
+`Editor::command_started(command)` and `Editor::command_finished(status)`
+bracket `run_named`, the text going out percent-encoded as kitty's
+`cmdline_url` with the submitting newline removed, and the status as the
+parameter of `D`.
 
 **The transform letter is a `Shell` seam.** The parser classifies every
 `${x@…}` as `ParamOp::Unsupported(UnsupportedOp::Transform)`; it does not copy

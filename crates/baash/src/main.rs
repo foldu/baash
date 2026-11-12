@@ -1165,9 +1165,18 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
                 // sees a whole chunk and cannot tell a REPL line from a
                 // script).
                 shell.state().begin_command();
+                // The command pair brackets execution for the terminal: `C`
+                // carries the text, `D` the status. They are the loop's job
+                // because the editor never sees a command run.
+                // The buffer ends with the newline that submitted it; that
+                // terminator is not part of the command the terminal should
+                // show or replay.
+                let command = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+                editor.command_started(command);
                 let started = std::time::Instant::now();
                 let status = shell.run_named("<stdin>", &bytes);
                 let elapsed = started.elapsed();
+                editor.command_finished(status.0);
                 // `cd` changes the shell's `PWD`; the completion engine and
                 // `PS1`'s `\w` must follow it (`docs/contracts.md`).
                 let after = shell.state().vars.scalar(b"PWD").map(<[u8]>::to_vec);

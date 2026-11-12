@@ -111,14 +111,27 @@ text, and the editor is the only party that knows when the first frame has
 been painted. The title and cwd announcements still go first, in the shell's
 preamble.
 
-The `C`/`D` pair — command start, and command finished carrying the exit
-status — is the next step. Kitty's `click_events=1` extension on `A` belongs
-with click-to-move and is not sent yet.
+`C` and `D` are written by the loop, not the editor, because only the loop
+sees a command start and finish:
+
+```
+ESC ] 133 ; C ; cmdline_url=… ESC \    a command starts; text percent-encoded
+ESC ] 133 ; D ; STATUS ESC \           the command finished
+```
+
+`C` carries the command text as kitty's `cmdline_url` extension, encoded so a
+`;`, a newline or an `ESC` cannot end the sequence early; the trailing newline
+that submitted the line is not part of the command. `D` carries the exit
+status, so a terminal can show it beside the prompt or group the output. The
+pair surrounds execution; the next prompt's `A` follows `D`.
+
+Kitty's `click_events=1` extension on `A` belongs with click-to-move and is
+not sent yet.
 
 ## 5. What is next
-In landing order, each with its own commit: the command marks (OSC 133 C/D),
-focus reporting, a cursor-position query for anchoring the prompt after output
-that did not end in a newline, resize repaint, background-colour detection
-with a light theme, clipboard copy (OSC 52), a scrollback-preserving `Ctrl-L`,
-the kitty keyboard protocol, and prompt-line clicks. The ordered list is the
-session's task list; this file records what has actually landed.
+In landing order, each with its own commit: focus reporting, a cursor-position
+query for anchoring the prompt after output that did not end in a newline,
+resize repaint, background-colour detection with a light theme, clipboard copy
+(OSC 52), a scrollback-preserving `Ctrl-L`, the kitty keyboard protocol, and
+prompt-line clicks. The ordered list is the session's task list; this file
+records what has actually landed.
