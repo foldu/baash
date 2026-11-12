@@ -237,17 +237,15 @@ impl LivePrompt for PromptState {
             .as_mut()
             .is_some_and(|watcher| watcher.pending());
         if changed {
-            // A real change: worth asking git for a new count. The request is
-            // rate-limited and coalesced, so an editor save that touches a
-            // hundred paths is still one `gix` walk.
+            // A real change: worth asking for a new count. The request is
+            // rate-limited, so an editor save that touches a hundred paths is
+            // still one `gix` walk.
             self.git.tick(&self.cwd);
-        } else {
-            // The editor's one-second backstop, or a wake-up with nothing in
-            // the queue: install a refresh that has finished since the last
-            // frame. This is how a worker result eventually reaches the screen
-            // without a keystroke.
-            self.git.poll();
         }
+        // Whether or not the watch spoke, the composition below picks up a
+        // refresh the runtime's blocking pool has finished since the last
+        // frame: this is the one-second backstop that puts a new count on
+        // screen without a keystroke.
         self.repaint_if_changed()
     }
 }

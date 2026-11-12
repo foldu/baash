@@ -439,16 +439,17 @@ The major segments are two spaces apart; the counters are one segment whose
 members are single-spaced. A clean repository is
 ` ~/src/bshell   main $` — no empty counter slot.
 
-The counters are computed in process by `gix` on a worker thread
-(`crates/baash/src/git_prompt.rs`), never on the prompt path. `gix` status with
+The counters are computed in process by `gix` as a task on the shell's `compio`
+runtime — a blocking walk on the runtime's pool (`crates/baash/src/git_prompt.rs`)
+— never on the prompt path. `gix` status with
 `UntrackedFiles::Files` yields modified tracked paths and untracked files as
 distinct paths; ahead/behind is the commit-graph count reachable from `HEAD`
 but not its upstream tracking ref (and the reverse), which is exactly
 `git rev-list --count HEAD ^upstream`. The shell therefore needs no `git`
-binary for the prompt. A 2 s deadline — a timer setting the flag passed to
-`should_interrupt_owned` — discards a slow result rather than painting it.
-Runs are rate-limited to one per 500 ms, coalesced down to the newest
-directory, and back off for 5 s after a silent failure. The prompt paints the
+binary for the prompt. A 2 s deadline — `compio::time::timeout` around the
+blocking walk, plus the flag passed to `should_interrupt_owned` — discards a
+slow result rather than painting it. Runs are rate-limited to one per 500 ms,
+never overlap, and back off for 5 s after a silent failure. The prompt paints the
 last completed counters for the current directory; a `cd` drops them until the
 first run for the new directory lands.
 

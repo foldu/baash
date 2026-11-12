@@ -7,9 +7,10 @@
 //!   `stat`s — microseconds — so it is exact and never stale, and a detached
 //!   `HEAD` is resolved to its abbreviated commit id at the same cost.
 //! * The **counters** (ahead, behind, modified, untracked) need a status, which
-//!   walks the index and the worktree. That never runs on the prompt path: a
-//!   worker thread computes it in process with `gix`, and the prompt renders
-//!   whatever the last completed refresh produced.
+//!   walks the index and the worktree. That never runs on the prompt path: it
+//!   is a task on the shell's own `compio` runtime, a blocking walk on the
+//!   runtime's blocking pool, and the prompt renders whatever the last
+//!   completed refresh produced.
 //!
 //! It is deliberately **not** `git status`: the shell must not depend on a `git`
 //! binary to show the counters. `gix` reads the index, honours `.gitignore` and
@@ -17,19 +18,17 @@
 //! commits reachable from `HEAD` but not from its upstream tracking ref (and
 //! the reverse), which is exactly `git rev-list --count HEAD ^upstream`.
 //!
-//! A refresh runs under a deadline. `gix`'s status takes a shared interrupt
-//! flag and checks it between chunks; a small timer sets it after
-//! [`STATUS_TIMEOUT`], and an interrupted result is discarded rather than
-//! painted. A status that is stuck inside one uninterruptible syscall can keep
-//! the worker busy, but it cannot delay the prompt and it does not accumulate
-//! threads: the next request is coalesced into the one the worker is already
-//! running.
+//! A refresh runs under a deadline, and the deadline is a runtime timer:
+//! [`compio::time::timeout`] races the blocking walk, `gix`'s status takes the
+//! shared interrupt flag as a second line of defence, and a late result is
+//! dropped rather than painted. Dropping it does not cancel the walk —
+//! `spawn_blocking` runs to completion by contract — but nothing waits on it,
+//! and one that is stuck cannot delay the prompt.
 //!
-//! Refreshes are rate-limited ([`MIN_INTERVAL`]) and coalesced: the worker
-//! drains every queued request down to the newest one, so a burst of prompts
-//! cannot queue a burst of status runs. A failed refresh (no repository, a
-//! corrupt one, a timeout) is silent and backs off to
-//! [`RETRY_AFTER_FAILURE`].
+//! Refreshes are rate-limited ([`MIN_INTERVAL`]) and never overlap: there is
+//! one refresh in flight at a time, so a burst of prompts cannot queue a burst
+//! of status runs. A refresh that produced nothing (no repository, a corrupt
+//! one, a timeout) is silent and backs off to [`RETRY_AFTER_FAILURE`].
 //!
 //! The prompt never waits for any of this: [`GitSegment::tick`] reads the
 //! branch and *schedules* a refresh, and [`GitSegment::facts`] returns the last
@@ -39,8 +38,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use baash_lang::prompt::GitStatus;
@@ -74,25 +72,19 @@ pub struct Facts {
     pub status: Option<GitStatus>,
 }
 
-/// A finished refresh.
-struct Update {
-    /// The directory it described. A result for a previous directory must not
-    /// be shown as if it described the current one.
-    cwd: PathBuf,
-    status: Option<GitStatus>,
-}
-
-/// The state shared by the prompt path and the worker's consumer.
+/// The state shared by the prompt path and the refresh task.
+#[derive(Default)]
 struct State {
-    request: Sender<PathBuf>,
-    updates: Receiver<Update>,
     /// The branch of [`State::cwd`]; `None` outside a repository.
     branch: Option<Vec<u8>>,
     /// The newest completed status for [`State::cwd`].
     status: Option<GitStatus>,
     /// The directory `branch` and `status` describe.
     cwd: Option<PathBuf>,
-    /// When the next refresh may be requested.
+    /// Whether a refresh task is running. One at a time: a second would walk
+    /// the same tree twice and the newer result is not more correct.
+    in_flight: bool,
+    /// When the next refresh may be started.
     next_attempt: Option<Instant>,
     /// How many times the prompt asked the cache for facts. Test-only: it is
     /// what proves a prompt ticks the cache even when the directory did not
@@ -106,68 +98,30 @@ struct State {
 ///
 /// Cloning it is cheap and shares the same cache, so the line editor's live
 /// repainter and the per-prompt composer see exactly the same facts without a
-/// second worker.
+/// second refresh.
 #[derive(Clone)]
 pub struct GitSegment {
     state: Arc<Mutex<State>>,
 }
 
 impl GitSegment {
-    /// Start the worker and return an empty segment.
-    ///
-    /// A worker that cannot start (no threads) is not fatal: the segment
-    /// simply stays empty and the prompt is unaffected.
+    /// An empty segment. Nothing runs until the first [`GitSegment::tick`] on
+    /// a thread with a runtime.
     pub fn new() -> Self {
-        let (request, requests) = mpsc::channel::<PathBuf>();
-        let (sender, updates) = mpsc::channel::<Update>();
-        std::thread::Builder::new()
-            .name("baash-git-prompt".to_owned())
-            .spawn(move || worker(requests, sender))
-            .ok();
-        Self {
-            state: Arc::new(Mutex::new(State {
-                request,
-                updates,
-                branch: None,
-                status: None,
-                cwd: None,
-                next_attempt: None,
-                #[cfg(test)]
-                ticks: 0,
-            })),
-        }
+        Self::default()
     }
 
-    /// Install every refresh that has finished, without scheduling a new one.
-    ///
-    /// The editor calls this on its idle wake-up so a worker result reaches the
-    /// screen without a keystroke and without paying for another status run.
-    pub fn poll(&self) {
-        let mut state = self.lock();
-        let now = Instant::now();
-        // The worker coalesces, so more than one can only be queued if the
-        // prompt was not drawn for a while.
-        while let Ok(update) = state.updates.try_recv() {
-            if state.cwd.as_deref() != Some(update.cwd.as_path()) {
-                // A result for a directory the prompt has already left.
-                continue;
-            }
-            let failed = update.status.is_none();
-            state.status = update.status;
-            if failed {
-                state.next_attempt = Some(now + RETRY_AFTER_FAILURE);
-            }
-        }
-    }
-
-    /// Bring the segment up to date for `cwd`, and schedule a refresh if due.
+    /// Bring the segment up to date for `cwd`, and start a refresh if due.
     ///
     /// Called once per prompt, and again whenever the editor is woken while
-    /// the line is idle. Reads `.git/HEAD` (cheap, exact), installs any
-    /// finished status, and asks the worker for a new one no more often than
+    /// the line is idle. Reads `.git/HEAD` (cheap, exact) on this thread and
+    /// schedules the walk on the runtime, no more often than
     /// [`MIN_INTERVAL`].
+    ///
+    /// Without a current `compio` runtime — a unit test, an embedding — there
+    /// is nothing to schedule on, so the branch is still exact and the counters
+    /// simply stay absent. The prompt path never blocks either way.
     pub fn tick(&self, cwd: &Path) {
-        self.poll();
         let mut state = self.lock();
         #[cfg(test)]
         {
@@ -183,22 +137,51 @@ impl GitSegment {
         }
 
         let bytes = baash_sys::os::bytes_from_os(cwd.as_os_str());
-        let branch = baash_lang::prompt::git_branch(&bytes);
-        if branch != state.branch {
-            state.branch = branch;
-        }
-
+        state.branch = baash_lang::prompt::git_branch(&bytes);
         if state.branch.is_none() {
-            // Not a repository: no counters to ask for, and a status here would
-            // only walk nothing.
+            // Not a repository: no counters to ask for, and a walk here would
+            // only fail.
+            return;
+        }
+        if state.in_flight {
             return;
         }
         let now = Instant::now();
         if state.next_attempt.is_some_and(|at| now < at) {
             return;
         }
+        // `try_current` rather than `current`: the prompt is composed in tests
+        // and in code that never started the shell's runtime loop, and neither
+        // may panic because a repository happened to be in the way.
+        let Some(runtime) = compio::runtime::Runtime::try_current() else {
+            return;
+        };
+        state.in_flight = true;
         state.next_attempt = Some(now + MIN_INTERVAL);
-        let _ = state.request.send(cwd.to_path_buf());
+
+        // The task owns nothing from the prompt: it writes into the same cache
+        // and the next `tick` or `facts` sees the result. `detach` because
+        // dropping a `JoinHandle` *cancels* the task in compio, and this one is
+        // deliberately fire-and-forget: the deadline inside it, not the prompt,
+        // decides when to stop.
+        let shared = Arc::clone(&self.state);
+        let directory = cwd.to_path_buf();
+        runtime
+            .spawn(async move {
+                let status = refresh_with_deadline(&directory).await;
+                let mut state = lock(&shared);
+                // A result for a directory the prompt has already left is not
+                // installed, and its failure does not back off the directory
+                // the user is in now: that one has not been tried yet.
+                if state.cwd.as_deref() == Some(directory.as_path()) {
+                    state.status = status;
+                    if status.is_none() {
+                        state.next_attempt = Some(Instant::now() + RETRY_AFTER_FAILURE);
+                    }
+                }
+                state.in_flight = false;
+            })
+            .detach();
     }
 
     /// The facts to paint, cloned out of the cache.
@@ -238,86 +221,61 @@ impl GitSegment {
         self.lock().ticks
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        // The mutex only guards plain data and channel handles; a panic while
-        // holding it would be a bug in this module, and poisoning is then no
-        // reason to take the whole shell down with the prompt. Recover the
-        // guard rather than unwrapping.
-        self.state
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+    fn lock(&self) -> MutexGuard<'_, State> {
+        lock(&self.state)
     }
+}
+
+/// A poisoned lock is recovered rather than propagated.
+///
+/// The mutex only guards plain data; a panic while holding it would be a bug in
+/// this module, and poisoning is then no reason to take the whole shell down
+/// with the prompt.
+fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
+    state.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
 impl Default for GitSegment {
     fn default() -> Self {
-        Self::new()
+        Self {
+            state: Arc::new(Mutex::new(State::default())),
+        }
     }
 }
 
-/// Compute the status of one directory, off the prompt path.
-fn worker(requests: Receiver<PathBuf>, updates: Sender<Update>) {
-    while let Ok(first) = requests.recv() {
-        // Coalesce: a queued older directory is worthless, since only the
-        // newest prompt is on screen.
-        let mut cwd = first;
-        while let Ok(newer) = requests.try_recv() {
-            cwd = newer;
-        }
-        let status = refresh(&cwd);
-        if updates.send(Update { cwd, status }).is_err() {
-            return;
+/// Compute the status of one directory, on the runtime, under the deadline.
+///
+/// The walk is blocking — `gix` reads the index and the worktree with ordinary
+/// file I/O — so it runs on the runtime's blocking pool rather than on an
+/// executor thread. `timeout` is the runtime's own timer: no timer thread, no
+/// `AtomicBool` handshake, and a late result is dropped by dropping the join
+/// handle. The walk itself keeps running to completion (`spawn_blocking` is not
+/// cancellable by contract), which costs one pool thread until it finishes and
+/// nothing in front of the cursor.
+async fn refresh_with_deadline(directory: &Path) -> Option<GitStatus> {
+    let directory = directory.to_path_buf();
+    // The walk's own stop button: `gix` asks it between chunks, so a walk that
+    // the deadline gave up on stops soon after rather than finishing a tree the
+    // prompt no longer wants.
+    let interrupt = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&interrupt);
+    let walk = compio::runtime::spawn_blocking(move || refresh(&directory, &flag));
+    match compio::time::timeout(STATUS_TIMEOUT, walk).await {
+        // `spawn_blocking` answers a join error if the walk panicked; a panic
+        // in the prompt's cache is not worth taking the shell down for.
+        Ok(Ok(status)) => status,
+        Ok(Err(_panicked)) => None,
+        Err(_elapsed) => {
+            interrupt.store(true, Ordering::Release);
+            None
         }
     }
 }
 
 /// Open the repository containing `cwd` and compute what the prompt paints.
-fn refresh(cwd: &Path) -> Option<GitStatus> {
+fn refresh(cwd: &Path, interrupt: &Arc<AtomicBool>) -> Option<GitStatus> {
     let repo = gix::discover(cwd).ok()?;
-    run_with_deadline(STATUS_TIMEOUT, |interrupt| status_with(&repo, interrupt))
-}
-
-/// Run `refresh` under a deadline, returning `None` when the deadline won.
-///
-/// The timer is a short-lived thread rather than a poll in the worker: the
-/// worker is inside `gix` and cannot watch a clock. It sleeps for the whole
-/// deadline and is harmless afterwards — it holds only two `Arc<AtomicBool>`s
-/// and exits. A refresh that finishes in milliseconds leaves at most a handful
-/// of sleeping timer threads, never a running one.
-fn run_with_deadline<F>(timeout: Duration, refresh: F) -> Option<GitStatus>
-where
-    F: FnOnce(&Arc<AtomicBool>) -> Option<GitStatus>,
-{
-    let interrupt = Arc::new(AtomicBool::new(false));
-    let timed_out = Arc::new(AtomicBool::new(false));
-    let done = Arc::new(AtomicBool::new(false));
-    {
-        let interrupt = Arc::clone(&interrupt);
-        let timed_out = Arc::clone(&timed_out);
-        let done = Arc::clone(&done);
-        let _ = std::thread::Builder::new()
-            .name("baash-git-deadline".to_owned())
-            .spawn(move || {
-                std::thread::sleep(timeout);
-                // Only a refresh that is still running is late. Checking
-                // `done` first keeps a completed result from being thrown away
-                // because the timer happened to wake at the same moment.
-                if !done.load(Ordering::Acquire) {
-                    timed_out.store(true, Ordering::Release);
-                    interrupt.store(true, Ordering::Release);
-                }
-            });
-    }
-
-    let result = refresh(&interrupt);
-    done.store(true, Ordering::Release);
-    if timed_out.load(Ordering::Acquire) {
-        // `gix` stops at its next interrupt check, which may be after the
-        // deadline; whatever it collected is partial, so paint nothing.
-        None
-    } else {
-        result
-    }
+    status_with(&repo, interrupt)
 }
 
 /// The status of `repo`, or `None` if it was interrupted or failed.
@@ -455,31 +413,47 @@ mod tests {
         assert!(status.success(), "git {arguments:?}");
     }
 
+    /// A runtime for the tests that exercise the task, not just the walk.
+    fn runtime() -> compio::runtime::Runtime {
+        compio::runtime::Runtime::new().expect("a compio runtime")
+    }
+
     #[test]
-    fn a_fast_refresh_keeps_its_result() {
-        let result = run_with_deadline(Duration::from_secs(10), |_| {
-            Some(GitStatus {
-                modified: 3,
-                ..GitStatus::default()
-            })
+    fn a_refresh_that_finishes_wins_the_race() {
+        let status = runtime().block_on(async {
+            compio::time::timeout(
+                Duration::from_secs(10),
+                compio::runtime::spawn_blocking(|| {
+                    Some(GitStatus {
+                        modified: 3,
+                        ..GitStatus::default()
+                    })
+                }),
+            )
+            .await
         });
-        assert_eq!(result.map(|status| status.modified), Some(3));
+        let status = status
+            .expect("finished before the deadline")
+            .expect("the walk did not panic");
+        assert_eq!(status.map(|status| status.modified), Some(3));
     }
 
     #[test]
     fn a_refresh_that_outlives_the_deadline_is_discarded() {
-        let started = Instant::now();
-        let result = run_with_deadline(Duration::from_millis(30), |interrupt| {
-            while !interrupt.load(Ordering::Acquire) {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            Some(GitStatus::default())
+        // The deadline is now the runtime's timer; what this pins is that a
+        // blocking walk that is still going cannot hold the prompt, and that
+        // its result is dropped rather than painted.
+        let status = runtime().block_on(async {
+            compio::time::timeout(
+                Duration::from_millis(10),
+                compio::runtime::spawn_blocking(|| {
+                    std::thread::sleep(Duration::from_millis(120));
+                    Some(GitStatus::default())
+                }),
+            )
+            .await
         });
-        assert_eq!(result, None);
-        assert!(
-            started.elapsed() >= Duration::from_millis(25),
-            "the deadline was not waited for"
-        );
+        assert!(status.is_err(), "the deadline must win over a slow walk");
     }
 
     #[test]
@@ -493,7 +467,7 @@ mod tests {
         std::fs::write(root.join("untracked.txt"), "x\n").unwrap();
 
         assert_eq!(
-            refresh(&root),
+            refresh(&root, &Arc::new(AtomicBool::new(false))),
             Some(GitStatus {
                 modified: 1,
                 untracked: 1,
@@ -532,7 +506,7 @@ mod tests {
         // The work tree's remote-tracking ref only moves on fetch.
         git(&work, &["fetch", "-q", "origin"]);
 
-        let status = refresh(&work).expect("a status");
+        let status = refresh(&work, &Arc::new(AtomicBool::new(false))).expect("a status");
         assert_eq!((status.ahead, status.behind), (1, 1));
         assert_eq!((status.modified, status.untracked), (0, 0));
         let _ = std::fs::remove_dir_all(&root);

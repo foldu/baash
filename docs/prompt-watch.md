@@ -45,10 +45,11 @@ unreadable repository omits the segment; nothing is guessed.
 the file read already resolves to, so it costs no extra work and answers "which
 commit am I on" instead of leaving a gap.
 
-## 3. The worker
+## 3. The refresh task
 
-`crates/baash/src/git_prompt.rs` owns one worker thread and one channel. Per
-directory it opens the repository with `gix::discover`, then:
+`crates/baash/src/git_prompt.rs` schedules at most one refresh at a time on the
+shell's `compio` runtime, and each refresh opens the repository with
+`gix::discover`, then:
 
 * **modified / untracked:** `repo.status(Discard)` with
   `UntrackedFiles::Files`, iterating the index↔worktree and tree↔index
@@ -66,18 +67,22 @@ It is deliberately **not** `git status`: the counters must work on a machine
 with no `git` binary. Only the branch read (`.git/HEAD`) is cheaper still, and
 that happens on the prompt path.
 
-* **Rate limit:** at most one run per [`MIN_INTERVAL`] = 500 ms. The prompt asks;
-  the worker decides when it is due.
-* **Coalescing:** the worker drains every queued request down to the newest
-  directory before running, so a burst of prompts cannot queue a burst of
-  walks.
-* **Deadline:** 2 s. A short-lived timer thread sets the `Arc<AtomicBool>` that
-  `gix` status checks between chunks (`should_interrupt_owned`); an interrupted
-  or late result is discarded, not painted. The timer thread sleeps and exits,
-  so a fast refresh leaves nothing running. A refresh stuck inside one
-  uninterruptible syscall can keep the worker busy, but it cannot delay the
-  prompt and it does not accumulate threads — the next request is coalesced
-  into the run already in progress.
+* **One at a time:** a `in_flight` flag, so a burst of prompts cannot queue a
+  burst of walks. The second prompt in a burst wants the same answer as the
+  first, and the next `tick` after the run lands starts the next one.
+* **Rate limit:** at most one run started per [`MIN_INTERVAL`] = 500 ms. The
+  prompt asks; the cache decides when it is due.
+* **Deadline:** 2 s, and the deadline is the runtime's timer, not a thread:
+  `compio::time::timeout(STATUS_TIMEOUT, spawn_blocking(walk))`. `gix`'s status
+  also takes the `Arc<AtomicBool>` it checks between chunks
+  (`should_interrupt_owned`), and the task sets it when the timer wins, so a
+  walk the prompt gave up on stops soon after instead of finishing a tree
+  nobody wants. `spawn_blocking` is not cancellable by contract, so a walk
+  stuck inside one uninterruptible syscall keeps a pool thread until it
+  returns; nothing in front of the cursor waits for it.
+* **Fire and forget:** the task is `detach`ed, because dropping a `compio`
+  `JoinHandle` cancels its task and this one must outlive the prompt that
+  started it.
 * **Failure back-off:** a run that produces nothing (not a repository, a
   corrupt one, a timeout) is silent and delays the next attempt by 5 s. A
   permanent condition does not repeat an expensive walk on every prompt.
