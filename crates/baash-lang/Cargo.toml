@@ -12,8 +12,3 @@ baash-diag.workspace = true
 baash-pattern.workspace = true
 smallvec.workspace = true
 
-# The default prompt's git segment. `gix` is gitoxide: it reads the index and
-# the worktree in process, which is the point — the prompt must not fork a
-# `git status` on every line. Only the status machinery is compiled in; no
-# network, no CLI.
-gix = { workspace = true }

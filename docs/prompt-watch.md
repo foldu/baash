@@ -1,252 +1,171 @@
-# The live prompt: a directory watcher without threads
+# The live prompt: what is cheap, what is not, and who pays
 
-Status: **partly built.** Written 2026-10-28, after the fork/subinterpreter
-discussion in [`portability.md`](portability.md); §7 records what landed. The
-wait primitive in §1 is no longer `poll(2)`: the shell runs on compio, so the
-watch descriptor is awaited as an io_uring poll (§1.1). The feature: while the prompt
-is sitting idle in a git repository, show the branch, ahead/behind, and a
-dirty-file count, and update them when something changes — new commits, a
-checkout, `git add`, a file edit — without the user pressing Enter.
+Status: **built.** This document describes the stock prompt's git segment as it
+ships. It replaces the earlier design note that assumed an in-process `gix`
+status; the cost class is the same question, and the answer moved to a worker.
 
-The point of writing it down before building it: this is the first feature that
-*wants* a background thread, and the obvious implementation (a watcher thread) is
-the one that trips the fork gate on the next `$( … )`. The design below gets the
-same behaviour on one thread, with no async runtime and no new dependency.
+The prompt is one line, rebuilt from the shell's state before every command:
 
----
-
-## 1. Why the obvious design is wrong here
-
-This was written when a watcher thread had to be registered with
-`baash_sys::fork_gate()`, or the next `$( … )`, `( … )` or `builtin | builtin`
-would panic (`fork() with 1 helper thread(s) live`). The 2026-10-30 pivot
-deleted the shell's last `fork`, so the gate and that whole problem are gone;
-the design below is kept because it is still the shape the watcher should take,
-not because threads are forbidden.
-That is the wrong trade for a cosmetic prompt.
-
-The editor already blocks waiting for exactly one thing: a keystroke. Waiting on
-two things instead of one is not a concurrency problem, it is a `poll(2)` call.
-So:
-
-```
-loop {
-    ready = poll([tty, watch_fd], timeout = next_deadline)
-    if tty readable:  decode + handle keystroke, repaint
-    if watch_fd ready: mark prompt dirty (debounce)
-    if deadline:      recompute prompt segment if dirty and idle, repaint
-}
+```text
+ ~/sr/gith/fo/nixos-config   master  ↑23 !2 ?5 $
 ```
 
-One thread, no gate interaction, and it is also the wrapper the editor already
-needs for another reason: a lone `Esc` is currently indistinguishable from the
-start of an `Alt-` sequence because the decoder blocks on `read`.
+`baash_lang::prompt::tide_prompt` paints it. It is built from data, never decoded
+as a `PS1` template, so a directory or branch containing `$`, a backslash or a
+`\u`-looking sequence is painted literally and cannot be expanded twice.
 
-`baash_sys::poll_readable(fd, timeout_ms)` exists today (single fd) and is what
-the decoder still uses. The loop above is the *shape*, not the implementation.
+## 1. The rule that decides the design
 
-### 1.1 The wait is an io_uring poll, not `poll(2)`
+**The prompt never waits and never spawns.** A prompt that blocks on `git` is
+the "bash locks up" feeling this shell exists to avoid, and a prompt that runs a
+process in the keystroke path is worse. So the work is split by cost, and only
+the cheap half is allowed in front of the cursor.
 
-The shell is on compio (io_uring) already, and a hand-rolled `poll` would be a
-second wait mechanism beside the reactor that drives the rest of the loop. So
-the watch descriptor is awaited as a `PollOnce` op — `IORING_OP_POLL_ADD` on an
-arbitrary fd — and the reactor that wakes the keystroke wakes the watcher through
-the same completion queue. Measured latency from "another program created a
-file" to "the prompt shows the new count" is about a millisecond.
+## 2. Two cost classes
 
-There is no `select!` in compio 0.19. `compio::runtime::fd::PollFd` submits one
-`PollOnce` per descriptor, so combining two of them is a `poll_fn` over the pair
-(`which_ready` in `crates/baash-repl/src/term.rs`) and that is the whole
-combinator: poll the first, poll the second, `Pending` if neither is ready. The
-loser of a race is dropped mid-poll, and what it drops is a readiness
-registration rather than a read, so nothing is half-done.
-
-Two details that are easy to get wrong, both measured:
-
-* **The keyboard's readiness is not believed.** A character device can answer a
-  readiness poll with no byte behind it, and taking that for a keystroke parks
-  the editor inside a read — where the watch is no longer awaited. Readiness is
-  confirmed with `FIONREAD` (`baash_sys::bytes_available`) before it counts.
-* **The pair is raced against a timer.** A completion-based poll is only as good
-  as the kernel's willingness to complete it, and on a network filesystem
-  `inotify` delivers nothing at all. A one-second backstop reports "ask the
-  prompt whether anything changed"; when nothing did, that is one `read` on the
-  watch and no frame.
-
-The multi-fd `poll` helper is therefore **not** needed for the watcher; it stays
-useful only for the `Esc`/`Alt` decoding fix in §7.
-
-## 2. Watching: cheap events continuously, expensive check only when idle
-
-The mistake to avoid is running `git status` per event. Split the work by cost:
-
-| what | how | cost | freshness |
+| fact | how | cost | freshness |
 |---|---|---|---|
-| branch name / detached HEAD | read `.git/HEAD`; if `ref: refs/heads/x`, name `x`, else short sha | ~10 µs | exact |
-| ahead / behind | parse `packed-refs` + `refs/remotes/**`, compare object ids, walk parents only when they differ | µs–ms | exact |
-| staged / index changed | inotify on `.git/index` | event | heuristic |
-| commits / checkouts / branch switches | inotify on `.git/HEAD`, `.git/refs/**`, `.git/packed-refs` | event | exact |
-| **modified files in the worktree** | `git status --porcelain=v2 -z --branch` (subprocess) **or** per-directory inotify | 10–500 ms | debounced |
+| cwd abbreviation | `read_dir` per outer component, once per `cd` | µs (local disk) | exact for that directory |
+| branch / detached HEAD | walk to `.git`, read `HEAD`, resolve refs/packed-refs | ~µs–ms, no process | exact |
+| ahead / behind | `# branch.ab +N -M` from one `git status` | subprocess | last completed refresh |
+| modified tracked files | `1`, `2`, `u` records from the same run | subprocess | last completed refresh |
+| untracked files | `?` records from the same run, `-uall` | subprocess | last completed refresh |
 
-Two watch scopes, and the choice between them is a configuration question:
+The branch is the only git fact read on the prompt path, by
+`baash_lang::prompt::git_branch`. It never forks: `.git` is a directory, or a
+file naming the real git directory for a linked worktree or a submodule;
+`HEAD` is read, `refs/heads/<name>` is shown as the branch, another symbolic ref
+is resolved through loose refs, `commondir` and `packed-refs`, and a detached
+`HEAD` is shown as its seven-character commit abbreviation. An absent or
+unreadable repository omits the segment; nothing is guessed.
 
-* **`.git` only** (default): the prompt is exact for branch/commits, and shows a
-  *stale* dirty marker that is refreshed by an idle-time `git status` on a
-  debounce (see §3). Cheap: a handful of watches.
-* **`.git` + the worktree, recursively**: one watch per directory. A normal
-  repository is a few hundred; a monorepo is thousands, and
-  `fs.inotify.max_user_watches` is a real limit to respect (see §6). This is the
-  only way to notice `vim foo.rs` immediately without running `git status`.
+**A detached `HEAD` shows the abbreviated commit id.** That is the same value
+the file read already resolves to, so it costs no extra work and answers "which
+commit am I on" instead of leaving a gap.
 
-Recommendation: ship `.git`-only first, with the idle refresh; add recursive
-worktree watches only if the debounce refresh proves visible.
+## 3. The worker
 
-### Never in the input path
+`crates/baash/src/git_prompt.rs` owns one worker thread and one channel. One
+run is
 
-`git status` is a subprocess. Spawning it from the keystroke path would put
-10–500 ms between keystrokes, which is exactly the "bash locks up" feeling this
-shell exists to avoid. Rules:
-
-1. The prompt is rendered from a **cache**; rendering never runs a process.
-2. A refresh is scheduled only when (a) something changed, (b) the buffer is
-   empty and no keystroke has arrived for `debounce` (default 150 ms), and
-   (c) `now - last_refresh >= min_interval` (default 500 ms).
-3. A refresh is **abandoned** if a keystroke arrives while it would run: poll
-   with the tty fd before spawning, and again after; if the user typed, discard
-   the result and mark dirty again.
-4. The spawn itself is a normal `posix_spawn` (no `fork`), so the gate is not
-   involved; environment is `LC_ALL=C`, `GIT_OPTIONAL_LOCKS=0`,
-   `GIT_TERMINAL_PROMPT=0`, `--no-optional-locks`, `-z` so the parser is
-   byte-exact and not affected by locale or quoting.
-
-## 3. The prompt segment
-
-The prompt is already a rendered byte string (`ExpandedPrompt`) rebuilt per line
-from the shell's variables. A live segment is one more input to that rendering:
-
-```rust
-/// One prompt segment whose text can change without a new line.
-pub struct Segment {
-    /// Rendered bytes, already encoded for the prompt.
-    text: Vec<u8>,
-    /// When `text` was computed.
-    computed_at: Instant,
-    /// Set by an event; cleared by a successful recompute.
-    dirty: bool,
-}
-
-pub trait SegmentSource {
-    /// Cheap: called from the event loop. Must not spawn or block.
-    fn on_event(&mut self, kind: WatchEvent);
-    /// Expensive: only called when idle, and must be cancellable between steps.
-    fn refresh(&mut self, shell: &mut PromptState) -> Option<Vec<u8>>;
-}
+```sh
+git --no-optional-locks status --porcelain=v2 --branch --untracked-files=all -z
 ```
 
-Two implementations, in this order:
+with `LC_ALL=C`, `GIT_OPTIONAL_LOCKS=0` and `GIT_TERMINAL_PROMPT=0`, spawned
+through compio's process API. The `-z` form is parsed byte-exactly: `2` records
+(a rename or copy) are followed by the original path as a separate NUL field,
+which is skipped rather than counted as a second change; `1` and `u` are one
+tracked file each; `?` is one untracked file each; `#` is a header.
 
-1. **Built-in git segment** (fast path): parses `.git` directly for branch and
-   ahead/behind; the dirty count comes from the debounced `git status`, cached
-   with a timestamp. No shell code runs, so no hooks, no aliases, no surprises.
-2. **Shell hook** (optional): a function such as `BAASH_PROMPT_WATCH` called on
-   the same debounce, for people who want something else (hg, jj, nix, a
-   directory of todos). This one runs shell code in the input loop, so it gets
-   the same abandonment rules and must be documented as "keep it fast; it runs
-   while you are not typing".
+* **Rate limit:** at most one run per [`MIN_INTERVAL`] = 500 ms. The prompt asks;
+  the worker decides when it is due.
+* **Coalescing:** the worker drains every queued request down to the newest
+  directory before running, so a burst of prompts cannot queue a burst of
+  processes.
+* **Failure back-off:** a run that produces nothing (no `git` binary, a broken
+  repository, a repository with no `HEAD` yet) is silent and delays the next
+  attempt by 5 s. A permanent condition does not spawn a doomed process on every
+  prompt.
+* **No timeout.** A hung `git` (a network filesystem, a stuck lock) leaves the
+  counters stale; it cannot delay the prompt, and the prompt keeps painting the
+  last completed numbers. This is a deliberate trade: killing a child safely
+  needs an ownership model the current `compio` output future does not give us,
+  and a leaked or half-read process would be worse than a stale number.
 
-The segment is rendered as `[branch +2 ~3]`-style text; the exact spelling and
-colours belong to the prompt configuration, not to this document. It must be
-wrapped so it does not disturb the cursor maths: the renderer already tracks
-non-printing ranges (`\[`/`\]`), so a coloured segment is emitted the same way.
+One run yields all of ahead, modified and untracked, so the prompt never needs
+a second process.
 
-## 4. Where the state lives
+## 4. What is painted while a refresh is in flight
 
-* The watcher and the cache live in `baash-repl` (it owns the event loop), behind
-  a trait so the editor can be tested with a fake watcher.
-* The git parsing lives in `baash-repl` too, or in a small `baash-git` module if it
-  grows; it needs no shell state beyond the working directory.
-* The shell does not learn about the watcher. `PROMPT_COMMAND`, `PS1` and the
-  segment composer see the same rendered prompt as today.
-* `cd` invalidates everything: the editor already calls `set_cwd` on a directory
-  change; the watcher re-arms there.
+The prompt always paints a **completed** result, never a half-updated one:
 
-## 5. Configuration
+* Same directory: the previous completed counters stay on screen until the new
+  run lands. The number is a moment old, never a mixture of two directories.
+* A `cd`: the counters are dropped immediately and the segment reappears when
+  the first run for the new directory lands. Showing another repository's
+  numbers in the gap would be worse than showing none.
+* Before the first run in a session: the branch is there (exact), the counters
+  are not.
 
-Proposed defaults, all open to argument:
+The worker result is installed by `GitSegment::poll`, which the prompt path
+calls before composing (`tick`) and the editor calls on its idle wake-up. There
+is one cache per `GitSegment`; the shell and the editor share the clone, so
+there is no second worker and no race about which result is newer.
 
-* `shopt -s prompt_watch` — on by default for an interactive shell whose `cwd`
-  is inside a git worktree; off otherwise. No watchers in a non-repo directory,
-  which is most of them.
-* `PROMPT_WATCH_DEBOUNCE_MS` (150), `PROMPT_WATCH_MIN_INTERVAL_MS` (500) as
-  variables, so a user can tune or disable the expensive refresh.
-* `BAASH_PROMPT_WATCH=1` / `shopt -u prompt_watch` to disable entirely.
-* Per-directory escape hatch: a `.baash-watch-off` file, or just `shopt -u` in an
-  rc function.
+## 5. The watcher and the live repaint
 
-## 6. Failure modes, and what the prompt must do about them
+On Linux, `baash_sys::watch` arms an inotify watch on the working tree and its
+git directory. The editor awaits that descriptor beside the keyboard
+(`Terminal::await_input`), so while a line is idle:
+
+1. A file change wakes the editor. `PromptState::refresh` drains the watch and
+   calls `GitSegment::tick`, which schedules the rate-limited `git status`.
+2. The editor also has a one-second backstop. On a wake-up with nothing in the
+   queue it calls `GitSegment::poll`; a result that landed since the last frame
+   is painted then. That is how the new count appears without a keystroke, even
+   though a subprocess completion cannot itself wake the inotify descriptor.
+3. The directory abbreviation is cached, so the repaint does not re-run
+   `read_dir` per component.
+
+The worst case for a visible count is therefore about one second after a change,
+or the next prompt, whichever comes first. A slow repository does not affect the
+keystroke, the repaint or the prompt.
+
+A user-defined `PS1` is not live: re-rendering it while the user types would run
+shell code between keystrokes. It keeps the legacy `[branch ~N]` suffix, fed by
+the same worker cache.
+
+## 6. Failure modes
 
 | situation | behaviour |
 |---|---|
-| `inotify` unavailable, or `max_user_watches` exhausted | fall back to TTL polling (`min_interval` becomes the only trigger); report once at debug level, never at the prompt |
-| network filesystem (NFS, sshfs) | inotify does not deliver remote changes; the TTL fallback is the whole feature. Same fallback path. |
-| huge repository | the bounded walk stops at `Limits::max_dirs` and watching is abandoned (`Why::TooBig`); the segment is computed per prompt instead, so it stays correct and merely becomes a snapshot. Half-watching would be worse: a stale count is a lie, a computed one is a moment behind |
-| `git` missing, or not a repo | segment disappears; no diagnostic, no repeated spawns |
-| `git status` slow (cold cache, huge tree) | abandoned on keystroke; if it exceeds a hard limit (say 2 s) the result is discarded and the segment marked stale rather than wrong |
-| `git` writes the index (status refresh) | `GIT_OPTIONAL_LOCKS=0` plus `--no-optional-locks`; we are a shell, not a git client |
-| worktrees / submodules / bare repos | `.git` may be a file (`gitdir: …`); resolve it; a bare repo has no worktree, so no dirty count |
-| rename storms, editor save patterns | debounce coalesces; one refresh per quiet period |
+| not a repository | no branch, no counters, no process; the segment is omitted |
+| `git` missing or not executable | branch still exact; counters silent; retry after 5 s |
+| repository with no commits | branch exact; `git status` succeeds with an empty `branch.ab`, so no `↑`; counters work |
+| corrupt repository | branch may still resolve; `git status` fails; silent, retry after 5 s |
+| linked worktree / submodule | `.git` file is followed; the git dir is watched through it |
+| huge repository | the watcher may refuse (`Why::TooBig`); the prompt then refreshes once per prompt, still off the prompt path |
+| network filesystem | inotify may deliver nothing; the prompt still refreshes at each prompt, and the one-second backstop cannot hurt |
+| `git status` slow or hung | prompt unaffected; counters stale until the run finishes |
+| an editor save touching many paths | coalesced into one run, and the watcher's event queue is drained in one read |
 
 The invariant: **the prompt never blocks, never spawns in the keystroke path,
 and never shows a number it cannot justify.** Stale is acceptable; wrong is not;
 slow is not.
 
-## 7. Implementation order
+## 7. Measurements
 
-1. **Done** — `baash-sys`: `watch` (Linux-only, `cfg`), an `inotify` wrapper
-   over `rustix::fs::inotify` (already a dependency; no new crate, no `unsafe`),
-   with the budget (`Limits`) and the bail-out. Tests cover create, `HEAD`, a
-   branch ref, the depth cap, the budget, symlinked directories and the
-   `.git`-file of a linked worktree. `git_dir()` is here too, so the prompt and
-   the watcher agree about which repository is being shown.
-2. **Done** — `baash-repl`: `Terminal::await_input` waits for the keyboard or
-   the watch, and `Editor::read_line_with` repaints the prompt from a
-   `LivePrompt` when it wakes. `baash` supplies one that recomputes the stock
-   prompt's git segment from the filesystem, so nothing in this path borrows the
-   interpreter and a user-defined `PS1` (which would mean running shell code
-   between keystrokes) keeps the worker-fed `[branch]` segment instead.
-3. **Partly done** — the segment is the stock prompt's own, recomputed on a
-   change; `shopt prompt_watch` and the abandon-on-keystroke rules are not
-   needed in this shape, because the recompute happens between keystrokes and
-   is a `gix` walk in process, not a subprocess (`docs/contracts.md` §3).
-4. Optional: shell hook; Windows (`ReadDirectoryChangesW` awaited the same way
-   as the inotify descriptor).
+`git status --porcelain=v2 --branch --untracked-files=all -z` on this repository
+(574 tracked files), warm page cache, on the development host: **1–9 ms** over
+ten runs, average about 1 ms. A cold repository is dominated by the stat of
+every tracked path and the index read; the figure was not measured because
+dropping the page cache needs root on the test host, and the design does not
+depend on it: the run is off the prompt path, and the prompt paints the last
+completed result meanwhile.
 
-Steps 1–2 are worth doing regardless: they fix `Esc`/`Alt` decoding and give the
-completion scanner a place to be cancelled from, which is the other feature that
-wants to be interruptible.
+The branch read is a handful of `stat`/`read` calls and is not measurable at
+prompt granularity.
 
-## 8. Non-goals
+## 8. What landed
 
-* Not a general-purpose file-watch API for scripts. If users want that, it is a
-  separate builtin and a separate design.
+* `crates/baash/src/git_prompt.rs` — the worker, the porcelain parser, the
+  shared cache (`GitSegment`), the 500 ms limit, coalescing, failure back-off.
+* `crates/baash/src/prompt_state.rs` — the directory cache, prompt context,
+  composer and watcher; implements `baash_repl::LivePrompt`.
+* `crates/baash-lang/src/prompt.rs` — `tide_prompt`, `shorten_path`,
+  `PathAbbreviator`, `GitStatus`, `git_branch`.
+* `crates/baash-repl` — unchanged: it already measures the prompt with
+  `unicode-width` and strips ANSI CSI sequences, so the glyphs count as one cell
+  and the SGR escapes as zero. `\[`/`\]` remain the marker for a *user's*
+  coloured prompt; the stock prompt needs none.
+
+## 9. Non-goals
+
+* Not a general-purpose file-watch API for scripts.
 * Not a git client: no fetching, no hooks, no index writes, no credential
   prompts.
-* Not a reason to add an async runtime. This was written when the shell had
-  none; it has compio now, so the watcher rides the reactor that is already
-  there instead of adding one (§1.1). What still holds is the second half:
-  io_uring does not make a directory walk or a `git status` cheaper, which is
-  why the segment is computed in process by `gix` and only *when something
-  changed*, never per keystroke.
-
-## 9. Open questions
-
-* Default on or off? A prompt that updates itself is delightful when it is right
-  and infuriating when it costs 200 ms. The debounce makes it safe, but the
-  first-run experience in a monorepo is the risk.
-* Does the dirty count belong in the prompt at all, or only a `*` when the
-  cached status is older than `min_interval`? A wrong number is worse than no
-  number.
-* Segment spelling/colours: `[main +2 ~3]`, `main*`, a powerline-ish block?
-  Needs a real decision before it ships.
-* Should the shell hook be able to *replace* the built-in segment (hg/jj users)
-  or only add to it?
+* No `↓N` segment. `behind` is parsed because the header carries it, but the
+  brief's line ends at `↑N`; adding a segment would be a separate decision.
+* No shell hook. A `BAASH_PROMPT_WATCH` function would run shell code between
+  keystrokes, which is the one thing this design refuses.

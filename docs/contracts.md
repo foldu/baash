@@ -378,65 +378,93 @@ and the string a script gets cannot drift.
   nest. The renderer consumes `non_printing()`; a caller that only needs bytes
   uses `into_bytes()`.
 
-**The stock `PS1` renders as the fish-like default prompt.** The `PS1`
-*variable* keeps bash's `\s-\v\$ ` value — `${PS1@P}` and the conformance case
-that reads it still decode bash's prompt — but `Interp::render_prompt`
-substitutes `baash_lang::prompt::fish_prompt` while the value is still that one.
-The rendered shape is
+**The stock `PS1` is the tide-like default prompt, composed by the binary.** The
+`PS1` *variable* keeps bash's `\s-\v\$ ` value — `${PS1@P}` and the
+conformance case that reads it still decode bash's prompt — but the interactive
+loop (`crates/baash/src/main.rs`, `prompt_state.rs`) paints
+`baash_lang::prompt::tide_prompt` while the value is still that one.
+`Interp::render_prompt` renders user templates only; the stock prompt needs
+worker-fed git facts and must not run on the prompt path. The line is
 
 ```text
-~/src/bshell main !2 ?5 $
+ ~/sr/gith/fo/nixos-config   master  ↑23 !2 ?5 $
 ```
 
-In a session that came in over `ssh`, `user@host` comes first:
+In a session that came in over `ssh`, `user@host` is the leading segment:
 
 ```text
-barnabas@jupiter ~/src/bshell main !2 ?5 $
+barnabas@jupiter   ~/src/bshell   main  ↑1 $
 ```
 
 The marker is any of `SSH_TTY`, `SSH_CONNECTION` or `SSH_CLIENT` being set and
 non-empty — `sshd` sets the first for an interactive login and the second for
 every session, and a nested shell or tmux inherits them, so all three mean the
-keyboard is not at this machine's console. The host is cut at the first dot
-(a prompt does not need the FQDN, and `\h` does not print one). Nothing else
+keyboard is not at this machine's console. The host is cut at the first dot (a
+prompt does not need the FQDN, and `\h` does not print one). Nothing else
 decides it: not `$TERM`, and not whether the terminal is local. The segment is
-one ANSI colour, yellow, and it is captured once per line, so a session cannot
-change remotely halfway through one.
+one ANSI colour (yellow), and it is captured when the prompt is armed.
 
-`cwd` (a leading `$HOME` abbreviated to `~`, bytes unchanged), then the git
-branch, then `!N` tracked files that differ from `HEAD` or the index when
-`N > 0`, then `?N` untracked files when `N > 0`, then `$` (or `#` for root),
-each preceded by one space, and one space after the marker. A component's space
-is omitted with the component, so a clean repository is `~/src/bshell main $ `
-rather than a double space, and the prompt always ends with the marker `\$`
-would have produced.
+Segments, in order:
 
-The counts come from `baash_lang::prompt::git_status`, which opens the
-repository with `gix` (gitoxide: index and worktree in process) and counts
-*distinct paths*, so a file changed in the index and again in the worktree is
-one dirty file rather than two. Nothing here forks a `git status`.
+* **cwd**, with a leading `$HOME` abbreviated to `~` and a Nerd Font folder icon
+  (U+F115) in front. Every component but the last is shortened to the shortest
+  prefix that is unique among its siblings in one `read_dir`, at least one
+  character (`src` beside `swap` becomes `sr`, `github` beside `gitlab` becomes
+  `gith`, `foo` beside `fzf` becomes `fo`); the last component is kept whole
+  because it names where you are. A directory whose siblings cannot be read is
+  shortened to two characters. `baash_lang::prompt::shorten_path` implements the
+  rule and `PathAbbreviator` caches the answer per `(cwd, HOME)`, so the
+  `read_dir`s run once per `cd`, not once per repaint. The last component is
+  painted brighter than the rest.
+* **the git branch**, with a Nerd Font branch icon (U+F418). It comes from
+  `baash_lang::prompt::git_branch`: walk up for `.git` (a directory, or a file
+  whose `gitdir:` names the real one for a linked worktree or submodule), read
+  `HEAD`, and show `refs/heads/<name>` as the branch. Any other symbolic ref is
+  resolved through loose refs, `commondir` and `packed-refs` and shown as a
+  seven-character commit id; a detached `HEAD` is a raw object id and is
+  abbreviated directly. It is all file reads — no `git`, no fork. An unreadable
+  or absent repository omits the segment, never guesses.
+* **`↑N`** commits ahead of the upstream, only when `N > 0` and the branch has
+  an upstream.
+* **`!N`** tracked files whose content, mode or existence differs from `HEAD` or
+  the index (staged and unstaged count once; a rename is one file), only when
+  `N > 0`.
+* **`?N`** files git does not track, only when `N > 0`. The status run uses
+  `--untracked-files=all`, so a new directory counts as its files, not as one
+  entry.
+* **`$`**, or `#` for root. One space before it and **no trailing space**: it is
+  the last cell before the cursor.
 
-On a terminal the prompt is painted in ANSI SGR colours only — never 24-bit
-values — so it follows the terminal's palette: cyan for the path, bright cyan
-for the last component, green for the branch, `!N` and the marker, blue for
-`?N`, red for `#`, yellow for `user@host`. `NO_COLOR` or a non-terminal gets the same text with no
-escapes.
+The major segments are two spaces apart; the counters are one segment whose
+members are single-spaced. A clean repository is
+` ~/src/bshell   main $` — no empty counter slot.
 
-The branch is `baash_lang::prompt::git_branch`: walk up for `.git` (a directory,
-or a file whose `gitdir:` names the real one for a linked worktree or
-submodule), read `HEAD`, and show `refs/heads/<name>` as the branch. Any other
-symbolic ref is resolved through loose refs, `commondir` and `packed-refs` and
-shown as a seven-character commit id; a detached `HEAD` is a raw object id and
-is abbreviated directly. It is all file reads — no `git`, no fork. An
-unreadable or absent repository omits the branch, never guesses.
+The counters come from **one** `git status --porcelain=v2 --branch
+--untracked-files=all -z` run on a worker thread
+(`crates/baash/src/git_prompt.rs`), never on the prompt path: the `# branch.ab
++N -M` header is ahead/behind, `1`/`2`/`u` records are modified tracked files,
+and `?` records are untracked. Runs are rate-limited to one per 500 ms,
+coalesced down to the newest directory, and back off for 5 s after a silent
+failure. The prompt paints the last completed counters for the current
+directory; a `cd` drops them until the first run for the new directory lands.
+`behind` is parsed but deliberately not painted (`docs/prompt-watch.md`).
+
+On a terminal the prompt uses ANSI SGR colours only — never 24-bit values — so
+it follows the terminal's palette: blue for the directory and its icon, bright
+cyan for the last component, green for the branch, its icon and the `$`, yellow
+for `↑N` and `!N` (and for `user@host`), red for `?N` and `#`. `NO_COLOR` or a
+non-terminal gets the same text with no escapes. The glyphs stay: they are text,
+not colour. Every coloured run ends with an SGR reset, so a path or a branch
+containing an escape-looking sequence cannot paint the rest of the line.
 
 The default is built directly from data, not decoded as a prompt template, so
 a directory or branch containing `$`, a backslash or a `\u`-looking sequence is
 painted once and cannot be expanded again. **A user-defined `PS1` always
-wins**: the environment, an rc file or an assignment at the prompt replaces
-the value and the normal template path renders exactly those bytes. The REPL's
-legacy `[branch]` segment is appended only to user-defined prompts, because the
-stock prompt already contains the branch inline.
+wins**: the environment, an rc file or an assignment at the prompt replaces the
+value and the normal template path renders exactly those bytes. The REPL's
+legacy `[branch ~N]` suffix is appended only to user-defined prompts, because
+the stock prompt already contains the branch and the counters. `N` there is
+modified plus untracked.
 
 `expand_with_variables(template, context, shell) -> ExpandedPrompt` is the
 two-pass form: it decodes the escapes, then — when `context.prompt_vars` is set

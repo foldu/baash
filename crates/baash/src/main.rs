@@ -36,6 +36,7 @@ use baash_vm::Interp;
 mod bash_completion;
 mod complete;
 mod git_prompt;
+mod prompt_state;
 
 const USAGE: &str = "\
 baash — a POSIX- and bash-compatible shell
@@ -948,169 +949,12 @@ fn capture_stdout(shell: &mut Interp, command: &[u8]) -> Option<Vec<u8>> {
     Some(output)
 }
 
-/// The stock prompt's live git segment.
-///
-/// It exists because the prompt the shell renders and the prompt the editor
-/// keeps painting are the same bytes, but only the editor is running while the
-/// user is thinking. The watch says the working tree moved; `refresh` recomputes
-/// the branch and the counts and hands back a whole [`baash_repl::Prompt`], so
-/// the repaint goes through the renderer the editor already has and the line,
-/// the wrapping and the cursor are untouched.
-///
-/// It holds no shell state: the prompt context is copied at arming time
-/// (`PWD`, `HOME`, whether the user is root), and the segment itself is read
-/// from the filesystem and from `gix`. That is what lets the editor borrow it
-/// for as long as a line is being read without borrowing the interpreter.
-#[cfg(target_os = "linux")]
-struct LiveGit {
-    /// The prompt as last handed to the editor, so an unchanged recompute is
-    /// not a repaint.
-    last: Vec<u8>,
-    cwd: Vec<u8>,
-    home: Vec<u8>,
-    root: bool,
-    color: bool,
-    /// `user@host` when the session is remote, captured when the prompt was
-    /// armed: an SSH session does not become local halfway through a line.
-    ssh: Option<(Vec<u8>, Vec<u8>)>,
-    /// `PS2`, which a git change never alters but a [`baash_repl::Prompt`] has
-    /// to carry anyway.
-    secondary: Vec<u8>,
-    watcher: Option<baash_sys::watch::Watcher>,
-    /// The directory the current watcher is armed for; a `cd` re-arms.
-    armed_for: Option<Vec<u8>>,
-    /// Whether the editor has already been given this watcher's descriptor.
-    adopted: bool,
-}
-
-#[cfg(target_os = "linux")]
-impl LiveGit {
-    fn new() -> Self {
-        Self {
-            last: Vec::new(),
-            cwd: Vec::new(),
-            home: Vec::new(),
-            root: false,
-            color: false,
-            ssh: None,
-            secondary: Vec::new(),
-            watcher: None,
-            armed_for: None,
-            adopted: false,
-        }
-    }
-
-    /// Point the watcher at the directory the prompt is about.
-    ///
-    /// Re-arming is skipped while the directory is unchanged: `inotify` watches
-    /// are per directory, so rebuilding them per prompt would be a few hundred
-    /// syscalls between every command for no new information.
-    fn arm(&mut self, context: &baash_lang::prompt::PromptContext, color: bool) {
-        self.home.clone_from(&context.home);
-        self.root = context.root;
-        self.color = color;
-        self.ssh = baash_lang::prompt::ssh_context(&context.user, &context.host);
-        if self.armed_for.as_deref() == Some(context.cwd.as_slice()) {
-            return;
-        }
-        self.armed_for = Some(context.cwd.clone());
-        self.cwd.clone_from(&context.cwd);
-        let limits = baash_sys::watch::Limits::default();
-        // No repository, or one too big to watch, is not an error: the prompt
-        // is then computed once per prompt instead of observed
-        // (`baash_sys::watch::Why`).
-        self.watcher =
-            baash_sys::watch::watch_worktree(&baash_sys::os::path_from_bytes(&context.cwd), limits)
-                .ok();
-        self.adopted = false;
-    }
-
-    /// Give the editor the descriptor to await, and the `PS2` a refresh must
-    /// carry. Only the first call after arming does anything.
-    fn adopt(&mut self, editor: &mut baash_repl::Editor<'_>) {
-        self.secondary = editor.prompt().secondary_bytes().to_vec();
-        if self.adopted {
-            return;
-        }
-        let dup = self
-            .watcher
-            .as_ref()
-            .and_then(|watcher| watcher.as_fd().try_clone_to_owned().ok());
-        if let Some(dup) = dup {
-            editor.set_watch(Some(dup));
-            self.adopted = true;
-        }
-    }
-
-    /// Stop watching: the prompt is the user's own now.
-    fn disarm(&mut self, editor: &mut baash_repl::Editor<'_>) {
-        if self.watcher.take().is_some() || self.armed_for.take().is_some() {
-            editor.set_watch(None);
-        }
-        self.adopted = false;
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl baash_repl::LivePrompt for LiveGit {
-    fn refresh(&mut self) -> Option<baash_repl::Prompt> {
-        // Draining is what re-arms the poll: readiness stays set until the
-        // queue is empty, so a refresh that did not read would spin.
-        if !self.watcher.as_mut()?.pending() {
-            return None;
-        }
-        let branch = baash_lang::prompt::git_branch(&self.cwd);
-        let git = baash_lang::prompt::git_status(&self.cwd);
-        let ssh = self
-            .ssh
-            .as_ref()
-            .map(|(user, host)| (user.as_slice(), host.as_slice()));
-        let primary = baash_lang::prompt::fish_prompt(
-            &self.cwd,
-            &self.home,
-            branch.as_deref(),
-            git,
-            ssh,
-            self.root,
-            self.color,
-        );
-        if primary.bytes() == self.last.as_slice() {
-            return None;
-        }
-        self.last = primary.bytes().to_vec();
-        Some(baash_repl::Prompt::from_expanded(
-            primary,
-            baash_repl::ExpandedPrompt::from_bytes(self.secondary.clone()),
-        ))
-    }
-}
-
-/// A prompt that does not update, where there is no watcher to drive it.
-#[cfg(not(target_os = "linux"))]
-struct LiveGit;
-
-#[cfg(not(target_os = "linux"))]
-impl LiveGit {
-    fn new() -> Self {
-        Self
-    }
-
-    fn arm(&mut self, _context: &baash_lang::prompt::PromptContext, _color: bool) {}
-
-    fn adopt(&mut self, _editor: &mut baash_repl::Editor<'_>) {}
-
-    fn disarm(&mut self, _editor: &mut baash_repl::Editor<'_>) {}
-}
-
-#[cfg(not(target_os = "linux"))]
-impl baash_repl::LivePrompt for LiveGit {
-    fn refresh(&mut self) -> Option<baash_repl::Prompt> {
-        None
-    }
-}
-
 /// Run `PROMPT_COMMAND`, then hand the freshly rendered `PS1`/`PS2` to the
 /// editor.
+///
+/// Returns whether the stock prompt was used. That can differ from
+/// `stock_prompt` when `PROMPT_COMMAND` itself assigns `PS1`: the assignment
+/// wins at this prompt, exactly as it would from a `PS1=` typed at the prompt.
 ///
 /// The ring moves to the shell first so `PROMPT_COMMAND` sees the same
 /// history the user does, and because `\!` is the ring's next number, which is
@@ -1119,30 +963,50 @@ fn refresh_prompt(
     shell: &mut Interp,
     editor: &mut baash_repl::Editor<'_>,
     engine: &baash_complete::CompletionEngine,
-    segment: Option<&[u8]>,
-) {
+    prompt: &mut prompt_state::PromptState,
+    stock_prompt: bool,
+) -> bool {
     std::mem::swap(editor.history_mut(), &mut shell.state().history);
     run_prompt_command(shell);
-    let primary = prompt_template(shell, b"PS1").unwrap_or_default();
+    // Decided after `PROMPT_COMMAND`, because that is shell code and may have
+    // assigned `PS1`.
+    let stock = stock_prompt && shell.uses_default_prompt();
     let secondary = prompt_template(shell, b"PS2").unwrap_or_else(|| b"> ".to_vec());
-    // The stock prompt already contains the branch, inline and in the
-    // cwd → branch → counters order. The legacy segment is a bracketed suffix,
-    // so appending it there would show the branch twice and out of order; it
-    // stays for user-defined `PS1`s only.
-    let stock_prompt = shell.uses_default_prompt();
-    let primary = shell.render_prompt(&primary);
     let secondary = shell.render_prompt(&secondary);
-    // The REPL owns the live segment: `PS1` and `PROMPT_COMMAND` see the prompt
-    // they always did, and a slow `git status` can never hold the line up
-    // because the bytes come from a cache (`docs/prompt-watch.md` §3). The
-    // segment is plain text, so it adds no `\[`/`\]` non-printing range yet.
-    let primary = match segment {
-        Some(segment) if !stock_prompt => {
-            let mut bytes = primary.into_bytes();
-            bytes.extend_from_slice(segment);
-            baash_repl::ExpandedPrompt::from_bytes(bytes)
+    let primary = if stock {
+        // Arm here rather than in the loop: `PROMPT_COMMAND` may have `cd`ed
+        // or changed `HOME`, and the prompt has to describe the directory the
+        // next command will run in. The composer itself is cache-only: one
+        // `.git/HEAD` read and no subprocess, so a slow repository cannot hold
+        // the line up (`docs/prompt-watch.md` §2).
+        let context = shell.repl_prompt_context();
+        let color = std::env::var_os("NO_COLOR").is_none() && baash_sys::is_tty(0);
+        prompt.arm(&context, color);
+        prompt.primary()
+    } else {
+        // The legacy `[branch ~N]` suffix is fed by the same worker cache, so
+        // it needs the directory even when the stock prompt is not in use.
+        let cwd = shell
+            .state()
+            .vars
+            .scalar(b"PWD")
+            .map(baash_sys::os::path_from_bytes)
+            .or_else(|| std::env::current_dir().ok());
+        if let Some(cwd) = cwd {
+            prompt.tick(&cwd);
         }
-        _ => primary,
+        let template = prompt_template(shell, b"PS1").unwrap_or_default();
+        let primary = shell.render_prompt(&template);
+        // The stock prompt carries the branch inline; the legacy bracketed
+        // suffix is for a user-defined `PS1` only.
+        match prompt.legacy_segment() {
+            Some(segment) => {
+                let mut bytes = primary.into_bytes();
+                bytes.extend_from_slice(&segment);
+                baash_repl::ExpandedPrompt::from_bytes(bytes)
+            }
+            None => primary,
+        }
     };
     // The completion engine reads the same state the prompt does, so it is
     // refreshed here: `PROMPT_COMMAND` may have defined a function or a
@@ -1151,6 +1015,7 @@ fn refresh_prompt(
     complete::refresh(shell, engine);
     std::mem::swap(editor.history_mut(), &mut shell.state().history);
     editor.set_prompt(baash_repl::Prompt::from_expanded(primary, secondary));
+    stock
 }
 
 /// The interactive shell: prompt, line editor, completion, history.
@@ -1231,11 +1096,11 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
     // One session per REPL: `:&` and `!%` remember facts across lines, and the
     // quote/here-document state must survive `PS2` continuation lines.
     let mut expansion = histexpand::Session::new();
-    let mut git = git_prompt::GitSegment::new();
-    // The stock prompt's git segment updates itself while the line is idle:
-    // the watcher says the working tree moved, and the segment is recomputed
-    // before the next keystroke is read (`docs/prompt-watch.md` §1.1).
-    let mut live = LiveGit::new();
+    // The stock prompt's state: the abbreviated directory, the cached git
+    // facts and the working-tree watcher. It holds no shell state, which is
+    // what lets the editor borrow it while a line is being read
+    // (`docs/prompt-watch.md` §3).
+    let mut prompt = prompt_state::PromptState::new();
 
     let status = loop {
         // `PROMPT_COMMAND` runs and the prompt is rendered here, not at
@@ -1247,44 +1112,24 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
         if let Ok(index) = index_rx.try_recv() {
             commands.install_index(index);
         }
-        // The segment belongs to user-defined prompts. The stock fish-like
-        // prompt carries the branch inline and must not put a `git status`
-        // worker (or a duplicate branch) behind itself.
+        // The stock prompt carries the branch and counters inline. A
+        // user-defined `PS1` gets the legacy bracketed `[branch]` suffix
+        // instead; both are fed by the same worker.
         let stock_prompt = shell.uses_default_prompt();
-        let segment = if stock_prompt {
-            None
-        } else {
-            // The segment is refreshed from a cache: the branch is one small
-            // file read, and the dirty count comes from a worker's `git status`.
-            let cwd = shell
-                .state()
-                .vars
-                .scalar(b"PWD")
-                .map(baash_sys::os::path_from_bytes)
-                .or_else(|| std::env::current_dir().ok());
-            if let Some(cwd) = cwd {
-                git.tick(&cwd);
-            }
-            git.render().map(<[u8]>::to_vec)
-        };
-        refresh_prompt(shell, &mut editor, &engine, segment.as_deref());
-        if stock_prompt {
+        let stock = refresh_prompt(shell, &mut editor, &engine, &mut prompt, stock_prompt);
+        if stock {
             // Only the built-in prompt is live. A user's `PS1` is the result of
             // `PROMPT_COMMAND` and every prompt escape, so re-rendering it from
-            // a watcher would run shell code while the user is typing; it keeps
-            // the worker-fed `[branch]` segment instead.
-            let context = shell.repl_prompt_context();
-            let color = std::env::var_os("NO_COLOR").is_none() && baash_sys::is_tty(0);
-            live.arm(&context, color);
-            live.adopt(&mut editor);
+            // a watcher would run shell code while the user is typing.
+            prompt.adopt(&mut editor);
         } else {
-            live.disarm(&mut editor);
+            prompt.disarm(&mut editor);
         }
         // `PROMPT_COMMAND='exit'` leaves the shell before the prompt is drawn.
         if let Some(requested) = shell.state().take_exit_request() {
             break requested;
         }
-        match read_command(shell, &mut editor, &mut expansion, &mut live, &engine) {
+        match read_command(shell, &mut editor, &mut expansion, &mut prompt, &engine) {
             Ok(NextCommand::Run(bytes)) => {
                 // Hand the ring to the shell for the duration of the command,
                 // so `history`/`fc` mutate the very ring the editor navigates.

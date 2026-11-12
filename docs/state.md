@@ -166,23 +166,29 @@ delegates everything else: line editing to `baash-repl`, execution to the
   (`\u \h \w \W \$ \! \# \j \l \d \t …`) read the shell's logical
   `PWD`, its background children (`\j`) and its history ring; `\!` is the
   number the line will get and `\#` bash's command number;
-* **the stock prompt is fish-like**: while `PS1` is still the built-in
-  `\s-\v\$ `, the rendered prompt is `~/src/bshell main !2 ?5 $ ` — the
-  abbreviated `$PWD`, the git branch (read from `.git/HEAD`, following a `.git`
-  file and `packed-refs` for worktrees), `!N` tracked files that differ from
-  `HEAD` or the index, `?N` untracked files — both counted by `gix` in process,
-  never by forking `git status` — then `$` (`#` for root), a space before it and
-  one after. On a terminal the segments are painted with plain ANSI SGR codes
-  (cyan path, bright cyan last component, green branch/`!N`/marker, blue `?N`,
-  red `#`), so the palette is whatever the terminal uses; `NO_COLOR` gives the
-  same text uncoloured. The marker is the same distinction `\$` draws in a
-  template, and it is the last cell before the cursor, so the prompt never runs
-  into typed text. The counts are recomputed at each prompt, not while you
-  type — `docs/prompt-watch.md` is the watcher that would keep them live. It is
-  built from bytes in one pass, so non-UTF-8 paths render exactly and nothing in
-  the prompt is expanded twice. The `PS1` *variable* keeps bash's value, so
-  `${PS1@P}` and the conformance `default PS1` case are unchanged. An explicit
-  `PS1` wins and is rendered by the ordinary escape expander;
+* **the stock prompt is tide-like**: while `PS1` is still the built-in
+  `\s-\v\$ `, the rendered prompt is
+  ` ~/sr/gith/fo/nixos-config   master  ↑23 !2 ?5 $` — a Nerd Font folder
+  icon and the abbreviated `$PWD` (outer components shortened to their shortest
+  unique prefix, the last one whole, `$HOME` as `~`), a branch icon and the git
+  branch (read from `.git/HEAD`, following a `.git` file and `packed-refs` for
+  worktrees; a detached `HEAD` is its seven-character commit id), then `↑N`
+  commits ahead of the upstream, `!N` modified tracked files and `?N` untracked
+  files, each omitted at zero, then `$` (`#` for root). The major segments are
+  two spaces apart and there is no trailing space. The counters come from one
+  `git status --porcelain=v2 --branch -z` on a worker thread, rate-limited to
+  500 ms and coalesced; the prompt paints the last completed refresh, so a
+  cold or huge repository never delays it, and a `cd` drops the previous
+  directory's counters rather than showing them
+  (`docs/prompt-watch.md`). On a terminal the segments use ANSI SGR colours
+  (blue directory, bright cyan last component, green branch, yellow `↑`/`!`,
+  red `?`/`#`); `NO_COLOR` gives the same text uncoloured. The glyphs are
+  width 1, and the editor measures the prompt with `unicode-width`, so the
+  cursor column survives them. It is built from bytes in one pass, so non-UTF-8
+  paths render exactly and nothing in the prompt is expanded twice. The `PS1`
+  *variable* keeps bash's value, so `${PS1@P}` and the conformance
+  `default PS1` case are unchanged. An explicit `PS1` wins and is rendered by
+  the ordinary escape expander;
 * **`promptvars`** (`shopt`, on by default): the decoded prompt is expanded a
   second time as if double-quoted, so `PS1='$PWD $ '` and
   `PS1='$(date +%H:%M) $ '` work and `$(…)` runs at prompt time; with the
@@ -289,13 +295,16 @@ delegates everything else: line editing to `baash-repl`, execution to the
 
 * The rendered stock prompt and the `PS1` variable differ on purpose: `$PS1`
   and `${PS1@P}` still report bash's `\s-\v\$ `, because the conformance suite
-  reads that value, while the interactive renderer draws the fish-like
+  reads that value, while the interactive renderer draws the tide-like
   prompt. A script cannot see the rendered form through `$PS1`.
-* The default prompt's branch is the branch only: no dirty count, no
-  ahead/behind, and no colour. The legacy `GitSegment` (bracketed `[branch]`
-  with an optional `~N` dirty count from a worker-thread `git status`) is
-  appended only to user-defined prompts, so the stock prompt never runs a
-  subprocess.
+* The stock prompt's counters are the last completed refresh, not a snapshot
+  taken at this instant. That is deliberate: the refresh is a `git status` on a
+  worker, at most once per 500 ms, and the prompt never waits for it. A change
+  made while the line is idle appears within about a second (the editor's
+  watcher backstop) or at the next prompt. If `git` hangs, the counters simply
+  stay stale; the prompt is unaffected.
+* `behind` is parsed from `# branch.ab` but no `↓N` segment is painted; the
+  brief's line ends at `↑N`.
 * `\s` is `baash`, so the conformance case that greps for `bash|osh` still
   fails; `\v`/`\V` now report the crate version (`0.0` / `0.0.0`).
 * With `set -e`, a failing `PROMPT_COMMAND` exits bash and does not exit this

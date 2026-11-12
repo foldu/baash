@@ -294,14 +294,14 @@ fn a_multiline_entry_is_recalled_as_lines() {
     let home = temp_dir("multiline-home");
     let work = temp_dir("multiline-work");
     let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
-    session.prompt("$ ");
+    session.prompt(" $");
     // A command the editor continues: `for` is unfinished until `done`.
     session.send(b"for i in 1 2; do\n");
     session.prompt("> ");
     session.send(b"echo $i\n");
     session.prompt("> ");
     session.send(b"done\n");
-    session.prompt("$ ");
+    session.prompt(" $");
     // Recalling it must paint three rows, not one with literal `^J`.
     session.send(b"\x1b[A");
     session.expect(b"do", Duration::from_secs(10));
@@ -316,7 +316,7 @@ fn a_multiline_entry_is_recalled_as_lines() {
     // Abandon the recalled line; `Ctrl-C` leaves `$?` at 130, so `exit` takes
     // the status explicitly.
     session.send(b"\x03");
-    session.prompt("$ ");
+    session.prompt(" $");
     session.send(b"exit 0\n");
     session.wait_child();
 }
@@ -340,7 +340,7 @@ fn an_ssh_session_shows_user_and_host() {
     // `user@host`, then the path, then the marker: `@` can only come from the
     // remote segment, which the local test below proves by its absence.
     session.expect(b"@", Duration::from_secs(10));
-    session.prompt(&format!(" {marker} "));
+    session.prompt(&format!(" {marker}"));
     session.send(b"exit\n");
     session.wait_child();
 }
@@ -352,7 +352,7 @@ fn a_local_session_shows_no_user_or_host() {
     let work = temp_dir("local-work");
     let marker = user_marker();
     let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
-    session.prompt(&format!(" {marker} "));
+    session.prompt(&format!(" {marker}"));
     assert!(
         !session.output.contains(&b'@'),
         "no `user@host` without an SSH marker: {:?}",
@@ -362,29 +362,92 @@ fn a_local_session_shows_no_user_or_host() {
     session.wait_child();
 }
 
-/// A change in the working tree repaints the prompt without a keystroke.
+/// The stock prompt has tide's shape: abbreviated path, branch, counters.
 ///
-/// This is the whole point of the watcher (`docs/prompt-watch.md`): the counts
-/// are not a snapshot taken when the line began, so a file created by another
-/// program appears in front of the user while they are still thinking.
+/// `!N` is a tracked file that differs from `HEAD` or the index, `?N` is
+/// untracked, and `↑N` is ahead of the upstream. Zero suppression is part of
+/// the shape, so a clean branch shows only the path, the branch and `$`.
 #[test]
-fn the_prompt_updates_while_the_line_is_idle() {
-    let home = temp_dir("live-home");
-    let work = temp_dir("live-work");
-    let initialized = std::process::Command::new("git")
-        .args(["init", "-q", "-b", "main"])
-        .arg(&work)
-        .status()
-        .expect("run git init");
-    assert!(initialized.success(), "git init failed");
+fn the_default_prompt_is_tide_like() {
+    let home = temp_dir("tide-home");
+    let work = home.join("src/bshell");
+    std::fs::create_dir_all(work.join(".git")).expect("create git directory");
+    std::fs::write(work.join(".git/HEAD"), b"ref: refs/heads/main\n").expect("write HEAD");
+
+    // No PS1 in the environment or an rc file: the stock prompt is rendered.
+    // `src` is shortened to its unique first character because the scratch
+    // home has no sibling that starts with `s`; the last component is whole.
+    let marker = user_marker();
     let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
-    // The stock prompt: path, branch, counters.
-    session.prompt("main $ ");
-    // Nothing was typed, so only the watcher can have noticed this.
-    std::fs::write(work.join("new.txt"), "x").expect("create an untracked file");
-    session.expect(b"?1", Duration::from_secs(10));
+    let prompt = format!("\u{f115} ~/s/bshell  \u{f418} main {marker}");
+    session.prompt(&prompt);
+    // The counts are git's, not the shell's: a failing command and a background
+    // child leave the prompt alone.
+    session.send(b"false\n");
+    session.prompt(&prompt);
+    // Leave through a successful command, so `exit` exits zero.
+    session.send(b"true\n");
+    session.prompt(&prompt);
     session.send(b"exit\n");
     session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A real repository: one commit ahead of a local upstream, one modified
+/// tracked file and one untracked file. This is the brief's shape, through the
+/// real binary and a pty.
+#[test]
+fn the_prompt_counts_ahead_modified_and_untracked() {
+    let home = temp_dir("counts-home");
+    let work = home.join("repo");
+    std::fs::create_dir_all(&work).expect("create work tree");
+    let git = |directory: &Path, arguments: &[&str]| {
+        let status = std::process::Command::new("git")
+            .arg("-c")
+            .arg("commit.gpgsign=false")
+            .args(arguments)
+            .current_dir(directory)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "Baash Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Baash Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {arguments:?}");
+    };
+    git(&work, &["init", "-q", "-b", "main"]);
+    std::fs::write(work.join("tracked.txt"), "one\n").expect("write tracked file");
+    git(&work, &["add", "tracked.txt"]);
+    git(&work, &["commit", "-q", "-m", "one"]);
+    let upstream = home.join("upstream.git");
+    git(&home, &["init", "-q", "--bare", "upstream.git"]);
+    git(
+        &work,
+        &["remote", "add", "origin", upstream.to_str().unwrap()],
+    );
+    git(&work, &["push", "-q", "-u", "origin", "main"]);
+    // One commit the upstream does not have.
+    std::fs::write(work.join("tracked.txt"), "two\n").expect("write tracked file");
+    git(&work, &["commit", "-q", "-am", "two"]);
+    // One tracked file with an unstaged change, one untracked file.
+    std::fs::write(work.join("tracked.txt"), "three\n").expect("write tracked file");
+    std::fs::write(work.join("untracked.txt"), "x\n").expect("write untracked file");
+
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    // The directory is `~/repo`; the counters arrive from the worker, so wait
+    // for the whole suffix rather than for the first prompt.
+    session.prompt("\u{f418} main  \u{2191}1 !1 ?1 $");
+    // A long line and an editing key must not corrupt the prompt's column
+    // arithmetic (the icons are width 1, the SGR sequences width 0).
+    session.send(&[b'x'; 240]);
+    session.send(b"\x15"); // Ctrl-U: discard the long line
+    session.send(b"echo ok\n");
+    session.prompt("ok\r\n");
+    session.send(b"exit\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 #[test]
@@ -517,53 +580,6 @@ fn prompt_escapes_read_real_history_and_job_numbers() {
     session.prompt("[1][1][0] ");
     session.line("true", "");
     session.expect(b"[2][2][0] ", Duration::from_secs(10));
-    session.send(b"exit\n");
-    session.wait_child();
-    let _ = std::fs::remove_dir_all(&home);
-}
-
-#[test]
-fn the_default_prompt_is_fish_like() {
-    let home = temp_dir("fish-home");
-    let work = home.join("src/bshell");
-    std::fs::create_dir_all(work.join(".git")).expect("create git directory");
-    std::fs::write(work.join(".git/HEAD"), b"ref: refs/heads/main\n").expect("write HEAD");
-
-    // No PS1 in the environment or an rc file: the stock prompt is rendered,
-    // ending in `$`, or `#` for root, like a `\$` in a template would.
-    let marker = user_marker();
-    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
-    // A space before the marker, and the branch between the path and it.
-    session.prompt(&format!("~/src/bshell main {marker} "));
-    // The counts are git's, not the shell's: a failing command and a background
-    // child leave the prompt alone now.
-    session.send(b"false\n");
-    session.prompt(&format!("~/src/bshell main {marker} "));
-    // Leave through a successful command, so `exit` exits zero.
-    session.send(b"true\n");
-    session.prompt(&format!("~/src/bshell main {marker} "));
-    session.send(b"exit\n");
-    session.wait_child();
-    let _ = std::fs::remove_dir_all(&home);
-}
-
-#[test]
-fn the_stock_prompt_is_coloured_on_a_terminal() {
-    let home = temp_dir("colour-home");
-    std::fs::create_dir_all(home.join("src/bshell/.git")).expect("create git directory");
-    std::fs::write(home.join("src/bshell/.git/HEAD"), b"ref: refs/heads/main\n")
-        .expect("write HEAD");
-
-    let mut session = Session::spawn_with(
-        &home,
-        &home.join("src/bshell"),
-        &["--norc", "-i"],
-        &[],
-        false,
-    );
-    // The whole prompt is painted, not the marker alone: the path cyan, the
-    // last component bright cyan, the branch green.
-    session.prompt("\x1b[36m~/src\x1b[96m/bshell\x1b[0m \x1b[92mmain\x1b[0m ");
     session.send(b"exit\n");
     session.wait_child();
     let _ = std::fs::remove_dir_all(&home);

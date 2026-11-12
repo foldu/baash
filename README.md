@@ -65,6 +65,23 @@ expansion (so
 before each prompt with its output above it. `Ctrl-R` is
 readline-compatible reverse incremental search.
 
+While `PS1` is untouched, the prompt is one tide-like line:
+
+```text
+ ~/sr/gith/fo/nixos-config   master  ↑23 !2 ?5 $
+```
+
+The directory icon and the branch icon are Nerd Font glyphs; the outer path
+components are shortened to the shortest prefix that is unique among their
+siblings, the last component is kept whole, and `$HOME` is `~`. `↑N` is commits
+ahead of the upstream, `!N` tracked files with staged or unstaged changes, `?N`
+untracked files; each is omitted at zero. `$` is `#` for root, and there is no
+trailing space. The branch is read from `.git/HEAD` on the prompt path; the
+counters come from one `git status --porcelain=v2 --branch` run on a worker
+(500 ms rate limit, coalesced), so a slow repository never delays a prompt
+([`docs/prompt-watch.md`](docs/prompt-watch.md)). `NO_COLOR` keeps the text and
+drops the ANSI colours. Set `PS1` to get your own prompt back.
+
 History expansion is bash's: the typed line is rewritten before parsing, so
 the expanded text is what runs. `!!`, `!$`, `!n`, `!?string?`, `!*`, `!^`, word designators,
 `:h :t :r :e :p :q :x :s :gs :&` and `^old^new^` follow the measured 5.3.20
