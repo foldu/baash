@@ -62,6 +62,14 @@ schtasks /run /tn <name>
 `cmd /k` keeps the window after the shell exits. Screenshot it with
 `virsh --connect qemu:///system screenshot win /tmp/x.png`.
 
+Observed on Windows 11 26300.9711, with Windows Terminal as the console host:
+the prompt renders with its icons and colours, the tab title follows the
+directory (OSC 0/1), and duplicating the tab with `Ctrl+Shift+D` starts
+`cmd.exe` in the shell's directory, so the cwd report is consumed. The
+unambiguous-keyboard requests are not honoured by that host — `Ctrl-M` still
+submits and `Ctrl-Left` arrives as a plain Left — so only the legacy
+encodings reach the editor.
+
 ## Facts that have already cost a session
 
 * **Quote Windows paths in baash, because `\` is an escape.** `cd C:\Windows`

@@ -332,32 +332,25 @@ Known gaps, stated so they are not mistaken for behaviour:
   (`docs/direction.md` §7) the shell has not taken on.
 * **`^Z`** has no job table to stop a job against; the child stops with the
   shell.
-* **The terminal protocol is unverified on a Windows guest.** The cwd report
-  writes `file://HOST/C:/…` and ConEmu's `OSC 9;9`, but no Windows terminal has
-  been observed consuming either; a UNC, drive-relative or drive-rooted path
-  yields no report rather than a guessed one, and `TERM=dumb` suppresses every
-  announcement. The console also has no bracketed-paste protocol: a paste
-  arrives as keystrokes, so the editor's `\x1b[200~` handling is never reached
-  there, and no focus sequence or cursor-position report, so `?1004` is not
-  written and the prompt keeps anchoring at column 0 after output that did not
-  end with a newline (`docs/terminal.md` §2, §5, §6). A resize is detected by
-  sampling the window size every 250 ms during the input wait rather than by an
-  event, and that sampling path has not been observed on a guest
-  (`docs/terminal.md` §7). `Ctrl-L`'s scrollback push relies on ECMA-48 Scroll
-  Up reaching the console's scrollback, which is unverified too
-  (`docs/terminal.md` §8). OSC 52 is written to the console like any other
-  escape, but whether its VT parser forwards the payload to the Windows
-  clipboard has not been observed (`docs/terminal.md` §9). Click-to-move is
-  unreachable there as well: it needs both `click_events` and the
-  cursor-position report, and the console provides neither
-  (`docs/terminal.md` §10). The background-colour query has no console answer
-  either, so Windows keeps the dark palette
-  (`docs/terminal.md` §11). The unambiguous-keyboard requests are not written
-  there: the console hands over key events rather than a byte stream, so
-  `Console` synthesises the legacy encodings and the decoder never sees a
-  `CSI u` or a `modifyOtherKeys` report. The new `Ctrl-Left`/`Ctrl-Delete`
-  bindings therefore depend on what the console's translation produces, which
-  has not been observed on a guest (`docs/terminal.md` §12).
+* **The terminal protocol is only partly verified on a Windows guest.** On
+  Windows 11 (26300.9711) in Windows Terminal the prompt renders, OSC 0/1 set
+  the tab title, and duplicating the tab (`Ctrl+Shift+D`) starts `cmd.exe` in
+  the shell's directory, so the cwd report — `file://HOST/C:/…` or ConEmu's
+  `OSC 9;9`, both are written — is consumed. A UNC, drive-relative or
+  drive-rooted path yields no report rather than a guessed one, and `TERM=dumb`
+  suppresses every announcement. The keyboard requests are written, but that
+  host ignores both: `Ctrl-M` still submits and `Ctrl-Left` arrives as a plain
+  Left, so the editor sees only the legacy encodings and the new
+  `Ctrl-Left`/`Ctrl-Delete` bindings do not fire (`docs/terminal.md` §12). The
+  console has no bracketed-paste protocol — a paste arrives as keystrokes, so
+  `\x1b[200~` is never reached — and no focus sequence or cursor-position
+  report, so `?1004` is not written and the prompt keeps anchoring at column 0
+  after output that did not end with a newline (`docs/terminal.md` §5, §6).
+  Still unobserved: the 250 ms resize sampling path (`§7`), `Ctrl-L`'s
+  scrollback push (`§8`), whether OSC 52 reaches the Windows clipboard (`§9`),
+  click-to-move, which needs both `click_events` and the cursor report (`§10`),
+  and the background-colour query, which the console does not answer, so
+  Windows keeps the dark palette (`§11`).
 
 Conformance is the other backlog, and it is measured: `docs/state.md` §6 and
 `docs/roadmap.md` carry the per-file picture, and `crates/baash-spec/baseline.txt`

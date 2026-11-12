@@ -64,10 +64,11 @@ which Windows Terminal reads for the same purpose. A path with no truthful URI
 form — a UNC `\\server\share` path, a drive-relative `C:x`, a
 drive-rooted `\x` — produces no report rather than a guessed one.
 
-The Windows half is **unverified on a real guest**: it is cross-compiled and
-unit-tested through `Flavour::Windows`, but no Windows terminal has been
-observed consuming it yet. That is recorded in
-[portability.md](portability.md) rather than claimed here.
+On Windows 11 (26300.9711) with Windows Terminal as the console host, the
+report is consumed: duplicating the tab (`Ctrl+Shift+D`) starts `cmd.exe` in
+the shell's directory. Which of the two forms the terminal used is not
+separable from outside, because both are written on every prompt; what a path
+with no truthful URI form does is still "writes neither".
 
 ## 3. OSC 0/1: the window and tab titles
 
@@ -321,10 +322,13 @@ answering a different application's request.
 The byte constants are `baash_sys::osc::KEYBOARD_ENABLE`/`KEYBOARD_DISABLE` and
 `MODIFY_OTHER_KEYS_ENABLE`/`MODIFY_OTHER_KEYS_DISABLE`; the decoding tests are
 in `key.rs`; the pty tests prove the pair is written and undone around a real
-line, and that a `CSI u` key edits the line. Windows does not take this path:
-its console delivers key events rather than a byte stream, so `Console`
-translates them to the legacy encodings and the same decoder maps them to the
-same keys (`docs/portability.md` §8).
+line, and that a `CSI u` key edits the line.
+
+Windows writes the same requests — `Console` puts the input handle in
+`ENABLE_VIRTUAL_TERMINAL_INPUT`, and the escape sequences go out like any
+other output — but the host observed on the guest ignores both: `Ctrl-M` still
+submits and `Ctrl-Left` arrives as a plain Left. The legacy encodings are
+therefore what the decoder sees there (`docs/portability.md` §8).
 
 ## 13. What is not here, and why
 

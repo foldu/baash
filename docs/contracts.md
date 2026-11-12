@@ -396,6 +396,9 @@ In a session that came in over `ssh`, `user@host` is the leading segment:
 barnabas@jupiter   ~/src/bshell   main  ↑1 $
 ```
 
+The marker is followed by one plain (unpainted) space, so the first character
+typed does not touch it.
+
 The marker is any of `SSH_TTY`, `SSH_CONNECTION` or `SSH_CLIENT` being set and
 non-empty — `sshd` sets the first for an interactive login and the second for
 every session, and a nested shell or tmux inherits them, so all three mean the
