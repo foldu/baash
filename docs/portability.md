@@ -738,3 +738,7 @@ Reading it:
   `.#windows-fast` for the same 427 units: every dependency pays the same
   bitcode-and-serial-codegen cost, not just `baash`. It is a fair trade for the
   artifact that ships and a bad one for iterating.
+
+The day-to-day protocol — which check catches `cfg(windows)` code, which build
+to use, copying to the guest, a GUI run — is [windows.md](windows.md). This
+section is the shape and the numbers behind it.
