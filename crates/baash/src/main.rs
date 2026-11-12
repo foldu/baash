@@ -49,6 +49,12 @@ OPTIONS
     -i              Interactive: read commands from a terminal with a prompt.
     -n              Parse SCRIPT (or stdin) without executing.
     --highlight     Syntax-highlight stdin to stdout and exit.
+    --regex-engine <NAME>
+                    Engine for `[[ x =~ y ]]`: `system` (the platform engine,
+                    which is what bash uses; the default) or `minrx` (portable;
+                    the only engine on Windows). `glibc` is accepted as an
+                    alias for `system`. The environment variable
+                    `BAASH_REGEX_ENGINE` is read when the flag is absent.
     -h, --help      Print this help.
     -V, --version   Print the version.
 
@@ -92,6 +98,9 @@ struct ShellFlags {
     rcdir: Option<std::path::PathBuf>,
     /// `--norc`: read no startup file at all.
     norc: bool,
+    /// `--regex-engine NAME`: which POSIX ERE engine `[[ =~ ]]` uses.
+    /// `BAASH_REGEX_ENGINE` stands in when the flag is absent.
+    regex_engine: Option<Vec<u8>>,
     /// `--eval FILE`: run these files, in order, before the command or script.
     /// The positional parameters are the ones the command text will get, so
     /// `baash --eval setup.sh -c 'echo "$@"' name a b` sees `a b` in both.
@@ -227,6 +236,13 @@ fn parse_args(args: &[OsString]) -> Result<(Mode, bool, ShellFlags), String> {
                 flags.rcdir = Some(std::path::PathBuf::from(path));
             }
             b"--norc" => flags.norc = true,
+            b"--regex-engine" => {
+                index += 1;
+                let Some(name) = args.get(index) else {
+                    return Err("--regex-engine requires a name".to_string());
+                };
+                flags.regex_engine = Some(bytes(name));
+            }
             b"--eval" => {
                 index += 1;
                 let Some(path) = args.get(index) else {
@@ -552,6 +568,33 @@ fn user_config() -> Option<std::path::PathBuf> {
         .filter(|path| path.is_file())
 }
 
+/// The engine `[[ =~ ]]` compiles with: `--regex-engine`, then
+/// `BAASH_REGEX_ENGINE`, then the platform default.
+///
+/// The name is resolved in the binary, not in `baash-sys`, because an engine
+/// this platform does not have is a usage error the user can act on, not a
+/// compile failure that surfaces at the first `=~`.
+fn regex_engine(flags: &ShellFlags) -> Result<baash_sys::Engine, String> {
+    let name = match &flags.regex_engine {
+        Some(name) => Some(String::from_utf8_lossy(name).into_owned()),
+        None => std::env::var_os("BAASH_REGEX_ENGINE").map(|value| {
+            String::from_utf8_lossy(&baash_sys::os::bytes_from_os(&value)).into_owned()
+        }),
+    };
+    let engine = match name {
+        None => baash_sys::Engine::default(),
+        Some(name) => baash_sys::Engine::from_name(&name).ok_or_else(|| {
+            format!("unknown regular-expression engine `{name}` (expected `system` or `minrx`)")
+        })?,
+    };
+    if !engine.is_available() {
+        return Err(format!(
+            "the `{engine}` regular-expression engine is not available on this platform; use `minrx`"
+        ));
+    }
+    Ok(engine)
+}
+
 /// `--rcdir DIR`: every regular file in the directory, in name order.
 ///
 /// A missing or unreadable directory is ignored, exactly like a missing
@@ -588,6 +631,17 @@ fn shell(interactive: bool, flags: &ShellFlags) -> Interp {
     // The one place that knows it is running for a user rather than a test:
     // character widths come from the environment here and nowhere else.
     shell.detect_locale();
+    // The regex engine is a usage decision, so it is resolved here and a bad
+    // name exits like any other bad option rather than failing at the first
+    // `[[ x =~ y ]]` the user writes.
+    match regex_engine(flags) {
+        Ok(engine) => shell.set_regex_engine(engine),
+        Err(message) => {
+            eprintln!("baash: {message}");
+            eprintln!("Try 'baash --help' for more information.");
+            std::process::exit(2);
+        }
+    }
     // bash and osh warn once when the environment names a locale the C library
     // does not know; without the warning the fallback to the C locale is
     // invisible, and globbing quietly changes behaviour.

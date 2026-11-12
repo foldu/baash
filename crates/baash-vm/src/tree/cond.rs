@@ -414,11 +414,13 @@ impl Parser<'_> {
         }
         let source = regex_source(pattern);
         let case_insensitive = self.interp.pattern_flags().nocasematch;
-        let compiled = if case_insensitive {
-            baash_sys::Regex::new_icase(&source)
-        } else {
-            baash_sys::Regex::new(&source)
-        };
+        // The interpreter's one-entry cache: `=~` in a loop re-evaluates the
+        // same pattern every iteration, and compiling is the dominant cost.
+        // `/regex-engine` selects which engine compiles it.
+        let compiled = self
+            .interp
+            .regex_cache
+            .captures(&source, case_insensitive, &text.bytes);
         let compiled = match compiled {
             Ok(compiled) => compiled,
             Err(error) => {
@@ -433,7 +435,7 @@ impl Parser<'_> {
                 return Err(String::new());
             }
         };
-        match compiled.captures(&text.bytes) {
+        match compiled {
             Some(captures) => {
                 self.set_rematch(&captures, &text.bytes);
                 Ok(true)

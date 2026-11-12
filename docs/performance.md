@@ -168,6 +168,55 @@ the call stack at read time instead of materialising them in the variable
 table. It costs `declare -p FUNCNAME` (bash lists it; we would not), which is
 why it is not in this commit.
 
+### 2026-11-12: `[[ =~ ]]`, the pattern cache and the two engines
+
+`=~` compiled the pattern on every evaluation, and compiling is what a loop
+pays for. A 16-slot LRU memo in the interpreter (`baash_sys::regex::Cache`)
+plus a selectable engine (the platform `regcomp`, or MinRX; `docs/contracts.md`) was
+measured with the harness the shell itself uses: `-c` scripts of 20 000
+evaluations, release build, minimum of 11 interleaved process runs minus the
+same loop with `[[ -n $s ]]`, against bash 5.3.20 on the identical scripts.
+
+| pattern | bash | system engine | MinRX |
+|---|---:|---:|---:|
+| `create` (literal) | 1.38 µs | 0.73 µs | 0.75 µs |
+| tar's `_longopt` ERE (84 B) | 38.3 µs | **3.64 µs** | 4.57 µs |
+| `^(foo|foobar|baz)([0-9]+)?$` | 4.44 µs | **0.48 µs** | 0.56 µs |
+| `^--(no-)?file` | 1.76 µs | **0.48 µs** | 0.67 µs |
+| no-match `^[[:blank:]]*--([[:alnum:]-]+)$` | 7.58 µs | 0.99 µs | **0.59 µs** |
+| capture `^--([[:alnum:]-]+)=(.*)$` | 6.81 µs | 2.09 µs | **1.68 µs** |
+
+Before the cache the same tar pattern cost 29.0 µs on the system engine and
+7.1 µs on MinRX (same harness, cache removed), so the memo is an 8× win for
+glibc and 1.5× for MinRX, and `=~` on that pattern went from roughly
+bash-speed to 8–11× faster than bash.
+
+The memo is bounded twice: 16 entries, and a 64 KiB limit on the pattern itself
+(`regex::MAX_PATTERN`), so a runaway generated pattern is refused rather than
+compiled and remembered. A one-entry cache would miss on every iteration of a
+loop rotating two patterns, and 16 slots keep both compiled. Measured with the one-entry version
+on the same harness, that loop cost 16.9 µs per `=~` on the system engine
+against 4.6 µs on MinRX — the argument for keeping MinRX selectable rather than
+deleting it, because glibc's `regcomp` is 8.7 µs on that pattern and MinRX's
+`regncomp` 1.8 µs.
+
+Where the time goes, engine-level (`baash_sys::Regex`, ns per call):
+
+| pattern | glibc compile / match | MinRX compile / match |
+|---|---:|---:|
+| `create` | 281 / 64 | 167 / 90 |
+| tar ERE | 8738 / 2329 | 1784 / 3348 |
+| `^(foo|foobar|baz)([0-9]+)?$` | 2708 / 425 | 374 / 337 |
+
+MinRX's compile is one pass into a flat Thompson program, matched by an NFA
+simulation (`docs/contracts.md`). Measured with an `LD_PRELOAD` counting
+allocator, one compile of the tar pattern makes **27 C allocator calls** on
+MinRX against **366** on glibc (glibc includes 202 reallocs of its growing node
+sets), which is the bulk of the compile-time difference; in the `C` locale
+MinRX also takes its byte path (`LC_CTYPE=C` → no `mbrtowc`, no wide
+characters, no Unicode tables). Forcing `C.UTF-8` makes its class-heavy compile
+1.64 → 8.26 µs, so a future `setlocale` call would change this picture.
+
 ## What this says
 
 * **Startup was not the problem.** A one-shot `baash -c ':'` costs 0.40 ms in

@@ -7,7 +7,7 @@
 //! differences. Tests that describe the *system* engine are `#[cfg(unix)]`;
 //! the portable engine is exercised everywhere.
 
-use baash_sys::regex::MAX_GROUPS;
+use baash_sys::regex::{MAX_GROUPS, MAX_PATTERN};
 use baash_sys::{Cache, Engine, Regex, RegexError};
 
 /// Compile a pattern that must be valid, with the platform's default engine.
@@ -467,5 +467,44 @@ fn a_cloned_cache_starts_empty_but_keeps_the_engine() {
     cache.captures(b"abc", false, b"abc").unwrap();
     let clone = cache.clone();
     assert_eq!(clone.engine(), cache.engine());
-    assert!(!format!("{clone:?}").contains("cached: true"));
+    assert!(format!("{clone:?}").contains("cached: 0"));
+}
+
+#[test]
+fn the_cache_rotates_more_patterns_than_it_holds() {
+    // Patterns a completion function tests in sequence: more than the 16
+    // slots, so each round evicts and recompiles. The answers must still match
+    // a fresh compile every time.
+    let cases: Vec<(Vec<u8>, Vec<u8>)> = (1..=20)
+        .map(|n| {
+            let pattern = format!("^(x{{{n}}})$").into_bytes();
+            (pattern, vec![b'x'; n])
+        })
+        .collect();
+    let mut cache = Cache::new(Engine::default());
+    for _ in 0..3 {
+        for (pattern, text) in &cases {
+            let got = cache.captures(pattern, false, text).expect("valid pattern");
+            assert_eq!(got, compile(pattern).captures(text));
+        }
+    }
+}
+
+#[test]
+fn a_pattern_larger_than_the_limit_is_refused() {
+    // A generated pattern that ran away is refused rather than compiled and
+    // memoised: the diagnostic names the bound, and no engine is asked to
+    // allocate for it.
+    let over = vec![b'a'; MAX_PATTERN + 1];
+    let error = Regex::new(&over).expect_err("a pattern this large is refused");
+    assert!(
+        matches!(error, RegexError::TooLarge { len } if len == MAX_PATTERN + 1),
+        "{error:?}"
+    );
+    assert!(error.message().contains("too large"), "{error}");
+    assert_eq!(error.code(), None);
+
+    // Exactly at the limit is accepted: the check is a bound, not a guess.
+    let at_limit = vec![b'a'; MAX_PATTERN];
+    assert!(Regex::new(&at_limit).is_ok(), "the limit is inclusive");
 }

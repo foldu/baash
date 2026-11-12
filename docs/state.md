@@ -393,15 +393,18 @@ rediscover):
   `$?` is 130 because `STATUS_CONTROL_C_EXIT` maps to `Signaled(SIGINT)`.
   `docs/portability.md` §10 records the measurement and the residual coarseness
   (a built-in loop is not interruptible, `trap INT` never runs).
-* **On Windows the library is there, and `=~` is what still holds it back.**
-  Verified on the guest: the exe mounts the tree in memory (no file, no cache
-  directory), the framework sources, an embedded script registers its rule, a
-  user's `~/.bash_completion` runs and returns candidates, and `> /dev/null` /
+* **On Windows the library is there, and `=~` now has an engine.** Verified on
+  the guest: the exe mounts the tree in memory (no file, no cache directory),
+  the framework sources, an embedded script registers its rule, a user's
+  `~/.bash_completion` runs and returns candidates, and `> /dev/null` /
   `>> /dev/null` / `< /dev/null` work (`open_cloexec` translates the device,
   which 556 of the 1097 scripts and the framework itself depend on).
-  `[[ … =~ … ]]` is still `BAASH-E0204` there, and 46 scripts use it — `tar`'s
-  option parser among them — so those print a diagnostic at Tab. That is a
-  shell gap, not an embedding one.
+  `[[ … =~ … ]]` used to be `BAASH-E0204` there, and 46 scripts use it — `tar`'s
+  option parser among them. MinRX (`Engine::Minrx`, the platform default on
+  Windows) now compiles those patterns, so `tar` completes. It is not glibc: a
+  backreference is a literal, `{,n}` is rejected, and a nested-capture tie-break
+  can name a different (still valid) extent — `docs/contracts.md` records the
+  234-case measurement. `--regex-engine system` is a usage error on Windows.
 * **Version skew is now the *system* library's problem.** The 229
   per-command scripts this machine installed are older than 2.18: 58 of them
   call `_init_completion`, which 2.18 renamed to `_comp_initialize`, so those
@@ -520,9 +523,13 @@ Do not re-litigate these without a reason; several were expensive.
   bounded lookahead; runtime ties are settled by bash behaviour, and by
   measuring bash 5.3.20 rather than reasoning about it. That rule found
   `pipefail` and the `[[ =~ ]]` right-hand rule.
-* **Regex through libc `regcomp`/`regexec`** (`baash-sys::regex`), not the
-  `regex` crate: POSIX is leftmost-**longest**. Measured:
-  `[[ abcd =~ (ab|abcd) ]]` must yield `abcd`.
+* **Regex is POSIX leftmost-longest, with two engines** (`baash-sys::regex`),
+  never the `regex` crate: `[[ abcd =~ (ab|abcd) ]]` must yield `abcd`. The
+  platform `regcomp` is the default where it exists (it is what bash links);
+  MinRX is the portable engine and the only one on Windows. `--regex-engine`
+  (or `BAASH_REGEX_ENGINE`) chooses, and the interpreter memoises the last
+  compiled pattern, because `=~` recompiled per evaluation and that was the
+  dominant cost (`docs/performance.md`).
 * **`[[ =~ ]]` RHS**: expand the word, then re-escape only the metacharacters
   that were *quoted*. That single rule explains every observed case.
 * **Locale is opt-in from the binary** (`shell.detect_locale()`), never from

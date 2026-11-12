@@ -83,6 +83,17 @@ pub type CaptureRanges = Vec<Option<(usize, usize)>>;
 /// a compile error.
 pub const MAX_GROUPS: usize = 64;
 
+/// The largest pattern, in bytes, that will be compiled.
+///
+/// A pattern this large is not something a person types: it is generated, and
+/// almost always by a bug (a loop that appends to a pattern, a substitution
+/// that never terminates). Compiling it costs the engine an unbounded amount of
+/// memory and time, and the shell would then memoise it, so the refusal is a
+/// bound on both the compile and the cache. bash has no such limit; this is a
+/// deliberate divergence, and the diagnostic names the limit so a script that
+/// really does need a huge generated regex can be told what it hit.
+pub const MAX_PATTERN: usize = 64 * 1024;
+
 /// Which regular-expression engine a [`Regex`] or [`Cache`] uses.
 ///
 /// The engine is part of the value, not process-global state: two interpreters
@@ -233,6 +244,9 @@ impl Regex {
         if !engine.is_available() {
             return Err(RegexError::Unavailable { engine });
         }
+        if pattern.len() > MAX_PATTERN {
+            return Err(RegexError::TooLarge { len: pattern.len() });
+        }
         // The scan is pure, so nothing can leak even if it were to panic (it
         // cannot), and a pattern that fails to compile never reports a count.
         let groups = count_subexpressions(pattern);
@@ -303,7 +317,7 @@ impl fmt::Debug for Regex {
     }
 }
 
-/// The last compiled pattern, reused across evaluations.
+/// The last few compiled patterns, reused across evaluations.
 ///
 /// `[[ x =~ re ]]` in a loop re-evaluates the same pattern on every iteration,
 /// and compiling is the dominant cost — glibc's `regcomp` is 8.7 µs on an
@@ -311,11 +325,15 @@ impl fmt::Debug for Regex {
 /// it feeds. bash has the same problem (its own `=~` costs 37.9 µs on that
 /// pattern), which is why a loop over `=~` is slow everywhere.
 ///
-/// A one-entry memo keyed on the pattern bytes and the case mode removes the
+/// A small memo keyed on the pattern bytes and the case mode removes the
 /// compile from the loop; measured, it takes that glibc evaluation from 29 µs
-/// to 3.4 µs (`docs/performance.md`). One entry, not a map: a shell's inner
-/// loop uses one pattern, and a second slot would only add allocation to the
-/// common case while still missing for three-way rotation.
+/// to 3.6 µs (`docs/performance.md`). Sixteen slots, least-recently-used,
+/// because the second common shape is a loop alternating between the patterns
+/// a completion function tests, and one entry misses every iteration there.
+/// The entries are kept in recency order and scanned newest-first, so the
+/// common single-pattern loop compares once; a hash map would compute a hash
+/// of the whole pattern on every call, which is dearer than that one
+/// comparison, so this stays a hand-rolled array rather than an LRU crate.
 ///
 /// Compile errors are deliberately **not** cached: the shell reports the
 /// engine's message at the point of use, and a failed compile is cheap next to
@@ -325,8 +343,17 @@ impl fmt::Debug for Regex {
 /// or output depends on whether a compilation happened.
 pub struct Cache {
     engine: Engine,
-    entry: Option<Entry>,
+    /// Least recently used first, most recently used last.
+    entries: Vec<Entry>,
 }
+
+/// How many compiled patterns a cache keeps.
+///
+/// Sixteen covers the measured shapes (one pattern in a loop, two alternating,
+/// and the patterns one completion function tests) without letting a
+/// pathological script pin arbitrary memory: each entry is a pattern plus one
+/// compiled form.
+const CACHE_SLOTS: usize = 16;
 
 struct Entry {
     pattern: Vec<u8>,
@@ -339,7 +366,7 @@ impl Cache {
     pub fn new(engine: Engine) -> Self {
         Self {
             engine,
-            entry: None,
+            entries: Vec::new(),
         }
     }
 
@@ -356,16 +383,16 @@ impl Cache {
     pub fn set_engine(&mut self, engine: Engine) {
         if self.engine != engine {
             self.engine = engine;
-            self.entry = None;
+            self.clear();
         }
     }
 
     /// Drop the memo, keeping the engine.
     pub fn clear(&mut self) {
-        self.entry = None;
+        self.entries.clear();
     }
 
-    /// Compile `pattern` if it is not the cached one, then search `text`.
+    /// Compile `pattern` if it is not cached, then search `text`.
     ///
     /// The returned captures are owned, so the caller may hold them while
     /// using the cache again.
@@ -375,23 +402,35 @@ impl Cache {
         icase: bool,
         text: &[u8],
     ) -> Result<Option<CaptureRanges>, RegexError> {
-        let hit = self
-            .entry
-            .as_ref()
-            .is_some_and(|entry| entry.icase == icase && entry.pattern == pattern);
-        if !hit {
-            let regex = Regex::with_engine(self.engine, pattern, icase)?;
-            self.entry = Some(Entry {
-                pattern: pattern.to_vec(),
-                icase,
-                regex,
-            });
+        // Newest first: the pattern a loop repeats is the last one inserted.
+        if let Some(index) = self
+            .entries
+            .iter()
+            .rposition(|entry| entry.icase == icase && entry.pattern == pattern)
+        {
+            // Refresh its position, keeping the vector in recency order.
+            let entry = self.entries.remove(index);
+            self.entries.push(entry);
+            return self
+                .entries
+                .last()
+                .expect("just pushed")
+                .regex
+                .try_captures(text);
         }
-        // The entry exists on every path that reaches here; `expect` documents
-        // that rather than hiding a `None` arm that cannot happen.
-        self.entry
-            .as_ref()
-            .expect("the cache was just filled")
+        let regex = Regex::with_engine(self.engine, pattern, icase)?;
+        if self.entries.len() == CACHE_SLOTS {
+            // The least recently used entry is the first one.
+            self.entries.remove(0);
+        }
+        self.entries.push(Entry {
+            pattern: pattern.to_vec(),
+            icase,
+            regex,
+        });
+        self.entries
+            .last()
+            .expect("just pushed")
             .regex
             .try_captures(text)
     }
@@ -408,7 +447,7 @@ impl fmt::Debug for Cache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Cache")
             .field("engine", &self.engine)
-            .field("cached", &self.entry.is_some())
+            .field("cached", &self.entries.len())
             .finish()
     }
 }
@@ -454,6 +493,14 @@ pub enum RegexError {
         /// The engine that was asked for.
         engine: Engine,
     },
+    /// The pattern is larger than [`MAX_PATTERN`].
+    ///
+    /// `len` is the pattern's length in bytes, which is what a diagnostic
+    /// needs; the limit itself is the constant, so it cannot go stale here.
+    TooLarge {
+        /// The pattern's length in bytes.
+        len: usize,
+    },
 }
 
 impl RegexError {
@@ -461,7 +508,10 @@ impl RegexError {
     pub fn code(&self) -> Option<libc::c_int> {
         match self {
             Self::Engine { code, .. } => Some(*code),
-            Self::NulInPattern | Self::NulInText | Self::Unavailable { .. } => None,
+            Self::NulInPattern
+            | Self::NulInText
+            | Self::Unavailable { .. }
+            | Self::TooLarge { .. } => None,
         }
     }
 
@@ -478,6 +528,7 @@ impl RegexError {
             Self::Unavailable { .. } => {
                 "the requested regular-expression engine is not available on this platform"
             }
+            Self::TooLarge { .. } => "regular expression is too large (64 KiB limit)",
         }
     }
 }

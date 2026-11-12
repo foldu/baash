@@ -192,11 +192,22 @@ candidates through `COMPREPLY`. That needed `/dev/null` to work, which it now
 does (`>`, `>>` and `<` all reach the `NUL` device), because 556 of the 1097
 scripts redirect to it and the framework does 62 times.
 
-One shell gap still takes its toll: `[[ … =~ … ]]` has no engine on Windows
-(`BAASH-E0204`), and 46 scripts use it — `tar`'s option parser among them, so
-`tar` prints a diagnostic at Tab and completes nothing. That is a gap in the
-shell, not in the embedding, and it is the next thing standing between Windows
-and bash-completion parity.
+`[[ … =~ … ]]` used to be the remaining shell gap here: Windows has no
+`regcomp`, so it reported `BAASH-E0204` and the 46 scripts that use it —
+`tar`'s option parser among them — printed a diagnostic at Tab. It now runs on
+[MinRX](../crates/baash-sys/src/regex/minrx.rs), a small POSIX ERE engine
+compiled from vendored C, which is the default engine here (`Engine::Minrx`;
+`docs/contracts.md`). Verified on the guest with the cross-built `baash.exe`:
+`tar`'s `_longopt` ERE matches with `BASH_REMATCH` filled, a capture pattern
+returns `file|some/path`, the stray-`)` pattern bash-completion produces
+compiles, and `--regex-engine system` is a usage error (exit 2) because there
+is no platform engine to ask for.
+
+It is not glibc, so the measured differences apply on this platform: a
+backreference is a literal `1`, `{,n}` is rejected, and a nested-capture
+tie-break can report a different (still valid) extent. `docs/contracts.md`
+records the 234-case measurement; no bash-completion pattern differs except one
+capture slot.
 
 ### 5a. `rustix` stops at the Windows boundary
 

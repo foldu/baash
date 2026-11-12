@@ -1186,6 +1186,7 @@ Regex::new_icase(pattern: &[u8]) -> Result<Regex, RegexError>;
 Regex::with_engine(engine, pattern: &[u8], icase: bool) -> Result<Regex, RegexError>;
 Regex::engine(&self) -> Engine;
 Regex::group_count(&self) -> usize;                               // true count, uncapped
+regex::MAX_PATTERN: usize = 64 * 1024;                            // refused above this
 Regex::captures(&self, text: &[u8]) -> Option<CaptureRanges>;
 Regex::try_captures(&self, text: &[u8]) -> Result<Option<CaptureRanges>, RegexError>;
 
@@ -1205,6 +1206,11 @@ Contract points that the caller must honour:
   `[[:upper:]]`/`[[:lower:]]`, which lowercasing does not.
 - **`MAX_GROUPS` is 64 slots** (whole match + 63 groups); longer patterns
   truncate rather than error, and `group_count()` still reports the truth.
+- **`MAX_PATTERN` is 64 KiB**; a larger pattern is `RegexError::TooLarge`
+  without being compiled, which bounds both the engine's compile and the cache
+  (16 entries × the limit). bash has no such limit: this is a deliberate
+  divergence for a runaway generated pattern, and the diagnostic names the
+  bound.
 - **NUL is engine-dependent.** The system engine takes C strings, so a pattern
   containing NUL is `RegexError::NulInPattern` and a subject containing NUL
   makes `captures` give up with `None` while `try_captures` reports
@@ -1227,12 +1233,17 @@ Contract points that the caller must honour:
   the system engine on Windows — the binary rejects the name before it gets
   there, with a usage error.
 - **`Regex` is neither `Send` nor `Sync` nor `Clone`**: one thread, one pattern.
-- **`Cache` is a one-entry memo** keyed on (pattern bytes, case mode, engine).
-  A miss compiles and replaces the entry; a compile **error is not cached**; a
-  clone starts empty; switching engines clears the entry. `Interp` owns one and
-  `set_regex_engine` chooses the engine, so `=~` in a loop compiles once. It is
-  not observable: no variable or output depends on a hit. Measured effect:
-  `docs/performance.md`.
+- **`Cache` is a 16-slot LRU memo** keyed on (pattern bytes, case mode,
+  engine). A miss compiles and inserts, evicting the least recently used
+  pattern; a compile **error is not cached**; a clone starts empty; switching
+  engines clears the memo. Sixteen slots cover the measured shapes — one
+  pattern in a loop, two alternating, the patterns a completion function tests
+  — and stay bounded: each entry is a pattern plus one compiled form. A
+  hand-rolled array, not an LRU crate: the entries are kept in recency order
+  and scanned newest-first, so the common case is one comparison, where a hash
+  map would hash the whole pattern on every call. `Interp` owns one and `set_regex_engine` chooses the engine,
+  so `=~` in a loop compiles once. It is not observable: no variable or output
+  depends on a hit. Measured effect: `docs/performance.md`.
 
 [minrx]: https://github.com/michaeljhaertel/minrx
 

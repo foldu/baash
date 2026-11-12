@@ -2033,3 +2033,103 @@ fn a_builtin_error_in_a_sourced_file_names_its_line() {
         "the sourced file's line is named: {message}"
     );
 }
+
+#[test]
+fn the_regex_engine_is_selectable() {
+    // glibc accepts backreferences in ERE mode (a GNU extension bash inherits
+    // and `=~` must too). MinRX has no backreferences, so `\1` is a literal
+    // `1`. The same script answers differently only because of the flag.
+    let script = r#"if [[ aa =~ (a)\1 ]]; then echo match; else echo no; fi"#;
+    #[cfg(unix)]
+    for engine in ["system", "glibc"] {
+        let output = baash()
+            .args(["--regex-engine", engine, "-c", script])
+            .output()
+            .expect("spawn baash");
+        assert_eq!(stdout(&output), "match\n", "{engine}: {}", stderr(&output));
+    }
+    let output = baash()
+        .args(["--regex-engine", "minrx", "-c", script])
+        .output()
+        .expect("spawn baash");
+    assert_eq!(stdout(&output), "no\n");
+}
+
+#[test]
+fn the_regex_engine_can_come_from_the_environment() {
+    let script = r#"if [[ aa =~ (a)\1 ]]; then echo match; else echo no; fi"#;
+    let output = baash()
+        .env("BAASH_REGEX_ENGINE", "minrx")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("spawn baash");
+    assert_eq!(stdout(&output), "no\n");
+    // The flag wins over the environment; only the system engine can see the
+    // backreference, so this is also the default on Unix.
+    #[cfg(unix)]
+    {
+        let output = baash()
+            .env("BAASH_REGEX_ENGINE", "minrx")
+            .args(["--regex-engine", "system", "-c", script])
+            .output()
+            .expect("spawn baash");
+        assert_eq!(stdout(&output), "match\n");
+    }
+}
+
+#[test]
+fn an_unknown_regex_engine_is_a_usage_error() {
+    let output = baash()
+        .args(["--regex-engine", "pcre", "-c", ":"])
+        .output()
+        .expect("spawn baash");
+    assert_eq!(code(&output), 2);
+    let error = stderr(&output);
+    assert!(
+        error.contains("unknown regular-expression engine `pcre`"),
+        "{error}"
+    );
+    assert!(error.contains("system"), "{error}");
+    assert!(error.contains("minrx"), "{error}");
+}
+
+#[test]
+fn the_pattern_cache_does_not_change_results() {
+    // The cache is an optimisation and must be invisible: the same pattern in
+    // a loop, then a case-mode change (a different cache key) and back.
+    let script = r#"
+s='--file=some/path'
+i=0
+while [ $i -lt 3 ]; do
+    [[ $s =~ ^--([[:alnum:]-]+)=(.*)$ ]] && printf '%s ' "${BASH_REMATCH[1]}"
+    i=$((i + 1))
+done
+shopt -s nocasematch
+[[ ABC =~ abc ]] && printf 'fold '
+shopt -u nocasematch
+[[ ABC =~ abc ]] || printf 'exact '
+[[ abc =~ abc ]] && printf 'lower '
+echo
+"#;
+    assert_eq!(out(script), "file file file fold exact lower \n");
+}
+
+#[test]
+fn minrx_accepts_bash_completions_stray_parenthesis() {
+    // Quote removal can leave a stray `)`, which POSIX (and glibc) treat as a
+    // literal; rejecting it would turn a completion into a status-2 error.
+    let script = r#"pat='--[A-Za-z0-9-]+(\[?)=)'
+if [[ '--file[=ARCHIVE' =~ $pat ]]; then echo match; else echo no; fi"#;
+    for engine in ["minrx", "system"] {
+        if engine == "system" && cfg!(windows) {
+            continue;
+        }
+        let output = baash()
+            .args(["--regex-engine", engine, "-c", script])
+            .output()
+            .expect("spawn baash");
+        assert_eq!(code(&output), 0, "{engine}: {}", stderr(&output));
+        assert_eq!(stdout(&output), "no\n", "{engine}");
+    }
+}

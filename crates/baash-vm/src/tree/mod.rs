@@ -297,6 +297,10 @@ pub(crate) struct Ctx {
 #[derive(Debug)]
 pub struct Interp {
     state: ShellState,
+    /// LRU memo for `[[ =~ ]]`, so a loop does not recompile per evaluation
+    /// (`docs/performance.md`). Its engine is the shell's engine, set from the
+    /// command line before the first parse.
+    regex_cache: baash_sys::regex::Cache,
     interactive: bool,
     /// Whether the locale counts characters rather than bytes.
     ///
@@ -539,6 +543,17 @@ impl Interp {
         Self::with_opts(Opts::default(), interactive)
     }
 
+    /// Choose the engine `[[ =~ ]]` compiles with.
+    ///
+    /// The interpreter starts on the platform default
+    /// ([`baash_sys::Engine::default`]: the system engine on Unix, MinRX on
+    /// Windows). The binary overrides it once, before the first parse, from
+    /// `--regex-engine` or `BAASH_REGEX_ENGINE`; the caller is responsible for
+    /// checking [`baash_sys::Engine::is_available`] first.
+    pub fn set_regex_engine(&mut self, engine: baash_sys::Engine) {
+        self.regex_cache.set_engine(engine);
+    }
+
     /// Take the character-width model from the environment.
     ///
     /// POSIX precedence is `LC_ALL` > `LC_CTYPE` > `LANG`; a value naming
@@ -571,6 +586,7 @@ impl Interp {
         });
         let mut interp = Self {
             state: ShellState::new(opts),
+            regex_cache: baash_sys::regex::Cache::default(),
             interactive,
             current: Arc::new(SourceFile::new("<none>", &b""[..])),
             functions: Vec::new(),
