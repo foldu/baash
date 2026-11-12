@@ -341,11 +341,29 @@ pub struct CompletionRun {
     /// function is still one completion, and the inner call must not clear the
     /// outer one's options when it ends.
     depth: usize,
+    /// The command whose rule is running, for `compopt -o … name`: a change to
+    /// the rule of the command being completed has to reach the run too, or
+    /// the option would only apply from the next keystroke.
+    command: Option<Vec<u8>>,
     /// The options in effect, in the order they were set.
     options: Vec<Vec<u8>>,
 }
 
 impl CompletionRun {
+    /// Name the command whose rule is about to run.
+    pub fn set_command(&mut self, command: Option<&[u8]>) {
+        if command.is_none() {
+            self.command = None;
+        } else {
+            self.command = command.map(<[u8]>::to_vec);
+        }
+    }
+
+    /// The command whose rule is running, if the shell named it.
+    pub fn command(&self) -> Option<&[u8]> {
+        self.command.as_deref()
+    }
+
     /// Mark the start of a completion, seeded with the spec's saved options.
     pub fn begin(&mut self, options: &[Vec<u8>]) {
         if self.depth == 0 {
@@ -395,6 +413,47 @@ pub fn has_option(options: &[Vec<u8>], name: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `compopt -o … name` edits the saved rule, and a rule that is not there
+    /// is reported rather than created (bash's status 1).
+    #[test]
+    fn compopt_options_land_on_the_named_rule() {
+        let mut table = CompletionTable::default();
+        let spec = CompletionSpec {
+            actions: vec![CompletionAction::File],
+            ..CompletionSpec::default()
+        };
+        let request = Request::Set {
+            spec,
+            names: vec![b"mpv".to_vec()],
+            default: false,
+            empty: false,
+            initial: false,
+        };
+        table.apply(&request).expect("define the rule");
+        let changes = [(b"nospace".to_vec(), true)];
+        assert!(table.set_options(&OptionTarget::Name(b"mpv".to_vec()), &changes));
+        assert!(
+            table
+                .print(&[b"mpv".to_vec()])
+                .iter()
+                .any(|line| line.windows(7).any(|window| window == b"-o nosp"))
+        );
+        // Turning it off again leaves the spec, without the option.
+        assert!(table.set_options(
+            &OptionTarget::Name(b"mpv".to_vec()),
+            &[(b"nospace".to_vec(), false)]
+        ));
+        assert!(
+            !table
+                .print(&[b"mpv".to_vec()])
+                .iter()
+                .any(|line| line.windows(7).any(|window| window == b"-o nosp"))
+        );
+        // No rule, no edit.
+        assert!(!table.set_options(&OptionTarget::Name(b"nope".to_vec()), &changes));
+        assert!(!table.set_options(&OptionTarget::Default, &changes));
+    }
 
     #[derive(Default)]
     struct Fake {
@@ -774,6 +833,37 @@ fn show(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// Which saved rule `compopt` edits when it is given a target.
+///
+/// `compopt -o …` with no target edits the completion in progress; with a
+/// target — a command name, or `-D`/`-E`/`-I` — it edits the rule bash will
+/// use next time, which is why it is legal outside a completion at all.
+/// bash-completion's loaders use that form to reset a command's options, so
+/// refusing it made every `mpv` completion print a usage error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OptionTarget {
+    /// `-D`: the rule used when no command rule matches.
+    Default,
+    /// `-E`: the rule for an empty line.
+    Empty,
+    /// `-I`: the rule for the initial word.
+    Initial,
+    /// A named command's rule.
+    Name(Vec<u8>),
+}
+
+impl OptionTarget {
+    /// The name a missing rule is reported under, which is bash's own.
+    pub fn display(&self) -> String {
+        match self {
+            OptionTarget::Default => "_DefaultCmD_".into(),
+            OptionTarget::Empty => "_EmptycmD_".into(),
+            OptionTarget::Initial => "_InitialWorD_".into(),
+            OptionTarget::Name(name) => show(name),
+        }
+    }
+}
+
 /// The specs a shell holds, in insertion order (`complete -p` prints them in
 /// the order they were defined, so a map would reorder them).
 #[derive(Clone, Debug, Default)]
@@ -782,9 +872,51 @@ pub struct CompletionTable {
     default: Option<CompletionSpec>,
     empty: Option<CompletionSpec>,
     initial: Option<CompletionSpec>,
+    /// readline's `completion-ignore-case`, as the shell read it from the
+    /// user's inputrc. It is not a spec and not an option: it changes how every
+    /// candidate list is filtered, which is what bash's `compgen` does too.
+    ignore_case: bool,
 }
 
 impl CompletionTable {
+    /// Honour readline's `completion-ignore-case`.
+    pub fn set_ignore_case(&mut self, on: bool) {
+        self.ignore_case = on;
+    }
+
+    /// Whether candidate lists match case-insensitively.
+    pub fn ignore_case(&self) -> bool {
+        self.ignore_case
+    }
+
+    /// Apply `compopt`'s option changes to one saved rule.
+    ///
+    /// Returns `false` when there is no such rule: bash reports that by name
+    /// and exits 1 rather than creating one, and a completion that silently
+    /// gained a spec would be worse than the error.
+    pub fn set_options(&mut self, target: &OptionTarget, changes: &[(Vec<u8>, bool)]) -> bool {
+        let spec = match target {
+            OptionTarget::Default => self.default.as_mut(),
+            OptionTarget::Empty => self.empty.as_mut(),
+            OptionTarget::Initial => self.initial.as_mut(),
+            OptionTarget::Name(name) => self
+                .entries
+                .iter_mut()
+                .find(|(existing, _)| existing == name)
+                .map(|(_, spec)| spec),
+        };
+        let Some(spec) = spec else {
+            return false;
+        };
+        for (name, on) in changes {
+            spec.options.retain(|option| option != name);
+            if *on {
+                spec.options.push(name.clone());
+            }
+        }
+        true
+    }
+
     /// Apply one request, returning output lines for the printing forms.
     pub fn apply(&mut self, request: &Request) -> Result<Vec<Vec<u8>>, String> {
         match request {

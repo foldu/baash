@@ -52,6 +52,8 @@ const SCRUBBED: &[&[u8]] = &[
     b"BAASH_BASH_COMPLETION",
     b"BAASH_EMBEDDED_BASH_COMPLETION",
     b"BAASH_NO_BASH_COMPLETION",
+    // readline's setting is read from the test's HOME, never the runner's.
+    b"INPUTRC",
     b"LC_ALL",
     b"NO_COLOR",
     b"PWD",
@@ -720,4 +722,72 @@ fn the_embedded_library_completes_without_an_installed_one() {
     let _ = std::fs::remove_dir_all(&cache);
     let _ = std::fs::remove_dir_all(&data);
     let _ = std::fs::remove_dir_all(&config);
+}
+/// `completion-ignore-case` from the user's inputrc reaches `compgen`.
+///
+/// The case that produced this test: bash-completion's `_filedir` runs
+/// `compgen -f -- "$cur"`, and with case-sensitive matching `Me` matches
+/// neither `MEGALOVANIA.webm` nor `measure.py`; `_filedir` then reports
+/// failure and mpv's own completion falls back to `COMPREPLY=($(compgen -f))`,
+/// which offers the whole directory. bash reads readline's setting here, and
+/// with one in inputrc it finds both.
+#[test]
+fn completion_ignore_case_matches_through_the_inputrc() {
+    // The setting is read when the shell starts, so the file has to exist
+    // before the prompt does.
+    let home = temp_dir("ignore-case-home");
+    let work = temp_dir("ignore-case-work");
+    std::fs::write(home.join(".inputrc"), b"set completion-ignore-case on\n").expect("inputrc");
+    std::fs::write(work.join("MEGALOVANIA.webm"), b"x").expect("upper");
+    let mut session = Session::spawn(&home, &work, &[("PS1", "P> ")]);
+    session.prompt();
+    std::fs::write(work.join("measure.py"), b"x").expect("lower");
+    std::fs::write(work.join("other.txt"), b"x").expect("other");
+
+    // The shape of a completion function falling back to `compgen -f`, with
+    // the current word passed the way bash-completion passes it.
+    session.line("fallback () { COMPREPLY=($(compgen -f -- \"${COMP_WORDS[COMP_CWORD]}\")); }");
+    session.line("complete -F fallback mpv");
+
+    session.send(b"mpv Me\t");
+    session.expect(b"MEGALOVANIA.webm", Duration::from_secs(10));
+    session.expect(b"measure.py", Duration::from_secs(10));
+    assert!(
+        find(&session.output, b"other.txt").is_none(),
+        "a non-matching name must not be offered: {:?}",
+        String::from_utf8_lossy(&session.output)
+    );
+    // Ctrl-C leaves `$?` at 130, and a bare `exit` would inherit it.
+    session.send(b"\x03");
+    session.prompt();
+    session.line("true");
+    cleanup(&mut session, &home, &work);
+}
+
+/// `compopt -o … name` is bash's other form, and bash-completion's loader uses
+/// it: `compopt +o nospace mpv` runs while the rule for `mpv` is being loaded.
+/// It used to be a usage error, which printed a diagnostic over the line being
+/// completed; the option has to land on the saved rule, and on the run when it
+/// is the rule being executed.
+#[test]
+fn compopt_accepts_a_command_name() {
+    let (mut session, home, work) = session("compopt-name");
+    session.line("f () { compopt -o nospace mpv; COMPREPLY=(done); }");
+    session.line("complete -F f mpv");
+
+    session.send(b"mpv \t");
+    session.expect(b"done", Duration::from_secs(10));
+    assert!(
+        find(&session.output, b"compopt: usage").is_none(),
+        "the named form is not a usage error: {:?}",
+        String::from_utf8_lossy(&session.output)
+    );
+    session.send(b"\x03");
+    session.prompt();
+
+    // The option was saved on the rule, which is what `complete -p` prints.
+    session.line("complete -p mpv");
+    session.expect(b"nospace", Duration::from_secs(10));
+    session.prompt();
+    cleanup(&mut session, &home, &work);
 }

@@ -104,7 +104,8 @@ impl CompletionSource for Interp {
     }
 
     fn files(&mut self, prefix: &[u8], directories_only: bool) -> Vec<Vec<u8>> {
-        files(prefix, directories_only)
+        let ignore_case = self.state.completions.ignore_case();
+        files(prefix, directories_only, ignore_case)
     }
 
     fn commands(&mut self, prefix: &[u8]) -> Vec<Vec<u8>> {
@@ -450,7 +451,7 @@ fn column_names(path: &[u8], column: usize, prefix: &[u8]) -> Vec<Vec<u8>> {
 /// to list and the part after it filters the entry names. The result keeps the
 /// prefix as written, so `subdir/f` offers `subdir/file1` — which is what bash
 /// prints and what makes the candidate usable as a command argument.
-fn files(prefix: &[u8], directories_only: bool) -> Vec<Vec<u8>> {
+fn files(prefix: &[u8], directories_only: bool, ignore_case: bool) -> Vec<Vec<u8>> {
     let split = prefix.iter().rposition(|&byte| byte == b'/');
     let (lead, base): (&[u8], &[u8]) = match split {
         Some(at) => (&prefix[..=at], &prefix[at + 1..]),
@@ -470,7 +471,7 @@ fn files(prefix: &[u8], directories_only: bool) -> Vec<Vec<u8>> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = os_bytes(&name);
-        if !name.starts_with(base) {
+        if !matches_prefix(&name, base, ignore_case) {
             continue;
         }
         if directories_only {
@@ -485,6 +486,26 @@ fn files(prefix: &[u8], directories_only: bool) -> Vec<Vec<u8>> {
     }
     out.sort_unstable();
     out
+}
+
+/// Whether a directory entry starts with the typed component.
+///
+/// `completion-ignore-case` folds ASCII case only: shell text is bytes, and
+/// folding more would mean decoding UTF-8 and changing byte offsets, so a
+/// non-ASCII prefix keeps matching byte for byte (the same rule as
+/// `baash-complete`'s ranker).
+fn matches_prefix(name: &[u8], prefix: &[u8], ignore_case: bool) -> bool {
+    if prefix.is_empty() {
+        return true;
+    }
+    if !ignore_case {
+        return name.starts_with(prefix);
+    }
+    name.len() >= prefix.len()
+        && name[..prefix.len()]
+            .iter()
+            .zip(prefix)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
 /// A path as the filesystem API takes it.

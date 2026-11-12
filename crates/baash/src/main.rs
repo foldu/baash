@@ -38,6 +38,7 @@ mod bash_completion;
 mod carapace_ext;
 mod complete;
 mod git_prompt;
+mod inputrc;
 mod prompt_state;
 
 const USAGE: &str = "\
@@ -1230,6 +1231,12 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
         .map(baash_sys::os::path_from_bytes)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     let engine = baash_complete::CompletionEngine::new().with_root(root);
+    // readline's `completion-ignore-case`, the one inputrc setting the shell
+    // honours: bash's `compgen` honours it inside a completion, and a
+    // filename completion that differs only in case otherwise finds nothing.
+    let ignore_case = inputrc::completion_ignore_case();
+    engine.set_ignore_case(ignore_case);
+    shell.state().completions.set_ignore_case(ignore_case);
     // There is one ring. The shell state owns it between commands (so the
     // built-ins see it); the editor holds it while a line is being read, and
     // the loop swaps it across at exactly those two points.

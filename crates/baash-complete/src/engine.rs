@@ -8,6 +8,7 @@
 //! `with_…` builders remain for tests and for a one-shot engine.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 #[cfg(feature = "carapace")]
@@ -82,6 +83,11 @@ pub struct CompletionEngine {
     specs: RwLock<Option<Arc<dyn SpecSource>>>,
     /// The shell's `COMP_WORDBREAKS`, when it differs from bash's default.
     word_breaks: RwLock<Option<Vec<u8>>>,
+    /// readline's `completion-ignore-case`, from the user's inputrc. Off by
+    /// default, which is bash's default: a candidate that differs only in case
+    /// is then not an exact match, though the ranker still offers it below the
+    /// exact ones (`rank.rs` tier 1).
+    ignore_case: AtomicBool,
     ranker: Mutex<Ranker>,
 }
 
@@ -114,6 +120,7 @@ impl CompletionEngine {
             vars: RwLock::new(None),
             specs: RwLock::new(None),
             word_breaks: RwLock::new(None),
+            ignore_case: AtomicBool::new(false),
             ranker: Mutex::new(Ranker::new()),
         };
         engine.set_provider(Arc::clone(&paths) as Arc<dyn Provider>);
@@ -320,7 +327,7 @@ impl CompletionEngine {
                 } else {
                     Vec::new()
                 };
-            keep_prefixed(&mut fallback, &deferred.ctx().prefix);
+            keep_prefixed(&mut fallback, &deferred.ctx().prefix, self.ignore_case());
             for candidate in &mut fallback {
                 decorate_candidate(candidate, spec);
             }
@@ -328,7 +335,7 @@ impl CompletionEngine {
         }
         if has_option(options, OPT_PLUSDIRS) {
             let mut directories = self.directory_candidates(deferred.ctx());
-            keep_prefixed(&mut directories, &deferred.ctx().prefix);
+            keep_prefixed(&mut directories, &deferred.ctx().prefix, self.ignore_case());
             for candidate in &mut directories {
                 decorate_candidate(candidate, spec);
             }
@@ -458,6 +465,21 @@ impl CompletionEngine {
         self.commands.invalidate();
     }
 
+    /// Honour readline's `completion-ignore-case`.
+    ///
+    /// It is the one readline variable the shell reads, because bash's own
+    /// `compgen` honours it inside a completion: with it set, `mpv Me` matches
+    /// `MEGALOVANIA …` and `measure.py`, which is the difference between a
+    /// filename list and the whole directory.
+    pub fn set_ignore_case(&self, on: bool) {
+        self.ignore_case.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether candidates match case-insensitively.
+    pub fn ignore_case(&self) -> bool {
+        self.ignore_case.load(Ordering::Relaxed)
+    }
+
     /// Drop every cached directory listing.
     pub fn invalidate_paths(&self) {
         self.paths.clear_cache();
@@ -570,20 +592,20 @@ impl CompletionEngine {
                 candidates.extend(self.action_candidates(action, ctx, providers));
             }
         }
-        keep_prefixed(&mut candidates, &ctx.prefix);
+        keep_prefixed(&mut candidates, &ctx.prefix, self.ignore_case());
 
         if candidates.is_empty() {
             if spec.has_option(OPT_DEFAULT) || spec.has_option(OPT_BASHDEFAULT) {
                 candidates = self.default_candidates(ctx, providers);
-                keep_prefixed(&mut candidates, &ctx.prefix);
+                keep_prefixed(&mut candidates, &ctx.prefix, self.ignore_case());
             } else if spec.has_option(OPT_DIRNAMES) {
                 candidates = self.directory_candidates(ctx);
-                keep_prefixed(&mut candidates, &ctx.prefix);
+                keep_prefixed(&mut candidates, &ctx.prefix, self.ignore_case());
             }
         }
         if spec.has_option(OPT_PLUSDIRS) {
             let mut directories = self.directory_candidates(ctx);
-            keep_prefixed(&mut directories, &ctx.prefix);
+            keep_prefixed(&mut directories, &ctx.prefix, self.ignore_case());
             candidates.extend(directories);
         }
 
@@ -698,11 +720,17 @@ fn keyword_candidates() -> Vec<Candidate> {
 }
 
 /// Drop candidates that do not start with the typed prefix.
-fn keep_prefixed(candidates: &mut Vec<Candidate>, prefix: &[u8]) {
+fn keep_prefixed(candidates: &mut Vec<Candidate>, prefix: &[u8], ignore_case: bool) {
     if prefix.is_empty() {
         return;
     }
-    candidates.retain(|candidate| text::starts_with(&candidate.insert, prefix));
+    candidates.retain(|candidate| {
+        if ignore_case {
+            text::starts_with_ascii_ci(&candidate.insert, prefix)
+        } else {
+            text::starts_with(&candidate.insert, prefix)
+        }
+    });
 }
 
 /// Apply `-P prefix`/`-S suffix` to a candidate.

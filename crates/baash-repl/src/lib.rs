@@ -38,7 +38,9 @@
 //!   what a terminal without `stty -ixon` can deliver.
 //! * **Readline's menu-complete.** Tab cycles the menu (fish's pager) and
 //!   Enter inserts the selection; it does not insert on each repeated Tab.
-//! * **Vi mode and `set -o vi`.** No modal editing, no `bind`, no `inputrc`.
+//! * **Vi mode and `set -o vi`.** No modal editing and no `bind`; of
+//!   readline's inputrc only `completion-ignore-case` is read
+//!   (`crates/baash/src/inputrc.rs`).
 //! * **The full-screen picker** (`DESIGN.md` §6.8). The inline menu is
 //!   columnar, paged and has a description column, but there is no separate
 //!   screen with a preview pane.

@@ -1656,6 +1656,26 @@ Sources that would be lies are stubs returning nothing rather than plausible
 lists: `binding` (no line editor), `service`, `job`/`running`/`stopped` (no
 job table), `disabled` built-ins (`enable -n` absent).
 
+`compopt` has bash's other form too: `compopt [-o option] [+o option] [-DEI]
+[name …]` edits the *saved* rule named by a command (or the default/empty/
+initial rule), and reports `no completion specification` with status 1 when
+there is none, instead of a usage error. A change to the rule of the command
+currently being completed also reaches the run in progress
+(`CompletionRun::set_command`), because the options a function reads back are
+the ones the run started with; editing only the saved rule would apply one
+keystroke late. bash-completion's `_comp_load` depends on this form, and so
+does every `mpv` completion.
+
+`crates/baash/src/inputrc.rs` reads exactly one readline variable:
+`set completion-ignore-case on` from `$INPUTRC`, else `~/.inputrc`. bash's own
+`compgen` honours it inside a completion, so with it set `compgen -f -- Me`
+matches `MEGALOVANIA.webm` and `measure.py`; without it neither matches, and a
+completion function whose `_filedir` finds nothing falls back to the whole
+directory. It is applied in two places — `Interp`'s file action (which is what
+`compgen -f` answers) and the engine's `keep_prefixed` — and nowhere else:
+`complete`/`compgen` name matching stays case-sensitive, and the rest of
+readline's inputrc is still not read.
+
 Two status codes are deliberately not bash's, both annotated as bugs in the
 suite: `complete -p NAME` for an unknown NAME is 0 (bash 1), and `complete NAME`
 with no action is 2 (bash 0).

@@ -32,8 +32,9 @@
 //!   at all is also `0` and prints nothing, which is what bash does.
 
 use crate::complete::{
-    CompletionAction, CompletionSource, CompletionSpec, CompletionTable, Request, WordList,
-    candidates, filter_prefix, has_option, is_completion_option, parse_complete, short_action,
+    CompletionAction, CompletionSource, CompletionSpec, CompletionTable, OptionTarget, Request,
+    WordList, candidates, filter_prefix, has_option, is_completion_option, parse_complete,
+    short_action,
 };
 use crate::{Opts, ShellHost, Status, VarValue};
 
@@ -513,55 +514,115 @@ pub(super) fn bi_complete(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
     }
 }
 
-/// `compopt [-o option] [+o option] …`.
+/// `compopt [-o option] [+o option] [-DEI] [name …]`.
 ///
-/// It edits only the completion *in progress*: outside one there is nothing to
-/// change and bash returns 1, which the suite pins. The options it sets are
-/// recorded in [`crate::complete::CompletionRun`] for the engine that is
-/// generating the completion.
+/// Two forms, exactly bash's. With no target it edits only the completion
+/// *in progress*: outside one there is nothing to change and bash returns 1,
+/// which the suite pins. With a target — one or more command names, or
+/// `-D`/`-E`/`-I` — it edits the saved rule, and bash-completion's loader
+/// depends on that: `compopt +o nospace mpv` runs before the rule for `mpv`
+/// has been loaded, and a rule that is not there is an error (status 1), not
+/// a usage error. Only a bad option letter or a bad option *name* is a usage
+/// error (status 2).
 pub(super) fn bi_compopt(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
     let mut changes: Vec<(Vec<u8>, bool)> = Vec::new();
+    let mut targets: Vec<OptionTarget> = Vec::new();
+    let mut names_only = false;
     let mut index = 1;
     while index < argv.len() {
         let argument = argv[index];
-        if argument == b"--" {
-            break;
-        }
-        let sign = argument.first().copied().unwrap_or(b'-');
-        if argument.len() > 1 && matches!(sign, b'-' | b'+') {
-            if &argument[1..] != b"o" {
-                return usage(host, argv, "usage: compopt [-o option] [+o option]");
-            }
-            let Some(value) = argv.get(index + 1) else {
-                return usage(host, argv, "-o: option requires an argument");
-            };
-            if !is_completion_option(value) {
-                diagnose(
-                    host,
-                    codes::USAGE,
-                    format!("compopt: {}: invalid option name", display(value)),
-                );
-                return Status(2);
-            }
-            changes.push((value.to_vec(), sign == b'-'));
-            index += 2;
+        if !names_only && argument == b"--" {
+            names_only = true;
+            index += 1;
             continue;
         }
-        return usage(host, argv, "usage: compopt [-o option] [+o option]");
+        let sign = argument.first().copied().unwrap_or(b'-');
+        if !names_only && argument.len() > 1 && matches!(sign, b'-' | b'+') {
+            match &argument[1..] {
+                b"o" => {
+                    let Some(value) = argv.get(index + 1) else {
+                        return usage(host, argv, "-o: option requires an argument");
+                    };
+                    if !is_completion_option(value) {
+                        diagnose(
+                            host,
+                            codes::USAGE,
+                            format!("compopt: {}: invalid option name", display(value)),
+                        );
+                        return Status(2);
+                    }
+                    changes.push((value.to_vec(), sign == b'-'));
+                    index += 2;
+                }
+                b"D" if sign == b'-' => {
+                    targets.push(OptionTarget::Default);
+                    index += 1;
+                }
+                b"E" if sign == b'-' => {
+                    targets.push(OptionTarget::Empty);
+                    index += 1;
+                }
+                b"I" if sign == b'-' => {
+                    targets.push(OptionTarget::Initial);
+                    index += 1;
+                }
+                _ => {
+                    return usage(
+                        host,
+                        argv,
+                        "usage: compopt [-o option] [+o option] [-DEI] [name ...]",
+                    );
+                }
+            }
+            continue;
+        }
+        targets.push(OptionTarget::Name(argument.to_vec()));
+        index += 1;
     }
 
-    if !host.state().completion.is_active() {
-        diagnose(
-            host,
-            codes::USAGE,
-            "compopt: not currently executing completion function",
-        );
-        return Status::FAILURE;
+    if targets.is_empty() {
+        if !host.state().completion.is_active() {
+            diagnose(
+                host,
+                codes::USAGE,
+                "compopt: not currently executing completion function",
+            );
+            return Status::FAILURE;
+        }
+        for (name, on) in changes {
+            host.state().completion.set_option(&name, on);
+        }
+        return Status::SUCCESS;
     }
-    for (name, on) in changes {
-        host.state().completion.set_option(&name, on);
+
+    // A change to the rule of the command being completed has to reach the
+    // run as well: the completion is generated from the options the run
+    // started with, so a saved-only edit would take effect one keystroke late.
+    let running = host.state().completion.command().map(<[u8]>::to_vec);
+    let mut missing = false;
+    for target in &targets {
+        if !host.state().completions.set_options(target, &changes) {
+            diagnose(
+                host,
+                codes::USAGE,
+                format!("compopt: {}: no completion specification", target.display()),
+            );
+            missing = true;
+            continue;
+        }
+        if let OptionTarget::Name(name) = target
+            && running.as_deref() == Some(name.as_slice())
+        {
+            for (option, on) in &changes {
+                host.state().completion.set_option(option, *on);
+            }
+        }
     }
-    Status::SUCCESS
+    if missing {
+        Status::FAILURE
+    } else {
+        Status::SUCCESS
+    }
 }
 
 #[cfg(test)]

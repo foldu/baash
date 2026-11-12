@@ -364,6 +364,13 @@ impl<'a> ShellCompleter<'a> {
         }
         // The rule's own `-o` options are in force before the function runs, so
         // `compopt +o …` can turn one off and `compopt -o …` can add another.
+        // The command is named too, because the compatibility loaders call
+        // `compopt -o … <command>` and that has to reach this run as well as
+        // the saved rule (see `bi_compopt`).
+        self.shell
+            .state()
+            .completion
+            .set_command(Some(deferred.command()));
         self.shell.state().completion.begin(&options);
         let captured = self.shell.call_function_captured(&function, &argv);
         let options = self.shell.state().completion.options().to_vec();
