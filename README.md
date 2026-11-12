@@ -68,7 +68,7 @@ readline-compatible reverse incremental search.
 While `PS1` is untouched, the prompt is one tide-like line:
 
 ```text
-~/sr/gith/fo/nixos-config  master  ↑23 !2 ?5 $
+~/sr/gith/fo/nixos-config master ↑23 !2 ?5 $
 ```
 
 The folder and branch glyphs tide puts in front of those two segments are Nerd

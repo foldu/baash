@@ -381,7 +381,7 @@ fn the_default_prompt_is_tide_like() {
     // home has no sibling that starts with `s`; the last component is whole.
     let marker = user_marker();
     let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
-    let prompt = format!("~/s/bshell  main {marker}");
+    let prompt = format!("~/s/bshell main {marker}");
     session.prompt(&prompt);
     // The counts are git's, not the shell's: a failing command and a background
     // child leave the prompt alone.
@@ -409,8 +409,8 @@ fn the_prompt_glyphs_are_an_option() {
     std::fs::create_dir_all(work.join(".git")).expect("create git directory");
     std::fs::write(work.join(".git/HEAD"), b"ref: refs/heads/main\n").expect("write HEAD");
     let marker = user_marker();
-    let plain = format!("~/s/bshell  main {marker}");
-    let ornate = format!("\u{f115} ~/s/bshell  \u{f418} main {marker}");
+    let plain = format!("~/s/bshell main {marker}");
+    let ornate = format!("\u{f115} ~/s/bshell \u{f418} main {marker}");
 
     let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
     session.prompt(&plain);
@@ -502,7 +502,7 @@ fn the_prompt_counts_ahead_behind_modified_and_untracked() {
     let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[("PROMPT_ICONS", "1")]);
     // The directory is `~/repo`; the counters arrive from the worker, so wait
     // for the whole suffix rather than for the first prompt.
-    session.prompt("\u{f418} main  \u{2191}1 \u{2193}1 !1 ?1 $");
+    session.prompt("\u{f418} main \u{2191}1 \u{2193}1 !1 ?1 $");
     // A long line and an editing key must not corrupt the prompt's column
     // arithmetic (the icons are width 1, the SGR sequences width 0).
     session.send(&[b'x'; 240]);

@@ -397,7 +397,7 @@ loop (`crates/baash/src/main.rs`, `prompt_state.rs`) paints
 worker-fed git facts and must not run on the prompt path. The line is
 
 ```text
-~/sr/gith/fo/nixos-config  master  ↑23 !2 ?5 $
+~/sr/gith/fo/nixos-config master ↑23 !2 ?5 $
 ```
 
 `PROMPT_ICONS` decides whether the folder (U+F115) and branch (U+F418) glyphs
@@ -409,7 +409,7 @@ prompt is armed, so `PROMPT_ICONS=1` typed at the prompt takes effect at the
 next one. With them on the line has one space after each glyph:
 
 ```text
- ~/sr/gith/fo/nixos-config   master  ↑23 !2 ?5 $
+ ~/sr/gith/fo/nixos-config  master ↑23 !2 ?5 $
 ```
 
 `baash_lang::prompt::Paint` carries the three choices a caller makes — ANSI
@@ -419,7 +419,7 @@ rather than three flags; `Paint::default()` is plain text with no glyphs.
 In a session that came in over `ssh`, `user@host` is the leading segment:
 
 ```text
-barnabas@jupiter  ~/src/bshell  main  ↑1 $
+barnabas@jupiter ~/src/bshell main ↑1 $
 ```
 
 The marker is followed by one plain (unpainted) space, so the first character
@@ -465,9 +465,9 @@ Segments, in order:
 * **`$`**, or `#` for root. One space on either side; the one after it is
   unpainted, so it cannot take the marker's colour.
 
-The major segments are two spaces apart; the counters are one segment whose
-members are single-spaced. A clean repository is
-`~/src/bshell  main $` — no empty counter slot.
+The segments are one space apart; the counters are one segment whose members
+are single-spaced too. A clean repository is
+`~/src/bshell main $` — no empty counter slot.
 
 The counters are computed in process by `gix` as a task on the shell's `compio`
 runtime — a blocking walk on the runtime's pool (`crates/baash/src/git_prompt.rs`)

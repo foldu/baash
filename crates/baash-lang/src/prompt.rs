@@ -1027,8 +1027,8 @@ pub struct Paint {
 /// * `$`, or `#` for a root user, with a space on either side: the marker is
 ///   separated from the line the user types.
 ///
-/// The major segments are two spaces apart; the counters are one segment whose
-/// members are single-spaced, which is the reference line's `↑23 !2 ?5`.
+/// The segments are one space apart; the counters are one segment whose
+/// members are single-spaced too, which is the reference line's `↑23 !2 ?5`.
 ///
 /// The icons are ordinary bytes in the prompt string, not part of an escape
 /// sequence; `unicode-width` reports width 1 for U+F115 and U+F418 (both are
@@ -1101,7 +1101,7 @@ pub fn tide_prompt(
         sgr(out, color, RESET);
     }
 
-    // The major segments. Joined with two spaces below; the counters are one
+    // The major segments. Joined with one space below; the counters are one
     // segment with single spaces inside it.
     let mut segments: Vec<Vec<u8>> = Vec::with_capacity(4);
 
@@ -1183,13 +1183,15 @@ pub fn tide_prompt(
     let mut bytes = Vec::with_capacity(directory.len() + 64);
     for (index, segment) in segments.iter().enumerate() {
         if index > 0 {
-            bytes.extend_from_slice(b"  ");
+            bytes.push(b' ');
         }
         bytes.extend_from_slice(segment);
     }
-    // One space on either side of the marker. The reference line has two
-    // spaces between the path, the branch and the counters; the marker keeps
-    // its own space so the first character typed does not touch it, which is
+    // One space on either side of the marker, and one between the segments
+    // above: the gap belongs to the marker and to each segment's own edge, not
+    // a wider separator that reads as a stray double space once the glyphs are
+    // gone. It keeps its space so the first character typed does not touch it,
+    // which is
     // what `$echo` looked like. The space after is not painted, so it cannot
     // take a background colour from the marker.
     bytes.push(b' ');
@@ -2521,8 +2523,8 @@ mod tests {
 
     #[test]
     fn the_default_prompt_has_tides_order_and_spacing() {
-        // The reference line: directory, branch, counters, marker, with two
-        // spaces between the major segments and one before the marker.
+        // The reference line: directory, branch, counters, marker, one
+        // space between the segments and one before the marker.
         assert_eq!(
             render(
                 b"~/sr/gith/fo/nixos-config",
@@ -2530,15 +2532,15 @@ mod tests {
                 counts(2, 5, 23, 4)
             ),
             format!(
-                "{DIR_ICON} ~/sr/gith/fo/nixos-config  \
-                 {BRANCH_ICON} master  \u{2191}23 \u{2193}4 !2 ?5 $ "
+                "{DIR_ICON} ~/sr/gith/fo/nixos-config \
+                {BRANCH_ICON} master \u{2191}23 \u{2193}4 !2 ?5 $ "
             )
             .into_bytes()
         );
         // A clean repository keeps the branch and drops the counters.
         assert_eq!(
             render(b"~/sr/bshell", Some(b"main"), counts(0, 0, 0, 0)),
-            format!("{DIR_ICON} ~/sr/bshell  {BRANCH_ICON} main $ ").into_bytes()
+            format!("{DIR_ICON} ~/sr/bshell {BRANCH_ICON} main $ ").into_bytes()
         );
         // No repository: no branch segment at all, so no gap where it was.
         assert_eq!(
@@ -2561,8 +2563,8 @@ mod tests {
             )
             .into_bytes(),
             format!(
-                "\x1b[34m{DIR_ICON} ~/sr/gith/fo\x1b[96m/nixos-config\x1b[0m  \
-                 \x1b[32m{BRANCH_ICON} master\x1b[0m  \
+                "\x1b[34m{DIR_ICON} ~/sr/gith/fo\x1b[96m/nixos-config\x1b[0m \
+                 \x1b[32m{BRANCH_ICON} master\x1b[0m \
                  \x1b[33m\u{2191}23\x1b[0m \x1b[31m\u{2193}4\x1b[0m \
                  \x1b[33m!2\x1b[0m \x1b[31m?5\x1b[0m \x1b[32m$\x1b[0m "
             )
@@ -2624,7 +2626,7 @@ mod tests {
                 false
             )
             .into_bytes(),
-            format!("ada@jupiter  {DIR_ICON} ~/src/bshell  {BRANCH_ICON} main  \u{2191}1 $ ")
+            format!("ada@jupiter {DIR_ICON} ~/src/bshell {BRANCH_ICON} main \u{2191}1 $ ")
                 .into_bytes()
         );
         assert_eq!(
@@ -2638,7 +2640,7 @@ mod tests {
                 false
             )
             .into_bytes(),
-            format!("\x1b[33mada@jupiter\x1b[0m  \x1b[34m{DIR_ICON} /x\x1b[0m \x1b[31m#\x1b[0m ")
+            format!("\x1b[33mada@jupiter\x1b[0m \x1b[34m{DIR_ICON} /x\x1b[0m \x1b[31m#\x1b[0m ")
                 .into_bytes()
         );
     }
@@ -2658,7 +2660,7 @@ mod tests {
                 Paint::default()
             )
             .into_bytes(),
-            b"/x  main  !2 ?1 $ ".to_vec()
+            b"/x main !2 ?1 $ ".to_vec()
         );
     }
 
@@ -2686,7 +2688,7 @@ mod tests {
                 false
             )
             .into_bytes(),
-            format!("{DIR_ICON} /x  {BRANCH_ICON} main  !2 ?1 # ").into_bytes()
+            format!("{DIR_ICON} /x {BRANCH_ICON} main !2 ?1 # ").into_bytes()
         );
     }
 
@@ -2694,20 +2696,20 @@ mod tests {
     fn counters_are_suppressed_at_zero_and_keep_their_order() {
         assert_eq!(
             render(b"/x", None, counts(2, 0, 0, 0)),
-            format!("{DIR_ICON} /x  !2 $ ").into_bytes()
+            format!("{DIR_ICON} /x !2 $ ").into_bytes()
         );
         assert_eq!(
             render(b"/x", None, counts(0, 1, 0, 0)),
-            format!("{DIR_ICON} /x  ?1 $ ").into_bytes()
+            format!("{DIR_ICON} /x ?1 $ ").into_bytes()
         );
         // Singular, and large enough that a `u8` would wrap.
         assert_eq!(
             render(b"/x", None, counts(1, 1, 1, 1)),
-            format!("{DIR_ICON} /x  \u{2191}1 \u{2193}1 !1 ?1 $ ").into_bytes()
+            format!("{DIR_ICON} /x \u{2191}1 \u{2193}1 !1 ?1 $ ").into_bytes()
         );
         assert_eq!(
             render(b"/x", None, counts(123_456, 987_654_321, 4_294_967_295, 1)),
-            format!("{DIR_ICON} /x  \u{2191}4294967295 \u{2193}1 !123456 ?987654321 $ ")
+            format!("{DIR_ICON} /x \u{2191}4294967295 \u{2193}1 !123456 ?987654321 $ ")
                 .into_bytes()
         );
     }
@@ -2732,7 +2734,7 @@ mod tests {
 
         let mut expected = Vec::new();
         expected.extend_from_slice(DIR_ICON.as_bytes());
-        expected.extend_from_slice(b" ~/\xff  ");
+        expected.extend_from_slice(b" ~/\xff ");
         expected.extend_from_slice(BRANCH_ICON.as_bytes());
         expected.extend_from_slice(b" ma\xefn $ ");
         assert_eq!(render(b"~/\xff", Some(b"ma\xefn"), None), expected);

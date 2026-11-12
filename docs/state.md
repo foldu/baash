@@ -177,13 +177,13 @@ delegates everything else: line editing to `baash-repl`, execution to the
   number the line will get and `\#` bash's command number;
 * **the stock prompt is tide-like**: while `PS1` is still the built-in
   `\s-\v\$ `, the rendered prompt is
-  `~/sr/gith/fo/nixos-config  master  ↑23 !2 ?5 $` — the abbreviated `$PWD`
+  `~/sr/gith/fo/nixos-config master ↑23 !2 ?5 $` — the abbreviated `$PWD`
   (outer components shortened to their shortest unique prefix, the last one
   whole, `$HOME` as `~`), the git branch (read from `.git/HEAD`, following a `.git` file and `packed-refs` for
   worktrees; a detached `HEAD` is its seven-character commit id), then `↑N`
   commits ahead of the upstream and `↓N` behind it, `!N` modified tracked files
   and `?N` untracked files, each omitted at zero, then `$` (`#` for root). The
-  major segments are two spaces apart and the marker is followed by one plain
+  segments are one space apart and the marker is followed by one plain
   (unpainted) space.
   counters come from a `gix` status and commit-graph walk on a worker thread,
   rate-limited to 500 ms, coalesced and capped by a 2 s deadline; the prompt

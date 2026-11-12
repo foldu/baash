@@ -9,7 +9,7 @@ binary it does not need.
 The prompt is one line, rebuilt from the shell's state before every command:
 
 ```text
-~/sr/gith/fo/nixos-config  master  ↑23 !2 ?5 $
+~/sr/gith/fo/nixos-config master ↑23 !2 ?5 $
 ```
 
 `baash_lang::prompt::tide_prompt` paints it. It is built from data, never decoded
