@@ -51,6 +51,51 @@ fn command_position_lists_commands_and_builtins() {
     assert!(menu.candidates[0].tier == 0);
 }
 
+/// `./` at the prompt is a command word with a path, so Tab offers only what
+/// could run: executable files and directories. Without the filter a
+/// non-executable file is offered and `./notes.txt` fails with "Permission
+/// denied" when chosen.
+#[test]
+fn a_dot_slash_command_word_lists_only_executables_and_directories() {
+    let tree = TempTree::new("dotslash");
+    tree.exe("runme");
+    tree.file("notes.txt", b"");
+    tree.dir("subdir");
+
+    let engine = CompletionEngine::new().with_root(&tree.root);
+    let menu = engine.complete(b"./", 2);
+    assert_eq!(menu.expect, Expect::Command);
+    let found: Vec<&[u8]> = menu
+        .candidates
+        .iter()
+        .map(|candidate| candidate.insert.as_slice())
+        .collect();
+    assert!(found.contains(&b"./runme".as_slice()), "{found:?}");
+    assert!(found.contains(&b"./subdir/".as_slice()), "{found:?}");
+    assert!(
+        !found.contains(&b"./notes.txt".as_slice()),
+        "a non-executable file must not be offered as a command: {found:?}"
+    );
+    assert!(
+        found.iter().all(|insert| insert.starts_with(b"./")),
+        "`./` is a path, so keywords and variables are not candidates: {found:?}"
+    );
+
+    // A non-empty component must not let a fuzzy keyword in either: `for`
+    // contains `r`, and `./r` is still a path.
+    let menu = engine.complete(b"./r", 3);
+    let found: Vec<&[u8]> = menu
+        .candidates
+        .iter()
+        .map(|candidate| candidate.insert.as_slice())
+        .collect();
+    assert!(
+        found.iter().all(|insert| insert.starts_with(b"./")),
+        "a keyword is a fuzzy match, not a command: {found:?}"
+    );
+    assert!(found.contains(&b"./runme".as_slice()), "{found:?}");
+}
+
 #[test]
 fn an_empty_command_word_offers_whole_history_lines_newest_first() {
     // fzf-style history: at a blank prompt Tab lists entire previous commands,

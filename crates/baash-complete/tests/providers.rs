@@ -48,6 +48,44 @@ fn lists_the_typed_directory_only() {
     assert!(!found.contains(&b"other.rs".to_vec()));
 }
 
+/// A command word that looks like a path asks for what could be executed:
+/// executable files and directories, never a non-executable file. An ordinary
+/// argument still sees every entry (`cat ./`).
+#[test]
+fn a_command_slot_with_a_slash_lists_executables_and_directories() {
+    let tree = TempTree::new("command-paths");
+    tree.exe("runme");
+    tree.file("plain", b"");
+    tree.dir("subdir");
+    #[cfg(unix)]
+    tree.symlink(&tree.path("runme"), "link-to-runme");
+
+    let provider = PathProvider::with_root(&tree.root);
+    let command = inserts(&provider.candidates(&ctx("./")));
+    assert!(command.contains(&b"./runme".to_vec()));
+    assert!(command.contains(&b"./subdir/".to_vec()));
+    assert!(
+        !command.contains(&b"./plain".to_vec()),
+        "a non-executable file is not a command: {command:?}"
+    );
+    #[cfg(unix)]
+    assert!(
+        command.contains(&b"./link-to-runme".to_vec()),
+        "a symlink to an executable is one: {command:?}"
+    );
+
+    // A wrapper's argument is a command slot too (`sudo ./…`).
+    let wrapped = inserts(&provider.candidates(&ctx("sudo ./")));
+    assert!(wrapped.contains(&b"./runme".to_vec()));
+    assert!(!wrapped.contains(&b"./plain".to_vec()));
+
+    // After a command the slot is a file argument, so nothing is filtered.
+    let argument = inserts(&provider.candidates(&ctx("cat ./")));
+    assert!(argument.contains(&b"./plain".to_vec()));
+    assert!(argument.contains(&b"./runme".to_vec()));
+    assert!(argument.contains(&b"./subdir/".to_vec()));
+}
+
 #[test]
 fn directories_end_with_a_slash_and_do_not_append_a_space() {
     let tree = TempTree::new("dirs");

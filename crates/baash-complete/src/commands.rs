@@ -160,7 +160,7 @@ impl CommandProvider {
                     if file_type.is_dir() {
                         continue;
                     }
-                    if !is_executable(&entry.path(), file_type.is_symlink()) {
+                    if !crate::paths::is_executable_file(&entry.path()) {
                         continue;
                     }
                     let name = os_bytes(entry.file_name());
@@ -211,30 +211,6 @@ fn mtimes_moved(dirs: &[(PathBuf, Option<SystemTime>)]) -> bool {
             .ok();
         now != *recorded
     })
-}
-
-/// Whether `path` is an executable regular file (or an executable symlink).
-fn is_executable(path: &std::path::Path, is_symlink: bool) -> bool {
-    let metadata = if is_symlink {
-        fs::metadata(path)
-    } else {
-        fs::symlink_metadata(path)
-    };
-    let Ok(metadata) = metadata else {
-        return false;
-    };
-    if metadata.is_dir() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
 }
 
 /// The separator between `PATH` entries: `;` on Windows, `:` elsewhere.

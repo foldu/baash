@@ -64,6 +64,13 @@ pub enum PathMode {
     Files,
     /// Directories only.
     Directories,
+    /// Executable files and directories: what a command word may name.
+    ///
+    /// This is `compgen -c` for a word that looks like a path (`./run<TAB>`):
+    /// a non-executable file cannot be run, but a directory is kept — `./sub/`
+    /// is how the next component is reached, and bash-completion adds
+    /// directories with `-o plusdirs` too.
+    Commands,
 }
 
 /// Provides files and directories.
@@ -261,6 +268,12 @@ impl Provider for PathProvider {
             .is_some_and(|name| sources::is_one_of(name, sources::DIRECTORY_COMMANDS));
         let mode = if directories_only {
             PathMode::Directories
+        } else if sources::command_slot(ctx) {
+            // `./`, `../bin/` and `dir/x` in command position are command
+            // names with a slash, so `bash` (and bash-completion's
+            // `compgen -c -o plusdirs`) offers only what could be executed:
+            // executable files and directories.
+            PathMode::Commands
         } else {
             PathMode::Any
         };
@@ -300,6 +313,12 @@ impl PathProvider {
             match mode {
                 PathMode::Directories if !entry.is_dir => continue,
                 PathMode::Files if entry.is_dir => continue,
+                PathMode::Commands
+                    if !entry.is_dir
+                        && !is_executable_file(&directory.join(path_from_bytes(&entry.name))) =>
+                {
+                    continue;
+                }
                 _ => {}
             }
             let mut insert = Vec::with_capacity(typed_dir.len() + entry.name.len() + 1);
@@ -346,4 +365,28 @@ fn path_from_bytes(bytes: &[u8]) -> PathBuf {
 #[cfg(not(unix))]
 fn path_from_bytes(bytes: &[u8]) -> PathBuf {
     PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// Whether `path` names a regular file the shell could execute.
+///
+/// Symlinks are followed (a link to a script is runnable), and a directory is
+/// never executable here: it is offered as a directory so the next component
+/// can be typed. On Windows any regular file passes, the same rule the `PATH`
+/// command index uses until `PATHEXT` is modelled.
+pub(crate) fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if metadata.is_dir() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }

@@ -125,8 +125,14 @@ impl Ranker {
                 } else {
                     display
                 };
-                let score =
-                    needle_component.and_then(|needle| self.score(haystack, needle, is_path));
+                let score = match needle_component {
+                    // A prefix ending in `/` has no final component, and an
+                    // empty needle matches every name — which put every
+                    // keyword and variable in a `./` or `src/` menu. Only
+                    // candidates that share the typed prefix belong there.
+                    None | Some("") => None,
+                    Some(needle) => self.score(haystack, needle, is_path),
+                };
                 match score {
                     Some(score) => {
                         candidate.tier = 2;
@@ -262,6 +268,31 @@ mod tests {
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].insert, b"a");
         assert!(candidates.iter().all(|c| c.tier == 0));
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_fuzzy_match_everything() {
+        // `./` and `src/` have an empty final component. An empty needle
+        // matches every name, which filled the command menu for `./` with
+        // keywords and variables; only candidates sharing the prefix remain.
+        let mut ranker = Ranker::new();
+        let mut candidates = vec![
+            Candidate::new("./runme", CandKind::Path),
+            Candidate::new("case", CandKind::Keyword),
+        ];
+        ranker.rank(&mut candidates, b"./");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].insert, b"./runme");
+
+        // A non-empty final component still fuzzy-matches normally.
+        let mut ranker = Ranker::new();
+        let mut candidates = vec![
+            Candidate::new("./runme", CandKind::Path),
+            Candidate::new("case", CandKind::Keyword),
+        ];
+        ranker.rank(&mut candidates, b"cas");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].insert, b"case");
     }
 
     #[test]

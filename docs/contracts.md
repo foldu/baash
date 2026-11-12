@@ -868,6 +868,22 @@ candidate that starts with `$` is `Insertion::Source`. Inside `${…}` a bare
 name is offered as `NAME}`, because bash closes the expansion (`${PA<TAB>` →
 `${PATH}`) and a name without the brace would not re-parse.
 
+**A command word with a path is filtered to what could run.** `./`, `../bin/`
+and `dir/x` in a command slot (`Expect::Command`, or a wrapper's argument such
+as `sudo ./`) make the `PATH` index inapplicable, so `PathProvider` answers
+from the typed directory. It uses `PathMode::Commands`: executable regular
+files (any `x` bit; a symlink is followed; on Windows any file until `PATHEXT`
+is modelled) plus directories, because `./sub/` is how the next component is
+reached and bash-completion adds directories with `-o plusdirs` as well. A
+non-executable file is left out: choosing it would run `./notes.txt` and fail.
+An ordinary argument (`cat ./`) is a file slot and still lists every entry.
+
+Two rules keep a path word from collecting names: the command slot consults
+only `PathProvider` (`default_candidates` narrows the table for a path-like
+command word), and a prefix ending in `/` has an empty final component, so
+ranking skips the fuzzy tier instead of matching every name (`./r` used to
+offer the keyword `for`).
+
 **`-F` is a handoff, and the handoff is the API.** The engine exposes
 `CompletionEngine::deferred(line, cursor) -> Option<Deferred>` (the rule names a
 function and the slot is an argument) and

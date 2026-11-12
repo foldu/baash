@@ -507,8 +507,18 @@ impl CompletionEngine {
 
     /// The candidates the expectation table asks for, unfiltered.
     fn default_candidates(&self, ctx: &Ctx, providers: &[Arc<dyn Provider>]) -> Vec<Candidate> {
+        // A command word with a slash is a path, not a name. bash asks only
+        // its path completion for `./x`; without this a fuzzy keyword or
+        // variable slipped into the menu beside the executable (`./r` offered
+        // `for`).
+        let path_only = sources::command_slot(ctx) && text::looks_like_path(&ctx.prefix);
+        let ids: &[ProviderId] = if path_only {
+            &[ProviderId::Path]
+        } else {
+            sources::providers_for(ctx.expect)
+        };
         let mut candidates = Vec::new();
-        for &id in sources::providers_for(ctx.expect) {
+        for &id in ids {
             let Some(provider) = providers.iter().find(|provider| provider.id() == id) else {
                 continue;
             };

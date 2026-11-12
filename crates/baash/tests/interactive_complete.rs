@@ -492,6 +492,34 @@ fn directory_completion_stops_at_the_directory() {
     cleanup(&mut session, &home, &work);
 }
 
+/// `./` at the prompt completes commands, not files: only entries that could
+/// be executed (and directories, to reach a command below them) are offered.
+#[test]
+fn a_dot_slash_command_word_offers_only_executables_and_directories() {
+    let (mut session, home, work) = session("dotslash");
+    let runme = work.join("runme");
+    std::fs::write(&runme, b"#!/bin/sh\necho RAN\n").expect("write runme");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&runme, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    std::fs::write(work.join("notes.txt"), b"NOTES\n").expect("write notes");
+    std::fs::create_dir(work.join("subdir")).expect("create subdirectory");
+
+    session.send(b"./\t");
+    session.expect(b"runme", Duration::from_secs(10));
+    assert!(
+        find(&session.output, b"notes.txt").is_none(),
+        "a non-executable file was offered for `./`: {}",
+        String::from_utf8_lossy(&session.output)
+    );
+    session.send(b"\x15"); // Ctrl-U: clear the line
+    session.send(b"echo ok\n");
+    session.expect(b"ok\r\n", Duration::from_secs(10));
+    session.prompt();
+    cleanup(&mut session, &home, &work);
+}
+
 #[test]
 fn a_programmable_rule_with_a_default_still_completes_files() {
     let (mut session, home, work) = session("defaultspec");
