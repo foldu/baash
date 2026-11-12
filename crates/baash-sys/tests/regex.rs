@@ -289,7 +289,17 @@ fn the_default_engine_is_the_platform_one() {
     assert_eq!(Engine::default(), Engine::System);
     #[cfg(not(unix))]
     assert_eq!(Engine::default(), Engine::Minrx);
+    // The property that has to hold on every target, and the one a Windows
+    // user depends on with no flag, no `BAASH_REGEX_ENGINE` and no config: the
+    // engine chosen by default has to be one this platform actually has.
+    // Windows has no `regcomp`, so a default of `System` there would not fall
+    // back — every `=~` would fail with `Unavailable`.
+    assert!(Engine::default().is_available());
     assert_eq!(compile(b"a").engine(), Engine::default());
+    // The interpreter's memo is what `=~` actually uses, so its default engine
+    // is the one that matters; the Linux test suite would not notice this
+    // regressing on Windows.
+    assert_eq!(Cache::default().engine(), Engine::default());
 }
 
 #[test]

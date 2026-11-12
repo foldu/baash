@@ -1164,8 +1164,10 @@ different ones:
   which has no `regcomp`.
 - **`Engine::Minrx`** — [MinRX][minrx], a small BSD-2-Clause POSIX ERE engine
   vendored by `minrx-sys` and compiled by `cc` on every target. The only engine
-  on Windows; the opt-in alternative on Unix with `--regex-engine minrx` (or
-  `BAASH_REGEX_ENGINE=minrx`).
+  on Windows, and what `Engine::default()` returns there — no flag, no
+  `BAASH_REGEX_ENGINE`, no configuration file: a bare `baash.exe` compiles
+  `=~` with MinRX. On Unix it is the opt-in alternative, `--regex-engine minrx`
+  (or `BAASH_REGEX_ENGINE=minrx`).
 
 The conformance target is bash, and bash uses the platform engine: POSIX
 leftmost-**longest** matching (`[[ "abcd" =~ (ab|abcd) ]]` yields `abcd`, where
