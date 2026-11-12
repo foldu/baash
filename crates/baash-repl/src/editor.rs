@@ -252,6 +252,11 @@ pub struct Editor<'a> {
     /// the working-directory report (OSC 7). They are not painted through the
     /// frame, because they have no width and the renderer would count them.
     preamble: Vec<u8>,
+    /// The screen row (one-based) the prompt started on, from the
+    /// cursor-position report. Mouse clicks are reported in screen cells, so
+    /// without this there is nothing to measure them against; `None` means the
+    /// terminal did not answer and clicks are ignored.
+    prompt_row: Option<u16>,
 }
 
 impl<'a> Editor<'a> {
@@ -292,6 +297,7 @@ impl<'a> Editor<'a> {
             secondary: false,
             dirty: true,
             preamble: Vec::new(),
+            prompt_row: None,
         }
     }
 
@@ -463,6 +469,7 @@ impl<'a> Editor<'a> {
 
     /// Reset per-line state and paint the first prompt.
     fn begin(&mut self) {
+        self.prompt_row = None;
         self.line.reset();
         if let Some(initial) = self.initial.take() {
             self.line.set_text(&initial);
@@ -475,6 +482,36 @@ impl<'a> Editor<'a> {
         self.secondary = false;
         self.renderer.reset();
         self.dirty = true;
+    }
+
+    /// Put the cursor where the user clicked on the command line.
+    ///
+    /// The terminal reports a screen cell; the frame is a `columns`-wide strip
+    /// of rows beginning at the prompt's row, so subtracting the prompt's cell
+    /// count gives an offset into the editable text. Without a
+    /// cursor-position report there is no row to measure from, and a click is
+    /// ignored rather than guessed at. A click on the prompt itself lands at
+    /// the start of the line.
+    fn move_cursor_to_click(&mut self, column: u16, row: u16) {
+        let Some(prompt_row) = self.prompt_row else {
+            return;
+        };
+        // A continuation line's editable region contains newlines, and the
+        // strip model does not hold across them.
+        if self.line.editable().contains(&b'\n') {
+            return;
+        }
+        let Some(row_offset) = row.checked_sub(prompt_row) else {
+            return;
+        };
+        let columns = self.term.size().columns_or_fallback().max(1);
+        let cell = u32::from(row_offset)
+            .saturating_mul(u32::from(columns))
+            .saturating_add(u32::from(column.saturating_sub(1)));
+        let offset = cell.saturating_sub(u32::from(self.renderer.prompt_cells())) as usize;
+        let end = self.line.start() + self.line.editable().len();
+        self.line.set_cursor(self.line.start() + offset.min(end));
+        self.menu = None;
     }
 
     /// Start the prompt on a line of its own when the output before it did not
@@ -495,11 +532,21 @@ impl<'a> Editor<'a> {
         let position = self
             .decoder
             .cursor_position(self.term, CURSOR_QUERY_TIMEOUT)?;
-        if let Some((_row, column)) = position
-            && column != 1
-        {
-            self.term.write_all(b"\r\n")?;
-            self.renderer.reset();
+        if let Some((row, column)) = position {
+            if column != 1 {
+                self.term.write_all(b"\r\n")?;
+                self.renderer.reset();
+            }
+            // Clicks are reported in screen rows, so the prompt's own row is
+            // what they are measured from. A newline above moves it down one;
+            // if that newline scrolled the screen instead, the row is one too
+            // high and a click lands a row off, which moves the cursor near
+            // the click rather than somewhere unrelated.
+            self.prompt_row = Some(if column == 1 {
+                row
+            } else {
+                row.saturating_add(1)
+            });
         }
         Ok(())
     }
@@ -522,6 +569,10 @@ impl<'a> Editor<'a> {
                 match self.term.await_input()? {
                     Input::Key => {}
                     Input::Resize => {
+                        // The prompt's screen row is no longer known: the
+                        // terminal reflowed and the next report is a prompt
+                        // away.
+                        self.prompt_row = None;
                         // The terminal reflowed its contents; the frame's rows
                         // and columns describe the old width. Re-anchor from
                         // the cursor and paint again at the size the renderer
@@ -732,6 +783,9 @@ impl<'a> Editor<'a> {
             }
             Key::Ctrl(0x0b) => {
                 self.line.kill_to_end();
+            }
+            Key::MouseLeft { column, row } => {
+                self.move_cursor_to_click(column, row);
             }
             Key::Ctrl(0x18) => {
                 // Copy the line to the terminal's clipboard (OSC 52). There is

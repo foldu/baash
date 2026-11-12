@@ -1486,3 +1486,30 @@ fn ctrl_x_copies_the_line_to_the_terminal_clipboard() {
         "the whole line is base64 in the clipboard sequence: {output:?}"
     );
 }
+
+/// A click on the command line puts the cursor at the clicked cell.
+///
+/// The terminal reports a screen row and column; the prompt reported its own
+/// row when the line began, and the renderer knows how many cells the prompt
+/// took. A click at column 5 on a prompt of two cells is offset 2 into the
+/// line, so the next character typed lands there.
+#[test]
+fn a_click_moves_the_cursor_to_the_clicked_cell() {
+    // The `DSR` reply says the prompt is at row 3, column 1 (no newline
+    // needed); the click is row 3, column 5.
+    let mut term = FakeTerminal::new(b"\x1b[3;1Rabcdef\x1b[<0;5;3MX\r");
+    let completer = StubCompleter::empty();
+    let mut editor = Editor::new(&mut term, &completer, &baash_repl::NeverNeedsMore);
+    let result = editor.read_line().expect("read_line");
+    assert_eq!(result, ReadResult::Line(b"abXcdef\n".to_vec()));
+}
+
+/// Without a cursor-position report there is no row to measure a click from.
+#[test]
+fn a_click_without_a_cursor_report_is_ignored() {
+    let mut term = FakeTerminal::new(b"abcdef\x1b[<0;5;3MX\r");
+    let completer = StubCompleter::empty();
+    let mut editor = Editor::new(&mut term, &completer, &baash_repl::NeverNeedsMore);
+    let result = editor.read_line().expect("read_line");
+    assert_eq!(result, ReadResult::Line(b"abcdefX\n".to_vec()));
+}

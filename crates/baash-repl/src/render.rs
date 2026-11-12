@@ -108,6 +108,10 @@ pub struct Renderer {
     columns: u16,
     /// Whether the cursor is known to be at the start of a fresh region.
     fresh: bool,
+    /// How many cells the prompt occupied in the last frame, counting wrapped
+    /// rows as a strip. A mouse click is mapped through this: the frame is a
+    /// `columns`-wide strip, and the editable text starts after the prompt.
+    prompt_cells: u16,
 }
 
 impl Renderer {
@@ -119,6 +123,7 @@ impl Renderer {
             end_col: 0,
             columns: Size::FALLBACK.columns,
             fresh: true,
+            prompt_cells: 0,
         }
     }
 
@@ -157,6 +162,15 @@ impl Renderer {
         canvas.clear_below();
 
         paint_prompt(&mut canvas, frame.prompt);
+        // Where the editable text starts, as a linear cell index into the
+        // strip. `paint_prompt` leaves the canvas at the prompt's last cell,
+        // and the canvas started at its first, so this is the prompt's width
+        // including any wrapped rows — the same arithmetic a click uses.
+        let prompt_end = canvas.position();
+        self.prompt_cells = prompt_end
+            .0
+            .saturating_mul(columns)
+            .saturating_add(prompt_end.1);
         let cursor_position = paint_line(&mut canvas, frame.line, frame.cursor, theme, color);
         if let Some(ghost) = frame.ghost {
             paint_ghost(&mut canvas, ghost, color);
@@ -186,6 +200,11 @@ impl Renderer {
         self.end_col = end.1;
         self.fresh = false;
         term.write_all(&canvas.out)
+    }
+
+    /// How many cells the prompt occupied in the last frame.
+    pub fn prompt_cells(&self) -> u16 {
+        self.prompt_cells
     }
 
     /// Erase the painted frame and leave the cursor where it began.

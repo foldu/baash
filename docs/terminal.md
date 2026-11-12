@@ -94,9 +94,14 @@ is a separate decision and is not done yet.
 ## 4. OSC 133: prompt marks (A and B)
 
 ```
-ESC ] 133 ; A ESC \      prompt starts here
-ESC ] 133 ; B ESC \      prompt ends here, the command line begins
+ESC ] 133 ; A ; click_events=1 ESC \   prompt starts here
+ESC ] 133 ; B ESC \                    prompt ends here, the line begins
 ```
+
+`click_events=1` is kitty's extension on `A`: the terminal reports
+left-button presses on the prompt and command line as mouse events, which is
+what click-to-move (§10) uses. A terminal that does not know the parameter
+ignores it, and general mouse tracking is never enabled.
 
 `A` is written after the preamble and before the prompt's first byte; `B` is
 written after the first frame, so it lands at the end of the prompt with the
@@ -217,8 +222,31 @@ needs `allowWindowOps`) or cap the payload size, and the shell cannot tell.
 There is no selection yet, so the whole line is copied; mouse selection is what
 will make a partial copy possible.
 
-## 10. What is next
-In landing order, each with its own commit: prompt-line clicks (and the
-selection that goes with them), background-colour detection with a light
-theme, and the kitty keyboard protocol. The ordered list is the session's task
-list; this file records what has actually landed.
+## 10. Click to move the cursor
+
+Because the prompt-start mark asks for `click_events=1`, a supporting terminal
+reports a left-button press on the prompt or command line as an SGR mouse
+event:
+
+```
+ESC [ < 0 ; column ; row M
+```
+
+The editor maps the cell back to a byte offset. The frame is a `columns`-wide
+strip of rows beginning at the prompt's row (from the cursor-position report in
+§6); the renderer records how many cells the prompt occupied, wrapped rows
+included; the difference between the clicked cell's linear index and that count
+is the offset into the editable line. A click on the prompt itself lands at the
+start of the line.
+
+Nothing happens without a cursor-position report: on a terminal that does not
+answer `ESC [ 6 n`, or on the Windows console, the row is unknown and the click
+is ignored rather than guessed at. A release (`m`), a modified button and a
+scroll wheel decode as unknown sequences and are ignored. Double-click, drag
+and text selection are not implemented yet.
+
+## 11. What is next
+In landing order, each with its own commit: background-colour detection with a
+light theme, and the kitty keyboard protocol. Drag-selection and the clipboard
+integration it would bring are the natural follow-ups to §10. The ordered list
+is the session's task list; this file records what has actually landed.

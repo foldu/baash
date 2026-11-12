@@ -1090,6 +1090,16 @@ terminal's scrollback, and only then is the viewport erased. The count is the
 terminal's rows, read from `Terminal::size`, so a terminal with no `SU` support
 ignores the first sequence and clears exactly as before.
 
+**Click-to-move is a cursor move with no key behind it.** The terminal sends
+`Key::MouseLeft { column, row }` (SGR mouse, one-based) only because the
+prompt-start mark asks for `click_events=1`. The editor maps it through two
+recorded facts: `prompt_row`, from the cursor-position report that started the
+line, and `Renderer::prompt_cells`, the cells the prompt took in the last frame
+(wrapped rows counted as a strip). The offset into the editable line is
+`row_offset * columns + column - 1 - prompt_cells`. Without a cursor-position
+report the mapping is refused, not approximated; a release, a modified button
+and a scroll wheel are unknown keys.
+
 **The terminal owns the clipboard.** `Ctrl-X` writes OSC 52 with the current
 line, base64-encoded so a newline or a control byte cannot end the sequence
 early. Everything that is a protocol announcement rather than text — the

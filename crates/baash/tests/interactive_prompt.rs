@@ -749,12 +749,12 @@ fn the_prompt_is_marked_for_the_terminal() {
     let work = temp_dir("marks-work");
     let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
 
-    session.expect(b"\x1b]133;A\x1b\\", Duration::from_secs(10));
+    session.expect(b"\x1b]133;A;click_events=1\x1b\\", Duration::from_secs(10));
     session.prompt(" $");
     session.expect(b"\x1b]133;B\x1b\\", Duration::from_secs(10));
 
     session.send(b"true\n");
-    session.expect(b"\x1b]133;A\x1b\\", Duration::from_secs(10));
+    session.expect(b"\x1b]133;A;click_events=1\x1b\\", Duration::from_secs(10));
     session.prompt(" $");
     session.expect(b"\x1b]133;B\x1b\\", Duration::from_secs(10));
 
@@ -784,7 +784,7 @@ fn a_command_is_marked_with_its_text_and_status() {
     );
     session.expect(b"\x1b]133;D;0\x1b\\", Duration::from_secs(10));
     // The next prompt starts with its own `A` mark.
-    session.expect(b"\x1b]133;A\x1b\\", Duration::from_secs(10));
+    session.expect(b"\x1b]133;A;click_events=1\x1b\\", Duration::from_secs(10));
     session.prompt(" $");
 
     session.send(b"false\n");

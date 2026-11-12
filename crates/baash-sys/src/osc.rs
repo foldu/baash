@@ -61,10 +61,15 @@ pub fn cwd_report(cwd: &[u8], host: &[u8], flavour: Flavour) -> Option<Vec<u8>> 
 ///
 /// Terminals use the four OSC 133 marks to treat a command line as a unit:
 /// prompt-jump, "select this command's output", per-command cwd for new tabs,
-/// and (once the C/D pair lands) the exit status shown next to the prompt.
-/// A and B bracket the prompt, so the terminal can tell the prompt text from
-/// what the user typed; C and D bracket execution.
-pub const PROMPT_START: &[u8] = b"\x1b]133;A\x1b\\";
+/// and the exit status shown next to the prompt. A and B bracket the prompt, so
+/// the terminal can tell the prompt text from what the user typed; C and D
+/// bracket execution.
+///
+/// The `click_events=1` parameter is kitty's extension: it asks the terminal to
+/// report mouse clicks on the prompt and command line as SGR mouse events, so
+/// the editor can put the cursor where the user clicked. A terminal that does
+/// not know the parameter ignores it and sends no events.
+pub const PROMPT_START: &[u8] = b"\x1b]133;A;click_events=1\x1b\\";
 
 /// `OSC 133 ; B`: the prompt ends here, and the command line begins.
 pub const PROMPT_END: &[u8] = b"\x1b]133;B\x1b\\";

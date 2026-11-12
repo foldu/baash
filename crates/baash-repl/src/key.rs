@@ -55,6 +55,17 @@ pub enum Key {
     /// `backward-kill-word`. Terminals differ in which of the two they send, so
     /// both decode to this.
     AltBackspace,
+    /// The left mouse button was pressed on the prompt or command line
+    /// (SGR mouse, `CSI < 0 ; column ; row M`), both coordinates one-based.
+    ///
+    /// Only sent because the prompt mark asks for `click_events`; a terminal
+    /// with general mouse tracking on would send these for anything.
+    MouseLeft {
+        /// The column, one-based, as the terminal reports it.
+        column: u16,
+        /// The row, one-based, as the terminal reports it.
+        row: u16,
+    },
     /// The terminal gained focus (CSI `I`).
     ///
     /// Focus reporting is requested with `?1004h` while a line is read; the
@@ -255,6 +266,10 @@ impl Decoder {
             // the sense that the terminal sends them between keystrokes.
             (b"", b'I') => Key::FocusIn,
             (b"", b'O') => Key::FocusOut,
+            // SGR mouse: `< button ; column ; row` then `M` for a press and
+            // `m` for a release. Only the left button with no modifiers is an
+            // editing gesture yet.
+            (parameters, b'M') if parameters.first() == Some(&b'<') => mouse_left(&parameters[1..]),
             (b"1" | b"7", b'~') => Key::Home,
             (b"4" | b"8", b'~') => Key::End,
             (b"3", b'~') => Key::Delete,
@@ -296,6 +311,37 @@ impl Decoder {
                 return Ok(Key::Paste(payload));
             }
         }
+    }
+}
+
+/// Decode the parameters of an SGR mouse press.
+///
+/// Anything that is not a plain left click — a release, a modified button, a
+/// scroll wheel — is reported as an unknown sequence, which the editor
+/// ignores.
+fn mouse_left(parameters: &[u8]) -> Key {
+    let mut numbers = [0u32; 3];
+    let mut count = 0;
+    for part in parameters.split(|&byte| byte == b';') {
+        if count == numbers.len() || part.is_empty() {
+            return Key::Unknown(parameters.to_vec());
+        }
+        let Ok(text) = std::str::from_utf8(part) else {
+            return Key::Unknown(parameters.to_vec());
+        };
+        let Ok(value) = text.parse::<u32>() else {
+            return Key::Unknown(parameters.to_vec());
+        };
+        numbers[count] = value;
+        count += 1;
+    }
+    let [button, column, row] = numbers;
+    if count != 3 || button != 0 || column == 0 || row == 0 {
+        return Key::Unknown(parameters.to_vec());
+    }
+    Key::MouseLeft {
+        column: u16::try_from(column).unwrap_or(u16::MAX),
+        row: u16::try_from(row).unwrap_or(u16::MAX),
     }
 }
 
@@ -565,6 +611,23 @@ mod tests {
         assert!(matches!(cursor_report(b"\x1b[;2R"), Report::Other));
         assert!(matches!(cursor_report(b"\x1b[A"), Report::Other));
         assert!(matches!(cursor_report(b"x"), Report::Other));
+    }
+
+    #[test]
+    fn a_left_click_is_a_mouse_key_and_nothing_else_is() {
+        assert_eq!(
+            keys(b"\x1b[<0;12;5M"),
+            vec![Key::MouseLeft { column: 12, row: 5 }]
+        );
+        // Release, modified buttons (`4` is shift+left) and scroll (`64`) are
+        // not editing gestures.
+        for sequence in [&b"\x1b[<0;12;5m"[..], b"\x1b[<4;12;5M", b"\x1b[<64;12;5M"] {
+            assert!(
+                matches!(keys(sequence).as_slice(), [Key::Unknown(_)]),
+                "{:?}",
+                sequence
+            );
+        }
     }
 
     #[test]
