@@ -96,13 +96,18 @@ already see.
 
 ## 5. Rules for anything painted live
 
-* **Grow downward, never upward.** The frame is anchored at the prompt row and
-  the renderer moves the cursor up from where it left it; a slot above the line
-  would push the prompt down and the next repaint would find the wrong row.
+* **Grow downward, never upward.** Below the line the frame simply gets taller
+  and the prompt stays where it was, which is why the hint and the menu live
+  there. A slot above the line would push the prompt down, and the next
+  repaint — which moves up from where the cursor was left — would find the
+  wrong row.
 * **Discard by key, not by arrival.** Two previews in flight will otherwise
   paint out of order.
-* **A slot that is empty must be as tall as one that is full**, or the line
-  moves as the user types and the screen reads as a flicker.
+* **A slot changes height only for a reason the user can see.** The hint
+  appears with the error and goes when it is fixed; the menu appears on Tab. A
+  slot that breathes on its own — a gauge that appears and disappears every
+  second — makes everything under it jump, and the screen reads as a flicker
+  even when the bytes are right.
 * **Ink budget.** A once-a-second repaint is fine locally and less fine over
   `ssh`; every sequence has to survive ConPTY as well (`docs/portability.md`).
 * **Nothing in the keystroke path may block**, and nothing may run at all unless
