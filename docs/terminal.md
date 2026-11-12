@@ -146,10 +146,36 @@ Windows: the console has no focus sequence. `ReadConsoleW` reports keys, and
 the console's own focus handling is not observable through it, so a Windows
 baash writes neither the mode nor an event handler for it.
 
-## 6. What is next
-In landing order, each with its own commit: a cursor-position query for
-anchoring the prompt after output that did not end in a newline, resize
-repaint, background-colour detection with a light theme, clipboard copy
-(OSC 52), a scrollback-preserving `Ctrl-L`, the kitty keyboard protocol, and
-prompt-line clicks. The ordered list is the session's task list; this file
-records what has actually landed.
+## 6. Cursor position: anchoring the prompt
+
+```
+ESC [ 6 n           where is the cursor?
+ESC [ row ; col R   the answer, both coordinates one-based
+```
+
+The command before a prompt can leave the cursor in the middle of a line
+(`printf` without `\n`, a program that does not end its output). Frames are
+anchored at column 0 because the editor cannot see what a child wrote, so
+without asking, the prompt paints over that partial line.
+
+The editor asks before the first frame of every line. A column other than 1
+means the frame would overwrite output, so a `\r\n` goes out first. The wait is
+bounded at 50 ms: a terminal answers in microseconds, and the deadline only
+costs anything on one that does not answer at all, which then keeps the old
+behaviour. `TERM=dumb` is never asked.
+
+The query reads ahead while it waits, so a keystroke that arrives meanwhile is
+put back in the decoder and decoded normally — including the case where the
+whole answer was a key the user typed. A late answer, after the deadline, is
+just an unknown key and is ignored.
+
+Windows: the console has no cursor-position report. `reports_cursor_position`
+is `false` there, the query is never sent, and the prompt keeps anchoring at
+column 0.
+
+## 7. What is next
+In landing order, each with its own commit: resize repaint,
+background-colour detection with a light theme, clipboard copy (OSC 52), a
+scrollback-preserving `Ctrl-L`, the kitty keyboard protocol, and prompt-line
+clicks. The ordered list is the session's task list; this file records what
+has actually landed.

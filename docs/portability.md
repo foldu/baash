@@ -338,8 +338,9 @@ Known gaps, stated so they are not mistaken for behaviour:
   yields no report rather than a guessed one, and `TERM=dumb` suppresses every
   announcement. The console also has no bracketed-paste protocol: a paste
   arrives as keystrokes, so the editor's `\x1b[200~` handling is never reached
-  there, and no focus sequence, so `?1004` is not written
-  (`docs/terminal.md` §2, §5).
+  there, and no focus sequence or cursor-position report, so `?1004` is not
+  written and the prompt keeps anchoring at column 0 after output that did not
+  end with a newline (`docs/terminal.md` §2, §5, §6).
 
 Conformance is the other backlog, and it is measured: `docs/state.md` §6 and
 `docs/roadmap.md` carry the per-file picture, and `crates/baash-spec/baseline.txt`

@@ -82,6 +82,14 @@ impl Terminal for FakeTerminal {
         self.size
     }
 
+    fn read_byte_timeout(&mut self, _timeout: std::time::Duration) -> io::Result<Option<u8>> {
+        self.read_byte()
+    }
+
+    fn reports_cursor_position(&self) -> bool {
+        true
+    }
+
     fn enter_raw(&mut self) -> io::Result<()> {
         self.raw_entries += 1;
         self.raw = true;

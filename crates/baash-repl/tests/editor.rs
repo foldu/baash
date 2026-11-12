@@ -1397,3 +1397,47 @@ fn a_completion_functions_output_is_painted_above_the_prompt() {
         "the note comes first, then the repainted line: {frame:?}"
     );
 }
+
+/// A prompt that follows output without a trailing newline starts on its own
+/// line.
+///
+/// Frames are anchored at column 0 because the editor cannot see what a child
+/// wrote, so without asking, the prompt paints over the last partial line
+/// (`printf x` followed by a prompt). The terminal is asked for the cursor
+/// position; a column other than 1 means "not at the start of a line".
+#[test]
+fn a_prompt_after_a_partial_line_starts_on_a_new_line() {
+    // The scripted terminal answers the DSR query with row 3, column 8, then
+    // submits an empty line.
+    let mut term = FakeTerminal::new(b"\x1b[3;8R\r");
+    let completer = StubCompleter::empty();
+    let mut editor = Editor::new(&mut term, &completer, &baash_repl::NeverNeedsMore);
+    let result = editor.read_line().expect("read_line");
+    assert!(matches!(result, ReadResult::Line(_)), "{result:?}");
+    let output = term.text();
+    let after_query = output
+        .strip_prefix("\u{1b}[6n")
+        .unwrap_or_else(|| panic!("the prompt asks where the cursor is: {output:?}"));
+    assert!(
+        after_query.starts_with("\r\n"),
+        "a newline moves the prompt off the partial line: {after_query:?}"
+    );
+}
+
+/// The same query answered with column 1 adds no blank line.
+#[test]
+fn a_prompt_at_the_start_of_a_line_does_not_add_a_blank_one() {
+    let mut term = FakeTerminal::new(b"\x1b[3;1R\r");
+    let completer = StubCompleter::empty();
+    let mut editor = Editor::new(&mut term, &completer, &baash_repl::NeverNeedsMore);
+    let result = editor.read_line().expect("read_line");
+    assert!(matches!(result, ReadResult::Line(_)), "{result:?}");
+    let output = term.text();
+    let after_query = output
+        .strip_prefix("\u{1b}[6n")
+        .unwrap_or_else(|| panic!("the prompt asks where the cursor is: {output:?}"));
+    assert!(
+        !after_query.starts_with("\r\n"),
+        "the prompt already starts at column 1: {after_query:?}"
+    );
+}

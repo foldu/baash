@@ -1039,6 +1039,9 @@ pub trait Terminal {                       // the pty wave implements these five
     fn size(&mut self) -> Size;            // Size { columns, rows }
     fn enter_raw(&mut self) -> io::Result<()>;
     fn leave_raw(&mut self) -> io::Result<()>;
+    // Two more, with defaults: `read_byte_timeout` (`Ok(None)` = no byte, no
+    // promise) and `reports_cursor_position` (false unless the terminal says
+    // otherwise).
 }
 
 pub trait Syntax { fn needs_more_input(&self, line: &[u8]) -> bool; }
@@ -1060,6 +1063,16 @@ same window: `ESC [ I` repaints the frame (another window may have painted
 over it) and `ESC [ O` leaves it alone. The Windows console has no such
 protocols: its paste goes into the input buffer, where the shell only sees the
 resulting keystrokes, and it has no focus sequence at all.
+
+**The prompt asks where the cursor is before painting.** A child can leave the
+cursor mid-line (`printf x`), and a frame anchors at column 0, so `read_line`
+writes `ESC [ 6 n` and waits at most 50 ms for `ESC [ row ; col R`; a column
+other than 1 writes `\r\n` first. The wait reads ahead, so a keystroke that
+arrives meanwhile is pushed back into the decoder — and the loop checks
+`Decoder::has_pending()` before waiting on the terminal, or those bytes would
+sit there until the user typed again. A terminal that does not answer pays the
+50 ms and keeps the old behaviour; `TERM=dumb` is never asked, and the Windows
+console reports no position at all.
 
 **`ShellCompletion` is the per-read `complete -F` seam.** The editor still
 borrows one `&dyn Completer` for its whole life, but a completion function needs

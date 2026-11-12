@@ -82,7 +82,11 @@ const PASTE_END: &[u8] = b"\x1b[201~";
 /// Decodes keys from a [`Terminal`], keeping one byte of pushback.
 #[derive(Clone, Debug, Default)]
 pub struct Decoder {
-    pending: Option<u8>,
+    /// Bytes read but not decoded yet. A one-byte slot became a queue when the
+    /// cursor-position query arrived: a query that reads ahead and finds a
+    /// keystroke instead of a report must put every byte back, and a keystroke
+    /// can be a whole UTF-8 scalar.
+    pending: std::collections::VecDeque<u8>,
 }
 
 impl Decoder {
@@ -109,9 +113,57 @@ impl Decoder {
 
     /// Read one byte, preferring the pushback slot.
     fn read(&mut self, term: &mut dyn Terminal) -> io::Result<Option<u8>> {
-        match self.pending.take() {
+        match self.pending.pop_front() {
             Some(byte) => Ok(Some(byte)),
             None => term.read_byte(),
+        }
+    }
+
+    /// Whether bytes read ahead are waiting to be decoded.
+    ///
+    /// A caller that waits on the terminal before decoding must ask this
+    /// first: the cursor-position query can push a keystroke back, and the
+    /// kernel then has nothing to wake a read on.
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Put bytes back, in the order they were read.
+    fn unread(&mut self, bytes: &[u8]) {
+        for &byte in bytes.iter().rev() {
+            self.pending.push_front(byte);
+        }
+    }
+
+    /// Wait for a cursor-position report: `ESC [ row ; col R`.
+    ///
+    /// The report is how the prompt learns what the command before it left on
+    /// screen. Returns `None` when the terminal does not answer within
+    /// `timeout` or when the bytes that arrived are not a report — a keystroke
+    /// typed while the prompt waits is put back for the next
+    /// [`Decoder::next`], never swallowed.
+    pub fn cursor_position(
+        &mut self,
+        term: &mut dyn Terminal,
+        timeout: std::time::Duration,
+    ) -> io::Result<Option<(u16, u16)>> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut seen = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let Some(byte) = term.read_byte_timeout(remaining)? else {
+                self.unread(&seen);
+                return Ok(None);
+            };
+            seen.push(byte);
+            match cursor_report(&seen) {
+                Report::Incomplete => {}
+                Report::Position(row, column) => return Ok(Some((row, column))),
+                Report::Other => {
+                    self.unread(&seen);
+                    return Ok(None);
+                }
+            }
         }
     }
 
@@ -134,7 +186,7 @@ impl Decoder {
                 // Truncated or invalid: keep the lead byte, and let the byte
                 // that was not a continuation be its own key.
                 Some(byte) => {
-                    self.pending = Some(byte);
+                    self.pending.push_front(byte);
                     return Ok(Key::Byte(first));
                 }
                 None => return Ok(Key::Byte(first)),
@@ -182,7 +234,7 @@ impl Decoder {
             if byte < 0x20 || byte == 0x7f {
                 // Not part of a CSI sequence: abort and keep it for the next
                 // key, so an Enter after a truncated sequence still submits.
-                self.pending = Some(byte);
+                self.pending.push_front(byte);
                 return Ok(Key::Unknown(sequence));
             }
             sequence.push(byte);
@@ -247,6 +299,68 @@ impl Decoder {
     }
 }
 
+/// What a partial byte string says about a cursor-position report.
+enum Report {
+    /// Still a valid prefix; more bytes are needed.
+    Incomplete,
+    /// A complete `ESC [ row ; col R`, both coordinates one-based.
+    Position(u16, u16),
+    /// Not a report. The bytes belong to something else.
+    Other,
+}
+
+/// Classify `bytes` as a prefix, a whole cursor-position report, or neither.
+///
+/// The grammar is strict on purpose: anything that is not exactly
+/// `ESC [ digits ; digits R` is someone else's bytes, and the caller must read
+/// them as keys instead.
+fn cursor_report(bytes: &[u8]) -> Report {
+    if bytes.is_empty() {
+        return Report::Incomplete;
+    }
+    if bytes[0] != 0x1b {
+        return Report::Other;
+    }
+    if bytes.len() == 1 {
+        return Report::Incomplete;
+    }
+    if bytes[1] != b'[' {
+        return Report::Other;
+    }
+    let params = &bytes[2..];
+    if params.is_empty() {
+        return Report::Incomplete;
+    }
+    let mut row: u32 = 0;
+    let mut column: u32 = 0;
+    for (index, &byte) in params.iter().enumerate() {
+        match byte {
+            b'0'..=b'9' => {
+                let slot = if column > 0 || params[..index].contains(&b';') {
+                    &mut column
+                } else {
+                    &mut row
+                };
+                *slot = slot
+                    .saturating_mul(10)
+                    .saturating_add(u32::from(byte - b'0'));
+                if *slot > 9999 {
+                    return Report::Other;
+                }
+            }
+            b';' if row > 0 && column == 0 => {}
+            b'R' if index + 1 == params.len() && row > 0 && column > 0 => {
+                return Report::Position(
+                    u16::try_from(row).unwrap_or(u16::MAX),
+                    u16::try_from(column).unwrap_or(u16::MAX),
+                );
+            }
+            _ => return Report::Other,
+        }
+    }
+    Report::Incomplete
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +382,14 @@ mod tests {
     impl Terminal for Script {
         fn read_byte(&mut self) -> io::Result<Option<u8>> {
             Ok(self.input.pop_front())
+        }
+
+        fn read_byte_timeout(&mut self, _timeout: std::time::Duration) -> io::Result<Option<u8>> {
+            self.read_byte()
+        }
+
+        fn reports_cursor_position(&self) -> bool {
+            true
         }
 
         fn write_all(&mut self, _bytes: &[u8]) -> io::Result<()> {
@@ -391,6 +513,58 @@ mod tests {
             keys(b"\x1b[3\r"),
             vec![Key::Unknown(b"3".to_vec()), Key::Enter]
         );
+    }
+
+    #[test]
+    fn a_cursor_report_is_parsed() {
+        let mut terminal = Script::new(b"\x1b[12;5R");
+        let mut decoder = Decoder::new();
+        assert_eq!(
+            decoder
+                .cursor_position(&mut terminal, std::time::Duration::from_millis(50))
+                .unwrap(),
+            Some((12, 5))
+        );
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_cursor_report_are_put_back() {
+        // The query reads ahead; a keystroke that arrived meanwhile must reach
+        // the line, and the report that follows is then just an unknown key.
+        let mut terminal = Script::new(b"ab\x1b[1;1R");
+        let mut decoder = Decoder::new();
+        assert_eq!(
+            decoder
+                .cursor_position(&mut terminal, std::time::Duration::from_millis(50))
+                .unwrap(),
+            None
+        );
+        let mut keys = Vec::new();
+        while let Some(key) = decoder.next(&mut terminal).unwrap() {
+            keys.push(key);
+        }
+        assert_eq!(
+            keys,
+            vec![
+                Key::Char('a'),
+                Key::Char('b'),
+                Key::Unknown(b"1;1".to_vec())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_truncated_report_is_not_a_report() {
+        assert!(matches!(cursor_report(b"\x1b[1;"), Report::Incomplete));
+        assert!(matches!(cursor_report(b"\x1b[1;2"), Report::Incomplete));
+        assert!(matches!(
+            cursor_report(b"\x1b[1;2R"),
+            Report::Position(1, 2)
+        ));
+        assert!(matches!(cursor_report(b"\x1b[1R"), Report::Other));
+        assert!(matches!(cursor_report(b"\x1b[;2R"), Report::Other));
+        assert!(matches!(cursor_report(b"\x1b[A"), Report::Other));
+        assert!(matches!(cursor_report(b"x"), Report::Other));
     }
 
     #[test]

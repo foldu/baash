@@ -842,3 +842,23 @@ fn a_refocused_terminal_repaints_the_prompt() {
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&work);
 }
+
+/// The prompt asks the terminal where the cursor is before painting.
+///
+/// The answer decides whether the output before the prompt ended with a
+/// newline; without it the frame paints over a partial last line. A pty has no
+/// terminal emulator behind it, so nothing answers here: the test proves the
+/// question is asked and that an unanswered question costs only the short
+/// deadline, never the prompt.
+#[test]
+fn the_prompt_asks_for_the_cursor_position() {
+    let home = temp_dir("cpr-home");
+    let work = temp_dir("cpr-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.expect(b"\x1b[6n", Duration::from_secs(10));
+    session.prompt(" $");
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}

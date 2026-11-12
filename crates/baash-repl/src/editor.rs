@@ -43,6 +43,13 @@ use crate::prompt::{ExpandedPrompt, Prompt};
 use crate::render::{Frame, MenuView, Renderer};
 use crate::term::{Input, Terminal};
 
+/// How long the prompt waits for a cursor-position report.
+///
+/// A terminal answers in microseconds; the deadline only bounds the cost on
+/// one that does not answer at all, which is why it is short. Such a terminal
+/// pays it on every prompt, so it must not be generous.
+const CURSOR_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// What a single key did to the editing session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flow {
@@ -400,6 +407,7 @@ impl<'a> Editor<'a> {
     ) -> io::Result<ReadResult> {
         self.begin();
         self.term.enter_raw()?;
+        self.start_at_a_fresh_line()?;
         // Announcements go before the prompt is painted, not inside it: the
         // frame's column arithmetic must not see them, and a broken write is
         // not worth failing the line over.
@@ -469,6 +477,33 @@ impl<'a> Editor<'a> {
         self.dirty = true;
     }
 
+    /// Start the prompt on a line of its own when the output before it did not
+    /// end with a newline.
+    ///
+    /// A command can leave the cursor mid-line (`printf x`, a program that
+    /// does not end its output), and frames are anchored at column 0 because
+    /// the editor cannot see what a child wrote. Asking the terminal where the
+    /// cursor is turns that guess into a fact: a column other than 1 means the
+    /// frame would paint over the output, so a newline goes first. A terminal
+    /// that does not answer costs one short timeout and keeps the old
+    /// behaviour; the Windows console never answers and never asks.
+    fn start_at_a_fresh_line(&mut self) -> io::Result<()> {
+        if !self.term.reports_cursor_position() {
+            return Ok(());
+        }
+        self.term.write_all(b"\x1b[6n")?;
+        let position = self
+            .decoder
+            .cursor_position(self.term, CURSOR_QUERY_TIMEOUT)?;
+        if let Some((_row, column)) = position
+            && column != 1
+        {
+            self.term.write_all(b"\r\n")?;
+            self.renderer.reset();
+        }
+        Ok(())
+    }
+
     fn read_line_loop(
         &mut self,
         live: &mut dyn LivePrompt,
@@ -480,7 +515,10 @@ impl<'a> Editor<'a> {
             let _ = self.term.write_all(baash_sys::osc::PROMPT_END);
         }
         loop {
-            if self.term.await_input()? == Input::Watch {
+            // A key pushed back by the cursor-position query is already in the
+            // decoder, so the kernel has nothing to wake on: waiting first
+            // would park the line until the user typed again.
+            if !self.decoder.has_pending() && self.term.await_input()? == Input::Watch {
                 // No key was consumed and the line is untouched: the watched
                 // directory changed, so the prompt is repainted in place and
                 // the wait resumes. A refresh that finds nothing to say leaves

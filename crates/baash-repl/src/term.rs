@@ -100,6 +100,25 @@ pub trait Terminal {
     /// Restore the terminal mode saved by [`Terminal::enter_raw`].
     fn leave_raw(&mut self) -> io::Result<()>;
 
+    /// Read one byte, waiting at most `timeout`.
+    ///
+    /// `Ok(None)` means "no byte, and none promised": the deadline passed, or
+    /// this terminal does not do timed reads. The default answers `None`
+    /// immediately, which is what a terminal with no cursor-position report
+    /// needs — a prompt must never wait on a question the terminal will not
+    /// answer.
+    fn read_byte_timeout(&mut self, _timeout: std::time::Duration) -> io::Result<Option<u8>> {
+        Ok(None)
+    }
+
+    /// Whether this terminal can answer a cursor-position query (`ESC [ 6 n`).
+    ///
+    /// The Windows console reads keys through `ReadConsoleW` and has no report
+    /// to give, so it keeps the default and the editor never asks.
+    fn reports_cursor_position(&self) -> bool {
+        false
+    }
+
     /// Watch `fd` alongside the keyboard, taking ownership of it.
     ///
     /// `None` stops watching. The default ignores it, which is what a terminal
@@ -406,6 +425,32 @@ impl Terminal for RealTerminal {
                 return Ok(Input::Key);
             }
         }
+    }
+
+    fn read_byte_timeout(&mut self, timeout: std::time::Duration) -> io::Result<Option<u8>> {
+        let runtime = compio::runtime::Runtime::current();
+        self.prepare_read_source()?;
+        let source = self.read_source.as_ref().expect("prepared just above");
+        // The same readiness the blocking read waits on, with the runtime's
+        // timer as the bound: a prompt that asks for the cursor position must
+        // not hang on a terminal that does not answer.
+        match runtime.block_on(compio::time::timeout(timeout, source.read_ready())) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(_elapsed) => return Ok(None),
+        }
+        let mut byte = [0u8; 1];
+        match baash_sys::read_fd(self.fd, &mut byte) {
+            Ok(0) => Ok(None),
+            Ok(_) => Ok(Some(byte[0])),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn reports_cursor_position(&self) -> bool {
+        // A dumb terminal would accept the query bytes and never answer, so it
+        // is not asked at all.
+        !baash_sys::is_dumb_terminal()
     }
 
     fn read_byte(&mut self) -> io::Result<Option<u8>> {
