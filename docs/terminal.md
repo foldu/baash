@@ -91,12 +91,34 @@ contain `ESC`, and a title is not a place to inject a sequence. Bytes above
 The title is set at the prompt. A foreground command that wants its own title
 is a separate decision and is not done yet.
 
-## 4. What is next
+## 4. OSC 133: prompt marks (A and B)
 
-In landing order, each with its own commit: window/tab titles (OSC 0/1),
-prompt marks (OSC 133 A–D), focus reporting, a cursor-position query for
-anchoring the prompt after output that did not end in a newline, resize
-repaint, background-colour detection with a light theme, clipboard copy
-(OSC 52), a scrollback-preserving `Ctrl-L`, the kitty keyboard protocol, and
-prompt-line clicks. The ordered list is the session's task list; this file
-records what has actually landed.
+```
+ESC ] 133 ; A ESC \      prompt starts here
+ESC ] 133 ; B ESC \      prompt ends here, the command line begins
+```
+
+`A` is written after the preamble and before the prompt's first byte; `B` is
+written after the first frame, so it lands at the end of the prompt with the
+command line still empty. Both are written once per prompt, not once per
+frame: a keystroke repaints the frame but does not re-mark it. That is what
+lets a terminal treat a command line as a unit — prompt-jump, selecting a
+command's output, per-command cwd for a new tab.
+
+`A` is written by the editor because it brackets painting, not by the shell's
+preamble: the marks are a property of *a line being read*, not of the prompt's
+text, and the editor is the only party that knows when the first frame has
+been painted. The title and cwd announcements still go first, in the shell's
+preamble.
+
+The `C`/`D` pair — command start, and command finished carrying the exit
+status — is the next step. Kitty's `click_events=1` extension on `A` belongs
+with click-to-move and is not sent yet.
+
+## 5. What is next
+In landing order, each with its own commit: the command marks (OSC 133 C/D),
+focus reporting, a cursor-position query for anchoring the prompt after output
+that did not end in a newline, resize repaint, background-colour detection
+with a light theme, clipboard copy (OSC 52), a scrollback-preserving `Ctrl-L`,
+the kitty keyboard protocol, and prompt-line clicks. The ordered list is the
+session's task list; this file records what has actually landed.

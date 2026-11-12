@@ -520,6 +520,13 @@ query or fragment. Windows also gets ConEmu's `OSC 9;9;"NATIVE\PATH"`; a path
 with no truthful URI form (UNC, drive-relative) writes no cwd report, and
 `TERM=dumb` suppresses the whole preamble.
 
+The editor brackets the prompt itself with OSC 133 `A`/`B`
+(`baash_sys::osc::PROMPT_START`/`PROMPT_END`): `A` after the preamble and
+before the prompt's first byte, `B` after the first frame. They are written
+once per `read_line`, so a repaint does not repeat them, and `TERM=dumb`
+suppresses them as well. The `C`/`D` pair is not written yet — the editor does
+not see execution, so it will be the loop's job.
+
 **The transform letter is a `Shell` seam.** The parser classifies every
 `${x@…}` as `ParamOp::Unsupported(UnsupportedOp::Transform)`; it does not copy
 the letter into the word. `ParamOp::Transform(Transform)` is the direct form

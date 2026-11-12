@@ -382,7 +382,17 @@ impl<'a> Editor<'a> {
         if !self.preamble.is_empty() {
             let _ = self.term.write_all(&self.preamble);
         }
-        let result = self.read_line_loop(live, &mut shell);
+        // Shell-integration marks: `A` before the prompt text and `B` after
+        // the first frame. The terminal shows neither; what it gains is
+        // knowing where its prompt ends and the command line begins, which is
+        // what prompt-jump, command selection and per-command cwd are built
+        // on. `B` is written once per line, not per frame, so a keystroke does
+        // not repeat it.
+        let marked = !baash_sys::is_dumb_terminal();
+        if marked {
+            let _ = self.term.write_all(baash_sys::osc::PROMPT_START);
+        }
+        let result = self.read_line_loop(live, &mut shell, marked);
         let _ = self.term.leave_raw();
         result
     }
@@ -439,8 +449,12 @@ impl<'a> Editor<'a> {
         &mut self,
         live: &mut dyn LivePrompt,
         shell: &mut Option<&mut dyn ShellCompletion>,
+        marked: bool,
     ) -> io::Result<ReadResult> {
         self.draw()?;
+        if marked {
+            let _ = self.term.write_all(baash_sys::osc::PROMPT_END);
+        }
         loop {
             if self.term.await_input()? == Input::Watch {
                 // No key was consumed and the line is untouched: the watched

@@ -734,3 +734,32 @@ fn the_window_and_tab_titles_name_the_directory() {
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&work);
 }
+
+/// The prompt is bracketed by OSC 133 marks, once per prompt.
+///
+/// `A` before the prompt text and `B` after it are what let a terminal treat
+/// a command line as a unit: prompt-jump, selecting a command's output, and
+/// per-command cwd are all built on the pair. The marks are not visible; they
+/// exist so the terminal can tell the prompt from what the user typed. They
+/// belong to the prompt event, not the frame, so the next prompt has them
+/// again.
+#[test]
+fn the_prompt_is_marked_for_the_terminal() {
+    let home = temp_dir("marks-home");
+    let work = temp_dir("marks-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+
+    session.expect(b"\x1b]133;A\x1b\\", Duration::from_secs(10));
+    session.prompt(" $");
+    session.expect(b"\x1b]133;B\x1b\\", Duration::from_secs(10));
+
+    session.send(b"true\n");
+    session.expect(b"\x1b]133;A\x1b\\", Duration::from_secs(10));
+    session.prompt(" $");
+    session.expect(b"\x1b]133;B\x1b\\", Duration::from_secs(10));
+
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}

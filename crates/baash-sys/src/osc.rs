@@ -57,6 +57,18 @@ pub fn cwd_report(cwd: &[u8], host: &[u8], flavour: Flavour) -> Option<Vec<u8>> 
     Some(report)
 }
 
+/// `OSC 133 ; A`: the prompt starts at this point.
+///
+/// Terminals use the four OSC 133 marks to treat a command line as a unit:
+/// prompt-jump, "select this command's output", per-command cwd for new tabs,
+/// and (once the C/D pair lands) the exit status shown next to the prompt.
+/// A and B bracket the prompt, so the terminal can tell the prompt text from
+/// what the user typed; C and D bracket execution.
+pub const PROMPT_START: &[u8] = b"\x1b]133;A\x1b\\";
+
+/// `OSC 133 ; B`: the prompt ends here, and the command line begins.
+pub const PROMPT_END: &[u8] = b"\x1b]133;B\x1b\\";
+
 /// OSC 0 (window title) and OSC 1 (tab title), both set to `text`.
 ///
 /// The two are separate so a terminal can put the shell's directory in the
