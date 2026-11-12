@@ -1055,8 +1055,11 @@ before restoring it, so a pasted newline reaches the decoder inside
 pasted script runs while the rest is still arriving — and a command started
 from the line never inherits the wrapper. A terminal that ignores the sequence
 still works; the paste is then unbracketed, which is the behaviour before the
-mode was requested. The Windows console has no such protocol: its paste goes
-into the input buffer, where the shell only sees the resulting keystrokes.
+mode was requested. Focus reporting (`?1004h`/`?1004l`) is enabled for the
+same window: `ESC [ I` repaints the frame (another window may have painted
+over it) and `ESC [ O` leaves it alone. The Windows console has no such
+protocols: its paste goes into the input buffer, where the shell only sees the
+resulting keystrokes, and it has no focus sequence at all.
 
 **`ShellCompletion` is the per-read `complete -F` seam.** The editor still
 borrows one `&dyn Completer` for its whole life, but a completion function needs

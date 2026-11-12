@@ -597,6 +597,12 @@ impl<'a> Editor<'a> {
                 // line and brings it back.
                 self.suggestion_dismissed = true;
             }
+            Key::FocusIn => {
+                // Another window may have painted over this one while the line
+                // sat idle, so the frame is drawn again. Losing focus changes
+                // nothing on screen.
+            }
+            Key::FocusOut => self.dirty = false,
             Key::BackTab => {}
             Key::Backspace => {
                 self.line.backspace();

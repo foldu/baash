@@ -55,6 +55,14 @@ pub enum Key {
     /// `backward-kill-word`. Terminals differ in which of the two they send, so
     /// both decode to this.
     AltBackspace,
+    /// The terminal gained focus (CSI `I`).
+    ///
+    /// Focus reporting is requested with `?1004h` while a line is read; the
+    /// event carries no text and exists so the editor can repaint a frame that
+    /// another program may have painted over.
+    FocusIn,
+    /// The terminal lost focus (CSI `O`).
+    FocusOut,
     /// A paste payload, inserted verbatim.
     Paste(Vec<u8>),
     /// A sequence the decoder does not understand. It is ignored whole: its
@@ -191,6 +199,10 @@ impl Decoder {
             (b"", b'H') => Key::Home,
             (b"", b'F') => Key::End,
             (b"", b'Z') => Key::BackTab,
+            // Focus reporting: `ESC [ I` and `ESC [ O`. They are keys only in
+            // the sense that the terminal sends them between keystrokes.
+            (b"", b'I') => Key::FocusIn,
+            (b"", b'O') => Key::FocusOut,
             (b"1" | b"7", b'~') => Key::Home,
             (b"4" | b"8", b'~') => Key::End,
             (b"3", b'~') => Key::Delete,
@@ -379,6 +391,13 @@ mod tests {
             keys(b"\x1b[3\r"),
             vec![Key::Unknown(b"3".to_vec()), Key::Enter]
         );
+    }
+
+    #[test]
+    fn focus_events_are_decoded() {
+        assert_eq!(keys(b"\x1b[I\x1b[O"), vec![Key::FocusIn, Key::FocusOut]);
+        // Not to be confused with SS3 `ESC O`, which is an arrow key prefix.
+        assert_eq!(keys(b"\x1bOA"), vec![Key::Up]);
     }
 
     #[test]

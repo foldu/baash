@@ -128,10 +128,28 @@ pair surrounds execution; the next prompt's `A` follows `D`.
 Kitty's `click_events=1` extension on `A` belongs with click-to-move and is
 not sent yet.
 
-## 5. What is next
-In landing order, each with its own commit: focus reporting, a cursor-position
-query for anchoring the prompt after output that did not end in a newline,
-resize repaint, background-colour detection with a light theme, clipboard copy
+## 5. Focus reporting
+
+```
+ESC [ ? 1004 h      focus reporting on
+ESC [ ? 1004 l      focus reporting off
+```
+
+The mode is on only while a line is read, like bracketed paste: a command gets
+the terminal without it. The terminal then sends `ESC [ I` when it gains focus
+and `ESC [ O` when it loses it. Gaining focus repaints the frame — another
+window may have painted over the terminal, or a multiplexer may have
+reattached it showing a stale prompt — and losing focus changes nothing on
+screen.
+
+Windows: the console has no focus sequence. `ReadConsoleW` reports keys, and
+the console's own focus handling is not observable through it, so a Windows
+baash writes neither the mode nor an event handler for it.
+
+## 6. What is next
+In landing order, each with its own commit: a cursor-position query for
+anchoring the prompt after output that did not end in a newline, resize
+repaint, background-colour detection with a light theme, clipboard copy
 (OSC 52), a scrollback-preserving `Ctrl-L`, the kitty keyboard protocol, and
 prompt-line clicks. The ordered list is the session's task list; this file
 records what has actually landed.

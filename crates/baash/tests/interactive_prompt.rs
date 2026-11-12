@@ -800,3 +800,45 @@ fn a_command_is_marked_with_its_text_and_status() {
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&work);
 }
+
+/// Focus changes are requested while a line is read; a refocus repaints.
+///
+/// Another window may paint over a terminal while a prompt sits idle, and a
+/// shared terminal can be reattached showing a stale frame. Focus reporting
+/// is on for the line only: a command gets the terminal without the switch,
+/// like bracketed paste.
+#[test]
+fn a_refocused_terminal_repaints_the_prompt() {
+    let home = temp_dir("focus-home");
+    let work = temp_dir("focus-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.expect(b"\x1b[?1004h", Duration::from_secs(10));
+    session.prompt(" $");
+
+    // Gaining focus repaints, although the line itself did not change.
+    session.send(b"\x1b[I");
+    session.prompt(" $");
+
+    // Losing focus changes nothing on screen.
+    let mark = session.output.len();
+    session.send(b"\x1b[O");
+    std::thread::sleep(Duration::from_millis(100));
+    session.drain();
+    assert_eq!(
+        &session.output[mark..],
+        b"",
+        "focus out must not repaint: {:?}",
+        String::from_utf8_lossy(&session.output[mark..])
+    );
+
+    // Off while the command runs, on again for the next line.
+    session.send(b"true\n");
+    session.expect(b"\x1b[?1004l", Duration::from_secs(10));
+    session.expect(b"\x1b[?1004h", Duration::from_secs(10));
+    session.prompt(" $");
+
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}

@@ -456,6 +456,11 @@ impl Terminal for RealTerminal {
             // `Key::Paste` handling in `key.rs`). Failing to write it is not
             // fatal — the editor still works, the paste is just unbracketed.
             let _ = self.write_all(b"\x1b[?2004h");
+            // Focus reporting, so a frame another program painted over while
+            // the line sat idle is drawn again when the window comes back.
+            // Like the paste mode it lasts only for the line: a command gets
+            // the terminal without either switch on.
+            let _ = self.write_all(b"\x1b[?1004h");
         }
         Ok(())
     }
@@ -466,6 +471,7 @@ impl Terminal for RealTerminal {
             // terminal, and its own line editor must ask for what it wants.
             // Ignoring a write error is deliberate — restoring the terminal
             // mode matters more than a terminal that would not take this.
+            let _ = self.write_all(b"\x1b[?1004l");
             let _ = self.write_all(b"\x1b[?2004l");
         }
         match self.raw.take() {
