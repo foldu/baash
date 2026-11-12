@@ -143,6 +143,12 @@ impl Drop for Fd {
     }
 }
 
+/// A bare descriptor number, under the name the Unix side gets from `std`.
+///
+/// The CRT descriptor is an `int` here, so this is the same type as `c_int`;
+/// the alias exists so the Windows and Unix vocabularies read the same.
+pub type RawFd = c_int;
+
 /// An owned descriptor, under the name the Unix side gets from `std`.
 pub type OwnedFd = Fd;
 
@@ -1289,71 +1295,3 @@ pub fn become_session_leader() -> io::Result<()> {
 
 /// Keep `AsRawHandle` in the import list for the console work ahead.
 const _: fn(&std::io::Stdin) -> RawHandle = |stdin| stdin.as_raw_handle();
-
-// ---------------------------------------------------------------------------
-// Regular expressions
-// ---------------------------------------------------------------------------
-
-/// A bare descriptor number.
-pub type RawFd = c_int;
-
-/// Capture ranges, as byte offsets into the searched text.
-pub type CaptureRanges = Vec<Option<(usize, usize)>>;
-
-/// A compiled POSIX extended regular expression.
-///
-/// Windows has no `regcomp`. The Unix backend deliberately keeps libc's engine
-/// so `[[ x =~ y ]]` and `${x/pat/rep}` keep bash's leftmost-longest semantics;
-/// swapping in a different engine would silently change matches. Until an
-/// engine with the same rules exists, compilation fails and the caller reports
-/// it (`docs/portability.md` §9).
-#[derive(Debug)]
-pub struct Regex {
-    _private: (),
-}
-
-impl Regex {
-    /// Always fails on Windows.
-    pub fn new(_pattern: &[u8]) -> Result<Self, RegexError> {
-        Err(RegexError::Unsupported)
-    }
-
-    /// Always fails on Windows.
-    pub fn new_icase(_pattern: &[u8]) -> Result<Self, RegexError> {
-        Err(RegexError::Unsupported)
-    }
-
-    /// The number of parenthesised subexpressions; unreachable in practice.
-    pub fn group_count(&self) -> usize {
-        0
-    }
-
-    /// Run the pattern; unreachable because construction fails.
-    pub fn captures(&self, _text: &[u8]) -> Option<CaptureRanges> {
-        None
-    }
-
-    /// Run the pattern; unreachable because construction fails.
-    pub fn try_captures(&self, _text: &[u8]) -> Result<Option<CaptureRanges>, RegexError> {
-        Err(RegexError::Unsupported)
-    }
-}
-
-/// Why a pattern could not be compiled or run.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RegexError {
-    /// This platform has no regular-expression engine.
-    Unsupported,
-}
-
-impl RegexError {
-    /// The engine's raw code, which does not exist here.
-    pub fn code(&self) -> Option<c_int> {
-        None
-    }
-
-    /// A human-readable message, never empty.
-    pub fn message(&self) -> &'static str {
-        "regular expressions are not implemented on Windows"
-    }
-}

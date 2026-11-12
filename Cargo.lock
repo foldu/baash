@@ -324,6 +324,7 @@ name = "baash-sys"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "minrx-sys",
  "rustix 1.1.6",
 ]
 
@@ -2963,6 +2964,15 @@ checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
 dependencies = [
  "adler2",
  "simd-adler32",
+]
+
+[[package]]
+name = "minrx-sys"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcdfcbcecd1adbd97aabbeac2541bea0dbb25add34f7530dcded45a4f9bfb669"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

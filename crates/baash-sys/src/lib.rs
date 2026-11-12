@@ -31,10 +31,11 @@
 //!   without a controlling terminal.
 //! * [`cstring`] — converting shell bytes for `exec`, failing with
 //!   [`NulByte`] instead of truncating.
-//! * [`Regex`], [`Error`] — compiled POSIX extended regular expressions for
-//!   `[[ x =~ re ]]` and `BASH_REMATCH`, using the same platform engine as
-//!   bash (`regcomp`/`regexec`). Byte offsets, POSIX ERE, no `REG_NEWLINE`;
-//!   see [`regex`] for the limits and the measured engine quirks.
+//! * [`Regex`], [`regex::Cache`], [`Engine`] — compiled POSIX extended regular
+//!   expressions for `[[ x =~ re ]]` and `BASH_REMATCH`. The platform engine
+//!   (`regcomp`/`regexec`, the same one bash uses) is the default on Unix and
+//!   MinRX is the portable engine (and the only one on Windows); see [`regex`]
+//!   for the selection, the cache and the measured differences.
 //! * [`dirs::config_home`], [`dirs::data_home`] — where this platform puts a
 //!   user's configuration and data (XDG on Unix, the roaming and local
 //!   profiles on Windows), so the shell's own files land where the platform's
@@ -51,11 +52,11 @@
 //! Linux is the primary target (`x86_64-linux`). The generic POSIX parts
 //! (spawn, wait, descriptors, termios) also build elsewhere; `signalfd`,
 //! `memfd_create` and `O_TMPFILE` are `#[cfg(target_os = "linux")]` with
-//! documented fallbacks. The `regex` module is `#[cfg(unix)]`: POSIX regular
-//! expressions are a Unix facility, and on a Unix target whose `libc` does not
-//! declare `regex_t`/`REG_*` (Solaris/illumos, Haiku and Hurd today) the crate
-//! does not build. There is no fallback engine, because a different engine
-//! would not agree with bash.
+//! documented fallbacks. The `regex` module builds everywhere: the system
+//! engine needs `regex_t`/`REG_*` from `libc` (Unix only, and a Unix target
+//! whose `libc` does not declare them, such as Solaris/illumos, is still out
+//! of scope), while MinRX is C compiled from the vendored source and is what
+//! Windows uses.
 
 #![warn(missing_docs)]
 // Every `unsafe` block in this crate states the invariant that makes it sound,
@@ -75,7 +76,6 @@ pub mod outcome;
 pub mod paths;
 #[cfg(unix)]
 pub mod pty;
-#[cfg(unix)]
 pub mod regex;
 #[cfg(unix)]
 pub mod signal;
@@ -105,8 +105,7 @@ pub use fd::{
 pub use outcome::WaitOutcome;
 #[cfg(unix)]
 pub use pty::{Pty, become_session_leader, open_pty};
-#[cfg(unix)]
-pub use regex::{CaptureRanges, Regex, RegexError};
+pub use regex::{Cache, CaptureRanges, Engine, Regex, RegexError};
 #[cfg(unix)]
 pub use signal::{
     Disposition, MaskGuard, SignalEvent, SignalFd, SignalGuard, SignalSet, ignore_signals,
@@ -128,13 +127,13 @@ pub use wait::{wait_any_nohang, wait_pid};
 
 #[cfg(windows)]
 pub use windows::{
-    AsRawFd, CaptureRanges, Child, Disposition, FdAction, FromRawFd, IntoRawFd, MaskGuard, NoEcho,
-    OwnedFd, Pipe, Pty, RawFd, RawMode, Regex, RegexError, SignalEvent, SignalFd, SignalGuard,
-    SignalSet, SpawnPlan, become_session_leader, chdir, close, create_unlinked_temp, dup,
-    dup_above, dup2, exec, fd_is_cloexec, fd_is_open, fork_child_status, ignore_signals, lseek,
-    open_cloexec, open_pty, parent_pid, pid, poll_readable, read_all, read_fd, replace_signal_mask,
-    seek, send_signal, set_cloexec, set_disposition, spawn, wait_any_nohang, wait_pid, window_size,
-    window_size_fd, write_all, write_fd,
+    AsRawFd, Child, Disposition, FdAction, FromRawFd, IntoRawFd, MaskGuard, NoEcho, OwnedFd, Pipe,
+    Pty, RawFd, RawMode, SignalEvent, SignalFd, SignalGuard, SignalSet, SpawnPlan,
+    become_session_leader, chdir, close, create_unlinked_temp, dup, dup_above, dup2, exec,
+    fd_is_cloexec, fd_is_open, fork_child_status, ignore_signals, lseek, open_cloexec, open_pty,
+    parent_pid, pid, poll_readable, read_all, read_fd, replace_signal_mask, seek, send_signal,
+    set_cloexec, set_disposition, spawn, wait_any_nohang, wait_pid, window_size, window_size_fd,
+    write_all, write_fd,
 };
 
 // `FdAction::Open` and the signal APIs name C types in their signatures, so a

@@ -56,6 +56,9 @@ rustix = { version = "1.1", default-features = false, features = [
     "pty",
 ] }
 memchr = "2"
+# The portable POSIX ERE engine: Windows' only engine, and an opt-in one on
+# Unix next to the platform `regcomp` (docs/performance.md).
+minrx-sys = "0.2.1"
 smallvec = "1"
 unicode-width = "0.2"
 miette = "7"

@@ -1152,19 +1152,46 @@ meaning); malformed extglob groups degrade to literal text; nesting is capped at
 
 ### baash-sys: `Regex` (POSIX ERE)
 
-`baash_sys::{Regex, RegexError, CaptureRanges}`, module `regex`, `#[cfg(unix)]`.
-The engine is the platform's `regcomp`/`regexec`, not a Rust regex crate, because
-the conformance target is bash and bash uses the platform engine: POSIX
+### baash-sys: `Regex` and `Cache` (POSIX ERE)
+
+`baash_sys::{Engine, Regex, RegexError, CaptureRanges, Cache}`, module `regex`,
+compiled on every target. Two engines are compiled in, and the engine is a
+**value**, not process-global state, so two interpreters in one process may use
+different ones:
+
+- **`Engine::System`** — the platform's `regcomp`/`regexec` (glibc on Linux),
+  which is literally what bash links. Default on Unix; unavailable on Windows,
+  which has no `regcomp`.
+- **`Engine::Minrx`** — [MinRX][minrx], a small BSD-2-Clause POSIX ERE engine
+  vendored by `minrx-sys` and compiled by `cc` on every target. The only engine
+  on Windows; the opt-in alternative on Unix with `--regex-engine minrx` (or
+  `BAASH_REGEX_ENGINE=minrx`).
+
+The conformance target is bash, and bash uses the platform engine: POSIX
 leftmost-**longest** matching (`[[ "abcd" =~ (ab|abcd) ]]` yields `abcd`, where
 a Perl-style engine yields `ab`), `{n,m}` parsing, and the same rejection
-messages for invalid patterns.
+messages for invalid patterns. That is why `Engine::System` is the default where
+it exists. MinRX was measured on a 234-case differential corpus against glibc:
+202 agree, and the 32 that do not are backreferences (`\1` is a literal `1`),
+`{,n}` (rejected rather than an interval), and nested-capture tie-breaks (a
+different, still valid, group extent). No bash-completion pattern in the corpus
+differs except one capture slot; the one pattern glibc treats as having a stray
+literal `)` compiles on both engines.
 
 ```rust
-Regex::new(pattern: &[u8]) -> Result<Regex, RegexError>;    // REG_EXTENDED
-Regex::new_icase(pattern: &[u8]) -> Result<Regex, RegexError>; // + REG_ICASE
-Regex::group_count(&self) -> usize;                          // true count, uncapped
+Engine::default(), Engine::ALL, Engine::name(), Engine::from_name(&str),
+Engine::is_available();
+Regex::new(pattern: &[u8]) -> Result<Regex, RegexError>;         // Engine::default()
+Regex::new_icase(pattern: &[u8]) -> Result<Regex, RegexError>;
+Regex::with_engine(engine, pattern: &[u8], icase: bool) -> Result<Regex, RegexError>;
+Regex::engine(&self) -> Engine;
+Regex::group_count(&self) -> usize;                               // true count, uncapped
 Regex::captures(&self, text: &[u8]) -> Option<CaptureRanges>;
 Regex::try_captures(&self, text: &[u8]) -> Result<Option<CaptureRanges>, RegexError>;
+
+Cache::new(engine), Cache::engine(), Cache::set_engine(engine), Cache::clear();
+Cache::captures(&mut self, pattern: &[u8], icase: bool, text: &[u8])
+    -> Result<Option<CaptureRanges>, RegexError>;
 ```
 
 Contract points that the caller must honour:
@@ -1173,21 +1200,41 @@ Contract points that the caller must honour:
   group that did not participate. `BASH_REMATCH` is built from exactly
   `captures().len()` entries, `None` becomes the empty string, and a failed
   match **clears** the array (bash does; leaving the previous match is a bug).
-- **`nocasematch` is `new_icase`**, not case folding of the subject: `REG_ICASE`
-  also folds `[[:upper:]]`/`[[:lower:]]`, which lowercasing does not.
+- **`nocasematch` is the engine's case flag** (`new_icase`, or `icase: true`),
+  not case folding of the subject: the flag also folds
+  `[[:upper:]]`/`[[:lower:]]`, which lowercasing does not.
 - **`MAX_GROUPS` is 64 slots** (whole match + 63 groups); longer patterns
   truncate rather than error, and `group_count()` still reports the truth.
-- **NUL**: a pattern containing NUL is `RegexError::NulInPattern`; a subject
-  containing NUL makes `captures` give up with `None` (bash cannot represent
-  it either) while `try_captures` reports `NulInText`.
+- **NUL is engine-dependent.** The system engine takes C strings, so a pattern
+  containing NUL is `RegexError::NulInPattern` and a subject containing NUL
+  makes `captures` give up with `None` while `try_captures` reports
+  `NulInText`. MinRX takes lengths and searches the bytes. Shell text cannot
+  hold a NUL, so this only affects a direct caller.
 - **No `REG_NEWLINE`** (bash passes none): `^`/`$` anchor at subject ends, `.`
-  matches newline, `[^x]` matches newline.
+  matches newline, `[^x]` matches newline. Both engines are configured this
+  way.
 - **Locale**: classes and collation come from the process locale, and Rust never
-  calls `setlocale`, so matching runs in the C locale whatever `LANG` says. That
-  is deterministic and matches bash under `LC_ALL=C`; bash under a UTF-8 locale
-  is Unicode-aware and we are not, because `setlocale` is process-global state
-  and mutating it would be the same class of bug as a global signal disposition.
+  calls `setlocale`, so both engines match in the C locale whatever `LANG`
+  says. That is deterministic and matches bash under `LC_ALL=C`; bash under a
+  UTF-8 locale is Unicode-aware and we are not, because `setlocale` is
+  process-global state and mutating it would be the same class of bug as a
+  global signal disposition. MinRX with `LC_CTYPE` in the `C` locale takes its
+  byte path, which is also its fastest.
+- **`RegexError::Engine { code, message }`** carries the engine's own message,
+  which is what bash prints after `invalid regular expression ...`; the meaning
+  of `code` is the engine's (`REG_*` for the system engine, MinRX's codes
+  otherwise). `RegexError::Unavailable` is the defensive result of asking for
+  the system engine on Windows — the binary rejects the name before it gets
+  there, with a usage error.
 - **`Regex` is neither `Send` nor `Sync` nor `Clone`**: one thread, one pattern.
+- **`Cache` is a one-entry memo** keyed on (pattern bytes, case mode, engine).
+  A miss compiles and replaces the entry; a compile **error is not cached**; a
+  clone starts empty; switching engines clears the entry. `Interp` owns one and
+  `set_regex_engine` chooses the engine, so `=~` in a loop compiles once. It is
+  not observable: no variable or output depends on a hit. Measured effect:
+  `docs/performance.md`.
+
+[minrx]: https://github.com/michaeljhaertel/minrx
 
 ### Completion built-ins and the `--rcfile` startup file
 
