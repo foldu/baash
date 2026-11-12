@@ -957,6 +957,24 @@ fn capture_stdout(shell: &mut Interp, command: &[u8]) -> Option<Vec<u8>> {
 /// `stock_prompt` when `PROMPT_COMMAND` itself assigns `PS1`: the assignment
 /// wins at this prompt, exactly as it would from a `PS1=` typed at the prompt.
 ///
+/// Whether `PROMPT_ICONS` asks for the stock prompt's Nerd Font glyphs.
+///
+/// The folder and branch icons are private-use codepoints (U+F115 and U+F418):
+/// a font that has them draws a picture, and a font without them draws a box.
+/// A shell cannot see the font — no terminal protocol has a question for it —
+/// so the choice is the user's, and it is off by default. `1`, `on`, `true` and
+/// `yes` in any ASCII case turn it on; anything else, an unset variable
+/// included, leaves it off. A shell variable rather than an environment
+/// variable, so an rc file and the command line both work.
+fn prompt_icons(shell: &mut Interp) -> bool {
+    const ON: [&[u8]; 4] = [b"1", b"on", b"true", b"yes"];
+    shell
+        .state()
+        .vars
+        .scalar(b"PROMPT_ICONS")
+        .is_some_and(|value| ON.iter().any(|word| value.eq_ignore_ascii_case(word)))
+}
+
 /// The ring moves to the shell first so `PROMPT_COMMAND` sees the same
 /// history the user does, and because `\!` is the ring's next number, which is
 /// what the line about to be typed will get.
@@ -987,7 +1005,7 @@ fn refresh_prompt(
         // `.git/HEAD` read and no subprocess, so a slow repository cannot hold
         // the line up (`docs/prompt-watch.md` §2).
         let color = std::env::var_os("NO_COLOR").is_none() && baash_sys::is_tty(0);
-        prompt.arm(&context, color, light);
+        prompt.arm(&context, color, light, prompt_icons(shell));
         prompt.primary()
     } else {
         // The legacy `[branch ~N]` suffix is fed by the same worker cache, so

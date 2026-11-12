@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-use baash_lang::prompt::{ExpandedPrompt, PathAbbreviator, PromptContext};
+use baash_lang::prompt::{ExpandedPrompt, Paint, PathAbbreviator, PromptContext};
 use baash_repl::{Editor, LivePrompt, Prompt};
 
 use crate::git_prompt::GitSegment;
@@ -40,6 +40,9 @@ pub struct PromptState {
     /// Whether the terminal's background is light; the stock prompt's accent
     /// colours change with it (`tide_prompt`'s `light`).
     light: bool,
+    /// Whether the stock prompt draws the Nerd Font folder and branch glyphs
+    /// (`tide_prompt`'s `icons`). Off unless `PROMPT_ICONS` says otherwise.
+    icons: bool,
     /// `user@host` when the session is remote, captured when the prompt was
     /// armed: an SSH session does not become local halfway through a line.
     ssh: Option<(Vec<u8>, Vec<u8>)>,
@@ -73,6 +76,7 @@ impl PromptState {
             root: false,
             color: false,
             light: false,
+            icons: false,
             ssh: None,
             secondary: Vec::new(),
             last: Vec::new(),
@@ -109,11 +113,15 @@ impl PromptState {
     /// watch) this is what keeps the counters from freezing at the first
     /// snapshot until a `cd`; [`GitSegment::tick`] is what rate-limits it to
     /// one `git status` per half second, so a prompt loop cannot cost more.
-    pub fn arm(&mut self, context: &PromptContext, color: bool, light: bool) {
+    /// `color`, `light` and `icons` decide what the stock prompt may paint:
+    /// ANSI colours, the palette for a light background, and the two Nerd Font
+    /// glyphs, which only a patched font draws.
+    pub fn arm(&mut self, context: &PromptContext, color: bool, light: bool, icons: bool) {
         self.home.clone_from(&context.home);
         self.root = context.root;
         self.color = color;
         self.light = light;
+        self.icons = icons;
         self.ssh = baash_lang::prompt::ssh_context(&context.user, &context.host);
 
         if self.cwd_bytes != context.cwd {
@@ -203,8 +211,11 @@ impl PromptState {
             facts.status,
             ssh,
             self.root,
-            self.color,
-            self.light,
+            Paint {
+                color: self.color,
+                light: self.light,
+                icons: self.icons,
+            },
         )
     }
 
@@ -281,8 +292,8 @@ mod tests {
             cwd: baash_sys::os::bytes_from_os(root.as_os_str()),
             ..PromptContext::default()
         };
-        state.arm(&context, false, false);
-        state.arm(&context, false, false);
+        state.arm(&context, false, false, false);
+        state.arm(&context, false, false, false);
         assert_eq!(state.git.ticks(), 2);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -297,7 +308,7 @@ mod tests {
             cwd: baash_sys::os::bytes_from_os(root.as_os_str()),
             ..PromptContext::default()
         };
-        state.arm(&context, true, true);
+        state.arm(&context, true, true, true);
         let prompt = state.primary().into_bytes();
         let text = String::from_utf8_lossy(&prompt);
         assert!(

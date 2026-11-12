@@ -51,6 +51,8 @@ const SCRUBBED: &[&[u8]] = &[
     b"SSH_CLIENT",
     b"LC_ALL",
     b"NO_COLOR",
+    // The stock prompt's glyphs are an option; the tests set it themselves.
+    b"PROMPT_ICONS",
     // A stale inherited `PWD` would win over the directory the test chdirs to,
     // and `\w` reads the shell's `PWD`.
     b"PWD",
@@ -379,7 +381,7 @@ fn the_default_prompt_is_tide_like() {
     // home has no sibling that starts with `s`; the last component is whole.
     let marker = user_marker();
     let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
-    let prompt = format!("\u{f115} ~/s/bshell  \u{f418} main {marker}");
+    let prompt = format!("~/s/bshell  main {marker}");
     session.prompt(&prompt);
     // The counts are git's, not the shell's: a failing command and a background
     // child leave the prompt alone.
@@ -388,6 +390,44 @@ fn the_default_prompt_is_tide_like() {
     // Leave through a successful command, so `exit` exits zero.
     session.send(b"true\n");
     session.prompt(&prompt);
+    session.send(b"exit\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The two Nerd Font glyphs are an option, and off is the default.
+///
+/// They are private-use codepoints (U+F115 and U+F418) that only a patched
+/// font draws, and a font without them shows a box, so the stock prompt is
+/// plain text unless `PROMPT_ICONS` asks for them. The variable is read when
+/// the prompt is armed, so an assignment takes effect at the next one, and the
+/// environment can ask before the first.
+#[test]
+fn the_prompt_glyphs_are_an_option() {
+    let home = temp_dir("glyph-home");
+    let work = home.join("src/bshell");
+    std::fs::create_dir_all(work.join(".git")).expect("create git directory");
+    std::fs::write(work.join(".git/HEAD"), b"ref: refs/heads/main\n").expect("write HEAD");
+    let marker = user_marker();
+    let plain = format!("~/s/bshell  main {marker}");
+    let ornate = format!("\u{f115} ~/s/bshell  \u{f418} main {marker}");
+
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.prompt(&plain);
+    assert!(
+        find(&session.output, "\u{f115}".as_bytes()).is_none(),
+        "no folder glyph by default: {:?}",
+        String::from_utf8_lossy(&session.output)
+    );
+    session.send(b"PROMPT_ICONS=1\n");
+    session.prompt(&ornate);
+    session.send(b"PROMPT_ICONS=off\n");
+    session.prompt(&plain);
+    session.send(b"exit\n");
+    session.wait_child();
+
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[("PROMPT_ICONS", "1")]);
+    session.prompt(&ornate);
     session.send(b"exit\n");
     session.wait_child();
     let _ = std::fs::remove_dir_all(&home);
@@ -457,7 +497,9 @@ fn the_prompt_counts_ahead_behind_modified_and_untracked() {
     std::fs::write(work.join("tracked.txt"), "three\n").expect("write tracked file");
     std::fs::write(work.join("untracked.txt"), "x\n").expect("write untracked file");
 
-    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    // The glyphs are on here so the column arithmetic is measured with a
+    // private-use cell in the prompt as well.
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[("PROMPT_ICONS", "1")]);
     // The directory is `~/repo`; the counters arrive from the worker, so wait
     // for the whole suffix rather than for the first prompt.
     session.prompt("\u{f418} main  \u{2191}1 \u{2193}1 !1 ?1 $");

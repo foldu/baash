@@ -68,15 +68,18 @@ readline-compatible reverse incremental search.
 While `PS1` is untouched, the prompt is one tide-like line:
 
 ```text
- ~/sr/gith/fo/nixos-config   master  ↑23 !2 ?5 $
+~/sr/gith/fo/nixos-config  master  ↑23 !2 ?5 $
 ```
 
-The directory icon and the branch icon are Nerd Font glyphs; the outer path
-components are shortened to the shortest prefix that is unique among their
-siblings, the last component is kept whole, and `$HOME` is `~`. `↑N` is commits
+The folder and branch glyphs tide puts in front of those two segments are Nerd
+Font private-use codepoints (U+F115 and U+F418), and a font without them draws
+a box where the picture should be: they are off by default, and
+`PROMPT_ICONS=1` turns them on. The outer path components are shortened to the
+shortest prefix that is unique among their siblings, the last component is kept
+whole, and `$HOME` is `~`. `↑N` is commits
 ahead of the upstream and `↓N` commits behind it, `!N` tracked files with staged
 or unstaged changes, and `?N` untracked files; each is omitted at zero, `$` is
-`#` for root, and nothing follows the marker. The branch is read from
+`#` for root, and one plain space follows the marker. The branch is read from
 `.git/HEAD` on the prompt path; the counters come from a `gix` status on a
 worker (500 ms rate limit, coalesced, a 2 s deadline), so no `git` binary is
 needed and a slow repository never delays a prompt

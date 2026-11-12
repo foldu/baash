@@ -177,14 +177,14 @@ delegates everything else: line editing to `baash-repl`, execution to the
   number the line will get and `\#` bash's command number;
 * **the stock prompt is tide-like**: while `PS1` is still the built-in
   `\s-\v\$ `, the rendered prompt is
-  ` ~/sr/gith/fo/nixos-config   master  ↑23 !2 ?5 $` — a Nerd Font folder
-  icon and the abbreviated `$PWD` (outer components shortened to their shortest
-  unique prefix, the last one whole, `$HOME` as `~`), a branch icon and the git
-  branch (read from `.git/HEAD`, following a `.git` file and `packed-refs` for
+  `~/sr/gith/fo/nixos-config  master  ↑23 !2 ?5 $` — the abbreviated `$PWD`
+  (outer components shortened to their shortest unique prefix, the last one
+  whole, `$HOME` as `~`), the git branch (read from `.git/HEAD`, following a `.git` file and `packed-refs` for
   worktrees; a detached `HEAD` is its seven-character commit id), then `↑N`
   commits ahead of the upstream and `↓N` behind it, `!N` modified tracked files
   and `?N` untracked files, each omitted at zero, then `$` (`#` for root). The
-  major segments are two spaces apart and there is no trailing space. The
+  major segments are two spaces apart and the marker is followed by one plain
+  (unpainted) space.
   counters come from a `gix` status and commit-graph walk on a worker thread,
   rate-limited to 500 ms, coalesced and capped by a 2 s deadline; the prompt
   paints the last completed refresh, so a cold or huge repository never delays
@@ -192,9 +192,9 @@ delegates everything else: line editing to `baash-repl`, execution to the
   them (`docs/prompt-watch.md`). On a terminal the segments use ANSI SGR
   colours
   (blue directory, bright cyan last component, green branch, yellow `↑`/`!`,
-  red `↓`/`?`/`#`); `NO_COLOR` gives the same text uncoloured. The glyphs are
-  width 1, and the editor measures the prompt with `unicode-width`, so the
-  cursor column survives them. It is built from bytes in one pass, so non-UTF-8
+  red `↓`/`?`/`#`); `NO_COLOR` gives the same text uncoloured. The glyphs,
+  when `PROMPT_ICONS` asks for them, are width 1, and the editor measures the
+  prompt with `unicode-width`, so the cursor column survives them. It is built from bytes in one pass, so non-UTF-8
   paths render exactly and nothing in the prompt is expanded twice. The `PS1`
   *variable* keeps bash's value, so `${PS1@P}` and the conformance
   `default PS1` case are unchanged. An explicit `PS1` wins and is rendered by

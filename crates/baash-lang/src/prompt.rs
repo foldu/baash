@@ -982,12 +982,28 @@ fn short_host(host: &[u8]) -> &[u8] {
 // The default prompt
 // ---------------------------------------------------------------------------
 
+/// What the terminal can be asked to draw.
+///
+/// A shell cannot see the font or the palette, so every choice here is the
+/// caller's: whether ANSI colours go out at all (`NO_COLOR` and a non-terminal
+/// say no), which palette reads on a light background, and whether the stock
+/// prompt draws its Nerd Font glyphs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Paint {
+    /// ANSI SGR colours around each segment.
+    pub color: bool,
+    /// The palette for a light background.
+    pub light: bool,
+    /// The Nerd Font folder and branch glyphs (`U+F115`, `U+F418`).
+    pub icons: bool,
+}
+
 /// The stock prompt an interactive shell draws when `PS1` is untouched.
 ///
 /// The reference is tide's single line, which is why the shape is
 ///
 /// ```text
-///  ~/sr/gith/fo/nixos-config   master  ↑23 !2 ?5 $
+/// ~/sr/gith/fo/nixos-config  master  ↑23 !2 ?5 $
 /// ```
 ///
 /// `directory` is already `~`-abbreviated and shortened by
@@ -999,11 +1015,12 @@ fn short_host(host: &[u8]) -> &[u8] {
 ///
 /// * `user@host`, only for an `ssh` session, so the prompt says which machine
 ///   the next command runs on.
-/// * the directory, with a Nerd Font folder icon. Its last component is painted
-///   brighter than the rest.
-/// * the branch, from [`git_branch`], with a Nerd Font branch icon. A detached
-///   `HEAD` is shown as the abbreviated commit id, because that is what the
-///   file read resolves to.
+/// * the directory, with a Nerd Font folder icon when `Paint::icons`. Its last
+///   component is painted brighter than the rest.
+/// * the branch, from [`git_branch`], with a Nerd Font branch icon when
+///   `Paint::icons`. A detached `HEAD` is shown as the abbreviated commit id,
+///   because
+///   that is what the file read resolves to.
 /// * `↑N` commits ahead of the upstream and `↓N` commits behind it, then `!N`
 ///   tracked files that differ from `HEAD` or the index and `?N` untracked
 ///   files. Each is omitted at zero.
@@ -1020,18 +1037,27 @@ fn short_host(host: &[u8]) -> &[u8] {
 /// branch containing something that looks like an escape cannot paint the rest
 /// of the line.
 ///
-/// `color == false` is the same text with no escapes at all: `NO_COLOR` and a
-/// non-terminal get it. The palette is the portable sixteen-colour SGR set, so
-/// it follows the terminal's own theme.
+/// [`Paint::icons`] is the caller's choice because only the caller's user knows
+/// the font: the two glyphs are Nerd Font private-use codepoints, and a font
+/// without them draws a box where the picture should be. The shell reads it
+/// from `PROMPT_ICONS`, and off is the default.
+///
+/// [`Paint::color`] off is the same text with no escapes at all: `NO_COLOR` and
+/// a non-terminal get it. The palette is the portable sixteen-colour SGR set,
+/// so it follows the terminal's own theme.
 pub fn tide_prompt(
     directory: &[u8],
     branch: Option<&[u8]>,
     git: Option<GitStatus>,
     ssh: Option<(&[u8], &[u8])>,
     root: bool,
-    color: bool,
-    light: bool,
+    paint: Paint,
 ) -> ExpandedPrompt {
+    let Paint {
+        color,
+        light,
+        icons,
+    } = paint;
     // Tide's palette in the portable sixteen colours: blue for the directory,
     // bright cyan for the component you are in, green for the branch and the
     // user's marker, yellow for ahead and for modified tracked files, red for
@@ -1100,8 +1126,10 @@ pub fn tide_prompt(
     };
     let mut segment = Vec::with_capacity(directory.len() + 24);
     sgr(&mut segment, color, DIRECTORY);
-    segment.extend_from_slice(DIRECTORY_ICON);
-    segment.push(b' ');
+    if icons {
+        segment.extend_from_slice(DIRECTORY_ICON);
+        segment.push(b' ');
+    }
     segment.extend_from_slice(prefix);
     if !here.is_empty() {
         sgr(&mut segment, color, here_colour);
@@ -1113,8 +1141,10 @@ pub fn tide_prompt(
     if let Some(branch) = branch {
         let mut segment = Vec::with_capacity(branch.len() + 16);
         sgr(&mut segment, color, BRANCH);
-        segment.extend_from_slice(BRANCH_ICON);
-        segment.push(b' ');
+        if icons {
+            segment.extend_from_slice(BRANCH_ICON);
+            segment.push(b' ');
+        }
         segment.extend_from_slice(branch);
         sgr(&mut segment, color, RESET);
         segments.push(segment);
@@ -1935,6 +1965,32 @@ fn is_name(byte: u8) -> bool {
 #[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
+
+    /// The stock prompt with the Nerd Font glyphs on, which is what the
+    /// composition tests below assert; the default is off and has its own
+    /// test.
+    fn icons_prompt(
+        directory: &[u8],
+        branch: Option<&[u8]>,
+        git: Option<GitStatus>,
+        ssh: Option<(&[u8], &[u8])>,
+        root: bool,
+        color: bool,
+        light: bool,
+    ) -> ExpandedPrompt {
+        tide_prompt(
+            directory,
+            branch,
+            git,
+            ssh,
+            root,
+            Paint {
+                color,
+                light,
+                icons: true,
+            },
+        )
+    }
     use crate::fixture::TestShell;
 
     fn context() -> PromptContext {
@@ -2448,7 +2504,7 @@ mod tests {
     /// The default prompt with an already-shortened directory, so the
     /// composition tests do not touch the filesystem.
     fn render(directory: &[u8], branch: Option<&[u8]>, git: Option<GitStatus>) -> Vec<u8> {
-        tide_prompt(directory, branch, git, None, false, false, false).into_bytes()
+        icons_prompt(directory, branch, git, None, false, false, false).into_bytes()
     }
 
     fn counts(modified: u32, untracked: u32, ahead: u32, behind: u32) -> Option<GitStatus> {
@@ -2494,7 +2550,7 @@ mod tests {
     #[test]
     fn the_colours_are_ansi_and_the_last_component_is_the_bright_one() {
         assert_eq!(
-            tide_prompt(
+            icons_prompt(
                 b"~/sr/gith/fo/nixos-config",
                 Some(b"master"),
                 counts(2, 5, 23, 4),
@@ -2514,14 +2570,14 @@ mod tests {
         );
         // Root keeps its distinction, and the escape covers the marker only.
         assert_eq!(
-            tide_prompt(b"/x", None, None, None, true, true, false).into_bytes(),
+            icons_prompt(b"/x", None, None, None, true, true, false).into_bytes(),
             format!("\x1b[34m{DIR_ICON} /x\x1b[0m \x1b[31m#\x1b[0m ").into_bytes()
         );
     }
 
     #[test]
     fn a_light_background_gets_a_darker_accent() {
-        let light = tide_prompt(
+        let light = icons_prompt(
             b"~/src/x",
             Some(b"main"),
             counts(2, 1, 3, 4),
@@ -2558,7 +2614,7 @@ mod tests {
         // On `ssh`, the prompt has to say which machine the command will run
         // on; the marker stays last, and the segment is one ANSI colour.
         assert_eq!(
-            tide_prompt(
+            icons_prompt(
                 b"~/src/bshell",
                 Some(b"main"),
                 counts(0, 0, 1, 0),
@@ -2572,7 +2628,7 @@ mod tests {
                 .into_bytes()
         );
         assert_eq!(
-            tide_prompt(
+            icons_prompt(
                 b"/x",
                 None,
                 None,
@@ -2588,6 +2644,25 @@ mod tests {
     }
 
     #[test]
+    fn the_glyphs_are_off_unless_asked_for() {
+        // The folder and branch glyphs are private-use codepoints that only a
+        // Nerd Font draws; a font without them shows a box, so the default
+        // line is plain text.
+        assert_eq!(
+            tide_prompt(
+                b"/x",
+                Some(b"main"),
+                counts(2, 1, 0, 0),
+                None,
+                false,
+                Paint::default()
+            )
+            .into_bytes(),
+            b"/x  main  !2 ?1 $ ".to_vec()
+        );
+    }
+
+    #[test]
     fn the_prompt_ends_with_the_marker_and_a_space() {
         // `$` for an ordinary user, `#` for root: the same distinction `\$`
         // makes in a template, followed by the space the line starts after.
@@ -2596,12 +2671,12 @@ mod tests {
             format!("{DIR_ICON} /x $ ").into_bytes()
         );
         assert_eq!(
-            tide_prompt(b"/x", None, None, None, true, false, false).into_bytes(),
+            icons_prompt(b"/x", None, None, None, true, false, false).into_bytes(),
             format!("{DIR_ICON} /x # ").into_bytes()
         );
         // The marker follows the counters rather than replacing them.
         assert_eq!(
-            tide_prompt(
+            icons_prompt(
                 b"/x",
                 Some(b"main"),
                 counts(2, 1, 0, 0),

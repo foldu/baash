@@ -397,13 +397,29 @@ loop (`crates/baash/src/main.rs`, `prompt_state.rs`) paints
 worker-fed git facts and must not run on the prompt path. The line is
 
 ```text
+~/sr/gith/fo/nixos-config  master  ↑23 !2 ?5 $
+```
+
+`PROMPT_ICONS` decides whether the folder (U+F115) and branch (U+F418) glyphs
+are drawn in front of the directory and the branch. They are private-use
+codepoints, and a font without them draws a box, so the default is off: `1`,
+`on`, `true` or `yes` in any ASCII case turn them on, and anything else —
+including an unset variable — leaves them off. The variable is read when the
+prompt is armed, so `PROMPT_ICONS=1` typed at the prompt takes effect at the
+next one. With them on the line has one space after each glyph:
+
+```text
  ~/sr/gith/fo/nixos-config   master  ↑23 !2 ?5 $
 ```
+
+`baash_lang::prompt::Paint` carries the three choices a caller makes — ANSI
+colour, the light palette and the glyphs — so the composer takes one value
+rather than three flags; `Paint::default()` is plain text with no glyphs.
 
 In a session that came in over `ssh`, `user@host` is the leading segment:
 
 ```text
-barnabas@jupiter   ~/src/bshell   main  ↑1 $
+barnabas@jupiter  ~/src/bshell  main  ↑1 $
 ```
 
 The marker is followed by one plain (unpainted) space, so the first character
@@ -419,8 +435,8 @@ one ANSI colour (yellow), and it is captured when the prompt is armed.
 
 Segments, in order:
 
-* **cwd**, with a leading `$HOME` abbreviated to `~` and a Nerd Font folder icon
-  (U+F115) in front. Every component but the last is shortened to the shortest
+* **cwd**, with a leading `$HOME` abbreviated to `~` and, with `PROMPT_ICONS`
+  on, a Nerd Font folder icon (U+F115) in front. Every component but the last is shortened to the shortest
   prefix that is unique among its siblings in one `read_dir`, at least one
   character (`src` beside `swap` becomes `sr`, `github` beside `gitlab` becomes
   `gith`, `foo` beside `fzf` becomes `fo`); the last component is kept whole
@@ -429,7 +445,8 @@ Segments, in order:
   rule and `PathAbbreviator` caches the answer per `(cwd, HOME)`, so the
   `read_dir`s run once per `cd`, not once per repaint. The last component is
   painted brighter than the rest.
-* **the git branch**, with a Nerd Font branch icon (U+F418). It comes from
+* **the git branch**, with a Nerd Font branch icon (U+F418) when
+  `PROMPT_ICONS` is on. It comes from
   `baash_lang::prompt::git_branch`: walk up for `.git` (a directory, or a file
   whose `gitdir:` names the real one for a linked worktree or submodule), read
   `HEAD`, and show `refs/heads/<name>` as the branch. Any other symbolic ref is
@@ -445,12 +462,12 @@ Segments, in order:
 * **`?N`** files git does not track, only when `N > 0`. The status run uses
   `--untracked-files=all`, so a new directory counts as its files, not as one
   entry.
-* **`$`**, or `#` for root. One space before it and **no trailing space**: it is
-  the last cell before the cursor.
+* **`$`**, or `#` for root. One space on either side; the one after it is
+  unpainted, so it cannot take the marker's colour.
 
 The major segments are two spaces apart; the counters are one segment whose
 members are single-spaced. A clean repository is
-` ~/src/bshell   main $` — no empty counter slot.
+`~/src/bshell  main $` — no empty counter slot.
 
 The counters are computed in process by `gix` as a task on the shell's `compio`
 runtime — a blocking walk on the runtime's pool (`crates/baash/src/git_prompt.rs`)
@@ -470,8 +487,8 @@ On a terminal the prompt uses ANSI SGR colours only — never 24-bit values — 
 it follows the terminal's palette: blue for the directory and its icon, bright
 cyan for the last component, green for the branch, its icon and the `$`, yellow
 for `↑N` and `!N` (and for `user@host`), red for `↓N`, `?N` and `#`.
-`NO_COLOR` or a non-terminal gets the same text with no escapes. The glyphs stay: they are text,
-not colour. Every coloured run ends with an SGR reset, so a path or a branch
+`NO_COLOR` or a non-terminal gets the same text with no escapes. The glyphs
+are not colour and are decided on their own, by `PROMPT_ICONS`. Every coloured run ends with an SGR reset, so a path or a branch
 containing an escape-looking sequence cannot paint the rest of the line.
 
 The default is built directly from data, not decoded as a prompt template, so
