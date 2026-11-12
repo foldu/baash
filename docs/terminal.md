@@ -92,7 +92,7 @@ contain `ESC`, and a title is not a place to inject a sequence. Bytes above
 The title is set at the prompt. A foreground command that wants its own title
 is a separate decision and is not done yet.
 
-## 4. OSC 133: prompt marks (A and B)
+## 4. OSC 133: prompt marks (A, B, C and D)
 
 ```
 ESC ] 133 ; A ; click_events=1 ESC \   prompt starts here
@@ -131,8 +131,14 @@ that submitted the line is not part of the command. `D` carries the exit
 status, so a terminal can show it beside the prompt or group the output. The
 pair surrounds execution; the next prompt's `A` follows `D`.
 
-Kitty's `click_events=1` extension on `A` belongs with click-to-move and is
-not sent yet.
+The four marks are the whole protocol: a terminal that understands them can
+jump between prompts, select one command's output including its prompt, open a
+new tab in the command's directory, and show the exit status. `TERM=dumb`
+suppresses all four, and `A`/`B` are not sent again for a repaint.
+
+Kitty's `click_events=1` extension on `A` is what §10 relies on: it asks the
+terminal to report left-button presses on the prompt and command line as mouse
+events, and without it there is nothing to map a click through.
 
 ## 5. Focus reporting
 
