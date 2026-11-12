@@ -320,8 +320,10 @@ delegates everything else: line editing to `baash-repl`, execution to the
 * The stock prompt's counters are the last completed refresh, not a snapshot
   taken at this instant. That is deliberate: the refresh is an in-process
   `gix` walk on a worker, at most once per 500 ms with a 2 s deadline, and the
-  prompt never waits for it. A change made while the line is idle appears
-  within about a second (the editor's watcher backstop) or at the next prompt.
+  prompt never waits for it. A change made while the line is idle appears when
+  the walk lands — a worker completion writes the editor's wake pipe, so a `cd`
+  into a repository shows its counters in about 60 ms rather than at the
+  one-second backstop (which remains as the fallback) — or at the next prompt.
   If the walk hangs, the counters stay stale; the prompt is unaffected.
 * `\s` is `baash`, so the conformance case that greps for `bash|osh` still
   fails; `\v`/`\V` now report the crate version (`0.0` / `0.0.0`).

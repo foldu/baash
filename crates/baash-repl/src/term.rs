@@ -67,8 +67,9 @@ impl Default for Size {
 pub enum Input {
     /// A byte is available; `read_byte` will not block.
     Key,
-    /// The watched path changed, or the terminal's backstop says it is time to
-    /// ask. No input was consumed, so the editor can repaint and wait again.
+    /// The watched path changed, or the live prompt has something to repaint,
+    /// or the terminal's backstop says it is time to ask. No input was
+    /// consumed, so the editor can repaint and wait again.
     Watch,
     /// The terminal's window changed size. No input was consumed; the frame's
     /// geometry is stale, so the editor re-anchors and paints again.
@@ -144,6 +145,19 @@ pub trait Terminal {
     #[cfg(unix)]
     fn set_watch(&mut self, _fd: Option<std::os::fd::OwnedFd>) {}
 
+    /// Wake `fd` alongside the keyboard, taking ownership of it.
+    ///
+    /// The descriptor behind a [`LivePrompt`](crate::LivePrompt) whose news is
+    /// not a filesystem event — the prompt's git counters come from a worker,
+    /// and a finished worker task has nothing to poll. It reports
+    /// [`Input::Watch`], exactly as a changed path does, because the editor's
+    /// response is the same: ask the live prompt and repaint.
+    ///
+    /// `None` stops awaiting it. The default ignores it, which is what a
+    /// terminal whose only news is keystrokes does.
+    #[cfg(unix)]
+    fn set_wake(&mut self, _fd: Option<std::os::fd::OwnedFd>) {}
+
     /// Wait until there is a keystroke or a watched change.
     ///
     /// [`Input::Key`] promises the next `read_byte` will not block; it consumes
@@ -193,6 +207,9 @@ pub struct RealTerminal {
     /// The directory watch the prompt refreshes from, when one is armed
     /// (`docs/prompt-watch.md`).
     watch: Option<compio::runtime::fd::PollFd<std::os::fd::OwnedFd>>,
+    /// The live prompt's own wake-up channel, when it has one: the prompt's
+    /// git counters arrive from a worker, which a poll cannot see.
+    wake: Option<compio::runtime::fd::PollFd<std::os::fd::OwnedFd>>,
     /// Bytes read while asking the terminal a question, which turned out to be
     /// keystrokes rather than an answer. They belong to the line editor.
     pending: std::collections::VecDeque<u8>,
@@ -213,6 +230,7 @@ impl RealTerminal {
                 raw: None,
                 read_source: None,
                 watch: None,
+                wake: None,
                 pending: std::collections::VecDeque::new(),
                 light: None,
             },
@@ -222,6 +240,7 @@ impl RealTerminal {
                 raw: None,
                 read_source: None,
                 watch: None,
+                wake: None,
                 pending: std::collections::VecDeque::new(),
                 light: None,
             },
@@ -424,11 +443,13 @@ fn drain_whole_characters(buffer: &mut Vec<u8>) -> Vec<u8> {
 enum Source {
     Key,
     Watch,
+    Wake,
     Resize,
     Backstop,
 }
 
-/// Await the keyboard, the directory watch, the resize signal and a timer.
+/// Await the keyboard, the directory watch, the live prompt's wake channel,
+/// the resize signal and a timer.
 ///
 /// `compio` has no `select!`: each `PollFd` submits one `PollOnce`
 /// (`IORING_OP_POLL_ADD`), so combining them is a `poll_fn` over the set, and
@@ -436,22 +457,25 @@ enum Source {
 /// drops is a readiness registration (or, for the signal, its handler), never a
 /// half-finished operation.
 #[cfg(unix)]
-async fn first_ready<A, B, C>(
+async fn first_ready<A, B, C, D>(
     keyboard: A,
     watch: B,
-    resize: C,
+    wake: C,
+    resize: D,
     backstop: std::time::Duration,
 ) -> io::Result<Source>
 where
     A: std::future::Future<Output = io::Result<()>>,
     B: std::future::Future<Output = io::Result<()>>,
     C: std::future::Future<Output = io::Result<()>>,
+    D: std::future::Future<Output = io::Result<()>>,
 {
     use std::future::poll_fn;
     use std::task::Poll;
 
     let mut keyboard = std::pin::pin!(keyboard);
     let mut watch = std::pin::pin!(watch);
+    let mut wake = std::pin::pin!(wake);
     let mut resize = std::pin::pin!(resize);
     let mut backstop = std::pin::pin!(compio::time::sleep(backstop));
     poll_fn(|context| {
@@ -472,6 +496,9 @@ where
         }
         if ready!(watch) {
             return Poll::Ready(Ok(Source::Watch));
+        }
+        if ready!(wake) {
+            return Poll::Ready(Ok(Source::Wake));
         }
         if backstop.as_mut().poll(context).is_ready() {
             return Poll::Ready(Ok(Source::Backstop));
@@ -601,15 +628,22 @@ impl RealTerminal {
                     None => std::future::pending::<io::Result<()>>().await,
                 }
             };
+            let wake = async {
+                match self.wake.as_ref() {
+                    Some(wake) => wake.read_ready().await,
+                    None => std::future::pending::<io::Result<()>>().await,
+                }
+            };
             let outcome = runtime.block_on(first_ready(
                 source.read_ready(),
                 watch,
+                wake,
                 compio::signal::unix::signal(baash_sys::SIGWINCH),
                 timeout,
             ))?;
             match outcome {
                 Source::Resize => return Ok(Some(Input::Resize)),
-                Source::Watch => return Ok(Some(Input::Watch)),
+                Source::Watch | Source::Wake => return Ok(Some(Input::Watch)),
                 Source::Backstop => return Ok(None),
                 Source::Key => {}
             }
@@ -629,11 +663,18 @@ impl Terminal for RealTerminal {
         self.watch = fd.and_then(|fd| compio::runtime::fd::PollFd::new(fd).ok());
     }
 
+    fn set_wake(&mut self, fd: Option<std::os::fd::OwnedFd>) {
+        // Same bargain as the watch: a prompt that cannot be woken is a
+        // one-second-late prompt, not a broken one.
+        self.wake = fd.and_then(|fd| compio::runtime::fd::PollFd::new(fd).ok());
+    }
+
     fn await_input(&mut self) -> io::Result<Input> {
         // The idle prompt samples the watch once a second even when nothing
         // wakes it: a completion-based poll is only as good as the kernel's
         // willingness to complete it, and a watcher that silently stopped
-        // being awaited would leave the prompt frozen.
+        // being awaited would leave the prompt frozen. A live prompt with a
+        // wake channel rarely pays this: a landed refresh wakes the wait.
         const BACKSTOP: std::time::Duration = std::time::Duration::from_secs(1);
         // The backstop is the idle prompt's "look again" tick either way.
         Ok(self.await_input_until(BACKSTOP)?.unwrap_or(Input::Watch))

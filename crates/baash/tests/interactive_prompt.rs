@@ -284,6 +284,24 @@ fn temp_dir(tag: &str) -> PathBuf {
     path
 }
 
+/// Run `git` for test *setup* only: the shell never does.
+fn git(directory: &Path, arguments: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-c")
+        .arg("commit.gpgsign=false")
+        .args(arguments)
+        .current_dir(directory)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Baash Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Baash Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git {arguments:?}");
+}
+
 /// The `n` in the first `\x1b[<n>C` at or after `from`.
 fn cursor_right_after(output: &[u8], from: usize) -> Option<usize> {
     let rest = &output[from..];
@@ -452,22 +470,6 @@ fn the_prompt_counts_ahead_behind_modified_and_untracked() {
     let home = temp_dir("counts-home");
     let work = home.join("repo");
     std::fs::create_dir_all(&work).expect("create work tree");
-    let git = |directory: &Path, arguments: &[&str]| {
-        let status = std::process::Command::new("git")
-            .arg("-c")
-            .arg("commit.gpgsign=false")
-            .args(arguments)
-            .current_dir(directory)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_AUTHOR_NAME", "Baash Test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
-            .env("GIT_COMMITTER_NAME", "Baash Test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git {arguments:?}");
-    };
     git(&work, &["init", "-q", "-b", "main"]);
     std::fs::write(work.join("tracked.txt"), "one\n").expect("write tracked file");
     git(&work, &["add", "tracked.txt"]);
@@ -523,6 +525,55 @@ fn the_prompt_counts_ahead_behind_modified_and_untracked() {
     session.send(b"exit\n");
     session.wait_child();
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The counters arrive when the worker lands, not at the editor's idle tick.
+///
+/// A `cd` into a repository drops the previous directory's counters on purpose
+/// (`docs/prompt-watch.md` §4), and they used to come back about a second
+/// later: a finished worker task is not something the editor's wait can see, so
+/// only the one-second backstop painted them. The prompt now has a wake
+/// channel, and this measures the arrival instead of assuming it — the whole
+/// segment has to be on screen well inside the second the backstop would have
+/// spent anyway.
+///
+/// Linux only: the live repaint is the watcher and the wake channel, and no
+/// other platform has either — a console handle cannot be polled
+/// (`docs/portability.md` §5) — so elsewhere the counters legitimately return
+/// at the next prompt.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_counters_do_not_wait_for_the_idle_tick() {
+    let home = temp_dir("live-home");
+    let work = home.join("repo");
+    std::fs::create_dir_all(&work).expect("create work tree");
+    git(&work, &["init", "-q", "-b", "main"]);
+    std::fs::write(work.join("tracked.txt"), "one\n").expect("write tracked file");
+    git(&work, &["add", "tracked.txt"]);
+    git(&work, &["commit", "-q", "-m", "one"]);
+    // One modified tracked file: the segment the test waits for.
+    std::fs::write(work.join("tracked.txt"), "two\n").expect("write tracked file");
+
+    // Start *outside* the repository, so the counters can only be dropped by
+    // the `cd` this test measures.
+    let outside = temp_dir("live-outside");
+    let marker = user_marker();
+    let mut session = Session::spawn(&home, &outside, &["--norc", "-i"], &[]);
+    session.prompt(&format!("{marker} "));
+
+    let started = Instant::now();
+    session.send(format!("cd {}\n", work.display()).as_bytes());
+    session.prompt(&format!("~/repo main !1 {marker}"));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(800),
+        "the counters waited for the one-second idle tick: {elapsed:?}"
+    );
+
+    session.send(b"exit\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&outside);
 }
 
 #[test]

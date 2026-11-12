@@ -102,29 +102,39 @@ The prompt always paints a **completed** result, never a half-updated one:
 * Before the first run in a session: the branch is there (exact), the counters
   are not.
 
-The worker result is installed by `GitSegment::poll`, which the prompt path
-calls before composing (`tick`) and the editor calls on its idle wake-up. There
-is one cache per `GitSegment`; the shell and the editor share the clone, so
-there is no second worker and no race about which result is newer.
+The worker result is installed by the refresh task itself, under the same lock
+the prompt path reads through `GitSegment::facts`. There is one cache per
+`GitSegment`; the shell and the editor share the clone, so there is no second
+worker and no race about which result is newer. Installing a result for the
+directory the prompt still describes also writes the wake pipe the editor is
+awaiting.
 
 ## 5. The watcher and the live repaint
 
 On Linux, `baash_sys::watch` arms an inotify watch on the working tree and its
-git directory. The editor awaits that descriptor beside the keyboard
-(`Terminal::await_input`), so while a line is idle:
+git directory, and the git segment owns a wake-up pipe
+(`baash_sys::notify::Notifier`). The editor awaits both descriptors beside the
+keyboard (`Terminal::await_input`), so while a line is idle:
 
 1. A file change wakes the editor. `PromptState::refresh` drains the watch and
    calls `GitSegment::tick`, which schedules the rate-limited `gix` walk.
-2. The editor also has a one-second backstop. On a wake-up with nothing in the
-   queue it calls `GitSegment::poll`; a result that landed since the last frame
-   is painted then. That is how the new count appears without a keystroke, even
-   though a worker completion cannot itself wake the inotify descriptor.
-3. The directory abbreviation is cached, so the repaint does not re-run
+2. A walk *landing* wakes the editor as well. The worker writes one byte to the
+   wake pipe after it installs its result, and the editor repaints then. That is
+   what makes a `cd` into a repository show its counters immediately: the
+   counters are dropped when the directory changes, and before this channel
+   existed there was no descriptor a finished `spawn_blocking` task could touch,
+   so they only returned at the next one-second tick (measured: 1.05 s; with the
+   channel ~0.06 s, most of which is the prompt's own `ESC [ 6 n` round trip).
+3. The one-second backstop stays. A wake the editor cannot count costs one
+   repaint at worst, and a watcher that silently stopped being awaited must not
+   freeze the line.
+4. The directory abbreviation is cached, so the repaint does not re-run
    `read_dir` per component.
 
-The worst case for a visible count is therefore about one second after a change,
-or the next prompt, whichever comes first. A slow repository does not affect the
-keystroke, the repaint or the prompt.
+The worst case for a visible count is therefore the walk itself — milliseconds
+on a warm local repository, capped at the 2 s deadline — or the next prompt,
+whichever comes first. A slow repository does not affect the keystroke, the
+repaint or the prompt.
 
 A user-defined `PS1` is not live: re-rendering it while the user types would run
 shell code between keystrokes. It keeps the legacy `[branch ~N]` suffix, fed by
@@ -141,6 +151,7 @@ the same worker cache.
 | huge repository | the watcher may refuse (`Why::TooBig`); the prompt then refreshes once per prompt, still off the prompt path |
 | network filesystem | inotify may deliver nothing; the prompt still refreshes at each prompt, and the one-second backstop cannot hurt |
 | `gix` walk slow or hung | prompt unaffected; the 2 s deadline discards slow results; counters stale until a run finishes |
+| the wake pipe cannot be created (descriptor limit) | counters arrive at the editor's next one-second tick instead; the prompt itself is unaffected |
 | an editor save touching many paths | coalesced into one run, and the watcher's event queue is drained in one read |
 
 The invariant: **the prompt never blocks, never spawns in the keystroke path,
@@ -156,6 +167,12 @@ because dropping the page cache needs root on the test host, and the design does
 not depend on it: the run is off the prompt path, the deadline caps it at 2 s,
 and the prompt paints the last completed result meanwhile.
 
+The latency the user sees, though, was never the walk: it was the editor's
+backstop. A `cd` into this repository dropped the counters and painted them
+again **1.05 s** later — the walk had finished after ~10 ms, but nothing woke
+the editor's wait. With the wake pipe the same measurement is **0.06 s**, and
+0.05 s of that is the prompt's own cursor-position round trip.
+
 The branch read is a handful of `stat`/`read` calls and is not measurable at
 prompt granularity.
 
@@ -168,10 +185,14 @@ prompt granularity.
   composer and watcher; implements `baash_repl::LivePrompt`.
 * `crates/baash-lang/src/prompt.rs` — `tide_prompt`, `shorten_path`,
   `PathAbbreviator`, `GitStatus`, `git_branch`.
-* `crates/baash-repl` — unchanged: it already measures the prompt with
-  `unicode-width` and strips ANSI CSI sequences, so the glyphs count as one cell
-  and the SGR escapes as zero. `\[`/`\]` remain the marker for a *user's*
-  coloured prompt; the stock prompt needs none.
+* `crates/baash-sys/src/notify.rs` — the wake-up pipe the worker writes and the
+  editor awaits (`Notifier`), so a landed refresh repaints at once.
+* `crates/baash-repl` — `Terminal::set_wake` and a fourth source in the editor's
+  wait, reported as `Input::Watch` because the editor's response is the same:
+  ask the live prompt, repaint if the bytes changed. It already measures the
+  prompt with `unicode-width` and strips ANSI CSI sequences, so the glyphs count
+  as one cell and the SGR escapes as zero. `\[`/`\]` remain the marker for a
+  *user's* coloured prompt; the stock prompt needs none.
 
 ## 9. Non-goals
 

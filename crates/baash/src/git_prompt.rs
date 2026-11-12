@@ -35,6 +35,12 @@
 //! completed counters for the current directory. A directory change drops the
 //! counters immediately rather than showing another repository's numbers; they
 //! reappear when the first refresh for the new directory lands.
+//!
+//! A completed refresh **wakes the editor** (the channel in
+//! [`baash_sys::notify`]), so those counters appear when they are computed
+//! rather than at the editor's next one-second tick. Before the channel
+//! existed, a `cd` into a repository dropped the numbers and then showed them
+//! again about a second later (`docs/prompt-watch.md` §5).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -102,6 +108,21 @@ struct State {
 #[derive(Clone)]
 pub struct GitSegment {
     state: Arc<Mutex<State>>,
+    /// The editor's wake-up channel (`docs/prompt-watch.md` §5).
+    ///
+    /// A completed refresh is not something a poll can see: there is no
+    /// descriptor behind it, so the counters it produced waited for the
+    /// editor's one-second backstop — the git segment appeared a second after
+    /// every `cd` into a repository. The worker writes one byte here instead,
+    /// and the editor awaits the read end beside the keyboard and the
+    /// directory watch. `None` when the pipe could not be created (a shell at
+    /// its descriptor limit): the prompt still works, a second slower.
+    ///
+    /// Linux only, because that is the only platform with a live prompt to
+    /// wake: elsewhere the prompt is composed at the next line and there is no
+    /// idle repaint to trigger.
+    #[cfg(target_os = "linux")]
+    wake: Option<Arc<baash_sys::notify::Notifier>>,
 }
 
 impl GitSegment {
@@ -164,22 +185,33 @@ impl GitSegment {
         // dropping a `JoinHandle` *cancels* the task in compio, and this one is
         // deliberately fire-and-forget: the deadline inside it, not the prompt,
         // decides when to stop.
-        let shared = Arc::clone(&self.state);
+        let segment = self.clone();
         let directory = cwd.to_path_buf();
         runtime
             .spawn(async move {
                 let status = refresh_with_deadline(&directory).await;
-                let mut state = lock(&shared);
-                // A result for a directory the prompt has already left is not
-                // installed, and its failure does not back off the directory
-                // the user is in now: that one has not been tried yet.
-                if state.cwd.as_deref() == Some(directory.as_path()) {
-                    state.status = status;
-                    if status.is_none() {
-                        state.next_attempt = Some(Instant::now() + RETRY_AFTER_FAILURE);
+                let installed = {
+                    let mut state = segment.lock();
+                    // A result for a directory the prompt has already left is
+                    // not installed, and its failure does not back off the
+                    // directory the user is in now: that one has not been tried
+                    // yet.
+                    let installed = state.cwd.as_deref() == Some(directory.as_path());
+                    if installed {
+                        state.status = status;
+                        if status.is_none() {
+                            state.next_attempt = Some(Instant::now() + RETRY_AFTER_FAILURE);
+                        }
                     }
+                    state.in_flight = false;
+                    installed
+                };
+                // Only a result the prompt will actually paint is worth a
+                // wake-up; a stale one could only make the editor recompose
+                // the same bytes.
+                if installed {
+                    segment.signal();
                 }
-                state.in_flight = false;
             })
             .detach();
     }
@@ -191,6 +223,41 @@ impl GitSegment {
             branch: state.branch.clone(),
             status: state.status,
         }
+    }
+
+    /// Tell the editor that the cache changed, where there is an editor to
+    /// tell.
+    ///
+    /// Split from the task so the platform difference is one `cfg` here rather
+    /// than one inside an `async` block: a platform without a live prompt has
+    /// nothing to wake, and the call is a no-op.
+    #[cfg(target_os = "linux")]
+    fn signal(&self) {
+        if let Some(wake) = &self.wake {
+            wake.notify();
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn signal(&self) {}
+
+    /// The descriptor the editor awaits so a landed refresh is painted at once.
+    ///
+    /// A duplicate of the read end: the editor's reactor owns it, and this
+    /// segment keeps the original for [`GitSegment::drain_wake`]. `None` when
+    /// the channel could not be created.
+    #[cfg(target_os = "linux")]
+    pub fn wake_fd(&self) -> Option<std::os::fd::OwnedFd> {
+        self.wake.as_ref()?.reader().ok()
+    }
+
+    /// Clear the wake-ups queued since the last repaint; `true` if any.
+    ///
+    /// Has to happen on every repaint: the pipe stays readable while a byte is
+    /// queued, so an unread signal would wake the editor straight back up.
+    #[cfg(target_os = "linux")]
+    pub fn drain_wake(&self) -> bool {
+        self.wake.as_ref().is_some_and(|wake| wake.drain())
     }
 
     /// The legacy `[branch ~N]` suffix for a user-defined `PS1`.
@@ -239,6 +306,11 @@ impl Default for GitSegment {
     fn default() -> Self {
         Self {
             state: Arc::new(Mutex::new(State::default())),
+            // No channel (a shell at its descriptor limit) is not an error:
+            // the counters then appear at the editor's one-second backstop,
+            // which is what every platform without a live prompt does.
+            #[cfg(target_os = "linux")]
+            wake: baash_sys::notify::Notifier::new().ok().map(Arc::new),
         }
     }
 }
@@ -416,6 +488,65 @@ mod tests {
     /// A runtime for the tests that exercise the task, not just the walk.
     fn runtime() -> compio::runtime::Runtime {
         compio::runtime::Runtime::new().expect("a compio runtime")
+    }
+
+    /// The prompt's git counters must not wait for the editor's one-second
+    /// backstop: a landed refresh wakes the wait that is painting the line.
+    ///
+    /// This is the mechanism behind the latency the pty test measures: before
+    /// the wake channel, `cd` into a repository painted the branch at once and
+    /// the counters about a second later, because a finished `spawn_blocking`
+    /// task is not something a poll can see.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_landed_refresh_wakes_the_waiting_editor() {
+        let root = scratch("wake");
+        git(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
+        git(&root, &["add", "tracked.txt"]);
+        git(&root, &["commit", "-q", "-m", "one"]);
+
+        let segment = GitSegment::new();
+        runtime().block_on(async {
+            segment.tick(&root);
+            assert!(
+                wait_for_wake(&segment, Duration::from_secs(10)).await,
+                "a landed refresh must wake the editor"
+            );
+            assert_eq!(
+                segment.facts().status.map(|status| status.modified),
+                Some(0),
+                "the wake-up is for a result that is in the cache"
+            );
+
+            // A change after the rate limit: the next walk is due, and it
+            // wakes the editor again.
+            std::fs::write(root.join("tracked.txt"), "two\n").unwrap();
+            compio::time::sleep(MIN_INTERVAL + Duration::from_millis(50)).await;
+            segment.tick(&root);
+            assert!(
+                wait_for_wake(&segment, Duration::from_secs(10)).await,
+                "the refreshed count must wake the editor too"
+            );
+            assert_eq!(
+                segment.facts().status.map(|status| status.modified),
+                Some(1)
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Wait for the wake channel, draining it; `false` if it never spoke.
+    #[cfg(target_os = "linux")]
+    async fn wait_for_wake(segment: &GitSegment, limit: Duration) -> bool {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            if segment.drain_wake() {
+                return true;
+            }
+            compio::time::sleep(Duration::from_millis(5)).await;
+        }
+        false
     }
 
     #[test]

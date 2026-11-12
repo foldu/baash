@@ -574,6 +574,19 @@ impl<'a> Editor<'a> {
         self.term.set_watch(fd);
     }
 
+    /// Hand the terminal a descriptor that goes ready when the live prompt has
+    /// news that is not a filesystem event.
+    ///
+    /// The prompt's git counters come from a worker; nothing about a finished
+    /// worker task is pollable, so the prompt supplies a channel the worker
+    /// writes when its result lands. The editor treats it exactly like a
+    /// changed directory: ask [`LivePrompt::refresh`] and repaint if the bytes
+    /// differ. Whoever owns the channel drains it in `refresh`.
+    #[cfg(unix)]
+    pub fn set_wake(&mut self, fd: Option<std::os::fd::OwnedFd>) {
+        self.term.set_wake(fd);
+    }
+
     /// Apply one decoded key; returns what the caller should do next.
     ///
     /// The editor redraws for [`Flow::Continue`]. This is public so a caller

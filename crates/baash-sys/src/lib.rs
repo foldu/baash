@@ -76,6 +76,8 @@ pub mod console;
 pub mod dirs;
 #[cfg(unix)]
 pub mod fd;
+#[cfg(unix)]
+pub mod notify;
 pub mod osc;
 pub mod outcome;
 pub mod paths;

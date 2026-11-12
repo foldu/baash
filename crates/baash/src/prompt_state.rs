@@ -10,7 +10,11 @@
 //!   exact `.git/HEAD` read and the counters are the worker's last completed
 //!   `gix` walk (`docs/prompt-watch.md` §2);
 //! * the working-tree watcher, so a file created while the line is idle makes
-//!   the counters refresh and repaint.
+//!   the counters refresh and repaint;
+//! * the worker's wake-up channel ([`GitSegment::wake_fd`]), so a refresh that
+//!   lands is painted when it lands instead of at the editor's next one-second
+//!   tick — a `cd` into a repository used to leave the counters off screen for
+//!   a second (`docs/prompt-watch.md` §5).
 //!
 //! It holds no shell state: `PWD`, `HOME` and whether the user is root are
 //! copied when the prompt is armed. That is what lets the editor borrow it for
@@ -160,14 +164,23 @@ impl PromptState {
             if self.adopted {
                 return;
             }
-            let dup = self
+            let watch = self
                 .watcher
                 .as_ref()
                 .and_then(|watcher| watcher.as_fd().try_clone_to_owned().ok());
-            if let Some(dup) = dup {
-                editor.set_watch(Some(dup));
-                self.adopted = true;
+            if let Some(watch) = watch {
+                editor.set_watch(Some(watch));
             }
+            // The counters come from a worker, and a worker's completion is not
+            // something a poll can see: without this descriptor they only went
+            // up at the editor's next one-second tick, so the git segment was a
+            // second late on every `cd` into a repository (`GitSegment::tick`
+            // starts the walk, the channel says when it landed).
+            editor.set_wake(self.git.wake_fd());
+            // Whatever was armed above is all this directory gets, including
+            // nothing: a repository too big to watch still has a wake channel,
+            // and a shell with neither falls back to the one-second tick.
+            self.adopted = true;
         }
         #[cfg(not(target_os = "linux"))]
         let _ = editor;
@@ -180,6 +193,7 @@ impl PromptState {
             if self.watcher.take().is_some() || self.armed_for.take().is_some() {
                 editor.set_watch(None);
             }
+            editor.set_wake(None);
             self.adopted = false;
         }
         #[cfg(not(target_os = "linux"))]
@@ -246,7 +260,10 @@ impl Default for PromptState {
 impl LivePrompt for PromptState {
     fn refresh(&mut self) -> Option<Prompt> {
         // Draining is what re-arms the poll: readiness stays set until the
-        // queue is empty, so a refresh that did not read would spin.
+        // queue is empty, so a refresh that did not read would spin. The wake
+        // channel is drained for the same reason, and the byte carries no news
+        // of its own: the cache it points at is read below.
+        let _ = self.git.drain_wake();
         let changed = self
             .watcher
             .as_mut()

@@ -109,6 +109,17 @@ of `SignalSet::set`, for a forked child that must not inherit the shell's
 blocked traps. `SIGALRM`, `SIGTERM`, `SIGINT`, `SIGQUIT` and `ECHILD` are
 re-exported so `baash-vm` needs no `libc`.
 
+**`notify::Notifier` is a wake-up pipe, not an event queue.** The prompt's git
+counters come from a worker, and a finished `spawn_blocking` task is not
+something a poll can see: without a descriptor of its own, a landed refresh only
+went up at the editor's one-second backstop. `Notifier` is the pipe pair that
+fixes that — `notify()` from the worker, `as_fd()`/`reader()` for the reactor,
+`drain()` before waiting again. Both ends are `O_NONBLOCK | O_CLOEXEC`, a
+failed write is not an error (the pipe being full already means "wake up"), and
+the bytes coalesce: what is signalled is *state*, so a reader that missed a
+count still sees the current one. Unix only, like `fd`; the consumer is the
+Linux live prompt.
+
 **`Flavour::host_device` is where a shell path becomes a device name.**
 `/dev/null` is a POSIX path and a Windows device (`NUL`). The mapping is a
 value beside the rest of the path grammar (`baash_sys::paths`), so it is
@@ -1279,6 +1290,16 @@ has no event, so `WaitForSingleObject` with a 250 ms deadline lets the idle
 prompt compare the window size with its last sample. The editor then drops the
 frame's anchor and paints again; the renderer reads the size on every frame, so
 the new geometry needs no plumbing.
+
+**A live prompt may have two descriptors, and only one of them is the
+filesystem.** `Terminal::set_watch` arms the directory watch; `set_wake` arms a
+descriptor that goes ready when the prompt has news that is not a filesystem
+event (its git counters arrive from a worker). Both report `Input::Watch`,
+because the editor's response is the same — ask `LivePrompt::refresh` and
+repaint if the bytes changed — and `refresh` is what drains whichever queue
+spoke. The wake channel is optional on both sides: a terminal that ignores it, a
+prompt without one, and a pipe that could not be created all fall back to the
+one-second backstop, which stays exactly as it was.
 
 **`Ctrl-L` clears without losing the output.** It writes `CSI rows S` (ECMA-48
 Scroll Up) before `CSI H CSI 2 J`: the scroll moves the page's text into the
