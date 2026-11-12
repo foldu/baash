@@ -9,11 +9,11 @@ description = "The baash binary"
 
 [features]
 # The static per-command completion tables (carapace, MIT): subcommands and
-# options with descriptions, for every command carapace knows. On by default,
-# because they are the difference between `git --<TAB>` working out of the box
-# and needing a bash-completion script; about 14 MiB of release binary.
-# `--no-default-features` builds the shell without them.
-default = ["carapace"]
+# options with descriptions, for every command carapace knows. Off by default:
+# they are about 14 MiB of release binary, and a shell that embeds a thousand
+# command grammars should make that a choice. `--features carapace` turns them
+# on; everything else (the engine, the `complete` model, bash-completion)
+# works either way.
 carapace = ["baash-complete/carapace"]
 # `--features mimalloc`: the process allocator on Unix too. musl's own malloc is
 # slow on the small-vector traffic a shell generates, so a static musl build

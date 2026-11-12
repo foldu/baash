@@ -71,9 +71,9 @@ completion needs no process and no JSON parser. 117 commands, 27,896 options,
 | `baash` with all 916 command tables | 41,359,768 (+14.0 MiB) |
 
 The cost is dominated by a few large tools: bazel is 704 KB of carapace JSON,
-git 439 KB, kubectl 194 KB, uv 187 KB. The `carapace` feature is on by default
-in `baash`; `cargo build -p baash --no-default-features` builds without the
-tables. `just carapace-data` regenerates them from the manifest
+git 439 KB, kubectl 194 KB, uv 187 KB. The `carapace` feature is **opt-in** in
+`baash` (`--features carapace`), so the default build stays at 26.7 MB and the
+tables are a deliberate 14 MiB. `just carapace-data` regenerates them from the manifest
 (`crates/baash-complete-data/commands.txt`). Per-Tab latency was not measured
 here: the tables are static and the provider is a binary search plus a walk
 over the typed words.

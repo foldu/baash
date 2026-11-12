@@ -9,10 +9,10 @@ description = "Completion candidates and ranking"
 
 [features]
 # Static per-command completion data generated from carapace (MIT): every
-# command's subcommands and options with a one-line description. On by default
-# in the `baash` binary; `cargo build -p baash --no-default-features` drops the
-# tables (and about 14 MiB of release binary) and keeps the engine, the
-# `complete` model and bash-completion.
+# command's subcommands and options with a one-line description. Opt-in in the
+# `baash` binary (`--features carapace`), because the tables are about 14 MiB of
+# release binary; without them the engine, the `complete` model and
+# bash-completion still answer.
 carapace = ["dep:baash-complete-data"]
 
 [dependencies]
