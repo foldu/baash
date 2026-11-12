@@ -1,9 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
   <title id="title">baash</title>
-  <!-- A sheep, because a shell that goes baa is funnier than one that does not.
+  <!-- The mark for light surfaces. On a dark page use logo-dark.svg: the same
+       drawing with a cream keyline on the ears, which are the only dark parts
+       that leave the fleece. Keep the two files in step.
+
+       A sheep, because a shell that goes baa is funnier than one that does not.
        The head is tilted and the eyes disagree: a sheep holding its head
        straight is a sheep that has understood something, and this one has not. -->
-  <g transform="rotate(-7 64 68)">
+  <g transform="translate(2.1 7.15) rotate(-7 64 68)">
     <!-- Wool: each puff drawn twice, once fat in the outline colour and once
          in cream, so the union gets one clean rim and no seams. -->
     <g fill="#24242b">
