@@ -105,6 +105,53 @@ pub fn title(text: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Whether an OSC 11 background-colour reply means a light terminal.
+///
+/// The reply is `ESC ] 11 ; rgb:RRRR/GGGG/BBBB BEL` (xterm uses four hex
+/// digits; two are also common, and `rgba:` adds an alpha component that is
+/// ignored). Returns `None` for anything else, so an unparseable or truncated
+/// answer leaves the shell on its default palette rather than guessing.
+pub fn background_is_light(reply: &[u8]) -> Option<bool> {
+    let body = reply.strip_prefix(b"\x1b]11;")?;
+    let body = body
+        .strip_suffix(b"\x07")
+        .or_else(|| body.strip_suffix(b"\x1b\\"))
+        .unwrap_or(body);
+    let colon = body.iter().position(|&byte| byte == b':')?;
+    let (kind, value) = (&body[..colon], &body[colon + 1..]);
+    if kind != b"rgb" && kind != b"rgba" {
+        return None;
+    }
+    let mut components = value.split(|&byte| byte == b'/');
+    let red = parse_hex(components.next()?)?;
+    let green = parse_hex(components.next()?)?;
+    let blue = parse_hex(components.next()?)?;
+    let red = f32::from(u16::try_from(red).ok()?) / 65535.0;
+    let green = f32::from(u16::try_from(green).ok()?) / 65535.0;
+    let blue = f32::from(u16::try_from(blue).ok()?) / 65535.0;
+    // Rec. 601 luma on the gamma-encoded values: good enough to separate a
+    // white background from a black one, which is the only decision this
+    // makes, and it does not need a colour-management library.
+    let luma = 0.299 * red + 0.587 * green + 0.114 * blue;
+    Some(luma > 0.5)
+}
+
+/// Parse one hex colour component (`f`, `ff`, `fff` or `ffff`) as 16-bit.
+fn parse_hex(digits: &[u8]) -> Option<u32> {
+    if digits.is_empty() || digits.len() > 4 {
+        return None;
+    }
+    let mut value: u32 = 0;
+    for &byte in digits {
+        let digit = char::from(byte).to_digit(16)?;
+        value = value * 16 + digit;
+    }
+    // Scale to 16 bits so `f`, `ff`, `fff` and `ffff` are the same colour:
+    // each precision's own maximum maps to `0xffff`.
+    let maximum = (1u32 << (4 * digits.len())) - 1;
+    Some(value * 0xffff / maximum)
+}
+
 /// `OSC 133 ; C`: a command is starting; `command` is its text.
 ///
 /// The text rides along as kitty's `cmdline_url` extension, percent-encoded so
@@ -250,6 +297,46 @@ mod tests {
     fn a_command_end_carries_the_status() {
         assert_eq!(command_finished(0), b"\x1b]133;D;0\x1b\\".to_vec());
         assert_eq!(command_finished(130), b"\x1b]133;D;130\x1b\\".to_vec());
+    }
+
+    #[test]
+    fn a_background_reply_says_light_or_dark() {
+        assert_eq!(
+            background_is_light(b"\x1b]11;rgb:ffff/ffff/ffff\x07"),
+            Some(true)
+        );
+        assert_eq!(
+            background_is_light(b"\x1b]11;rgb:0000/0000/0000\x07"),
+            Some(false)
+        );
+        assert_eq!(
+            background_is_light(b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\"),
+            Some(true)
+        );
+        // Two-digit and one-digit components are the same colour.
+        assert_eq!(background_is_light(b"\x1b]11;rgb:ff/ff/ff\x07"), Some(true));
+        assert_eq!(background_is_light(b"\x1b]11;rgb:f/f/f\x07"), Some(true));
+        // `rgba:` carries an alpha the decision ignores.
+        assert_eq!(
+            background_is_light(b"\x1b]11;rgba:0000/0000/0000/ffff\x07"),
+            Some(false)
+        );
+        // Below mid grey is dark; a real terminal is rarely near the boundary.
+        assert_eq!(
+            background_is_light(b"\x1b]11;rgb:7000/7000/7000\x07"),
+            Some(false)
+        );
+        // Anything malformed leaves the palette alone.
+        for reply in [
+            &b"\x1b]11;?\x07"[..],
+            b"\x1b]11;rgb:zz/00/00\x07",
+            b"\x1b]11;rgb:ffff/ffff\x07",
+            b"\x1b]11;cmyk:0/0/0/0\x07",
+            b"\x1b]10;rgb:ffff/ffff/ffff\x07",
+            b"nonsense",
+        ] {
+            assert_eq!(background_is_light(reply), None, "{reply:?}");
+        }
     }
 
     #[test]

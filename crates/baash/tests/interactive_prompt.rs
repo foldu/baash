@@ -930,3 +930,21 @@ fn ctrl_x_copies_the_line_to_the_terminal_clipboard() {
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&work);
 }
+
+/// The shell asks for the terminal's background colour before the first prompt.
+///
+/// A pty has no terminal emulator to answer, so this proves the question is
+/// asked and that an unanswered question only costs the short deadline; the
+/// answer's effect on the palette is tested where the palette is built.
+#[test]
+fn the_background_colour_is_asked_for_once() {
+    let home = temp_dir("background-home");
+    let work = temp_dir("background-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.expect(b"\x1b]11;?\x1b\\", Duration::from_secs(10));
+    session.prompt(" $");
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}

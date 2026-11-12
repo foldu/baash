@@ -350,7 +350,9 @@ Known gaps, stated so they are not mistaken for behaviour:
   clipboard has not been observed (`docs/terminal.md` §9). Click-to-move is
   unreachable there as well: it needs both `click_events` and the
   cursor-position report, and the console provides neither
-  (`docs/terminal.md` §10).
+  (`docs/terminal.md` §10). The background-colour query has no console answer
+  either, so Windows keeps the dark palette
+  (`docs/terminal.md` §11).
 
 Conformance is the other backlog, and it is measured: `docs/state.md` §6 and
 `docs/roadmap.md` carry the per-file picture, and `crates/baash-spec/baseline.txt`

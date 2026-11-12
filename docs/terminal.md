@@ -245,8 +245,35 @@ is ignored rather than guessed at. A release (`m`), a modified button and a
 scroll wheel decode as unknown sequences and are ignored. Double-click, drag
 and text selection are not implemented yet.
 
-## 11. What is next
-In landing order, each with its own commit: background-colour detection with a
-light theme, and the kitty keyboard protocol. Drag-selection and the clipboard
-integration it would bring are the natural follow-ups to §10. The ordered list
-is the session's task list; this file records what has actually landed.
+## 11. Background colour (OSC 11)
+
+```
+ESC ] 11 ; ? ESC \                     what is the background colour?
+ESC ] 11 ; rgb:RRRR/GGGG/BBBB BEL       the answer, one to four hex digits each
+```
+
+The shell asks once, before the first prompt, and waits at most 100 ms. A
+terminal answers in microseconds; one that does not answer at all keeps the
+dark palette. The reply's Rec. 601 luma decides light or dark, which is the
+only question being asked here — not a colour-managed match.
+
+The answer picks two things: the syntax theme (`Theme::LIGHT`/`DARK`, both in
+the 16 base colours) and the stock prompt's accents. On a light background the
+bright cyan of the current directory and the yellow of the counters are
+invisible, so both become dark magenta; the reds of `behind`, `untracked` and
+root's `#` stay.
+
+It is asked once, not per prompt: there is no theme-change event to subscribe
+to (OSC 2031 is not requested), and a round trip in front of every cursor
+would be a latency bug. A terminal whose theme changes mid-session keeps the
+palette it started with until the shell restarts.
+
+Bytes typed while the question is outstanding are not an answer; they are put
+back for the editor. The question is asked in raw mode, because a cooked
+terminal would echo it and wait for a newline the reply does not have.
+
+## 12. What is next
+In landing order, each with its own commit: the kitty keyboard protocol.
+Drag-selection and the clipboard integration it would bring are the natural
+follow-ups to §10. The ordered list is the session's task list; this file
+records what has actually landed.

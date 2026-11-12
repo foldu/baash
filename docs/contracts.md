@@ -1090,6 +1090,17 @@ terminal's scrollback, and only then is the viewport erased. The count is the
 terminal's rows, read from `Terminal::size`, so a terminal with no `SU` support
 ignores the first sequence and clears exactly as before.
 
+**The palette is chosen once from the terminal's own answer.**
+`RealTerminal::background_is_light` asks OSC 11 before the first prompt
+(100 ms bound) and caches the answer, including "asked and got nothing"; the
+reply is parsed by `baash_sys::osc::background_is_light`. The shell turns it
+into `Theme::LIGHT`/`DARK` and passes it to `PromptState::arm`, whose third
+argument is `light` because the stock prompt's bright cyan and yellow are
+invisible on white and become dark magenta. A terminal that does not answer
+(the Windows console, `TERM=dumb`, a terminal that ignores the query) keeps the
+dark palette. By the time this is read it is historical: there is no
+theme-change subscription, so a live change is picked up at the next restart.
+
 **Click-to-move is a cursor move with no key behind it.** The terminal sends
 `Key::MouseLeft { column, row }` (SGR mouse, one-based) only because the
 prompt-start mark asks for `click_events=1`. The editor maps it through two

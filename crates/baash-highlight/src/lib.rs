@@ -215,6 +215,58 @@ impl Theme {
             underline: false,
         },
     };
+
+    /// A readable theme for light terminals, also in the 16 base colours.
+    ///
+    /// The dark theme's accents are bright yellow, bright cyan and bright
+    /// magenta, all of which wash out on white; this one keeps the base
+    /// colours that carry enough contrast and uses `Default` for comments,
+    /// where an explicit colour would either disappear or shout.
+    pub const LIGHT: Theme = Theme {
+        keyword: Style {
+            color: Color::Magenta,
+            bold: true,
+            italic: false,
+            underline: false,
+        },
+        operator: Style {
+            color: Color::Blue,
+            bold: false,
+            italic: false,
+            underline: false,
+        },
+        redirect: Style {
+            color: Color::Cyan,
+            bold: false,
+            italic: false,
+            underline: false,
+        },
+        comment: Style {
+            color: Color::Default,
+            bold: false,
+            italic: true,
+            underline: false,
+        },
+        word: Style::PLAIN,
+        unterminated: Style {
+            color: Color::Red,
+            bold: true,
+            italic: false,
+            underline: true,
+        },
+        arithmetic: Style {
+            color: Color::Magenta,
+            bold: false,
+            italic: false,
+            underline: false,
+        },
+        heredoc: Style {
+            color: Color::Green,
+            bold: false,
+            italic: false,
+            underline: false,
+        },
+    };
 }
 
 impl Default for Theme {

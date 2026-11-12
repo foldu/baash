@@ -37,6 +37,9 @@ pub struct PromptState {
     home: Vec<u8>,
     root: bool,
     color: bool,
+    /// Whether the terminal's background is light; the stock prompt's accent
+    /// colours change with it (`tide_prompt`'s `light`).
+    light: bool,
     /// `user@host` when the session is remote, captured when the prompt was
     /// armed: an SSH session does not become local halfway through a line.
     ssh: Option<(Vec<u8>, Vec<u8>)>,
@@ -69,6 +72,7 @@ impl PromptState {
             home: Vec::new(),
             root: false,
             color: false,
+            light: false,
             ssh: None,
             secondary: Vec::new(),
             last: Vec::new(),
@@ -105,10 +109,11 @@ impl PromptState {
     /// watch) this is what keeps the counters from freezing at the first
     /// snapshot until a `cd`; [`GitSegment::tick`] is what rate-limits it to
     /// one `git status` per half second, so a prompt loop cannot cost more.
-    pub fn arm(&mut self, context: &PromptContext, color: bool) {
+    pub fn arm(&mut self, context: &PromptContext, color: bool, light: bool) {
         self.home.clone_from(&context.home);
         self.root = context.root;
         self.color = color;
+        self.light = light;
         self.ssh = baash_lang::prompt::ssh_context(&context.user, &context.host);
 
         if self.cwd_bytes != context.cwd {
@@ -199,6 +204,7 @@ impl PromptState {
             ssh,
             self.root,
             self.color,
+            self.light,
         )
     }
 
@@ -275,9 +281,33 @@ mod tests {
             cwd: baash_sys::os::bytes_from_os(root.as_os_str()),
             ..PromptContext::default()
         };
-        state.arm(&context, false);
-        state.arm(&context, false);
+        state.arm(&context, false, false);
+        state.arm(&context, false, false);
         assert_eq!(state.git.ticks(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_light_terminal_gets_the_light_prompt_palette() {
+        let mut state = PromptState::new();
+        let root = std::env::temp_dir().join(format!("baash-prompt-light-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let context = PromptContext {
+            cwd: baash_sys::os::bytes_from_os(root.as_os_str()),
+            ..PromptContext::default()
+        };
+        state.arm(&context, true, true);
+        let prompt = state.primary().into_bytes();
+        let text = String::from_utf8_lossy(&prompt);
+        assert!(
+            text.contains("\x1b[35m"),
+            "the light accent is magenta: {text:?}"
+        );
+        assert!(
+            !text.contains("\x1b[96m") && !text.contains("\x1b[33m"),
+            "no bright cyan or yellow on a light background: {text:?}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

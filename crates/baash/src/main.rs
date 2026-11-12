@@ -965,6 +965,7 @@ fn refresh_prompt(
     engine: &baash_complete::CompletionEngine,
     prompt: &mut prompt_state::PromptState,
     stock_prompt: bool,
+    light: bool,
 ) -> bool {
     std::mem::swap(editor.history_mut(), &mut shell.state().history);
     run_prompt_command(shell);
@@ -985,7 +986,7 @@ fn refresh_prompt(
         // `.git/HEAD` read and no subprocess, so a slow repository cannot hold
         // the line up (`docs/prompt-watch.md` §2).
         let color = std::env::var_os("NO_COLOR").is_none() && baash_sys::is_tty(0);
-        prompt.arm(&context, color);
+        prompt.arm(&context, color, light);
         prompt.primary()
     } else {
         // The legacy `[branch ~N]` suffix is fed by the same worker cache, so
@@ -1102,6 +1103,19 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
         ..baash_repl::Config::default()
     };
     let mut terminal = baash_repl::RealTerminal::new();
+    // The terminal knows whether its background is light; the answer picks the
+    // syntax theme and, later, the stock prompt's accent colours. A terminal
+    // that does not answer (the Windows console, `TERM=dumb`, a terminal that
+    // ignores OSC 11) keeps the dark palette.
+    let light = terminal.background_is_light().unwrap_or(false);
+    let config = baash_repl::Config {
+        theme: if light {
+            baash_repl::Theme::LIGHT
+        } else {
+            baash_repl::Theme::DARK
+        },
+        ..config
+    };
     let mut editor = baash_repl::Editor::with_config(&mut terminal, &engine, &syntax, config);
     // The first command completion would otherwise walk every `PATH` directory
     // on the thread that reads keystrokes. Build the index on a worker and
@@ -1141,7 +1155,14 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
         // user-defined `PS1` gets the legacy bracketed `[branch]` suffix
         // instead; both are fed by the same worker.
         let stock_prompt = shell.uses_default_prompt();
-        let stock = refresh_prompt(shell, &mut editor, &engine, &mut prompt, stock_prompt);
+        let stock = refresh_prompt(
+            shell,
+            &mut editor,
+            &engine,
+            &mut prompt,
+            stock_prompt,
+            light,
+        );
         if stock {
             // Only the built-in prompt is live. A user's `PS1` is the result of
             // `PROMPT_COMMAND` and every prompt escape, so re-rendering it from

@@ -179,6 +179,12 @@ pub struct RealTerminal {
     /// The directory watch the prompt refreshes from, when one is armed
     /// (`docs/prompt-watch.md`).
     watch: Option<compio::runtime::fd::PollFd<std::os::fd::OwnedFd>>,
+    /// Bytes read while asking the terminal a question, which turned out to be
+    /// keystrokes rather than an answer. They belong to the line editor.
+    pending: std::collections::VecDeque<u8>,
+    /// The cached answer to "is the background light?", including "asked and
+    /// got nothing", which must not be asked again.
+    light: Option<Option<bool>>,
 }
 
 #[cfg(unix)]
@@ -193,6 +199,8 @@ impl RealTerminal {
                 raw: None,
                 read_source: None,
                 watch: None,
+                pending: std::collections::VecDeque::new(),
+                light: None,
             },
             Err(_) => Self {
                 tty: None,
@@ -200,6 +208,8 @@ impl RealTerminal {
                 raw: None,
                 read_source: None,
                 watch: None,
+                pending: std::collections::VecDeque::new(),
+                light: None,
             },
         }
     }
@@ -241,6 +251,12 @@ pub struct RealTerminal {
 
 #[cfg(windows)]
 impl RealTerminal {
+    /// The console's background is a user setting and is not reported through
+    /// `ReadConsoleW`, so the default palette is used.
+    pub fn background_is_light(&mut self) -> Option<bool> {
+        None
+    }
+
     /// The process's console, or a terminal whose operations say so when there
     /// is none.
     pub fn new() -> Self {
@@ -445,6 +461,86 @@ where
 
 #[cfg(unix)]
 impl RealTerminal {
+    /// Whether the terminal's background is light, asked once with OSC 11.
+    ///
+    /// The answer picks the syntax theme and the prompt's accent colours. It is
+    /// cached: a terminal's theme can change under the shell, but there is no
+    /// theme-change event to subscribe to, and re-asking at every prompt would
+    /// put a round trip in front of the cursor.
+    ///
+    /// Bytes typed while the question is outstanding are keystrokes, not an
+    /// answer; they are put back for the line editor.
+    pub fn background_is_light(&mut self) -> Option<bool> {
+        if let Some(answer) = self.light {
+            return answer;
+        }
+        let answer = if self.supports_control_sequences() {
+            self.query_background().ok().flatten()
+        } else {
+            None
+        };
+        self.light = Some(answer);
+        answer
+    }
+
+    fn query_background(&mut self) -> io::Result<Option<bool>> {
+        // The reply has to be read in raw mode: a cooked terminal would echo
+        // the question and wait for a newline that is never coming.
+        let entered = self.raw.is_none();
+        if entered {
+            self.enter_raw()?;
+        }
+        let answer = self.read_background_reply();
+        if entered {
+            let _ = self.leave_raw();
+        }
+        answer
+    }
+
+    fn read_background_reply(&mut self) -> io::Result<Option<bool>> {
+        const PREFIX: &[u8] = b"\x1b]11;";
+        const TIMEOUT_MS: i32 = 100;
+        self.write_all(b"\x1b]11;?\x1b\\")?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        let mut reply = Vec::new();
+        loop {
+            // A blocking `poll` rather than the runtime's readiness source:
+            // this runs once at startup, before the editor exists, and the
+            // question is short enough that a parked thread is cheaper than
+            // teaching the runtime about a second polled source.
+            let remaining = deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis()
+                .min(TIMEOUT_MS as u128) as i32;
+            if !baash_sys::poll_readable(self.fd, remaining)? {
+                self.pending.extend(reply);
+                return Ok(None);
+            }
+            let mut byte = [0u8; 1];
+            match baash_sys::read_fd(self.fd, &mut byte) {
+                Ok(0) => {
+                    self.pending.extend(reply);
+                    return Ok(None);
+                }
+                Ok(_) => reply.push(byte[0]),
+                Err(error) => return Err(error),
+            }
+            // A prefix that has already diverged is a keystroke, not an answer;
+            // nothing else is expected on this channel.
+            if reply.len() <= PREFIX.len() && !PREFIX.starts_with(&reply) {
+                self.pending.extend(reply);
+                return Ok(None);
+            }
+            if reply.ends_with(b"\x07") || reply.ends_with(b"\x1b\\") {
+                return Ok(baash_sys::osc::background_is_light(&reply));
+            }
+            if reply.len() > 96 {
+                self.pending.extend(reply);
+                return Ok(None);
+            }
+        }
+    }
+
     /// Open the private read handle for the keyboard, once.
     ///
     /// A private handle, so the poll registration cannot disturb the descriptor
@@ -513,6 +609,9 @@ impl Terminal for RealTerminal {
     }
 
     fn read_byte_timeout(&mut self, timeout: std::time::Duration) -> io::Result<Option<u8>> {
+        if let Some(byte) = self.pending.pop_front() {
+            return Ok(Some(byte));
+        }
         let runtime = compio::runtime::Runtime::current();
         self.prepare_read_source()?;
         let source = self.read_source.as_ref().expect("prepared just above");
@@ -543,6 +642,9 @@ impl Terminal for RealTerminal {
     }
 
     fn read_byte(&mut self) -> io::Result<Option<u8>> {
+        if let Some(byte) = self.pending.pop_front() {
+            return Ok(Some(byte));
+        }
         // Readiness comes from the runtime; the read itself is one byte from a
         // descriptor already known to be ready. A keystroke must not park the
         // thread that also has to answer a scan or reap a child

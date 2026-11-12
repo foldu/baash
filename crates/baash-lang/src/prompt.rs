@@ -1030,6 +1030,7 @@ pub fn tide_prompt(
     ssh: Option<(&[u8], &[u8])>,
     root: bool,
     color: bool,
+    light: bool,
 ) -> ExpandedPrompt {
     // Tide's palette in the portable sixteen colours: blue for the directory,
     // bright cyan for the component you are in, green for the branch and the
@@ -1039,13 +1040,21 @@ pub fn tide_prompt(
     const DIRECTORY: &[u8] = b"\x1b[34m";
     const HERE: &[u8] = b"\x1b[96m";
     const BRANCH: &[u8] = b"\x1b[32m";
+    // `ahead`, `modified` and `user@host` share this yellow in the dark
+    // palette; the light one replaces all three.
     const AHEAD: &[u8] = b"\x1b[33m";
     const BEHIND: &[u8] = b"\x1b[31m";
-    const MODIFIED: &[u8] = b"\x1b[33m";
     const UNTRACKED: &[u8] = b"\x1b[31m";
-    const REMOTE: &[u8] = b"\x1b[33m";
     const USER: &[u8] = b"\x1b[32m";
     const ROOT: &[u8] = b"\x1b[31m";
+
+    // On a light background the bright cyan of the current directory and the
+    // yellow of the counters are both close to invisible. Magenta is the
+    // replacement for both: it is dark enough to read on white and still
+    // distinct from the red of `behind`, `untracked` and root's `#`.
+    const LIGHT_ACCENT: &[u8] = b"\x1b[35m";
+    let here_colour = if light { LIGHT_ACCENT } else { HERE };
+    let warn = if light { LIGHT_ACCENT } else { AHEAD };
 
     // The Nerd Font glyphs tide puts in front of the directory and the branch:
     // `nf-fa-folder_open` (U+F115) and `nf-oct-git_branch` (U+F418). They are
@@ -1076,7 +1085,7 @@ pub fn tide_prompt(
         remote.push(b'@');
         remote.extend_from_slice(host);
         let mut segment = Vec::new();
-        painted(&mut segment, color, REMOTE, &remote);
+        painted(&mut segment, color, warn, &remote);
         segments.push(segment);
     }
 
@@ -1095,7 +1104,7 @@ pub fn tide_prompt(
     segment.push(b' ');
     segment.extend_from_slice(prefix);
     if !here.is_empty() {
-        sgr(&mut segment, color, HERE);
+        sgr(&mut segment, color, here_colour);
         segment.extend_from_slice(here);
     }
     sgr(&mut segment, color, RESET);
@@ -1114,9 +1123,9 @@ pub fn tide_prompt(
     if let Some(git) = git {
         let mut counters: Vec<Vec<u8>> = Vec::with_capacity(3);
         for (count, symbol, code) in [
-            (git.ahead, "\u{2191}", AHEAD),
+            (git.ahead, "\u{2191}", warn),
             (git.behind, "\u{2193}", BEHIND),
-            (git.modified, "!", MODIFIED),
+            (git.modified, "!", warn),
             (git.untracked, "?", UNTRACKED),
         ] {
             if count == 0 {
@@ -2436,7 +2445,7 @@ mod tests {
     /// The default prompt with an already-shortened directory, so the
     /// composition tests do not touch the filesystem.
     fn render(directory: &[u8], branch: Option<&[u8]>, git: Option<GitStatus>) -> Vec<u8> {
-        tide_prompt(directory, branch, git, None, false, false).into_bytes()
+        tide_prompt(directory, branch, git, None, false, false, false).into_bytes()
     }
 
     fn counts(modified: u32, untracked: u32, ahead: u32, behind: u32) -> Option<GitStatus> {
@@ -2488,7 +2497,8 @@ mod tests {
                 counts(2, 5, 23, 4),
                 None,
                 false,
-                true
+                true,
+                false
             )
             .into_bytes(),
             format!(
@@ -2501,8 +2511,42 @@ mod tests {
         );
         // Root keeps its distinction, and the escape covers the marker only.
         assert_eq!(
-            tide_prompt(b"/x", None, None, None, true, true).into_bytes(),
+            tide_prompt(b"/x", None, None, None, true, true, false).into_bytes(),
             format!("\x1b[34m{DIR_ICON} /x\x1b[0m \x1b[31m#\x1b[0m").into_bytes()
+        );
+    }
+
+    #[test]
+    fn a_light_background_gets_a_darker_accent() {
+        let light = tide_prompt(
+            b"~/src/x",
+            Some(b"main"),
+            counts(2, 1, 3, 4),
+            Some((b"ada", b"jupiter")),
+            false,
+            true,
+            true,
+        )
+        .into_bytes();
+        let text = String::from_utf8_lossy(&light);
+        // Bright cyan and yellow disappear on white; the dark magenta accent
+        // replaces both, and the reds stay as they are.
+        assert!(
+            !text.contains("\x1b[96m"),
+            "no bright cyan on white: {text:?}"
+        );
+        assert!(!text.contains("\x1b[33m"), "no yellow on white: {text:?}");
+        assert!(
+            text.contains("\x1b[35m/x"),
+            "the current component is magenta: {text:?}"
+        );
+        assert!(
+            text.contains("\x1b[35m\u{2191}3"),
+            "ahead is magenta: {text:?}"
+        );
+        assert!(
+            text.contains("\x1b[31m\u{2193}4"),
+            "behind stays red: {text:?}"
         );
     }
 
@@ -2517,6 +2561,7 @@ mod tests {
                 counts(0, 0, 1, 0),
                 Some((b"ada", b"jupiter")),
                 false,
+                false,
                 false
             )
             .into_bytes(),
@@ -2524,7 +2569,16 @@ mod tests {
                 .into_bytes()
         );
         assert_eq!(
-            tide_prompt(b"/x", None, None, Some((b"ada", b"jupiter")), true, true).into_bytes(),
+            tide_prompt(
+                b"/x",
+                None,
+                None,
+                Some((b"ada", b"jupiter")),
+                true,
+                true,
+                false
+            )
+            .into_bytes(),
             format!("\x1b[33mada@jupiter\x1b[0m  \x1b[34m{DIR_ICON} /x\x1b[0m \x1b[31m#\x1b[0m")
                 .into_bytes()
         );
@@ -2539,12 +2593,21 @@ mod tests {
             format!("{DIR_ICON} /x $").into_bytes()
         );
         assert_eq!(
-            tide_prompt(b"/x", None, None, None, true, false).into_bytes(),
+            tide_prompt(b"/x", None, None, None, true, false, false).into_bytes(),
             format!("{DIR_ICON} /x #").into_bytes()
         );
         // The marker follows the counters rather than replacing them.
         assert_eq!(
-            tide_prompt(b"/x", Some(b"main"), counts(2, 1, 0, 0), None, true, false).into_bytes(),
+            tide_prompt(
+                b"/x",
+                Some(b"main"),
+                counts(2, 1, 0, 0),
+                None,
+                true,
+                false,
+                false
+            )
+            .into_bytes(),
             format!("{DIR_ICON} /x  {BRANCH_ICON} main  !2 ?1 #").into_bytes()
         );
     }
