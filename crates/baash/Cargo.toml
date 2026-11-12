@@ -8,6 +8,13 @@ publish.workspace = true
 description = "The baash binary"
 
 [features]
+# The static per-command completion tables (carapace, MIT): subcommands and
+# options with descriptions, for every command carapace knows. On by default,
+# because they are the difference between `git --<TAB>` working out of the box
+# and needing a bash-completion script; about 14 MiB of release binary.
+# `--no-default-features` builds the shell without them.
+default = ["carapace"]
+carapace = ["baash-complete/carapace"]
 # `--features mimalloc`: the process allocator on Unix too. musl's own malloc is
 # slow on the small-vector traffic a shell generates, so a static musl build
 # wants this (`docs/performance.md`).

@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use baash_syntax::ParseOpts;
 
 use crate::candidate::{CandKind, Candidate, dedupe};
+#[cfg(feature = "carapace")]
+use crate::carapace::CarapaceProvider;
 use crate::commands::CommandProvider;
 use crate::context::{Ctx, context};
 use crate::deferred::{Deferred, Replies};
@@ -114,13 +116,20 @@ impl CompletionEngine {
         };
         engine.set_provider(Arc::clone(&paths) as Arc<dyn Provider>);
         engine.set_provider(Arc::clone(&commands) as Arc<dyn Provider>);
-        for provider in [
+        // The generated tables come first so a subcommand beats a file of the
+        // same name; when the feature is off the provider simply is not there
+        // and every other source still answers.
+        let mut providers: Vec<Arc<dyn Provider>> = Vec::new();
+        #[cfg(feature = "carapace")]
+        providers.push(Arc::new(CarapaceProvider));
+        providers.extend([
             Arc::new(BuiltinProvider) as Arc<dyn Provider>,
             Arc::new(ParamOpProvider),
             Arc::new(TestOpProvider),
             Arc::new(KeywordProvider),
             Arc::new(CaseTagProvider::new()),
-        ] {
+        ]);
+        for provider in providers {
             engine.set_provider(provider);
         }
         engine

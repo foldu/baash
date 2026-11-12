@@ -7,8 +7,17 @@ license.workspace = true
 publish.workspace = true
 description = "Completion candidates and ranking"
 
+[features]
+# Static per-command completion data generated from carapace (MIT): every
+# command's subcommands and options with a one-line description. On by default
+# in the `baash` binary; `cargo build -p baash --no-default-features` drops the
+# tables (and about 14 MiB of release binary) and keeps the engine, the
+# `complete` model and bash-completion.
+carapace = ["dep:baash-complete-data"]
+
 [dependencies]
 baash-syntax.workspace = true
 baash-lang.workspace = true
 baash-diag.workspace = true
+baash-complete-data = { workspace = true, optional = true }
 nucleo-matcher.workspace = true

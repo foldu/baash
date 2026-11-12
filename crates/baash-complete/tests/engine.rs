@@ -631,3 +631,49 @@ fn a_non_ascii_completion_is_not_escaped() {
         inserts(&menu)
     );
 }
+
+#[test]
+fn a_known_commands_options_are_completed_with_descriptions() {
+    // The generated carapace tables reach the menu through the ordinary
+    // provider table; nothing here runs a process or parses JSON.
+    let engine = CompletionEngine::new();
+    let menu = engine.complete(b"git --", 6);
+    let version = menu
+        .candidates
+        .iter()
+        .find(|candidate| candidate.insert == b"--version")
+        .expect("git --version");
+    assert!(
+        version.desc.as_deref().is_some_and(|desc| !desc.is_empty()),
+        "the option carries carapace's help text"
+    );
+}
+
+#[test]
+fn a_subcommand_is_completed_with_a_description() {
+    let engine = CompletionEngine::new();
+    let menu = engine.complete(b"git ch", 6);
+    let checkout = menu
+        .candidates
+        .iter()
+        .find(|candidate| candidate.insert == b"checkout")
+        .expect("git checkout");
+    assert!(
+        checkout
+            .desc
+            .as_deref()
+            .is_some_and(|desc| !desc.is_empty())
+    );
+}
+
+#[test]
+fn a_subcommands_own_options_are_not_the_roots() {
+    let engine = CompletionEngine::new();
+    let menu = engine.complete(b"git checkout --", 15);
+    assert!(
+        menu.candidates
+            .iter()
+            .any(|candidate| candidate.insert == b"--detach"),
+        "checkout --detach"
+    );
+}

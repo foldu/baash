@@ -52,6 +52,8 @@
 #![warn(missing_docs)]
 
 mod candidate;
+#[cfg(feature = "carapace")]
+mod carapace;
 mod commands;
 mod context;
 mod deferred;
@@ -68,6 +70,8 @@ mod text;
 pub use baash_lang::QuoteCtx;
 
 pub use candidate::{CandKind, Candidate, Insertion, Span};
+#[cfg(feature = "carapace")]
+pub use carapace::CarapaceProvider;
 pub use commands::{CommandIndex, CommandProvider};
 pub use context::{Ctx, context};
 pub use deferred::{DEFAULT_WORDBREAKS, Deferred, Replies};

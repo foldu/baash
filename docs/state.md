@@ -137,6 +137,7 @@ commit and the tag cannot drift apart.
 | `baash-pattern` | 4197 | Thompson-NFA glob: `O(n·m)`, never exponential; `extglob`/`nocasematch`/`utf8` flags |
 | `baash-diag` | 1946 | diagnostic model and miette rendering; error-code space |
 | `baash-complete` | 4074 | completion engine: providers, contexts, nucleo ranking, menu layout |
+| `baash-complete-data` | 927 | generated carapace tables: 916 command trees, 58k options and one-line descriptions, compiled in behind the `carapace` feature; no dependencies |
 | `baash-repl` | 3470 | line editor, key decoding, history navigation, prompt adapter, renderer, terminal abstraction |
 | `baash-utils` | 244 | embedded coreutils (uutils 0.8 subcrates): the `builtin-utils` fallback used when `PATH` finds nothing; on by default for Windows, opt-in on Linux |
 | `baash-highlight` | 386 | syntax highlighting (token → style), shared with the editor |

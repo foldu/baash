@@ -58,6 +58,26 @@ by writing 1106 files for Defender to read; the mount has no first start. (A
 its own first execution, at any design, because the operating system reads the
 new file once — that is not the shell.)
 
+### 2026-11-12: the carapace completion tables
+
+`crates/baash-complete-data` carries command, option and description tables
+generated from carapace-bin 1.8.1 by `scripts/carapace-data.py`, compiled in so
+completion needs no process and no JSON parser. 117 commands, 27,896 options,
+3.6 MB of generated Rust. `x86_64-linux`, release (`lto = "thin"`):
+
+| | bytes |
+|---|---:|
+| `baash` with an empty table | 26,705,312 |
+| `baash` with all 916 command tables | 41,359,768 (+14.0 MiB) |
+
+The cost is dominated by a few large tools: bazel is 704 KB of carapace JSON,
+git 439 KB, kubectl 194 KB, uv 187 KB. The `carapace` feature is on by default
+in `baash`; `cargo build -p baash --no-default-features` builds without the
+tables. `just carapace-data` regenerates them from the manifest
+(`crates/baash-complete-data/commands.txt`). Per-Tab latency was not measured
+here: the tables are static and the provider is a binary search plus a walk
+over the typed words.
+
 ### 2026-11-01: dynamic specials, and two variable-table fast paths
 
 Re-measured at the commits that made `$SECONDS`/`$RANDOM` lazy and added the

@@ -79,6 +79,14 @@ pub struct Ctx {
     /// Index the completed word occupies in the simple command: `0` is the
     /// command name, assignments and redirection targets do not count.
     pub arg_index: usize,
+    /// The words of the simple command before the cursor, command word first.
+    ///
+    /// A provider that knows a command's grammar (its subcommands and options)
+    /// needs the words already typed to know which subcommand the cursor is
+    /// in: `git -C dir checkout --` is not `git --`. The words are the lexer's
+    /// token text, so a quoted argument keeps its quotes; matching against
+    /// command names is a byte comparison, and a quoted subcommand is not one.
+    pub words: Vec<Vec<u8>>,
     /// Whether the word continues past the cursor.
     pub has_suffix: bool,
     /// Whether the word is a redirection target.
@@ -172,7 +180,7 @@ pub fn context(line: &[u8], cursor: usize, opts: &ParseOpts) -> Ctx {
         .take_while(|token| token.span.end <= up_to)
         .cloned()
         .collect();
-    let (command_name, arg_index) = command_info(&command_tokens, line);
+    let (command_name, arg_index, words) = command_info(&command_tokens, line);
 
     // `FOO=/us<TAB>` completes the value, not the assignment name.
     let mut assign = false;
@@ -227,6 +235,7 @@ pub fn context(line: &[u8], cursor: usize, opts: &ParseOpts) -> Ctx {
         quote,
         command_name,
         arg_index,
+        words,
         has_suffix: word.end > cursor,
         redirect,
         param,
@@ -329,9 +338,12 @@ fn hit_of(token: &Token, line: &[u8]) -> Option<WordHit> {
     }
 }
 
-/// The command word and argument index for the tokens before the completion
-/// word.
-fn command_info(tokens: &[Token], line: &[u8]) -> (Option<Vec<u8>>, usize) {
+/// The command word, argument index and word list for the tokens before the
+/// completion word.
+///
+/// The word list is what a per-command provider walks: `git -C dir status --`
+/// has to know both the command and the subcommand the cursor is in.
+fn command_info(tokens: &[Token], line: &[u8]) -> (Option<Vec<u8>>, usize, Vec<Vec<u8>>) {
     let roles = classify_tokens(tokens, line);
     let start = roles
         .iter()
@@ -340,15 +352,22 @@ fn command_info(tokens: &[Token], line: &[u8]) -> (Option<Vec<u8>>, usize) {
 
     let mut command: Option<Vec<u8>> = None;
     let mut arguments = 0usize;
+    let mut words: Vec<Vec<u8>> = Vec::new();
     for (role, token) in roles[start..].iter().zip(&tokens[start..]) {
         match role {
-            TokenRole::CommandWord => command = Some(token.text(line).to_vec()),
-            TokenRole::Argument => arguments += 1,
+            TokenRole::CommandWord => {
+                command = Some(token.text(line).to_vec());
+                words.push(token.text(line).to_vec());
+            }
+            TokenRole::Argument => {
+                arguments += 1;
+                words.push(token.text(line).to_vec());
+            }
             _ => {}
         }
     }
     let arg_index = if command.is_some() { arguments + 1 } else { 0 };
-    (command, arg_index)
+    (command, arg_index, words)
 }
 
 #[cfg(test)]

@@ -24,6 +24,8 @@ pub enum ProviderId {
     Path,
     /// Commands found on `PATH`.
     Command,
+    /// Subcommands and options from the generated carapace tables.
+    Carapace,
     /// Shell functions.
     Function,
     /// Shell builtins.
@@ -84,6 +86,10 @@ const COMMAND: &[ProviderId] = &[
 // which `command_slot` reports as a command position; in an ordinary argument
 // slot the keyword provider declines.
 const WORD: &[ProviderId] = &[
+    // The generated tables know a command's options and subcommands, which a
+    // file or a `PATH` name cannot; a name that collides with a subcommand
+    // (`checkout`) is the subcommand, so this provider comes first.
+    ProviderId::Carapace,
     ProviderId::Path,
     ProviderId::Variable,
     ProviderId::Command,
