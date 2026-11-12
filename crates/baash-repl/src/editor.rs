@@ -518,16 +518,31 @@ impl<'a> Editor<'a> {
             // A key pushed back by the cursor-position query is already in the
             // decoder, so the kernel has nothing to wake on: waiting first
             // would park the line until the user typed again.
-            if !self.decoder.has_pending() && self.term.await_input()? == Input::Watch {
-                // No key was consumed and the line is untouched: the watched
-                // directory changed, so the prompt is repainted in place and
-                // the wait resumes. A refresh that finds nothing to say leaves
-                // the frame alone.
-                if let Some(prompt) = live.refresh() {
-                    self.set_prompt(prompt);
-                    self.draw()?;
+            if !self.decoder.has_pending() {
+                match self.term.await_input()? {
+                    Input::Key => {}
+                    Input::Resize => {
+                        // The terminal reflowed its contents; the frame's rows
+                        // and columns describe the old width. Re-anchor from
+                        // the cursor and paint again at the size the renderer
+                        // reads now.
+                        self.renderer.reset();
+                        self.dirty = true;
+                        self.draw()?;
+                        continue;
+                    }
+                    Input::Watch => {
+                        // No key was consumed and the line is untouched: the
+                        // watched directory changed, so the prompt is
+                        // repainted in place and the wait resumes. A refresh
+                        // that finds nothing to say leaves the frame alone.
+                        if let Some(prompt) = live.refresh() {
+                            self.set_prompt(prompt);
+                            self.draw()?;
+                        }
+                        continue;
+                    }
                 }
-                continue;
             }
             let Some(key) = self.decoder.next(self.term)? else {
                 return self.finish_eof();

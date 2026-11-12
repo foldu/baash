@@ -216,6 +216,17 @@ pub const SIGTERM: c_int = libc::SIGTERM;
 #[cfg(windows)]
 pub const SIGTERM: c_int = 15;
 
+/// `SIGWINCH`: the terminal's window changed size.
+///
+/// Only Unix has it. Windows reports the new size through
+/// `GetConsoleScreenBufferInfo` and never signals; the shell compares sizes
+/// there instead.
+#[cfg(unix)]
+pub const SIGWINCH: c_int = libc::SIGWINCH;
+/// `SIGWINCH`; see the note on Windows signal numbers.
+#[cfg(windows)]
+pub const SIGWINCH: c_int = 28;
+
 /// `SIGSTOP`: cannot be caught, blocked or ignored.
 #[cfg(unix)]
 pub const SIGSTOP: c_int = libc::SIGSTOP;

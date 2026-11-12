@@ -862,3 +862,25 @@ fn the_prompt_asks_for_the_cursor_position() {
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&work);
 }
+
+/// A resize repaints the prompt at the new width.
+///
+/// The terminal reflows its own contents on a resize, but the editor's frame
+/// still assumes the old rows and columns; without a repaint the cursor and the
+/// menu land in the wrong place until the next keystroke. `TIOCSWINSZ` on the
+/// master delivers `SIGWINCH` to the foreground group of the slave, which is
+/// the shell.
+#[test]
+fn resizing_the_terminal_repaints_the_prompt() {
+    let home = temp_dir("resize-home");
+    let work = temp_dir("resize-work");
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[]);
+    session.prompt(" $");
+    baash_sys::set_window_size_fd(session.pty.master.as_raw_fd(), 120, 40).expect("resize the pty");
+    // The prompt is painted again without any keystroke.
+    session.prompt(" $");
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}

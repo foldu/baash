@@ -340,7 +340,10 @@ Known gaps, stated so they are not mistaken for behaviour:
   arrives as keystrokes, so the editor's `\x1b[200~` handling is never reached
   there, and no focus sequence or cursor-position report, so `?1004` is not
   written and the prompt keeps anchoring at column 0 after output that did not
-  end with a newline (`docs/terminal.md` §2, §5, §6).
+  end with a newline (`docs/terminal.md` §2, §5, §6). A resize is detected by
+  sampling the window size every 250 ms during the input wait rather than by an
+  event, and that sampling path has not been observed on a guest
+  (`docs/terminal.md` §7).
 
 Conformance is the other backlog, and it is measured: `docs/state.md` §6 and
 `docs/roadmap.md` carry the per-file picture, and `crates/baash-spec/baseline.txt`

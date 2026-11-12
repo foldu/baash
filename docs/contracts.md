@@ -1074,6 +1074,15 @@ sit there until the user typed again. A terminal that does not answer pays the
 50 ms and keeps the old behaviour; `TERM=dumb` is never asked, and the Windows
 console reports no position at all.
 
+**A resize is an input event.** `Terminal::await_input` returns
+`Input::Resize` when the window changed, with no byte consumed: Unix waits for
+`SIGWINCH` alongside the keyboard and the watch in one `poll_fn`, and the
+handler is reset by `exec` so children inherit nothing; the Windows console
+has no event, so `WaitForSingleObject` with a 250 ms deadline lets the idle
+prompt compare the window size with its last sample. The editor then drops the
+frame's anchor and paints again; the renderer reads the size on every frame, so
+the new geometry needs no plumbing.
+
 **`ShellCompletion` is the per-read `complete -F` seam.** The editor still
 borrows one `&dyn Completer` for its whole life, but a completion function needs
 the interpreter, which the loop owns, so `Editor::read_line_with_shell(live,

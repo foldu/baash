@@ -26,9 +26,12 @@
 //!
 //! # What a console still cannot do
 //!
-//! There is no `poll` on a console handle, so the prompt watcher has nothing to
-//! wait on here: `await_input` blocks in a read. That is why the watcher is
-//! `#[cfg(target_os = "linux")]` rather than merely non-Windows.
+//! A console handle can be waited on, but not with a byte count: the wait
+//! reports that *some* input record is ready, and `ReadConsoleW` then reads it.
+//! That is what [`Console::wait_input`] exposes, and it is what lets an idle
+//! prompt notice that the window changed size. There is still no directory
+//! watch here, which is why the watcher is `#[cfg(target_os = "linux")]`
+//! rather than merely non-Windows.
 
 use std::ffi::c_void;
 use std::fs::File;
@@ -102,7 +105,15 @@ unsafe extern "system" {
         written: *mut u32,
         reserved: *mut c_void,
     ) -> i32;
+    fn WaitForSingleObject(handle: RawHandle, milliseconds: u32) -> u32;
 }
+
+/// `WAIT_OBJECT_0`: the handle is signalled.
+const WAIT_OBJECT_0: u32 = 0;
+/// `WAIT_TIMEOUT`: the deadline passed first.
+const WAIT_TIMEOUT: u32 = 0x102;
+/// `WAIT_FAILED`: the call failed; `GetLastError` says why.
+const WAIT_FAILED: u32 = 0xffff_ffff;
 
 /// One end of the console: a handle this module owns and closes on drop.
 ///
@@ -212,6 +223,31 @@ impl Console {
             u16::try_from(columns.max(0)).unwrap_or(u16::MAX),
             u16::try_from(rows.max(0)).unwrap_or(u16::MAX),
         ))
+    }
+
+    /// Wait until the console has an input record, or `timeout` passes.
+    ///
+    /// `false` means the deadline passed. `ReadConsoleW` has no timeout of its
+    /// own, so this is the wait that lets an idle prompt check the window size
+    /// without a second thread.
+    pub fn wait_input(&self, timeout: std::time::Duration) -> io::Result<bool> {
+        // `WaitForSingleObject` takes whole milliseconds and reserves
+        // `INFINITE` (0xffff_ffff) for "no deadline", which must not be
+        // produced by a long duration by accident.
+        let millis = u32::try_from(timeout.as_millis())
+            .unwrap_or(u32::MAX - 1)
+            .min(u32::MAX - 1);
+        // SAFETY: the handle is the console input handle owned by `self` and
+        // stays open for the duration of the call.
+        let result = unsafe { WaitForSingleObject(self.input.handle(), millis) };
+        match result {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            WAIT_FAILED => Err(io::Error::last_os_error()),
+            other => Err(io::Error::other(format!(
+                "WaitForSingleObject returned {other:#x}"
+            ))),
+        }
     }
 
     /// Read whatever the console has, as UTF-8, appending to `out`.

@@ -70,6 +70,9 @@ pub enum Input {
     /// The watched path changed, or the terminal's backstop says it is time to
     /// ask. No input was consumed, so the editor can repaint and wait again.
     Watch,
+    /// The terminal's window changed size. No input was consumed; the frame's
+    /// geometry is stale, so the editor re-anchors and paints again.
+    Resize,
 }
 
 /// The byte and terminal-state interface the editor owns.
@@ -219,6 +222,10 @@ pub struct RealTerminal {
     /// Bytes the editor wrote that are not yet a whole character, kept so a
     /// character split across two writes is not painted as two replacements.
     outgoing: Vec<u8>,
+    /// The window size at the last wait, so a change is noticed without a
+    /// keystroke. The console has no resize event to wait on, so the wait
+    /// deadline is also the sampling interval.
+    last_size: Option<Size>,
 }
 
 #[cfg(windows)]
@@ -295,6 +302,9 @@ impl Terminal for RealTerminal {
     fn enter_raw(&mut self) -> io::Result<()> {
         let guard = self.host()?.enter_raw()?;
         self.raw = Some(guard);
+        // A resize while a command ran is not a change to report at the first
+        // prompt: the frame is painted at the current size anyway.
+        self.last_size = Some(self.size());
         Ok(())
     }
 
@@ -303,6 +313,35 @@ impl Terminal for RealTerminal {
             guard.restore()?;
         }
         Ok(())
+    }
+
+    fn await_input(&mut self) -> io::Result<Input> {
+        /// How often an idle prompt samples the window size. The console has
+        /// no resize event, so this is also the worst-case repaint delay.
+        const POLL: std::time::Duration = std::time::Duration::from_millis(250);
+        loop {
+            if !self.pending.is_empty() {
+                return Ok(Input::Key);
+            }
+            let ready = {
+                let Some(console) = self.console.as_ref() else {
+                    return Err(self.no_console());
+                };
+                console.wait_input(POLL)?
+            };
+            if ready {
+                return Ok(Input::Key);
+            }
+            let size = self.size();
+            match self.last_size {
+                Some(last) if last != size => {
+                    self.last_size = Some(size);
+                    return Ok(Input::Resize);
+                }
+                None => self.last_size = Some(size),
+                Some(_) => {}
+            }
+        }
     }
 }
 
@@ -331,30 +370,62 @@ fn drain_whole_characters(buffer: &mut Vec<u8>) -> Vec<u8> {
     std::mem::replace(buffer, tail)
 }
 
-/// Await two readiness futures, reporting whether the second finished first.
-///
-/// `compio` has no `select!`: `PollFd` submits one `PollOnce`
-/// (`IORING_OP_POLL_ADD`) per descriptor, so combining two of them is a
-/// `poll_fn` over the pair, and that is the whole combinator. The loser is
-/// dropped mid-poll, and what it drops is a readiness registration rather than
-/// a read, so there is no half-finished operation to unwind.
+/// Which of the sources [`RealTerminal::await_input`] waits on finished first.
 #[cfg(unix)]
-async fn which_ready<A, B>(first: A, second: B) -> io::Result<bool>
+enum Source {
+    Key,
+    Watch,
+    Resize,
+    Backstop,
+}
+
+/// Await the keyboard, the directory watch, the resize signal and a timer.
+///
+/// `compio` has no `select!`: each `PollFd` submits one `PollOnce`
+/// (`IORING_OP_POLL_ADD`), so combining them is a `poll_fn` over the set, and
+/// that is the whole combinator. The losers are dropped mid-poll, and what one
+/// drops is a readiness registration (or, for the signal, its handler), never a
+/// half-finished operation.
+#[cfg(unix)]
+async fn first_ready<A, B, C>(
+    keyboard: A,
+    watch: B,
+    resize: C,
+    backstop: std::time::Duration,
+) -> io::Result<Source>
 where
     A: std::future::Future<Output = io::Result<()>>,
     B: std::future::Future<Output = io::Result<()>>,
+    C: std::future::Future<Output = io::Result<()>>,
 {
     use std::future::poll_fn;
     use std::task::Poll;
 
-    let mut first = std::pin::pin!(first);
-    let mut second = std::pin::pin!(second);
-    poll_fn(|cx| {
-        if let Poll::Ready(result) = first.as_mut().poll(cx) {
-            return Poll::Ready(result.map(|()| false));
+    let mut keyboard = std::pin::pin!(keyboard);
+    let mut watch = std::pin::pin!(watch);
+    let mut resize = std::pin::pin!(resize);
+    let mut backstop = std::pin::pin!(compio::time::sleep(backstop));
+    poll_fn(|context| {
+        macro_rules! ready {
+            ($future:expr) => {
+                match $future.as_mut().poll(context) {
+                    Poll::Ready(Ok(())) => true,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Pending => false,
+                }
+            };
         }
-        if let Poll::Ready(result) = second.as_mut().poll(cx) {
-            return Poll::Ready(result.map(|()| true));
+        if ready!(keyboard) {
+            return Poll::Ready(Ok(Source::Key));
+        }
+        if ready!(resize) {
+            return Poll::Ready(Ok(Source::Resize));
+        }
+        if ready!(watch) {
+            return Poll::Ready(Ok(Source::Watch));
+        }
+        if backstop.as_mut().poll(context).is_ready() {
+            return Poll::Ready(Ok(Source::Backstop));
         }
         Poll::Pending
     })
@@ -393,33 +464,36 @@ impl Terminal for RealTerminal {
         let runtime = compio::runtime::Runtime::current();
         self.prepare_read_source()?;
         let source = self.read_source.as_ref().expect("prepared just above");
-        let Some(watch) = self.watch.as_ref() else {
-            runtime.block_on(async { source.read_ready().await })?;
-            return Ok(Input::Key);
-        };
-        // The keyboard and the watch are awaited together. The pair is raced
-        // against the runtime's timer as a backstop: a completion-based poll is
-        // only as good as the kernel's willingness to complete it for this file
-        // type, and a watcher that silently stopped being awaited would leave
-        // the prompt frozen until the next keystroke. A backstop that finds
-        // nothing changed reads the watch and paints nothing.
+        // The keyboard, the watch, `SIGWINCH` and a timer are awaited
+        // together. The timer is a backstop: a completion-based poll is only as
+        // good as the kernel's willingness to complete it for this file type,
+        // and a watcher that silently stopped being awaited would leave the
+        // prompt frozen until the next keystroke. A backstop that finds nothing
+        // changed reads the watch and paints nothing.
         //
         // Keyboard readiness is re-checked rather than believed: a character
         // device can answer a readiness poll with no byte behind it, and taking
         // that for a keystroke parks the editor inside a read.
         const BACKSTOP: std::time::Duration = std::time::Duration::from_secs(1);
         loop {
-            let watched = match runtime.block_on(compio::time::timeout(
-                BACKSTOP,
-                which_ready(source.read_ready(), watch.read_ready()),
-            )) {
-                Ok(Ok(watched)) => watched,
-                Ok(Err(error)) => return Err(error),
-                // The backstop: a chance to refresh, not an event.
-                Err(_elapsed) => return Ok(Input::Watch),
+            let watch = async {
+                match self.watch.as_ref() {
+                    Some(watch) => watch.read_ready().await,
+                    // No watch: a future that never finishes, so the race has
+                    // one shape whether or not a directory is watched.
+                    None => std::future::pending::<io::Result<()>>().await,
+                }
             };
-            if watched {
-                return Ok(Input::Watch);
+            let outcome = runtime.block_on(first_ready(
+                source.read_ready(),
+                watch,
+                compio::signal::unix::signal(baash_sys::SIGWINCH),
+                BACKSTOP,
+            ))?;
+            match outcome {
+                Source::Resize => return Ok(Input::Resize),
+                Source::Watch | Source::Backstop => return Ok(Input::Watch),
+                Source::Key => {}
             }
             if baash_sys::bytes_available(self.fd) > 0 {
                 return Ok(Input::Key);

@@ -173,9 +173,25 @@ Windows: the console has no cursor-position report. `reports_cursor_position`
 is `false` there, the query is never sent, and the prompt keeps anchoring at
 column 0.
 
-## 7. What is next
-In landing order, each with its own commit: resize repaint,
-background-colour detection with a light theme, clipboard copy (OSC 52), a
-scrollback-preserving `Ctrl-L`, the kitty keyboard protocol, and prompt-line
-clicks. The ordered list is the session's task list; this file records what
-has actually landed.
+## 7. Resize
+
+On Unix the editor waits for `SIGWINCH` beside the keyboard and the directory
+watch: one `poll_fn` over the readiness futures, with `compio::signal`
+installing a real handler. A handler is reset to the default across `exec`, so
+no signal mask is inherited by a child. The signal returns `Input::Resize`, the
+editor drops the frame's anchor, and the next frame is painted at the width the
+renderer reads. The terminal has already reflowed its own contents; reflowing
+the history above the edit region is still out of scope.
+
+On Windows the console has no resize event. `WaitForSingleObject` on the input
+handle, with a 250 ms deadline, gives the idle prompt a chance to compare
+`GetConsoleScreenBufferInfo`'s window size with the last one; a difference
+returns the same `Resize`. The wait is also what makes the console path stop
+blocking in a read, which is why the prompt there can notice anything at all
+while idle.
+
+## 8. What is next
+In landing order, each with its own commit: background-colour detection with a
+light theme, clipboard copy (OSC 52), a scrollback-preserving `Ctrl-L`, the
+kitty keyboard protocol, and prompt-line clicks. The ordered list is the
+session's task list; this file records what has actually landed.
