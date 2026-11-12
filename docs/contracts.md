@@ -439,14 +439,18 @@ The major segments are two spaces apart; the counters are one segment whose
 members are single-spaced. A clean repository is
 ` ~/src/bshell   main $` — no empty counter slot.
 
-The counters come from **one** `git status --porcelain=v2 --branch
---untracked-files=all -z` run on a worker thread
-(`crates/baash/src/git_prompt.rs`), never on the prompt path: the `# branch.ab
-+N -M` header is ahead/behind, `1`/`2`/`u` records are modified tracked files,
-and `?` records are untracked. Runs are rate-limited to one per 500 ms,
-coalesced down to the newest directory, and back off for 5 s after a silent
-failure. The prompt paints the last completed counters for the current
-directory; a `cd` drops them until the first run for the new directory lands.
+The counters are computed in process by `gix` on a worker thread
+(`crates/baash/src/git_prompt.rs`), never on the prompt path. `gix` status with
+`UntrackedFiles::Files` yields modified tracked paths and untracked files as
+distinct paths; ahead/behind is the commit-graph count reachable from `HEAD`
+but not its upstream tracking ref (and the reverse), which is exactly
+`git rev-list --count HEAD ^upstream`. The shell therefore needs no `git`
+binary for the prompt. A 2 s deadline — a timer setting the flag passed to
+`should_interrupt_owned` — discards a slow result rather than painting it.
+Runs are rate-limited to one per 500 ms, coalesced down to the newest
+directory, and back off for 5 s after a silent failure. The prompt paints the
+last completed counters for the current directory; a `cd` drops them until the
+first run for the new directory lands.
 
 On a terminal the prompt uses ANSI SGR colours only — never 24-bit values — so
 it follows the terminal's palette: blue for the directory and its icon, bright

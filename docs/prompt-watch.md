@@ -1,8 +1,10 @@
 # The live prompt: what is cheap, what is not, and who pays
 
 Status: **built.** This document describes the stock prompt's git segment as it
-ships. It replaces the earlier design note that assumed an in-process `gix`
-status; the cost class is the same question, and the answer moved to a worker.
+ships. The counters are computed in process by `gix` on a worker; an earlier
+version computed them on the prompt path, which was the latency bug, and a
+later one briefly used a `git` subprocess, which made the shell depend on a
+binary it does not need.
 
 The prompt is one line, rebuilt from the shell's state before every command:
 
@@ -27,9 +29,9 @@ the cheap half is allowed in front of the cursor.
 |---|---|---|---|
 | cwd abbreviation | `read_dir` per outer component, once per `cd` | µs (local disk) | exact for that directory |
 | branch / detached HEAD | walk to `.git`, read `HEAD`, resolve refs/packed-refs | ~µs–ms, no process | exact |
-| ahead / behind | `# branch.ab +N -M` from one `git status` | subprocess | last completed refresh |
-| modified tracked files | `1`, `2`, `u` records from the same run | subprocess | last completed refresh |
-| untracked files | `?` records from the same run, `-uall` | subprocess | last completed refresh |
+| ahead / behind | `gix` commit walk: reachable from `HEAD`, not from the upstream ref (and the reverse) | worker, no process | last completed refresh |
+| modified tracked files | `gix` status: index↔worktree and tree↔index, distinct paths | worker, no process | last completed refresh |
+| untracked files | `gix` status dirwalk, one entry per file | worker, no process | last completed refresh |
 
 The branch is the only git fact read on the prompt path, by
 `baash_lang::prompt::git_branch`. It never forks: `.git` is a directory, or a
@@ -45,36 +47,43 @@ commit am I on" instead of leaving a gap.
 
 ## 3. The worker
 
-`crates/baash/src/git_prompt.rs` owns one worker thread and one channel. One
-run is
+`crates/baash/src/git_prompt.rs` owns one worker thread and one channel. Per
+directory it opens the repository with `gix::discover`, then:
 
-```sh
-git --no-optional-locks status --porcelain=v2 --branch --untracked-files=all -z
-```
+* **modified / untracked:** `repo.status(Discard)` with
+  `UntrackedFiles::Files`, iterating the index↔worktree and tree↔index
+  entries. Distinct paths go into sets, so a file changed in the index and
+  again in the worktree is one modified file, and a rename is one file, not
+  two. `gix` honours `.gitignore` and the repository's configuration.
+* **ahead / behind:** commits reachable from `HEAD` but not from the upstream
+  tracking ref, and the reverse. `rev_walk(...).with_hidden(...)` is exactly
+  `git rev-list --count HEAD ^upstream`; no merge-base call and no subprocess.
+  The upstream name is derived by `gix` from `branch.<name>.remote` and the
+  fetch refspec, so a renamed remote or a custom `refs/remotes` layout follows
+  the repository's own configuration.
 
-with `LC_ALL=C`, `GIT_OPTIONAL_LOCKS=0` and `GIT_TERMINAL_PROMPT=0`, spawned
-through compio's process API. The `-z` form is parsed byte-exactly: `2` records
-(a rename or copy) are followed by the original path as a separate NUL field,
-which is skipped rather than counted as a second change; `1` and `u` are one
-tracked file each; `?` is one untracked file each; `#` is a header.
+It is deliberately **not** `git status`: the counters must work on a machine
+with no `git` binary. Only the branch read (`.git/HEAD`) is cheaper still, and
+that happens on the prompt path.
 
 * **Rate limit:** at most one run per [`MIN_INTERVAL`] = 500 ms. The prompt asks;
   the worker decides when it is due.
 * **Coalescing:** the worker drains every queued request down to the newest
   directory before running, so a burst of prompts cannot queue a burst of
-  processes.
-* **Failure back-off:** a run that produces nothing (no `git` binary, a broken
-  repository, a repository with no `HEAD` yet) is silent and delays the next
-  attempt by 5 s. A permanent condition does not spawn a doomed process on every
-  prompt.
-* **No timeout.** A hung `git` (a network filesystem, a stuck lock) leaves the
-  counters stale; it cannot delay the prompt, and the prompt keeps painting the
-  last completed numbers. This is a deliberate trade: killing a child safely
-  needs an ownership model the current `compio` output future does not give us,
-  and a leaked or half-read process would be worse than a stale number.
+  walks.
+* **Deadline:** 2 s. A short-lived timer thread sets the `Arc<AtomicBool>` that
+  `gix` status checks between chunks (`should_interrupt_owned`); an interrupted
+  or late result is discarded, not painted. The timer thread sleeps and exits,
+  so a fast refresh leaves nothing running. A refresh stuck inside one
+  uninterruptible syscall can keep the worker busy, but it cannot delay the
+  prompt and it does not accumulate threads — the next request is coalesced
+  into the run already in progress.
+* **Failure back-off:** a run that produces nothing (not a repository, a
+  corrupt one, a timeout) is silent and delays the next attempt by 5 s. A
+  permanent condition does not repeat an expensive walk on every prompt.
 
-One run yields all of ahead, modified and untracked, so the prompt never needs
-a second process.
+One run yields all of ahead, behind, modified and untracked, so the prompt never
+needs a second walk.
 
 ## 4. What is painted while a refresh is in flight
 
@@ -100,11 +109,11 @@ git directory. The editor awaits that descriptor beside the keyboard
 (`Terminal::await_input`), so while a line is idle:
 
 1. A file change wakes the editor. `PromptState::refresh` drains the watch and
-   calls `GitSegment::tick`, which schedules the rate-limited `git status`.
+   calls `GitSegment::tick`, which schedules the rate-limited `gix` walk.
 2. The editor also has a one-second backstop. On a wake-up with nothing in the
    queue it calls `GitSegment::poll`; a result that landed since the last frame
    is painted then. That is how the new count appears without a keystroke, even
-   though a subprocess completion cannot itself wake the inotify descriptor.
+   though a worker completion cannot itself wake the inotify descriptor.
 3. The directory abbreviation is cached, so the repaint does not re-run
    `read_dir` per component.
 
@@ -120,14 +129,13 @@ the same worker cache.
 
 | situation | behaviour |
 |---|---|
-| not a repository | no branch, no counters, no process; the segment is omitted |
-| `git` missing or not executable | branch still exact; counters silent; retry after 5 s |
-| repository with no commits | branch exact; `git status` succeeds with an empty `branch.ab`, so no `↑`; counters work |
-| corrupt repository | branch may still resolve; `git status` fails; silent, retry after 5 s |
+| not a repository | no branch, no counters, no walk; the segment is omitted |
+| repository with no commits | branch exact; there are no commits to be ahead or behind of, and the index/worktree walk still counts; no `↑`/`↓` |
+| corrupt repository | branch may still resolve; `gix` fails; silent, retry after 5 s |
 | linked worktree / submodule | `.git` file is followed; the git dir is watched through it |
 | huge repository | the watcher may refuse (`Why::TooBig`); the prompt then refreshes once per prompt, still off the prompt path |
 | network filesystem | inotify may deliver nothing; the prompt still refreshes at each prompt, and the one-second backstop cannot hurt |
-| `git status` slow or hung | prompt unaffected; counters stale until the run finishes |
+| `gix` walk slow or hung | prompt unaffected; the 2 s deadline discards slow results; counters stale until a run finishes |
 | an editor save touching many paths | coalesced into one run, and the watcher's event queue is drained in one read |
 
 The invariant: **the prompt never blocks, never spawns in the keystroke path,
@@ -136,21 +144,21 @@ slow is not.
 
 ## 7. Measurements
 
-`git status --porcelain=v2 --branch --untracked-files=all -z` on this repository
-(574 tracked files), warm page cache, on the development host: **1–9 ms** over
-ten runs, average about 1 ms. A cold repository is dominated by the stat of
-every tracked path and the index read; the figure was not measured because
-dropping the page cache needs root on the test host, and the design does not
-depend on it: the run is off the prompt path, and the prompt paints the last
-completed result meanwhile.
+The `gix` status walk on this repository (574 tracked files), warm page cache,
+on the development host: **7–9 ms** per run. A cold repository is dominated by
+the stat of every tracked path and the index read; the figure was not measured
+because dropping the page cache needs root on the test host, and the design does
+not depend on it: the run is off the prompt path, the deadline caps it at 2 s,
+and the prompt paints the last completed result meanwhile.
 
 The branch read is a handful of `stat`/`read` calls and is not measurable at
 prompt granularity.
 
 ## 8. What landed
 
-* `crates/baash/src/git_prompt.rs` — the worker, the porcelain parser, the
-  shared cache (`GitSegment`), the 500 ms limit, coalescing, failure back-off.
+* `crates/baash/src/git_prompt.rs` — the worker, the `gix` status and
+  ahead/behind walk, the 2 s deadline, the shared cache (`GitSegment`), the
+  500 ms limit, coalescing, failure back-off.
 * `crates/baash/src/prompt_state.rs` — the directory cache, prompt context,
   composer and watcher; implements `baash_repl::LivePrompt`.
 * `crates/baash-lang/src/prompt.rs` — `tide_prompt`, `shorten_path`,
@@ -164,6 +172,6 @@ prompt granularity.
 
 * Not a general-purpose file-watch API for scripts.
 * Not a git client: no fetching, no hooks, no index writes, no credential
-  prompts.
+  prompts, and no `git` binary.
 * No shell hook. A `BAASH_PROMPT_WATCH` function would run shell code between
   keystrokes, which is the one thing this design refuses.

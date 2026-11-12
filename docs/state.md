@@ -176,11 +176,12 @@ delegates everything else: line editing to `baash-repl`, execution to the
   commits ahead of the upstream and `↓N` behind it, `!N` modified tracked files
   and `?N` untracked files, each omitted at zero, then `$` (`#` for root). The
   major segments are two spaces apart and there is no trailing space. The
-  counters come from one `git status --porcelain=v2 --branch -z` on a worker
-  thread, rate-limited to 500 ms and coalesced; the prompt paints the last
-  completed refresh, so a cold or huge repository never delays it, and a `cd`
-  drops the previous directory's counters rather than showing them
-  (`docs/prompt-watch.md`). On a terminal the segments use ANSI SGR colours
+  counters come from a `gix` status and commit-graph walk on a worker thread,
+  rate-limited to 500 ms, coalesced and capped by a 2 s deadline; the prompt
+  paints the last completed refresh, so a cold or huge repository never delays
+  it, and a `cd` drops the previous directory's counters rather than showing
+  them (`docs/prompt-watch.md`). On a terminal the segments use ANSI SGR
+  colours
   (blue directory, bright cyan last component, green branch, yellow `↑`/`!`,
   red `↓`/`?`/`#`); `NO_COLOR` gives the same text uncoloured. The glyphs are
   width 1, and the editor measures the prompt with `unicode-width`, so the
@@ -298,11 +299,11 @@ delegates everything else: line editing to `baash-repl`, execution to the
   reads that value, while the interactive renderer draws the tide-like
   prompt. A script cannot see the rendered form through `$PS1`.
 * The stock prompt's counters are the last completed refresh, not a snapshot
-  taken at this instant. That is deliberate: the refresh is a `git status` on a
-  worker, at most once per 500 ms, and the prompt never waits for it. A change
-  made while the line is idle appears within about a second (the editor's
-  watcher backstop) or at the next prompt. If `git` hangs, the counters simply
-  stay stale; the prompt is unaffected.
+  taken at this instant. That is deliberate: the refresh is an in-process
+  `gix` walk on a worker, at most once per 500 ms with a 2 s deadline, and the
+  prompt never waits for it. A change made while the line is idle appears
+  within about a second (the editor's watcher backstop) or at the next prompt.
+  If the walk hangs, the counters stay stale; the prompt is unaffected.
 * `\s` is `baash`, so the conformance case that greps for `bash|osh` still
   fails; `\v`/`\V` now report the crate version (`0.0` / `0.0.0`).
 * With `set -e`, a failing `PROMPT_COMMAND` exits bash and does not exit this
@@ -589,9 +590,9 @@ Where the waves stand:
   without nesting the executor); raw stdin is read after a `PollFd` readiness
   wait instead of a blocking read; the `PATH` completion index is built on a
   worker and installed at the prompt; the prompt's git segment reads
-  `.git/HEAD` synchronously and gets its dirty count from a worker's
-  `git status` (500 ms minimum interval, coalesced, discarded if the directory
-  changed). `read -t` keeps `poll(2)` on purpose: no runtime on the `-c` path.
+  `.git/HEAD` synchronously and gets its counters from a worker's in-process
+  `gix` walk (500 ms minimum interval, coalesced, 2 s deadline, discarded if
+  the directory changed). `read -t` keeps `poll(2)` on purpose: no runtime on the `-c` path.
   Measured with `scripts/bench.py` (release): startup 0.47 ms per spawn,
   `$(echo hi)` 7.5 ms per 1000 against bash's 170 ms, `( : )` 4.5 ms against
   149 ms — a scope costs ~2.3 µs and the snapshot model is *ahead* of bash.

@@ -76,10 +76,11 @@ components are shortened to the shortest prefix that is unique among their
 siblings, the last component is kept whole, and `$HOME` is `~`. `↑N` is commits
 ahead of the upstream and `↓N` commits behind it, `!N` tracked files with staged
 or unstaged changes, and `?N` untracked files; each is omitted at zero, `$` is
-`#` for root, and nothing follows the marker. The branch is read from `.git/HEAD`
-on the prompt path; the counters come from one `git status --porcelain=v2
---branch` run on a worker (500 ms rate limit, coalesced), so a slow repository
-never delays a prompt ([`docs/prompt-watch.md`](docs/prompt-watch.md)).
+`#` for root, and nothing follows the marker. The branch is read from
+`.git/HEAD` on the prompt path; the counters come from a `gix` status on a
+worker (500 ms rate limit, coalesced, a 2 s deadline), so no `git` binary is
+needed and a slow repository never delays a prompt
+([`docs/prompt-watch.md`](docs/prompt-watch.md)).
 `NO_COLOR` keeps the text and drops the ANSI colours. Set `PS1` to get your own
 prompt back.
 

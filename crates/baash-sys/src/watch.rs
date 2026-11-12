@@ -1,7 +1,7 @@
 //! Live filesystem change notification for the prompt's git segment.
 //!
 //! The prompt shows the branch and the counts of modified and untracked paths
-//! (`docs/contracts.md` §3). The counters come from a worker's `git status`,
+//! (`docs/contracts.md` §3). The counters come from a worker's `gix` walk,
 //! and asking for one on a timer would burn a core while the user is reading
 //! the screen. Instead the prompt *waits* for the filesystem to say something
 //! changed, then asks the rate-limited worker.

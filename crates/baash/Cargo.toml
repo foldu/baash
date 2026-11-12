@@ -36,6 +36,7 @@ baash-complete.workspace = true
 baash-repl.workspace = true
 baash-tools.workspace = true
 compio.workspace = true
+gix.workspace = true
 mimalloc = { version = "0.1", optional = true, default-features = false }
 # `debug-embed` builds the same asset table in debug as in release, so a test
 # exercises the bytes in the binary and not whatever happens to be in

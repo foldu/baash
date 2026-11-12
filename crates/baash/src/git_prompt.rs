@@ -6,24 +6,30 @@
 //!   [`baash_lang::prompt::git_branch`]. That is a few small file reads and
 //!   `stat`s — microseconds — so it is exact and never stale, and a detached
 //!   `HEAD` is resolved to its abbreviated commit id at the same cost.
-//! * The **counters** (ahead, modified, untracked) need `git status`, which is
-//!   a subprocess that can take hundreds of milliseconds on a cold or large
-//!   repository. It never runs on the prompt path: a worker spawns it through
-//!   compio's process API, and the prompt renders whatever the last completed
-//!   refresh produced.
+//! * The **counters** (ahead, behind, modified, untracked) need a status, which
+//!   walks the index and the worktree. That never runs on the prompt path: a
+//!   worker thread computes it in process with `gix`, and the prompt renders
+//!   whatever the last completed refresh produced.
 //!
-//! One `git status --porcelain=v2 --branch -z` run supplies all three: the
-//! `# branch.ab +N -M` header is the ahead/behind count, `1`, `2` and `u`
-//! records are tracked files with staged or unstaged changes, and `?` records
-//! are untracked files. The parser is byte-exact and NUL-delimited, so a path
-//! containing a newline, a space or a quote cannot confuse it.
+//! It is deliberately **not** `git status`: the shell must not depend on a `git`
+//! binary to show the counters. `gix` reads the index, honours `.gitignore` and
+//! runs the directory walk itself. Ahead/behind come from the commit graph:
+//! commits reachable from `HEAD` but not from its upstream tracking ref (and
+//! the reverse), which is exactly `git rev-list --count HEAD ^upstream`.
+//!
+//! A refresh runs under a deadline. `gix`'s status takes a shared interrupt
+//! flag and checks it between chunks; a small timer sets it after
+//! [`STATUS_TIMEOUT`], and an interrupted result is discarded rather than
+//! painted. A status that is stuck inside one uninterruptible syscall can keep
+//! the worker busy, but it cannot delay the prompt and it does not accumulate
+//! threads: the next request is coalesced into the one the worker is already
+//! running.
 //!
 //! Refreshes are rate-limited ([`MIN_INTERVAL`]) and coalesced: the worker
 //! drains every queued request down to the newest one, so a burst of prompts
-//! cannot queue a burst of `git status` runs. A failed refresh (no `git`
-//! binary, a broken repository, a repository with no commits yet) is silent and
-//! backs off to [`RETRY_AFTER_FAILURE`] rather than spawning a doomed process
-//! on every prompt.
+//! cannot queue a burst of status runs. A failed refresh (no repository, a
+//! corrupt one, a timeout) is silent and backs off to
+//! [`RETRY_AFTER_FAILURE`].
 //!
 //! The prompt never waits for any of this: [`GitSegment::tick`] reads the
 //! branch and *schedules* a refresh, and [`GitSegment::facts`] returns the last
@@ -32,21 +38,29 @@
 //! reappear when the first refresh for the new directory lands.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use baash_lang::prompt::GitStatus;
 
-/// The shortest gap between two `git status` runs.
+/// The shortest gap between two status runs.
 const MIN_INTERVAL: Duration = Duration::from_millis(500);
+
+/// How long a single refresh may run before its result is discarded.
+///
+/// This is a hard deadline in front of the *user*, not a target: a cold
+/// monorepo may legitimately take longer, in which case the prompt simply keeps
+/// showing the previous completed numbers.
+const STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long to wait after a refresh that produced nothing.
 ///
-/// A missing `git`, a directory that is not a repository, or a corrupt
-/// repository would otherwise fail once per prompt. The prompt stays silent
-/// either way; this only stops the worker from burning a process spawn every
-/// half second on a permanent condition.
+/// A directory that is not a repository, a corrupt repository, or a status that
+/// timed out would otherwise retry once per prompt. The prompt stays silent
+/// either way; this only stops the worker from repeating a doomed or expensive
+/// run every half second.
 const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(5);
 
 /// The facts the prompt paints.
@@ -55,8 +69,8 @@ pub struct Facts {
     /// The branch, or a detached `HEAD`'s abbreviated commit id. `None` when
     /// the directory is not in a repository.
     pub branch: Option<Vec<u8>>,
-    /// The newest completed `git status` for this directory, or `None` while
-    /// the first refresh is still in flight (or when there is no repository).
+    /// The newest completed status for this directory, or `None` while the
+    /// first refresh is still in flight (or when there is no repository).
     pub status: Option<GitStatus>,
 }
 
@@ -101,8 +115,8 @@ pub struct GitSegment {
 impl GitSegment {
     /// Start the worker and return an empty segment.
     ///
-    /// A worker that cannot start (no threads, no runtime) is not fatal: the
-    /// segment simply stays empty and the prompt is unaffected.
+    /// A worker that cannot start (no threads) is not fatal: the segment
+    /// simply stays empty and the prompt is unaffected.
     pub fn new() -> Self {
         let (request, requests) = mpsc::channel::<PathBuf>();
         let (sender, updates) = mpsc::channel::<Update>();
@@ -127,7 +141,7 @@ impl GitSegment {
     /// Install every refresh that has finished, without scheduling a new one.
     ///
     /// The editor calls this on its idle wake-up so a worker result reaches the
-    /// screen without a keystroke and without paying for another `git status`.
+    /// screen without a keystroke and without paying for another status run.
     pub fn poll(&self) {
         let mut state = self.lock();
         let now = Instant::now();
@@ -150,8 +164,8 @@ impl GitSegment {
     ///
     /// Called once per prompt, and again whenever the editor is woken while
     /// the line is idle. Reads `.git/HEAD` (cheap, exact), installs any
-    /// finished `git status`, and asks the worker for a new one no more often
-    /// than [`MIN_INTERVAL`].
+    /// finished status, and asks the worker for a new one no more often than
+    /// [`MIN_INTERVAL`].
     pub fn tick(&self, cwd: &Path) {
         self.poll();
         let mut state = self.lock();
@@ -175,8 +189,8 @@ impl GitSegment {
         }
 
         if state.branch.is_none() {
-            // Not a repository: no counters to ask for, and a `git status`
-            // here would only fail.
+            // Not a repository: no counters to ask for, and a status here would
+            // only walk nothing.
             return;
         }
         let now = Instant::now();
@@ -241,11 +255,8 @@ impl Default for GitSegment {
     }
 }
 
-/// Ask git for the status of one directory, off the prompt path.
+/// Compute the status of one directory, off the prompt path.
 fn worker(requests: Receiver<PathBuf>, updates: Sender<Update>) {
-    let Ok(runtime) = compio::runtime::Runtime::new() else {
-        return;
-    };
     while let Ok(first) = requests.recv() {
         // Coalesce: a queued older directory is worthless, since only the
         // newest prompt is on screen.
@@ -253,156 +264,278 @@ fn worker(requests: Receiver<PathBuf>, updates: Sender<Update>) {
         while let Ok(newer) = requests.try_recv() {
             cwd = newer;
         }
-        let status = runtime.block_on(status(&cwd));
+        let status = refresh(&cwd);
         if updates.send(Update { cwd, status }).is_err() {
             return;
         }
     }
 }
 
-/// Run `git status` for `cwd` and return what the prompt needs.
-async fn status(cwd: &Path) -> Option<GitStatus> {
-    let mut command = compio::process::Command::new("git");
-    command
-        .arg("--no-optional-locks")
-        .arg("status")
-        .arg("--porcelain=v2")
-        .arg("--branch")
-        // Every untracked file, not git's default "this whole new directory is
-        // one entry": `?N` promises a file count. The walk happens on the
-        // worker, never in front of the cursor.
-        .arg("--untracked-files=all")
-        .arg("-z")
-        .current_dir(cwd)
-        // Byte-exact output, no lock contention, and never a credential prompt:
-        // this runs while the user is typing (`docs/prompt-watch.md` §2).
-        .env("LC_ALL", "C")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdout(std::process::Stdio::piped())
-        .ok()?
-        .stderr(std::process::Stdio::null())
-        .ok()?;
-    let output = command.output().await.ok()?;
-    output
-        .status
-        .success()
-        .then(|| parse_status(&output.stdout))
+/// Open the repository containing `cwd` and compute what the prompt paints.
+fn refresh(cwd: &Path) -> Option<GitStatus> {
+    let repo = gix::discover(cwd).ok()?;
+    run_with_deadline(STATUS_TIMEOUT, |interrupt| status_with(&repo, interrupt))
 }
 
-/// Read the four facts out of `git status --porcelain=v2 --branch -z`.
+/// Run `refresh` under a deadline, returning `None` when the deadline won.
 ///
-/// The NUL-separated form matters: in `--porcelain=v2 -z` a rename is a `2`
-/// record followed by its original path as a *separate* NUL field, so counting
-/// records without accounting for that would count one rename as two changes.
-/// The header lines (`#`) are not changes.
-fn parse_status(stdout: &[u8]) -> GitStatus {
-    let mut status = GitStatus::default();
-    let records: Vec<&[u8]> = stdout.split(|&byte| byte == 0).collect();
-    let mut at = 0;
-    while at < records.len() {
-        let record = records[at];
-        at += 1;
-        match record.first() {
-            Some(b'#') => {
-                if let Some(rest) = record.strip_prefix(b"# branch.ab ") {
-                    // `+N -M`; the header is absent when there is no upstream,
-                    // in which case both stay zero and no `↑` is painted.
-                    let mut parts = rest.split(|&byte| byte == b' ');
-                    status.ahead = parts.next().map_or(0, count);
-                    status.behind = parts.next().map_or(0, count);
+/// The timer is a short-lived thread rather than a poll in the worker: the
+/// worker is inside `gix` and cannot watch a clock. It sleeps for the whole
+/// deadline and is harmless afterwards — it holds only two `Arc<AtomicBool>`s
+/// and exits. A refresh that finishes in milliseconds leaves at most a handful
+/// of sleeping timer threads, never a running one.
+fn run_with_deadline<F>(timeout: Duration, refresh: F) -> Option<GitStatus>
+where
+    F: FnOnce(&Arc<AtomicBool>) -> Option<GitStatus>,
+{
+    let interrupt = Arc::new(AtomicBool::new(false));
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    {
+        let interrupt = Arc::clone(&interrupt);
+        let timed_out = Arc::clone(&timed_out);
+        let done = Arc::clone(&done);
+        let _ = std::thread::Builder::new()
+            .name("baash-git-deadline".to_owned())
+            .spawn(move || {
+                std::thread::sleep(timeout);
+                // Only a refresh that is still running is late. Checking
+                // `done` first keeps a completed result from being thrown away
+                // because the timer happened to wake at the same moment.
+                if !done.load(Ordering::Acquire) {
+                    timed_out.store(true, Ordering::Release);
+                    interrupt.store(true, Ordering::Release);
                 }
+            });
+    }
+
+    let result = refresh(&interrupt);
+    done.store(true, Ordering::Release);
+    if timed_out.load(Ordering::Acquire) {
+        // `gix` stops at its next interrupt check, which may be after the
+        // deadline; whatever it collected is partial, so paint nothing.
+        None
+    } else {
+        result
+    }
+}
+
+/// The status of `repo`, or `None` if it was interrupted or failed.
+///
+/// The interrupt flag is the one the deadline owns; `gix` checks it between
+/// chunks of the worktree walk. The counters are *distinct paths*: a file
+/// changed in the index and again in the worktree is one modified file, and a
+/// rename is one file, not two.
+fn status_with(repo: &gix::Repository, interrupt: &Arc<AtomicBool>) -> Option<GitStatus> {
+    use std::collections::BTreeSet;
+
+    let platform = repo
+        .status(gix::progress::Discard)
+        .ok()?
+        // Each untracked file, not git's default "this whole new directory is
+        // one entry": `?N` promises a file count.
+        .untracked_files(gix::status::UntrackedFiles::Files)
+        // Let the deadline stop the walk at its next chunk boundary.
+        .should_interrupt_owned(Arc::clone(interrupt));
+
+    let mut modified = BTreeSet::new();
+    let mut untracked = BTreeSet::new();
+    for item in platform.into_iter(Vec::new()).ok()? {
+        let item = item.ok()?;
+        match item {
+            gix::status::Item::IndexWorktree(item) => match item {
+                gix::status::index_worktree::Item::Modification { rela_path, .. } => {
+                    modified.insert(rela_path);
+                }
+                gix::status::index_worktree::Item::Rewrite { dirwalk_entry, .. } => {
+                    modified.insert(dirwalk_entry.rela_path);
+                }
+                gix::status::index_worktree::Item::DirectoryContents { entry, .. } => {
+                    if entry.status == gix::dir::entry::Status::Untracked {
+                        untracked.insert(entry.rela_path);
+                    }
+                }
+            },
+            gix::status::Item::TreeIndex(change) => {
+                modified.insert(change.location().to_owned());
             }
-            // `1`: ordinary changed entry; `u`: unmerged. Both are one tracked
-            // path, whether the change is staged, unstaged or both.
-            Some(b'1' | b'u') if record.get(1) == Some(&b' ') => {
-                status.modified = status.modified.saturating_add(1);
-            }
-            // `2`: renamed or copied tracked entry, followed by its original
-            // path as the next NUL field.
-            Some(b'2') if record.get(1) == Some(&b' ') => {
-                status.modified = status.modified.saturating_add(1);
-                at += 1;
-            }
-            // `?`: untracked. `!`: ignored, which we do not ask for.
-            Some(b'?') if record.get(1) == Some(&b' ') => {
-                status.untracked = status.untracked.saturating_add(1);
-            }
-            _ => {}
         }
     }
-    status
+    if interrupt.load(Ordering::Acquire) {
+        return None;
+    }
+
+    let (ahead, behind) = ahead_behind(repo);
+    if interrupt.load(Ordering::Acquire) {
+        return None;
+    }
+
+    Some(GitStatus {
+        modified: u32::try_from(modified.len()).unwrap_or(u32::MAX),
+        untracked: u32::try_from(untracked.len()).unwrap_or(u32::MAX),
+        ahead,
+        behind,
+    })
 }
 
-/// A `+N`/`-M` counter from the branch header.
-fn count(field: &[u8]) -> u32 {
-    let digits = field
-        .strip_prefix(b"+")
-        .or_else(|| field.strip_prefix(b"-"))
-        .unwrap_or(field);
-    std::str::from_utf8(digits)
-        .ok()
-        .and_then(|text| text.parse().ok())
-        .unwrap_or(0)
+/// How many commits `HEAD` has that its upstream does not, and the reverse.
+///
+/// This is the same answer as `git rev-list --count HEAD ^upstream` (and the
+/// mirrored form): hide every commit reachable from the other tip and count
+/// what is left. No merge-base call is needed, and a diverged history is
+/// handled the same way as a fast-forward. No upstream (a detached `HEAD`, a
+/// branch with no `branch.<name>.remote`/`merge`, or one whose remote-tracking
+/// ref does not exist yet) is `(0, 0)`, which paints no arrows.
+fn ahead_behind(repo: &gix::Repository) -> (u32, u32) {
+    let Ok(head) = repo.head_id() else {
+        // An unborn `HEAD` (a fresh repository) has no commits to be ahead or
+        // behind of.
+        return (0, 0);
+    };
+    let Some(upstream) = upstream_id(repo) else {
+        return (0, 0);
+    };
+    let (head, upstream) = (head.detach(), upstream.detach());
+    (
+        count_excluding(repo, head, upstream),
+        count_excluding(repo, upstream, head),
+    )
+}
+
+/// The commit `refs/remotes/<remote>/<branch>` points at for the checked-out
+/// branch, when there is one.
+///
+/// The name is derived by `gix` from `branch.<name>.remote` and the remote's
+/// fetch refspec, so a renamed remote and a non-default `refs/remotes` layout
+/// both follow the repository's own configuration rather than a guess.
+fn upstream_id(repo: &gix::Repository) -> Option<gix::Id<'_>> {
+    let name = repo.head_name().ok()??;
+    let tracking = repo
+        .branch_remote_tracking_ref_name(name.as_ref(), gix::remote::Direction::Fetch)?
+        .ok()?;
+    let mut reference = repo.find_reference(&tracking).ok()?;
+    reference.peel_to_id().ok()
+}
+
+/// Count the commits reachable from `tip` but not from `hidden`.
+fn count_excluding(repo: &gix::Repository, tip: gix::ObjectId, hidden: gix::ObjectId) -> u32 {
+    let Ok(walk) = repo.rev_walk([tip]).with_hidden([hidden]).all() else {
+        return 0;
+    };
+    u32::try_from(walk.count()).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn status_of(porcelain: &[u8]) -> GitStatus {
-        parse_status(porcelain)
+    fn scratch(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("baash-git-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    /// Run git for test *setup* only. The shell itself never does; this is how
+    /// the fixture creates commits and a remote.
+    fn git(directory: &Path, arguments: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-c")
+            .arg("commit.gpgsign=false")
+            .args(arguments)
+            .current_dir(directory)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "Baash Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Baash Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {arguments:?}");
     }
 
     #[test]
-    fn the_porcelain_parser_reads_all_four_facts() {
-        let porcelain = concat!(
-            "# branch.oid 1111111111111111111111111111111111111111\0",
-            "# branch.head main\0",
-            "# branch.upstream origin/main\0",
-            "# branch.ab +23 -4\0",
-            "1 .M N... 100644 100644 100644 a b modified.txt\0",
-            "1 M. N... 100644 100644 100644 a b staged.txt\0",
-            "2 R. N... 100644 100644 100644 a b renamed.txt\0original.txt\0",
-            "u UU N... 100644 100644 100644 100644 a b c conflict.txt\0",
-            "? untracked.txt\0",
-            "? another untracked file.txt\0",
-        );
-        assert_eq!(
-            status_of(porcelain.as_bytes()),
-            GitStatus {
-                modified: 4,
-                untracked: 2,
-                ahead: 23,
-                behind: 4,
+    fn a_fast_refresh_keeps_its_result() {
+        let result = run_with_deadline(Duration::from_secs(10), |_| {
+            Some(GitStatus {
+                modified: 3,
+                ..GitStatus::default()
+            })
+        });
+        assert_eq!(result.map(|status| status.modified), Some(3));
+    }
+
+    #[test]
+    fn a_refresh_that_outlives_the_deadline_is_discarded() {
+        let started = Instant::now();
+        let result = run_with_deadline(Duration::from_millis(30), |interrupt| {
+            while !interrupt.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(1));
             }
+            Some(GitStatus::default())
+        });
+        assert_eq!(result, None);
+        assert!(
+            started.elapsed() >= Duration::from_millis(25),
+            "the deadline was not waited for"
         );
     }
 
     #[test]
-    fn a_rename_is_one_file_not_two() {
-        // The original path follows the `2` record as its own NUL field; it is
-        // not a second change.
-        let porcelain = b"2 R. N... 100644 100644 100644 a b new-name\0old-name\0";
-        assert_eq!(status_of(porcelain).modified, 1);
-    }
+    fn a_real_repository_counts_modified_and_untracked() {
+        let root = scratch("status");
+        git(&root, &["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
+        git(&root, &["add", "tracked.txt"]);
+        git(&root, &["commit", "-q", "-m", "one"]);
+        std::fs::write(root.join("tracked.txt"), "two\n").unwrap();
+        std::fs::write(root.join("untracked.txt"), "x\n").unwrap();
 
-    #[test]
-    fn no_upstream_and_no_changes_is_all_zero() {
-        let porcelain = concat!(
-            "# branch.oid 1111111111111111111111111111111111111111\0",
-            "# branch.head main\0",
+        assert_eq!(
+            refresh(&root),
+            Some(GitStatus {
+                modified: 1,
+                untracked: 1,
+                ahead: 0,
+                behind: 0,
+            })
         );
-        assert_eq!(status_of(porcelain.as_bytes()), GitStatus::default());
-        assert_eq!(status_of(b""), GitStatus::default());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn a_malformed_or_truncated_count_is_zero() {
-        assert_eq!(count(b"+23"), 23);
-        assert_eq!(count(b"-4"), 4);
-        assert_eq!(count(b"+"), 0);
-        assert_eq!(count(b"nonsense"), 0);
+    fn a_diverged_branch_counts_both_directions() {
+        let root = scratch("diverged");
+        let work = root.join("repo");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        std::fs::write(work.join("tracked.txt"), "one\n").unwrap();
+        git(&work, &["add", "tracked.txt"]);
+        git(&work, &["commit", "-q", "-m", "one"]);
+        git(&root, &["init", "-q", "--bare", "upstream.git"]);
+        git(&work, &["remote", "add", "origin", "../upstream.git"]);
+        git(&work, &["push", "-q", "-u", "origin", "main"]);
+
+        // One commit on our side, one on the upstream's, from the same base.
+        std::fs::write(work.join("tracked.txt"), "local\n").unwrap();
+        git(&work, &["commit", "-q", "-am", "local"]);
+        let clone = root.join("clone");
+        git(
+            &root,
+            &["clone", "-q", "-b", "main", "upstream.git", "clone"],
+        );
+        std::fs::write(clone.join("upstream.txt"), "upstream\n").unwrap();
+        git(&clone, &["add", "upstream.txt"]);
+        git(&clone, &["commit", "-q", "-m", "upstream"]);
+        git(&clone, &["push", "-q", "origin", "main"]);
+        // The work tree's remote-tracking ref only moves on fetch.
+        git(&work, &["fetch", "-q", "origin"]);
+
+        let status = refresh(&work).expect("a status");
+        assert_eq!((status.ahead, status.behind), (1, 1));
+        assert_eq!((status.modified, status.untracked), (0, 0));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -415,7 +548,7 @@ mod tests {
                 modified: 2,
                 untracked: 3,
                 ahead: 9,
-                behind: 0,
+                behind: 4,
             });
         }
         assert_eq!(segment.legacy(), Some(b" [main ~5]".to_vec()));
@@ -425,9 +558,7 @@ mod tests {
 
     #[test]
     fn outside_a_repository_there_is_nothing_to_paint() {
-        let root = std::env::temp_dir().join(format!("baash-git-none-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        let root = scratch("none");
         let segment = GitSegment::new();
         segment.tick(&root);
         assert_eq!(segment.facts(), Facts::default());
@@ -439,8 +570,7 @@ mod tests {
     fn a_detached_head_is_the_branch_segment() {
         // `git_branch` resolves a detached HEAD to the abbreviated commit; the
         // segment carries it exactly like a branch name.
-        let root = std::env::temp_dir().join(format!("baash-git-detached-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = scratch("detached");
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::write(
             root.join(".git/HEAD"),

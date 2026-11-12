@@ -93,7 +93,7 @@ time; that case rejects at the point of failure and is documented.
 **compio.** One runtime, main thread. The REPL is an async loop; the interpreter
 remains synchronous and is called from it, and blocking it during a command is
 accepted (the prompt is not visible then). File I/O — directory scans, `stat`,
-the `git status` subprocess — uses compio's completion-based operations instead
+the prompt's status walk (in-process `gix`, on a worker) — uses compio's completion-based operations instead
 of a thread per blocked read. CPU-bound work (ranking thousands of completion
 candidates) goes to a worker thread and returns through a channel. Inotify is
 not provided by compio, so `baash-sys` grows a small inotify wrapper of its own
@@ -126,7 +126,7 @@ runs in process now — `portability.md` §3) and W5's set, which landed smaller
 |---|---|---|
 | W1 | delete job control | gate green; `jobs`/`fg`/`bg` report `CAPABILITY`; `wait`/`kill`/`$!` still work for pids; baseline re-recorded |
 | W2 | no-fork subshells | `( … )` and `$( … )` in-process; `exec` in subshell, shell-code `&`, non-last builtin pipeline stages rejected with 302; the four fork call sites and `fork_gate` deleted |
-| W3 | compio event loop | spike proven (see §9); then the REPL loop on compio, `git status` spawned and awaited, directory scans through compio, completion scan and prompt refresh off the main thread; no custom poll code; no input lag while a scan runs |
+| W3 | compio event loop | spike proven (see §9); then the REPL loop on compio, the prompt's status on a worker (in process, `gix`), directory scans through compio, completion scan and prompt refresh off the main thread; no custom poll code; no input lag while a scan runs |
 | W4 | Windows build | cross-compiles; `baash -c 'echo hi'` runs; a simple script with `$( … )`, `for`, `if`, functions runs in a ConPTY |
 | W5 | uutils embedded | curated set as built-ins behind a feature; measured size/build cost; `ls`/`cat`/`cp`/`rm`/`mkdir`/`head`/`tail`/`wc` work without external binaries |
 | W6 | curated conformance | a "supported subset" document and a differential runner asserting *match bash or reject*, with silent divergence = 0 |

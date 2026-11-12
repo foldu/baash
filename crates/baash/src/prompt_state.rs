@@ -8,7 +8,7 @@
 //!   `cd`, not once per repaint;
 //! * the git branch and counters ([`GitSegment`]), where the branch is an
 //!   exact `.git/HEAD` read and the counters are the worker's last completed
-//!   `git status` (`docs/prompt-watch.md` §2);
+//!   `gix` walk (`docs/prompt-watch.md` §2);
 //! * the working-tree watcher, so a file created while the line is idle makes
 //!   the counters refresh and repaint.
 //!
@@ -239,7 +239,7 @@ impl LivePrompt for PromptState {
         if changed {
             // A real change: worth asking git for a new count. The request is
             // rate-limited and coalesced, so an editor save that touches a
-            // hundred paths is still one `git status`.
+            // hundred paths is still one `gix` walk.
             self.git.tick(&self.cwd);
         } else {
             // The editor's one-second backstop, or a wake-up with nothing in

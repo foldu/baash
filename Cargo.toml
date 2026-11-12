@@ -11,6 +11,14 @@ license = "GPL-3.0-or-later"
 publish = false
 
 [workspace.dependencies]
+# The stock prompt's status. `gix` (gitoxide) reads the index and walks the
+# worktree in process on the prompt worker, so the shell needs no `git` binary
+# for the counters; `revision` supplies the ahead/behind walk.
+gix = { version = "0.90", default-features = false, features = [
+  "status",
+  "revision",
+  "sha1",
+] }
 baash-diag = { path = "crates/baash-diag" }
 baash-syntax = { path = "crates/baash-syntax" }
 baash-highlight = { path = "crates/baash-highlight" }
