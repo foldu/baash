@@ -13,7 +13,9 @@
 # The library and `zoxide init bash` are not baked into the store at evaluation
 # time: the first is a store path `config/config.sh` sources, the second is one
 # line `eval`'d at startup (zoxide printing its script costs about a
-# millisecond, and it is the integration zoxide itself documents).
+# millisecond, and it is the integration zoxide itself documents). `carapace`
+# is the third: the shell looks for it on `PATH` when a TAB needs completing, so
+# installing it here is the whole integration and no startup line is needed.
 { self }:
 {
   config,
@@ -122,6 +124,26 @@ in
       '';
     };
 
+    carapace = {
+      enable = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Install `carapace`, the completion engine baash asks for the command
+          being completed.
+
+          The shell looks for a `carapace` on its `PATH` and prefers it over its
+          own generated tables; without one it falls back to those tables and to
+          the bash-completion library, so this is the whole integration and
+          there is no second switch inside the shell. Installing it here keeps
+          completion working for a user whose `PATH` is the system's rather than
+          one they assembled by hand.
+        '';
+      };
+
+      package = lib.mkPackageOption pkgs "carapace" { };
+    };
+
     zoxide = {
       enable = mkEnableOption "zoxide integration (`z` and `zi`, with its directory hook)";
 
@@ -142,6 +164,7 @@ in
     environment.systemPackages = [
       cfg.package
     ]
+    ++ lib.optional cfg.carapace.enable cfg.carapace.package
     ++ lib.optionals cfg.zoxide.enable [ cfg.zoxide.package ];
 
     # `/etc/shells`: what `chsh` and PAM check before they let this shell be

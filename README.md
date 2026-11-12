@@ -284,6 +284,8 @@ and before the user's `~/.config/baash/config.sh`.
 | `programs.baash.enable` | `false` | install `baash` and write the startup file |
 | `programs.baash.package` | this flake's package | the build to install |
 | `programs.baash.bashCompletion` | `true` | point `BAASH_BASH_COMPLETION` at `pkgs.bash-completion`, so TAB completion for the machine's commands works — NixOS has no `/usr/share/bash-completion` for [`config/config.sh`](config/config.sh) to find |
+| `programs.baash.carapace.enable` | `true` | install `carapace`; the shell asks a `carapace` on `PATH` for completions and falls back to its own tables without one |
+| `programs.baash.carapace.package` | `pkgs.carapace` | the carapace to install |
 | `programs.baash.zoxide.enable` | `false` | install zoxide and run `eval "$(zoxide init bash)"` at startup |
 | `programs.baash.zoxide.package` | `pkgs.zoxide` | the zoxide to install |
 | `programs.baash.extraConfig` | `""` | shell code appended to the system file |

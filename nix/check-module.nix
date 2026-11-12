@@ -34,8 +34,10 @@ let
       ++ modules;
     };
 
-  # Both options on: the library and zoxide are the two things this module adds
-  # to the shell's defaults, and each has a visible effect at startup.
+  # Everything on: the library, carapace and zoxide. `carapace.enable` is left
+  # at its default, so this case is also the one that proves the default; the
+  # library and zoxide each have a visible effect at startup, while carapace's
+  # is membership of the system closure.
   both = evaluate [
     {
       programs.baash = {
@@ -48,13 +50,15 @@ let
     }
   ];
 
-  # The same module with neither: `bashCompletion`'s default is on, so this is
-  # the one case where it is off, and it must not leave a library behind.
+  # The same module with the additions turned off: `bashCompletion` and
+  # `carapace` both default on, so this is the one case where they are off, and
+  # it must leave neither a library nor a package behind.
   bare = evaluate [
     {
       programs.baash = {
         enable = true;
         bashCompletion = false;
+        carapace.enable = false;
       };
     }
   ];
@@ -69,6 +73,8 @@ let
   registered = system: builtins.elem package system.config.environment.shells;
   installed = system: builtins.elem package system.config.environment.systemPackages;
   zoxideInstalled = builtins.elem both.config.programs.baash.zoxide.package both.config.environment.systemPackages;
+  carapaceInstalled = builtins.elem both.config.programs.baash.carapace.package both.config.environment.systemPackages;
+  carapaceAbsent = !builtins.elem bare.config.programs.baash.carapace.package bare.config.environment.systemPackages;
 in
 if !registered both || !registered bare then
   throw "programs.baash.enable did not add the package to environment.shells"
@@ -76,6 +82,10 @@ else if !installed both || !installed bare then
   throw "programs.baash.enable did not add the package to environment.systemPackages"
 else if both.config.programs.baash.zoxide.enable && !zoxideInstalled then
   throw "programs.baash.zoxide.enable did not add zoxide to environment.systemPackages"
+else if !carapaceInstalled then
+  throw "programs.baash.carapace.enable defaults to true but carapace is not in environment.systemPackages"
+else if !carapaceAbsent then
+  throw "programs.baash.carapace.enable = false still put carapace in environment.systemPackages"
 else if
   disabled.config.environment.etc ? "xdg/baash/config.sh" || installed disabled || registered disabled
 then

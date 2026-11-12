@@ -444,7 +444,9 @@ rediscover):
   dynamic one (`docs/performance.md`), against 0.7 ms when the tables answer.
   Not done there: the runtime provider is not consulted for the command word,
   redirects, assignments or substitution bodies, and carapace's `messages` are
-  not shown.
+  not shown. The NixOS module installs `carapace` by default
+  (`programs.baash.carapace.enable`), so a machine whose `PATH` is the system's
+  has the binary without the user adding it.
 * **Version skew is now the *system* library's problem.** The 229
   per-command scripts this machine installed are older than 2.18: 58 of them
   call `_init_completion`, which 2.18 renamed to `_comp_initialize`, so those
