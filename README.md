@@ -332,6 +332,14 @@ pty-driven `interactive_*` tests need a real `/dev/pts` (in a build sandbox
 hostname, tzdata, effective uid, wall-clock timers — so a sandbox measures 2326
 where a real environment measures 2344.
 
+`crates/baash/tests/completion_compat.rs` is the differential suite: each case
+is one shell script that fills `COMPREPLY`, and it runs under bash and under
+baash with the same environment, so the candidates and the exit status must
+match. It needs `bash`, and the library cases want
+`vendor/bash-completion/bash_completion` (a `nix develop` shell, or
+`nix build .#bash-completion`); without either it reports a skip rather than
+pretending to have compared.
+
 GitHub Actions (`.github/workflows/ci.yml`) mirrors the same three gates with a
 rustup toolchain instead of nix, which is enough because the build has no C
 dependencies. It is the second opinion, not the ratchet of record.
