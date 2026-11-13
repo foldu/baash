@@ -1688,11 +1688,13 @@ load-bearing: bash-completion's loader asks `if compspec=$(complete -p --
 rule makes every command look pre-completed.
 
 The file action expands the *directory* part of the word and keeps the answer
-as typed: `~/Doc⇥` and `$HOME/Doc⇥` both list the home directory and answer
-`~/Documents` / `$HOME/Documents`. That is bash's filename path — its readline
-rewrite hook expands the word and puts the typed prefix back after completion —
-and it lives in `Interp`'s file action, so `compgen -f`, `-A file`/`directory`
-and the engine's file provider all obey it. Only tilde and parameter expansion
+as typed: `~/Doc⇥` gives `~/Documents` in the editor, and
+`compgen -f -- '$HOME/Doc'` gives `$HOME/Documents`. That is bash's filename
+path — its readline rewrite hook expands the word and puts the typed prefix back
+after completion — and it lives in `Interp`'s file action, so `compgen -f`,
+`-A file`/`directory` and the engine's file provider all go through it (the
+editor routes a word that *begins* with `$NAME` to variable completion before
+asking, which is `docs/state.md`'s known gap). Only tilde and parameter expansion
 run: a word that spells `$(…)`, `` `…` ``, `$((…))` or `<(`/`>(` is left
 exactly as written, so a completion never executes shell code (bash's filename
 path leaves those literal too).
