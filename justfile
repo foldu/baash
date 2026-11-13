@@ -40,6 +40,14 @@ windows:
 windows-fast:
     nix build .#windows-fast -o result-windows-fast
 
+# The published Linux binaries: glibc 2.17, linked by zig, so the tarball runs
+# outside nix. The release workflow builds exactly these.
+portable:
+    nix build .#portable -o result-portable
+
+portable-aarch64:
+    nix build .#portable-aarch64 -o result-portable-aarch64
+
 # Cut a release: gate, bump, commit, tag `v<version>`, push; the tag publishes.
 release version: check test conformance
     cargo release --execute {{version}}

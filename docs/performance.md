@@ -203,6 +203,11 @@ The variant that would win both is a *static glibc* build (no loader, glibc's
 allocator); it needs a static glibc toolchain at build time, which is a Nix
 `pkgsStatic` decision rather than a flag.
 
+What ships is therefore glibc with a version floor instead of a store path:
+`.#portable` in the flake links the release binaries against glibc 2.17 through
+zig, so a tarball runs on any distribution from 2012 on, and the allocator is
+the one the gnu column above measures.
+
 ### Allocator: mimalloc on Windows
 
 Measured both ways on Linux, mimalloc trades one kind of work for another:

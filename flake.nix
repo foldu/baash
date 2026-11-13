@@ -55,6 +55,35 @@
             craneLib = (crane.mkLib pkgs).overrideToolchain (_: hostToolchain);
             windowsCraneLib = (crane.mkLib pkgs).overrideToolchain (_: windowsToolchain);
 
+            # The release toolchain: the host toolchain plus the other Linux
+            # std, so one x86 machine can build both published artifacts. `cargo
+            # zigbuild` supplies the linker and the older glibc for both, so no
+            # sysroot is needed on the build machine.
+            portableToolchain = pkgs.rust-bin.stable.${rustVersion}.default.override {
+              targets = [ "aarch64-unknown-linux-gnu" ];
+            };
+            portableCraneLib = (crane.mkLib pkgs).overrideToolchain (_: portableToolchain);
+
+            # The icon theme files. `share/icons/hicolor` is freedesktop's
+            # fallback theme, and it is where an `Icon=baash` in a desktop entry
+            # is resolved from: one vector source under `scalable/apps`, plus a
+            # PNG at each size the theme spec names, for the consumers that will
+            # not read SVG. They are generated here instead of being checked in,
+            # so the PNGs follow `assets/logo.svg` rather than drifting from it.
+            #
+            # A `let` up here rather than inside `packages` because the release
+            # artifacts install them too, and the tarball copies `share` from
+            # whichever artifact it was built from.
+            icons = pkgs.runCommand "baash-icons" { nativeBuildInputs = [ pkgs.librsvg ]; } ''
+              for size in 16 24 32 48 64 128 256; do
+                install -d "$out/share/icons/hicolor/''${size}x''${size}/apps"
+                rsvg-convert -w "$size" -h "$size" ${./assets/logo.svg} \
+                  -o "$out/share/icons/hicolor/''${size}x''${size}/apps/baash.png"
+              done
+              install -Dm644 ${./assets/logo.svg} \
+                "$out/share/icons/hicolor/scalable/apps/baash.svg"
+            '';
+
             # Not `cleanCargoSource`: the binary `include_bytes!`s
             # `config/config.sh`, which a Cargo-only filter would drop.
             #
@@ -269,6 +298,73 @@
               profile = "windows-fast";
             };
 
+            # --- the release Linux artifacts ----------------------------------
+            #
+            # `default` links the store's glibc: its interpreter is
+            # `/nix/store/…-glibc/lib/ld-linux-x86-64.so.2`, so a tarball made
+            # from it runs on the machine that built it and nowhere else. These
+            # two are built against the oldest glibc the shell supports (2.17,
+            # 2012) through zig, which needs no sysroot on the build machine and
+            # is the same tool the Windows target already uses. Both triples
+            # come off an x86 runner, so the release has one build job per
+            # artifact rather than a second runner architecture.
+            #
+            # Not static musl, which would also run anywhere: it removes the
+            # loader and costs 10–40 ms per second of typing. The measurement is
+            # `docs/performance.md` §"Static musl: startup yes, throughput no".
+            mkPortable =
+              {
+                pname,
+                triple,
+                # The glibc the binary requires; zig stamps it into the
+                # interpreter and the versioned symbol references, so a newer
+                # build machine cannot raise the floor by accident.
+                glibc ? "2.17",
+              }:
+              portableCraneLib.mkCargoDerivation {
+                inherit pname src;
+                version = "0.0.0";
+                strictDeps = true;
+                # The suite is the CI gate, on a real pty; a release build is a
+                # packaging step, as it is for `default`.
+                doCheck = false;
+                cargoArtifacts = null;
+                doInstallCargoArtifacts = false;
+                cargoVendorDir = portableCraneLib.vendorCargoDeps { inherit src; };
+                nativeBuildInputs = [
+                  pkgs.cargo-zigbuild
+                  pkgs.zig
+                  pkgs.coreutils
+                ];
+                buildPhaseCargoCommand = ''
+                  # Both zig caches want to live under `$HOME`, and the
+                  # sandbox's home is not writable.
+                  export HOME="$TMPDIR"
+                  export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global"
+                  export ZIG_LOCAL_CACHE_DIR="$TMPDIR/zig-local"
+                  cargo zigbuild --locked --release -p baash \
+                    --target ${triple}.${glibc}
+                '';
+                # The layout `default` installs, so the tarball copies `share`
+                # without knowing which artifact it came from.
+                installPhaseCommand = ''
+                  mkdir -p $out/bin
+                  install -m755 target/${triple}/release/baash $out/bin/
+                  install -Dm644 config/config.sh "$out/etc/xdg/baash/config.sh"
+                  cp -r --no-preserve=mode ${icons}/share "$out/share"
+                '';
+              };
+
+            portable = mkPortable {
+              pname = "baash-portable";
+              triple = "x86_64-unknown-linux-gnu";
+            };
+
+            portableAarch64 = mkPortable {
+              pname = "baash-portable-aarch64";
+              triple = "aarch64-unknown-linux-gnu";
+            };
+
           in
           f {
             inherit
@@ -279,7 +375,10 @@
               src
               commonArgs
               embedCompletion
+              icons
               licenses
+              portable
+              portableAarch64
               windows
               windowsFast
               system
@@ -295,27 +394,13 @@
           cargoArtifacts,
           commonArgs,
           embedCompletion,
+          icons,
+          portable,
+          portableAarch64,
           windows,
           windowsFast,
           ...
         }:
-        let
-          # The icon theme files. `share/icons/hicolor` is freedesktop's
-          # fallback theme, and it is where an `Icon=baash` in a desktop entry
-          # is resolved from: one vector source under `scalable/apps`, plus a
-          # PNG at each size the theme spec names, for the consumers that will
-          # not read SVG. They are generated here instead of being checked in,
-          # so the PNGs follow `assets/logo.svg` rather than drifting from it.
-          icons = pkgs.runCommand "baash-icons" { nativeBuildInputs = [ pkgs.librsvg ]; } ''
-            for size in 16 24 32 48 64 128 256; do
-              install -d "$out/share/icons/hicolor/''${size}x''${size}/apps"
-              rsvg-convert -w "$size" -h "$size" ${./assets/logo.svg} \
-                -o "$out/share/icons/hicolor/''${size}x''${size}/apps/baash.png"
-            done
-            install -Dm644 ${./assets/logo.svg} \
-              "$out/share/icons/hicolor/scalable/apps/baash.svg"
-          '';
-        in
         {
           default = craneLib.buildPackage (
             commonArgs
@@ -364,6 +449,14 @@
           # Nix has: the parts that did not change are not rebuilt.
           windows = windows.package;
           windows-fast = windowsFast.package;
+
+          # The published Linux binaries: the same program, linked against glibc
+          # 2.17 so that unpacking the tarball outside nix is all it takes.
+          # `default` stays the nix package, because inside nix the store's glibc
+          # is the faster one (`docs/performance.md`, the musl and loader
+          # measurements).
+          portable = portable;
+          portable-aarch64 = portableAarch64;
 
           # The cached halves on their own, so a drift in the split is visible:
           # these two store paths must not move when only `crates/*/src`
