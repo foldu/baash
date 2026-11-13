@@ -62,10 +62,16 @@ jobs:
       - uses: actions/checkout@v7
       # `deny.toml` is the allow-list: a dependency whose license is not in it
       # fails here, so `THIRD-PARTY.md` cannot quietly go stale.
+      #
+      # The action runs `cargo deny <arguments> <command> <command-arguments>`,
+      # in that order, so `--deny` cannot ride in `arguments`: it would land
+      # before the subcommand and clap exits 2 with "unexpected argument
+      # '--deny' found". It goes after `check`, beside `licenses` — the same
+      # vector as `just licenses` and the flake's `licenses` derivation.
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check licenses
-          arguments: --deny warnings
+          command: check
+          command-arguments: --deny warnings licenses
 
   conformance:
     runs-on: ubuntu-latest
