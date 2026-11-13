@@ -1099,6 +1099,24 @@ re-enters itself. `SIGINT`/`SIGQUIT` are ignored while waiting for a foreground
 child, and *discarded* if they were trapped (bash's rule: `kill -INT` during
 `sleep` runs no `INT` trap, while `USR1` runs afterwards).
 
+**An interactive shell blocks the terminal's signals for its whole life.** The
+editor turns `ISIG` off while it owns the line, but a *command* runs with the
+terminal back in cooked mode — `read` and every other builtin that wants a line
+needs the line discipline — so the same key is a `SIGINT` for the shell's own
+process group, and the default action ended the session: an in-process command,
+or the gap between a command's output and the next prompt, took the variables
+and the history with it. `baash` blocks `SIGINT`/`SIGQUIT` before the first
+command (`keep_the_session_through_ctrl_c`, next to the Windows console handler
+that makes the same promise), and `sync_traps` keeps both in the *wanted* set
+while the shell is interactive, so a `trap - INT` cannot unblock them again.
+Blocked rather than `SIG_IGN`, because an ignored disposition survives `exec`
+and children would stop honouring `Ctrl-C`, while the spawn path already clears
+the mask. A foreground child still receives its own copy through the shared
+process group, a pending untrapped `INT` is read off the `signalfd` and dropped
+at a boundary, and a `trap` on `INT` still runs. What is **not** implemented is
+bash's abort: an in-process command runs to completion, and the signal is gone
+by the time the prompt returns.
+
 **`read` never over-reads.** A seekable descriptor is read in one chunk and
 rewound by the surplus with `lseek`; a pipe is read one byte at a time because
 bytes cannot be given back to it. `Interp::read_buffers` only holds a surplus

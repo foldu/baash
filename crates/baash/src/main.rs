@@ -408,13 +408,17 @@ fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
             if !interactive && flags.rcfile.is_some() {
                 eprintln!("baash: warning: --rcfile is only read by interactive shells");
             }
-            // An interactive shell survives `Ctrl-C`: the console gives the
-            // event to the foreground child too, so the child dies and the
-            // prompt comes back, as a Unix shell ignores `SIGINT` while it
-            // waits for a foreground job. A script keeps the default handler.
-            #[cfg(windows)]
+            // An interactive shell survives `Ctrl-C`. Windows gets the event
+            // from its console, which also delivers it to the foreground child,
+            // so the child dies and the prompt comes back; Unix has no console
+            // event, and its `SIGINT` reached the shell while a command ran,
+            // so the terminal's signals are blocked for the session instead. A
+            // script keeps the default action either way.
             if interactive {
+                #[cfg(windows)]
                 let _ = baash_sys::windows::install_console_control_handler();
+                #[cfg(unix)]
+                keep_the_session_through_ctrl_c();
             }
             let mut shell = shell(interactive, &flags);
             // bash reads a startup file only for an interactive shell, and
@@ -1184,6 +1188,40 @@ fn refresh_prompt(
     };
     editor.set_preamble(&preamble);
     stock
+}
+
+/// Keep an interactive shell alive when `Ctrl-C` arrives while a command runs.
+///
+/// The editor owns the terminal with `ISIG` off, so a `Ctrl-C` at the prompt is
+/// a keystroke. A *command* runs with the terminal back in cooked mode — that is
+/// what lets `read` and every other builtin that wants a line use the line
+/// discipline — so the same key becomes `SIGINT` for the foreground process
+/// group, and that group is the shell's own: with the default disposition the
+/// session ends, taking the variables and the history with it.
+///
+/// bash survives because its `SIGINT` handler aborts the command; the
+/// conservative version of the same promise is to keep the signal away from the
+/// shell, which is what this does. `SIGINT`/`SIGQUIT` are *blocked*, not set to
+/// `SIG_IGN`: an ignored disposition survives `exec`, so an external command
+/// would stop honouring `Ctrl-C`, while the spawn path clears the mask
+/// explicitly (`SpawnPlan::sigmask`) and a child therefore gets an empty one.
+/// A `trap` on `INT` still sees the signal, through the trap reader's
+/// `signalfd`; with no trap the pending signal is discarded at a command
+/// boundary, so `Ctrl-C` interrupts the *wait* for a foreground job (the child
+/// receives its own copy through the shared process group) but not in-process
+/// shell code, which runs to completion — bash aborts the command here, this is
+/// the conservative version of the same promise. `sync_traps` keeps both
+/// signals in the *wanted* set while the shell is interactive, so a
+/// `trap - INT` cannot unblock them again and hand the next `Ctrl-C` the
+/// default action.
+#[cfg(unix)]
+fn keep_the_session_through_ctrl_c() {
+    let Ok(mut mask) = baash_sys::SignalSet::current() else {
+        return;
+    };
+    mask.insert(baash_sys::SIGINT);
+    mask.insert(baash_sys::SIGQUIT);
+    let _ = baash_sys::replace_signal_mask(&mask);
 }
 
 /// The interactive shell: prompt, line editor, completion, history.

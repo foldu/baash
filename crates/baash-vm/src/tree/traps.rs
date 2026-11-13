@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use baash_sys::AsRawFd;
 use std::sync::Arc;
 
-use baash_runtime::{Status, TrapAction, TrapKey};
+use baash_runtime::{ShellHost, Status, TrapAction, TrapKey};
 
 use super::Interp;
 
@@ -78,7 +78,21 @@ impl Interp {
         for signal in &caught {
             want.insert(*signal);
         }
-        if want != self.signals.blocked || (self.signals.reader.is_none() && !caught.is_empty()) {
+        // An interactive shell keeps the terminal's own signals blocked for its
+        // whole life: a command runs with the terminal in cooked mode, so the
+        // `Ctrl-C` that is a keystroke at the prompt is a `SIGINT` for the
+        // shell's own process group while a builtin runs
+        // (`keep_the_session_through_ctrl_c` in `baash` installs the mask
+        // before the first command). They are part of the *wanted* set here, so
+        // that this function's own bookkeeping cannot take them away again:
+        // `trap 'x' INT` records `SIGINT` as blocked by the trap table, and a
+        // later `trap - INT` would otherwise unblock it and put the session
+        // back at the default action.
+        if self.is_interactive() {
+            want.insert(baash_sys::SIGINT);
+            want.insert(baash_sys::SIGQUIT);
+        }
+        if want != self.signals.blocked || (self.signals.reader.is_none() && !want.is_empty()) {
             if let Ok(current) = baash_sys::SignalSet::current() {
                 let mut target = current;
                 for signal in self.signals.blocked.iter() {
@@ -91,15 +105,18 @@ impl Interp {
                 }
                 let _ = baash_sys::replace_signal_mask(&target);
             }
-            self.signals.blocked = want;
             // A fresh descriptor per mask change keeps `SignalFd` immutable in
             // the interpreter; pending signals live in the process, not the
-            // descriptor, so nothing is lost by closing the old one.
-            self.signals.reader = if caught.is_empty() {
+            // descriptor, so nothing is lost by closing the old one. The set is
+            // `want`, not `caught`, because an interactive shell's blocked
+            // `SIGINT` has to be read (and dropped) at a boundary rather than
+            // left pending for a trap registered much later.
+            self.signals.reader = if want.is_empty() {
                 None
             } else {
                 baash_sys::SignalFd::new(&want).ok().map(Arc::new)
             };
+            self.signals.blocked = want;
         }
 
         // `SIG_IGN` for ignored traps, and the default action back for signals

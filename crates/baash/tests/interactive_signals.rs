@@ -211,3 +211,39 @@ fn ctrl_c_on_a_foreground_command_leaves_status_130_and_the_shell_alive() {
     session.line("exit");
     session.wait_child();
 }
+
+/// `Ctrl-C` while the shell itself runs a command must not end the session.
+///
+/// The editor turns the terminal's keyboard signals off for the line, but a
+/// command runs with the terminal back in cooked mode — that is what lets
+/// `read` use the line discipline — so the same key is a `SIGINT` for the
+/// foreground process group, and that group is the shell's own. With the
+/// default disposition the shell died: an in-process command, or the gap
+/// between a command's output and the next prompt, lost the whole session
+/// (`interactive_carapace::a_fast_enter_waits_for_a_pending_lookup` met the
+/// gap and failed about one run in ten).
+///
+/// The signal is blocked for the life of an interactive shell, so the builtin
+/// finishes and the next command still runs. The marker is computed by the
+/// shell rather than typed, so the editor's echo of the line cannot match it.
+#[test]
+fn ctrl_c_during_in_process_shell_code_does_not_end_the_session() {
+    let mut session = Session::spawn();
+    session.prompt();
+
+    // `read -t` is the only builtin that blocks without a child, so it is the
+    // one way to be inside the shell — and not inside the editor — when the
+    // key arrives. The timeout ends it two seconds later, which is what the
+    // test waits for.
+    session.line("read -t 2 ignored; echo done-$((6*7))");
+    settle();
+    session.send(b"\x03");
+    session.expect(b"done-42", Duration::from_secs(15));
+
+    session.line("echo still-here");
+    session.expect(b"still-here", Duration::from_secs(10));
+    session.prompt();
+
+    session.line("exit");
+    session.wait_child();
+}

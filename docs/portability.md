@@ -524,7 +524,11 @@ while it waits for a foreground job: the child receives the same event and dies
 on its own. `STATUS_CONTROL_C_EXIT` is reported as `Signaled(SIGINT)`, so `$?`
 is 130 rather than the low byte of `0xC000013A` (58). A non-interactive shell
 installs nothing, so `baash -c 'sleep 10'` still dies on `Ctrl-C` the way a
-script does.
+script does. Unix reaches the same promise with a blocked mask rather than a
+handler (`docs/contracts.md`, "An interactive shell blocks the terminal's
+signals for its whole life"): the editor has `ISIG` off, but a command runs with
+the terminal back in cooked mode, and without the block the `SIGINT` that is a
+keystroke at the prompt killed the shell mid-command.
 
 **Verified on the `winvm` guest** (2026-11-12), in a Windows Terminal tab
 (ConPTY) opened in the console session, with keystrokes injected through QMP:
