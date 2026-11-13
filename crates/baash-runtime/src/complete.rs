@@ -436,6 +436,7 @@ mod tests {
         assert!(
             table
                 .print(&[b"mpv".to_vec()])
+                .lines
                 .iter()
                 .any(|line| line.windows(7).any(|window| window == b"-o nosp"))
         );
@@ -447,12 +448,34 @@ mod tests {
         assert!(
             !table
                 .print(&[b"mpv".to_vec()])
+                .lines
                 .iter()
                 .any(|line| line.windows(7).any(|window| window == b"-o nosp"))
         );
         // No rule, no edit.
         assert!(!table.set_options(&OptionTarget::Name(b"nope".to_vec()), &changes));
         assert!(!table.set_options(&OptionTarget::Default, &changes));
+    }
+
+    /// `complete -p` prints the `-o` options in bash's order — alphabetical,
+    /// once each — however they were given, because its output is read back
+    /// and compared line for line.
+    #[test]
+    fn rendered_options_follow_bash_order() {
+        let spec = CompletionSpec {
+            options: vec![
+                b"nospace".to_vec(),
+                b"filenames".to_vec(),
+                b"bashdefault".to_vec(),
+                b"nospace".to_vec(),
+            ],
+            function: Some(b"_f".to_vec()),
+            ..CompletionSpec::default()
+        };
+        assert_eq!(
+            String::from_utf8(spec.render(b"cmd")).unwrap(),
+            "complete -o bashdefault -o filenames -o nospace -F _f cmd"
+        );
     }
 
     #[derive(Default)]
@@ -639,7 +662,16 @@ impl CompletionSpec {
     /// Render this spec the way `complete -p` prints it, re-input-safe.
     pub fn render(&self, name: &[u8]) -> Vec<u8> {
         let mut out = b"complete".to_vec();
-        for option in &self.options {
+        // bash prints the `-o` options in its own table order — alphabetical
+        // (`bashdefault`, `default`, `dirnames`, `filenames`, `noquote`,
+        // `nosort`, `nospace`, `plusdirs`) — not the order they were given,
+        // and a repeated option once. `complete -p` output is read back by
+        // scripts and compared line for line, so the order is part of the
+        // contract.
+        let mut options: Vec<&[u8]> = self.options.iter().map(Vec::as_slice).collect();
+        options.sort_unstable();
+        options.dedup();
+        for option in options {
             out.extend_from_slice(b" -o ");
             out.extend_from_slice(option);
         }
@@ -916,9 +948,26 @@ impl CompletionTable {
         }
         true
     }
+}
 
+/// What one request produced.
+///
+/// `lines` is what a printing form writes; `missing` is the names it was
+/// asked about that have no spec. bash reports each of those on stderr and
+/// exits 1, and the status is load-bearing: bash-completion's loader decides
+/// whether a command already has a rule with
+/// `if compspec=$(complete -p -- "$cmd"); then`.
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct Applied {
+    /// Lines for stdout, in print order.
+    pub lines: Vec<Vec<u8>>,
+    /// Names `-p` was asked about that have no completion spec.
+    pub missing: Vec<Vec<u8>>,
+}
+
+impl CompletionTable {
     /// Apply one request, returning output lines for the printing forms.
-    pub fn apply(&mut self, request: &Request) -> Result<Vec<Vec<u8>>, String> {
+    pub fn apply(&mut self, request: &Request) -> Result<Applied, String> {
         match request {
             Request::Print { names } => Ok(self.print(names)),
             Request::Remove { names } => {
@@ -932,7 +981,7 @@ impl CompletionTable {
                         self.entries.retain(|(existing, _)| existing != name);
                     }
                 }
-                Ok(Vec::new())
+                Ok(Applied::default())
             }
             Request::Set {
                 spec,
@@ -960,22 +1009,23 @@ impl CompletionTable {
                         None => self.entries.push((name.clone(), spec.clone())),
                     }
                 }
-                Ok(Vec::new())
+                Ok(Applied::default())
             }
         }
     }
 
-    fn print(&self, names: &[Vec<u8>]) -> Vec<Vec<u8>> {
-        let mut out = Vec::new();
+    fn print(&self, names: &[Vec<u8>]) -> Applied {
+        let mut out = Applied::default();
         if names.is_empty() {
             for (name, spec) in &self.entries {
-                out.push(spec.render(name));
+                out.lines.push(spec.render(name));
             }
             return out;
         }
         for name in names {
-            if let Some((_, spec)) = self.entries.iter().find(|(existing, _)| existing == name) {
-                out.push(spec.render(name));
+            match self.entries.iter().find(|(existing, _)| existing == name) {
+                Some((_, spec)) => out.lines.push(spec.render(name)),
+                None => out.missing.push(name.clone()),
             }
         }
         out
@@ -1078,14 +1128,15 @@ mod spec_tests {
         let mut table = CompletionTable::default();
         // `complete` with no arguments prints nothing when nothing is defined.
         let request = parse_complete(&[]).expect("parse");
-        assert_eq!(table.apply(&request).expect("apply"), Vec::<Vec<u8>>::new());
+        assert_eq!(table.apply(&request).expect("apply"), Applied::default());
 
         let request = parse_complete(&[b"-W", b"foo bar", b"mycommand"]).expect("parse");
         table.apply(&request).expect("apply");
         assert_eq!(
             table
                 .apply(&parse_complete(&[b"-p"]).expect("parse"))
-                .expect("apply"),
+                .expect("apply")
+                .lines,
             vec![b"complete -W 'foo bar' mycommand".to_vec()]
         );
 
@@ -1094,12 +1145,29 @@ mod spec_tests {
         assert_eq!(
             table
                 .apply(&parse_complete(&[]).expect("parse"))
-                .expect("apply"),
+                .expect("apply")
+                .lines,
             vec![
                 b"complete -W 'foo bar' mycommand".to_vec(),
                 b"complete -F myfunc other".to_vec(),
             ]
         );
+    }
+
+    /// `complete -p NAME` for a name with no spec answers "no": bash prints
+    /// the names it does have, reports the rest, and exits 1 — the status
+    /// bash-completion's loader uses to discover whether a rule exists.
+    #[test]
+    fn printing_a_missing_name_reports_it() {
+        let mut table = CompletionTable::default();
+        table
+            .apply(&parse_complete(&[b"-F", b"_f", b"known"]).expect("parse"))
+            .expect("apply");
+        let applied = table
+            .apply(&parse_complete(&[b"-p", b"known", b"missing"]).expect("parse"))
+            .expect("apply");
+        assert_eq!(applied.lines, vec![b"complete -F _f known".to_vec()]);
+        assert_eq!(applied.missing, vec![b"missing".to_vec()]);
     }
 
     #[test]
@@ -1115,7 +1183,8 @@ mod spec_tests {
         assert_eq!(
             table
                 .apply(&parse_complete(&[b"-p"]).expect("parse"))
-                .expect("apply"),
+                .expect("apply")
+                .lines,
             vec![b"complete -W 'b' cmd".to_vec()]
         );
         table
@@ -1142,7 +1211,8 @@ mod spec_tests {
         table.apply(&request).expect("apply");
         let printed = table
             .apply(&parse_complete(&[b"-p"]).expect("parse"))
-            .expect("apply");
+            .expect("apply")
+            .lines;
         assert_eq!(printed, vec![b"complete -W 'it'\\''s here' cmd".to_vec()]);
         // The rendered form escapes the quote so a shell can read it back.
         assert!(printed[0].windows(4).any(|window| window == b"'\\''"));
@@ -1201,10 +1271,12 @@ mod bash_output_tests {
             assert_eq!(
                 short_table
                     .apply(&parse_complete(&[b"-p"]).expect("parse"))
-                    .expect("print"),
+                    .expect("print")
+                    .lines,
                 long_table
                     .apply(&parse_complete(&[b"-p"]).expect("parse"))
-                    .expect("print"),
+                    .expect("print")
+                    .lines,
                 "-{} must mean -A {}",
                 char::from(letter),
                 name
@@ -1242,7 +1314,8 @@ mod bash_output_tests {
                 .expect("apply");
             let printed = table
                 .apply(&parse_complete(&[b"-p"]).expect("parse"))
-                .expect("apply");
+                .expect("apply")
+                .lines;
             assert_eq!(printed, vec![expected.to_vec()], "for {args:?}");
         }
     }

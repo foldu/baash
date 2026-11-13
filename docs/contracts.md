@@ -1676,9 +1676,26 @@ directory. It is applied in two places — `Interp`'s file action (which is what
 `complete`/`compgen` name matching stays case-sensitive, and the rest of
 readline's inputrc is still not read.
 
-Two status codes are deliberately not bash's, both annotated as bugs in the
-suite: `complete -p NAME` for an unknown NAME is 0 (bash 1), and `complete NAME`
-with no action is 2 (bash 0).
+One status code is deliberately not bash's, and annotated as a bug in the
+suite: `complete NAME` with no action is 2 (bash 0). `complete -p` follows bash
+otherwise. The `-o` options are printed in bash's table order (alphabetical)
+rather than the order they were given, and once each, because the output is read
+back and compared line for line. And `complete -p NAME` for a name with no spec
+prints the names that do have one, reports each missing name as
+`complete: NAME: no completion specification`, and exits 1 — the status is
+load-bearing: bash-completion's loader asks `if compspec=$(complete -p --
+"$cmd")` to find out whether a rule already exists, so answering 0 for a missing
+rule makes every command look pre-completed.
+
+The file action expands the *directory* part of the word and keeps the answer
+as typed: `~/Doc⇥` and `$HOME/Doc⇥` both list the home directory and answer
+`~/Documents` / `$HOME/Documents`. That is bash's filename path — its readline
+rewrite hook expands the word and puts the typed prefix back after completion —
+and it lives in `Interp`'s file action, so `compgen -f`, `-A file`/`directory`
+and the engine's file provider all obey it. Only tilde and parameter expansion
+run: a word that spells `$(…)`, `` `…` ``, `$((…))` or `<(`/`>(` is left
+exactly as written, so a completion never executes shell code (bash's filename
+path leaves those literal too).
 
 **`baash_runtime::vfs` is a mount table, not a file system.** A `Mount` is a
 path prefix and a table of `(relative path, bytes)`; `Vfs` answers `file`,

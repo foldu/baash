@@ -442,6 +442,31 @@ fn a_directory_completes_on_a_match_inside_its_name() {
     cleanup(&mut session, &home, &work);
 }
 
+/// `~/` and `$HOME/` complete in the home directory and keep the typed lead.
+///
+/// bash does the same through readline's filename rewrite hook: the candidate
+/// carries the word as the user wrote it, so the line that results is still
+/// the line they meant to type. The lookup itself uses the expanded path.
+#[test]
+fn a_tilde_prefix_completes_in_the_home_directory() {
+    let (mut session, home, work) = session("tilde-prefix");
+    let documents = home.join("documents");
+    std::fs::create_dir(&documents).expect("create the directory");
+    std::fs::write(documents.join("note.txt"), b"PAYLOAD\n").expect("write the file");
+
+    session.send(b"cat ~/do\t");
+    session.expect(b"~/documents/", Duration::from_secs(10));
+    session.send(b"note.txt\n");
+    session.expect(b"PAYLOAD", Duration::from_secs(10));
+    session.prompt();
+    // A parameter spelling of the same path (`$HOME/do`) is not covered here:
+    // the editor classifies a word that begins with `$NAME` as a variable
+    // completion and lists variables, which is `docs/state.md`'s known gap.
+    // `compgen -f '$HOME/…'` does expand it, and `completion_compat.rs` pins
+    // that.
+    cleanup(&mut session, &home, &work);
+}
+
 /// A `!` in a completed filename is not a history event.
 ///
 /// History expansion runs on the line the user submits, and double quotes do

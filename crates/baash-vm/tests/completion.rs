@@ -50,6 +50,10 @@ impl Capture {
         String::from_utf8_lossy(&self.out).into_owned()
     }
 
+    fn stderr(&self) -> String {
+        String::from_utf8_lossy(&self.err).into_owned()
+    }
+
     fn text(&self, name: &[u8]) -> String {
         String::from_utf8_lossy(Vars::get(&self.interp, name).unwrap_or_default()).into_owned()
     }
@@ -301,7 +305,9 @@ fn complete_round_trips_through_complete_p() {
     assert_eq!(shell.builtin(&[b"complete"]), Status::SUCCESS);
     assert_eq!(shell.stdout(), "complete -W 'foo bar' mycommand\n");
 
-    // `-p name` prints that spec; an unknown name prints nothing and succeeds.
+    // `-p name` prints that spec. An unknown name is bash's status 1 with one
+    // diagnostic — the status bash-completion's loader reads to find out
+    // whether a rule already exists.
     assert_eq!(
         shell.builtin(&[b"complete", b"-p", b"mycommand"]),
         Status::SUCCESS
@@ -309,9 +315,16 @@ fn complete_round_trips_through_complete_p() {
     assert_eq!(shell.stdout(), "complete -W 'foo bar' mycommand\n");
     assert_eq!(
         shell.builtin(&[b"complete", b"-p", b"nonexistent"]),
-        Status::SUCCESS
+        Status::FAILURE
     );
     assert_eq!(shell.stdout(), "");
+    assert!(
+        shell
+            .stderr()
+            .contains("complete: nonexistent: no completion specification"),
+        "stderr: {}",
+        shell.stderr()
+    );
 
     // A second definition replaces the first, in place.
     assert_eq!(

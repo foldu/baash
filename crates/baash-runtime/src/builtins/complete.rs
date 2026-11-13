@@ -506,7 +506,29 @@ pub(super) fn bi_complete(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
     }
     let table: &mut CompletionTable = &mut host.state().completions;
     match table.apply(&request) {
-        Ok(lines) => write_lines(host, &lines),
+        Ok(applied) => {
+            let status = write_lines(host, &applied.lines);
+            if !status.is_success() {
+                return status;
+            }
+            // bash answers "is there a rule for this name?" with status 1 and
+            // one diagnostic per name that has none. bash-completion's loader
+            // reads that status (`if compspec=$(complete -p -- "$cmd")`), so
+            // reporting a missing rule as success would make every command
+            // look already-completed.
+            for name in &applied.missing {
+                diagnose(
+                    host,
+                    codes::NOT_FOUND,
+                    format!("complete: {}: no completion specification", display(name)),
+                );
+            }
+            if applied.missing.is_empty() {
+                Status::SUCCESS
+            } else {
+                Status::FAILURE
+            }
+        }
         Err(message) => {
             diagnose(host, codes::USAGE, message);
             Status(2)

@@ -103,9 +103,18 @@ impl CompletionSource for Interp {
             .collect()
     }
 
+    /// File candidates, with `~` and `$name` in the directory part expanded.
+    ///
+    /// bash expands the *directory* of a filename completion and keeps the
+    /// word as typed: `~/Doc⇥` and `$HOME/Doc⇥` both list the home directory
+    /// and answer `~/Documents` / `$HOME/Documents`. Both callers of this
+    /// provider — the `compgen` built-in and the editor's file completion —
+    /// get the rule from here, so `compgen -f` and Tab cannot drift apart.
     fn files(&mut self, prefix: &[u8], directories_only: bool) -> Vec<Vec<u8>> {
         let ignore_case = self.state.completions.ignore_case();
-        files(prefix, directories_only, ignore_case)
+        let (lead, base) = split_completion_prefix(prefix);
+        let directory = self.completion_directory(lead);
+        list_files(lead, base, &directory, directories_only, ignore_case)
     }
 
     fn commands(&mut self, prefix: &[u8]) -> Vec<Vec<u8>> {
@@ -209,6 +218,42 @@ impl CompletionSource for Interp {
 }
 
 impl Interp {
+    /// The directory a completion word's lead names, expanded.
+    ///
+    /// `lead` is everything up to and including the last `/`, so the directory
+    /// to open is the lead without that slash — except at the root, where the
+    /// slash *is* the path, and when there is no slash at all, where the word
+    /// names an entry of `.`.
+    fn completion_directory(&mut self, lead: &[u8]) -> Vec<u8> {
+        match lead {
+            [] => b".".to_vec(),
+            [b'/'] => b"/".to_vec(),
+            _ => self.expanded_completion_prefix(&lead[..lead.len() - 1]),
+        }
+    }
+
+    /// Expand the directory part of a filename completion word.
+    ///
+    /// Tilde and parameter expansion only — `~`, `~/x`, `$HOME`, `${HOME}`,
+    /// `${x:-y}` — which is what bash's filename completion does. A word that
+    /// spells a command substitution, an arithmetic expansion or a process
+    /// substitution is left exactly as written: bash's filename path leaves
+    /// those literal, and expanding them here would run shell code on a Tab.
+    /// Anything the parser rejects is left literal too, so a completion never
+    /// diagnoses or fails; it just offers fewer candidates.
+    fn expanded_completion_prefix(&mut self, text: &[u8]) -> Vec<u8> {
+        if spells_a_substitution(text) {
+            return text.to_vec();
+        }
+        let Some(word) = self.parse_fragment(text) else {
+            return text.to_vec();
+        };
+        match self.expand_operand(&word) {
+            Ok(field) => field.bytes,
+            Err(_) => text.to_vec(),
+        }
+    }
+
     /// Every shell function name, sorted and deduplicated.
     ///
     /// The interactive completion bridge in the binary projects this shell's
@@ -445,25 +490,63 @@ fn column_names(path: &[u8], column: usize, prefix: &[u8]) -> Vec<Vec<u8>> {
     names
 }
 
-/// The entries a completion prefix names.
+/// Split a completion word at its last `/`, keeping the slash in the lead.
 ///
-/// The prefix is split at its last `/`: the part before it names the directory
-/// to list and the part after it filters the entry names. The result keeps the
-/// prefix as written, so `subdir/f` offers `subdir/file1` — which is what bash
-/// prints and what makes the candidate usable as a command argument.
-fn files(prefix: &[u8], directories_only: bool, ignore_case: bool) -> Vec<Vec<u8>> {
-    let split = prefix.iter().rposition(|&byte| byte == b'/');
-    let (lead, base): (&[u8], &[u8]) = match split {
+/// No slash at all means the word names an entry of the current directory:
+/// the lead is empty and the whole word filters.
+fn split_completion_prefix(prefix: &[u8]) -> (&[u8], &[u8]) {
+    match prefix.iter().rposition(|&byte| byte == b'/') {
         Some(at) => (&prefix[..=at], &prefix[at + 1..]),
         None => (&prefix[..0], prefix),
-    };
-    let directory: &[u8] = if lead.is_empty() {
-        b"."
-    } else if lead == b"/" {
-        b"/"
-    } else {
-        &lead[..lead.len() - 1]
-    };
+    }
+}
+
+/// Whether `text` spells a construct whose expansion would run code.
+///
+/// `$(…)`, `` `…` ``, `$((…))` and `<(`/`>(` — anywhere but inside single
+/// quotes, with backslash escapes honoured. Quoted forms are literal in bash
+/// too (`'$(x)'` is a directory named `$(x)`), so they do not count. The
+/// scanner is deliberately textual: it only has to answer "leave this word
+/// alone", and a word that does not parse is left alone anyway.
+fn spells_a_substitution(text: &[u8]) -> bool {
+    let mut index = 0;
+    let mut single = false;
+    let mut double = false;
+    while index < text.len() {
+        let byte = text[index];
+        match byte {
+            // A backslash quotes the next byte outside single quotes (and
+            // inside them it is literal, so the branch does not fire).
+            b'\\' if !single => index += 1,
+            b'\'' if !double => single = !single,
+            b'"' if !single => double = !double,
+            b'`' if !single => return true,
+            b'$' if !single && text.get(index + 1) == Some(&b'(') => return true,
+            b'<' | b'>' if !single && !double && text.get(index + 1) == Some(&b'(') => {
+                return true;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
+}
+
+/// The entries a completion prefix names.
+///
+/// `lead` is the path up to and including its last `/`, `base` the part that
+/// filters entry names, and `directory` the directory to list — already
+/// expanded, so `~/` and `$HOME/` both look in the home directory. The result
+/// keeps the lead as written, so `subdir/f` offers `subdir/file1` and
+/// `~/Doc` offers `~/Documents`: that is what bash prints, and it is what
+/// makes the candidate usable as a command argument without re-quoting.
+fn list_files(
+    lead: &[u8],
+    base: &[u8],
+    directory: &[u8],
+    directories_only: bool,
+    ignore_case: bool,
+) -> Vec<Vec<u8>> {
     let Ok(entries) = std::fs::read_dir(path_from_bytes(directory)) else {
         return Vec::new();
     };
@@ -828,6 +911,42 @@ mod source_tests {
         );
         assert_eq!(strings(interp.commands(b"eva")), ["eval"]);
         assert_eq!(strings(interp.commands(b"whil")), ["while"]);
+    }
+
+    #[test]
+    fn file_completion_expands_the_directory_and_keeps_the_word() {
+        let dir =
+            std::env::temp_dir().join(format!("baash-complete-expand-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("documents")).expect("create temp dir");
+        std::fs::create_dir_all(dir.join("docs")).expect("create temp dir");
+        std::fs::write(dir.join("filedoc"), b"").expect("write file");
+
+        let mut interp = shell();
+        let home = dir.display().to_string();
+        interp.run_named("<test>", format!("HOME={home}\n").as_bytes());
+
+        // `~/` and `$HOME/` list the home directory; the candidate keeps the
+        // lead the user typed, which is what bash's filename completion does.
+        assert_eq!(
+            strings(interp.files(b"~/do", false)),
+            ["~/docs", "~/documents"]
+        );
+        assert_eq!(
+            strings(interp.files(b"$HOME/do", false)),
+            ["$HOME/docs", "$HOME/documents"]
+        );
+        // Quoting is honoured for the lookup, not for the answer.
+        assert_eq!(
+            strings(interp.files(b"\"$HOME\"/do", false)),
+            ["\"$HOME\"/docs", "\"$HOME\"/documents"]
+        );
+        // A substitution is left as written — bash's filename path does not
+        // run one — so nothing matches, and no command ran.
+        assert!(interp.files(b"$(echo x)/", false).is_empty());
+        assert!(interp.files(b"~/$(echo x)/", false).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

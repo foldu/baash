@@ -387,6 +387,21 @@ rediscover):
   on every prompt. A `complete -W '$list'` therefore offers the literal
   `$list`. (`compgen -W` *is* expanded, because it runs as a command, and that
   is the form bash-completion uses.)
+* **File completion expands the directory part and keeps the word.** `compgen
+  -f`, `-A file`/`directory` and the editor's file provider expand `~` and
+  `$name` in the directory — `~/Doc⇥` gives `~/Documents` in the editor,
+  `compgen -f -- '$HOME/Do'` gives `$HOME/Documents` — and never run a
+  `$(…)`/`` `…` ``/`$((…))`/`<(` spelling.
+  Two consequences: a word that begins with `$NAME` is claimed by the editor's
+  variable completion before the file provider is asked, so `cat $HOME/do⇥`
+  lists variables (bash completes the path; `compgen -f '$HOME/…'` does
+  expand); and `compgen -C` reports `BAASH-E0511` instead of running the
+  command.
+* `complete -p -D`/`-E`/`-I` print the whole table instead of the named
+  default/empty/initial spec, and `complete -D` with no action is a usage error
+  where bash installs an empty default spec. The named form, `complete -p NAME`,
+  matches bash: one line per name that has a spec, `no completion specification`
+  for each that does not, and status 1.
 * **bash-completion works, and the library is inside the binary.** The 2.18
   library sources with status 0 and its `-D` loader is honoured (status `124`
   retries the completion after the loader installs the command's script), so
