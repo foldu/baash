@@ -1130,7 +1130,15 @@ impl Interp {
         // an `ERR` trap that fires for the call reports the caller's line, not
         // the function's last one (`line=14` for a call on line 14).
         let saved_line = (self.line_source.clone(), self.line_offset, self.line_number);
+        // The body's spans are offsets into its *definition* file, so the
+        // diagnostics raised inside it have to be rendered against that file.
+        // Without the swap a function defined by `source` blames the call site
+        // — and a call from a chunk with no text of its own (the editor's
+        // completion call) has no line to point at, so it clamps to 1:1 and
+        // prints an empty one.
+        let saved_source = std::mem::replace(&mut self.current, function.chunk.source.clone());
         let result = self.eval_node(&function.chunk, function.body, ctx);
+        self.current = saved_source;
         // `RETURN` runs with the function's frame still in scope.
         if let Some(exit) = self.run_return_trap() {
             self.depth -= 1;

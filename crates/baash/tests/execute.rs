@@ -88,6 +88,28 @@ fn echo_prints_its_arguments() {
     assert_eq!(out("echo"), "\n");
 }
 
+/// A diagnostic from inside a function names the file the function was
+/// *defined* in, not the file that called it.
+///
+/// The body's spans are offsets into its own file, so rendering them against
+/// the caller's text points at the wrong line — bash prints `lib.sh: line 2`
+/// and a call site sends the reader to the wrong file. The completion path
+/// made the same mistake with no text at all, which is how it showed up.
+#[test]
+fn a_diagnostic_inside_a_function_names_its_definition_file() {
+    let dir = TestDir::new("function-source");
+    let library = dir.at("lib.sh");
+    std::fs::write(&library, "f() {\n    echo ${x?boom}\n}\n").expect("write the library");
+
+    let output = run(&format!(". {library}\nf\n"));
+    assert_eq!(code(&output), 1);
+    let err = stderr(&output);
+    assert!(
+        err.contains("lib.sh:2:"),
+        "expected the definition file and line, got: {err}"
+    );
+}
+
 #[test]
 fn true_and_false_set_the_status() {
     assert_eq!(code(&run("true")), 0);
