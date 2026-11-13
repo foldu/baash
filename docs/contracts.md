@@ -948,12 +948,17 @@ against the typed prefix (bash trusts the function), `-P`/`-S` decorate them,
 `name/` without a space, and an empty reply falls back to
 `-o default|bashdefault|dirnames`; `-o plusdirs` adds directories to replies.
 
-The function's standard output is captured (`ShellHost::call_function_captured`,
-the `$(…)` mechanism) instead of printed: the editor owns the terminal in raw
-mode with an unflushed frame. `ShellMenu::output` carries it back, and the
-editor erases the frame, writes the output where the frame was and repaints the
-prompt and line below it — bash's order, so a function that warns while
-completing keeps its message without garbling the line.
+The function's standard output **and standard error** are captured
+(`ShellHost::call_function_captured`, the `$(…)` mechanism) instead of printed:
+the editor owns the terminal in raw mode with an unflushed frame. Both streams
+go to one capture, in the order they were written, because a script complains on
+the second and the shell writes its own diagnostics there — a completion
+function that hits a rejected construct (`nix`'s is a `<(...)` loop) used to
+paint that diagnostic into the middle of the typed line. `ShellMenu::output`
+carries the bytes back, including from a run that failed: the editor erases the
+frame, writes the output where the frame was and repaints the prompt and line
+below it — bash's order, so a function that warns while completing keeps its
+message without garbling the line.
 
 A function runs to completion on the main thread, exactly as it does in bash:
 there is no deadline, so a slow script delays that Tab (and nothing else — the
@@ -1360,9 +1365,10 @@ While a completion is pending, `Terminal::await_input_timeout` bounds the wait
 so the loop can poll; it returns the new `Input::Timeout` when the bound
 elapses. `await_input` keeps its one-second backstop and turns it into
 `Input::Watch`, so the idle prompt is unchanged. `ShellMenu { menu, output }`
-is still how a hook answers: `output` is the function's stdout, and the editor
-erases the frame with `Renderer::clear_frame`, writes the output where the frame
-was and paints the prompt, line and menu below it, which is bash's order.
+is still how a hook answers: `output` is what the function wrote on stdout and
+stderr (a failed run's bytes included), and the editor erases the frame with
+`Renderer::clear_frame`, writes the output where the frame was and paints the
+prompt, line and menu below it, which is bash's order.
 `Editor::step` and `read_line` take no hook and are the plain editor.
 
 **Continuation and the hint both go through `Syntax`, implemented in the

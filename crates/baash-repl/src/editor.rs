@@ -1152,11 +1152,20 @@ impl<'a> Editor<'a> {
             }
             ShellCompletionState::Ready(Some(shell_menu)) => {
                 self.completion_pending = false;
-                if !shell_menu.output.is_empty() {
+                // `print_above` erases the frame, so the line has to be drawn
+                // again whatever is offered — and `offer` clears the flag when
+                // there is nothing to offer, which is only right when the line
+                // is still on screen.
+                let painted = !shell_menu.output.is_empty();
+                if painted {
                     self.print_above(&shell_menu.output)?;
                 }
                 self.dirty = true;
-                self.offer(shell_menu.menu)
+                let offered = self.offer(shell_menu.menu);
+                if painted {
+                    self.dirty = true;
+                }
+                offered
             }
             ShellCompletionState::Ready(None) => {
                 self.completion_pending = false;

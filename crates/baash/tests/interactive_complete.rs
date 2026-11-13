@@ -94,6 +94,11 @@ impl Session {
         // No history database: a test run must not touch the user's.
         entries.push(b"BAASH_HISTORY_DB=".to_vec());
         for (key, value) in environment {
+            // A test that names a variable *replaces* the ambient one: a second
+            // entry is not enough, because `getenv` reads the first, so a test
+            // couldn't take `carapace` off `PATH` by appending an empty one.
+            let prefix = format!("{key}=");
+            entries.retain(|entry| !entry.starts_with(prefix.as_bytes()));
             let mut entry = key.as_bytes().to_vec();
             entry.push(b'=');
             entry.extend_from_slice(value.as_bytes());
@@ -399,6 +404,40 @@ fn a_for_header_in_a_completion_function_expands_the_array_length() {
     );
     session.send(b"\n");
     session.expect(b"args:prefix-al\r\n", Duration::from_secs(10));
+    session.prompt();
+    cleanup(&mut session, &home, &work);
+}
+
+/// A completion function the shell cannot finish says why — above the line.
+///
+/// `nix`'s own completion script is a `<(...)` loop, so Tab on
+/// `nix shell nixpkgs#` reaches exactly this path. The diagnostic used to be
+/// written through the frame, which put it in the middle of the line being
+/// typed and pointed at 1:1 of nothing; it now goes above the line, with the
+/// script's own line under it, and the line is drawn again underneath.
+#[test]
+fn a_completion_function_that_cannot_finish_reports_above_the_line() {
+    let home = temp_dir("rejected-home");
+    let work = temp_dir("rejected-work");
+    // No `carapace` on `PATH`: the rule answers synchronously, which is the
+    // path where the frame is drawn once, after the answer, and therefore the
+    // one where a cleared dirty flag would leave the line unpainted.
+    let path = work.display().to_string();
+    let mut session = Session::spawn(&home, &work, &[("PS1", "P> "), ("PATH", &path)]);
+    session.prompt();
+    session.line("mycmd () { echo \"args:$*\"; }");
+    session.line(
+        "f () { local l; while IFS= read -r l; do COMPREPLY+=(\"$l\"); done < <(printf 'alpha\\n'); }",
+    );
+    session.line("complete -F f mycmd");
+
+    session.send(b"mycmd a\t");
+    session.expect(b"unsupported expansion", Duration::from_secs(10));
+    // The message erased the frame, so the line is painted again under it,
+    // intact — and running it proves the line never changed.
+    session.expect(b"mycmd a", Duration::from_secs(10));
+    session.send(b"\n");
+    session.expect(b"args:a\r\n", Duration::from_secs(10));
     session.prompt();
     cleanup(&mut session, &home, &work);
 }

@@ -272,7 +272,20 @@ impl<'a> ShellCompleter<'a> {
                     });
                 }
                 Run::Retry => refresh(self.shell, self.engine),
-                Run::Fail => return None,
+                Run::Fail(output) => {
+                    // Something to say about a function that could not finish:
+                    // offer the bytes as an empty menu, which the editor paints
+                    // above the prompt before the bell. With nothing to say,
+                    // return `None` so the ordinary completion still runs.
+                    if output.is_empty() {
+                        return None;
+                    }
+                    let ctx = self.engine.context(line, cursor.min(line.len()));
+                    return Some(baash_repl::ShellMenu {
+                        menu: baash_complete::Menu::new(ctx, Vec::new()),
+                        output,
+                    });
+                }
             }
         }
         None
@@ -376,15 +389,17 @@ impl<'a> ShellCompleter<'a> {
         let options = self.shell.state().completion.options().to_vec();
         self.shell.state().completion.end();
         let Some((output, status)) = captured else {
-            return Run::Fail;
+            return Run::Fail(Vec::new());
         };
         if status == baash_runtime::Status(124) {
             return Run::Retry;
         }
         if !status.is_success() {
-            // bash shows nothing for a function that failed part-way; the
-            // ordinary completion is better than the half-filled replies.
-            return Run::Fail;
+            // bash shows nothing for a function that failed part-way, and the
+            // ordinary completion is better than half-filled replies — but what
+            // the function wrote (a complaint, or the shell's own diagnostic
+            // about a construct it rejects) is still worth painting.
+            return Run::Fail(output);
         }
         let vars = &self.shell.state().vars;
         Run::Replies(
@@ -463,8 +478,11 @@ enum Run {
     Replies(baash_complete::Replies, Vec<u8>),
     /// Status 124: bash's "the rule changed, complete again".
     Retry,
-    /// No function, or one that failed: keep the ordinary completion.
-    Fail,
+    /// No function, or one that failed. The bytes it wrote are still its
+    /// output: a completion function that hit a construct this shell rejects
+    /// says so on standard error, and dropping that would leave the Tab
+    /// silently unhelpful.
+    Fail(Vec<u8>),
 }
 
 /// The candidates a completion function left in `COMPREPLY`.

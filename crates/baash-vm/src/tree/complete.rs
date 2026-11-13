@@ -397,13 +397,16 @@ impl Interp {
         })
     }
 
-    /// Run a `-F` completion function with its stdout captured.
+    /// Run a `-F` completion function with its output captured.
     ///
     /// A completion runs while the editor owns the terminal in raw mode, so
-    /// anything the function prints would land inside an unflushed frame. bash
-    /// paints it above the prompt; the editor does not have that seam yet, so
-    /// the bytes are collected here (which is what matters now: the frame
-    /// stays intact) and returned for a caller that can paint them.
+    /// anything the function writes would land inside an unflushed frame —
+    /// candidates on descriptor 1, and on descriptor 2 the complaints a script
+    /// makes and the diagnostics the shell raises for a construct it rejects
+    /// (`nix`'s own completion script is a `<(...)` loop). Both streams go to
+    /// one capture and are returned in the order they were written; the editor
+    /// paints them above the prompt, which is where bash puts a completion
+    /// function's output.
     ///
     /// `None` means there is no such function, or the capture could not be set
     /// up — in both cases the caller keeps the ordinary completion.
@@ -415,18 +418,26 @@ impl Interp {
         use baash_sys::AsRawFd;
 
         self.function_index(name)?;
-        // The VM writes through descriptor 1; a buffered `println!` in a
-        // built-in would otherwise stay in the buffer and escape after the
-        // descriptor is restored.
+        // The VM writes through the descriptors; a buffered `println!` in a
+        // built-in would otherwise stay in the buffer and escape after they are
+        // restored.
         let _ = std::io::Write::flush(&mut std::io::stdout());
-        let saved = baash_sys::dup(1).ok()?;
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+        let saved_out = baash_sys::dup(1).ok()?;
+        let saved_err = baash_sys::dup(2).ok()?;
         let capture = baash_sys::create_unlinked_temp(0).ok()?;
         if baash_sys::dup2(capture.as_raw_fd(), 1).is_err() {
-            let _ = baash_sys::dup2(saved.as_raw_fd(), 1);
+            let _ = baash_sys::dup2(saved_out.as_raw_fd(), 1);
+            return None;
+        }
+        if baash_sys::dup2(capture.as_raw_fd(), 2).is_err() {
+            let _ = baash_sys::dup2(saved_out.as_raw_fd(), 1);
+            let _ = baash_sys::dup2(saved_err.as_raw_fd(), 2);
             return None;
         }
         let status = self.completion_call(name, argv);
-        let _ = baash_sys::dup2(saved.as_raw_fd(), 1);
+        let _ = baash_sys::dup2(saved_out.as_raw_fd(), 1);
+        let _ = baash_sys::dup2(saved_err.as_raw_fd(), 2);
         let _ = std::io::Write::flush(&mut std::io::stdout());
         let capture_fd = capture.as_raw_fd();
         baash_sys::lseek(capture_fd, 0, baash_sys::seek::SET).ok()?;

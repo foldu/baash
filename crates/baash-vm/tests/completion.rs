@@ -451,3 +451,38 @@ fn the_shell_state_owns_the_completion_table() {
     assert!(table.get(b"other").is_none());
     assert!(shell.interp.state().completion.options().is_empty());
 }
+
+/// A `-F` run collects both streams, because the editor paints them above the
+/// prompt: a diagnostic printed into the frame lands in the middle of the line.
+#[test]
+fn a_completion_runs_output_includes_what_it_wrote_on_stderr() {
+    let mut capture = Capture::new();
+    capture.run("f() { echo to-out; echo to-err >&2; }");
+
+    let (bytes, status) = capture
+        .interp
+        .call_function_captured(b"f", &[b"f".to_vec()])
+        .expect("the function runs");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(status.is_success(), "{status:?}");
+    assert!(text.contains("to-out"), "stdout missing: {text}");
+    assert!(text.contains("to-err"), "stderr missing: {text}");
+}
+
+/// The same capture is where a rejected construct's diagnostic lands.
+#[test]
+fn a_completion_runs_output_includes_its_diagnostics() {
+    let mut capture = Capture::new();
+    capture.run("f() { local l; while IFS= read -r l; do :; done < <(printf 'x\\n'); }");
+
+    let (bytes, status) = capture
+        .interp
+        .call_function_captured(b"f", &[b"f".to_vec()])
+        .expect("the function runs");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(!status.is_success());
+    assert!(
+        text.contains("unsupported expansion"),
+        "the diagnostic was not captured: {text}"
+    );
+}
