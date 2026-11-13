@@ -408,6 +408,25 @@ fn a_for_header_in_a_completion_function_expands_the_array_length() {
     cleanup(&mut session, &home, &work);
 }
 
+/// A completion function may read a `<(...)`: bash-completion's helpers and,
+/// in the wild, `nix`'s own completion are loops over one.
+#[test]
+fn a_completion_function_reads_from_a_process_substitution() {
+    let (mut session, home, work) = session("procsub");
+    session.line("mycmd () { echo \"args:$*\"; }");
+    session.line(
+        "f () { local l; while IFS= read -r l; do COMPREPLY+=(\"$l\"); done < <(printf 'alpha\\n'); }",
+    );
+    session.line("complete -F f mycmd");
+
+    session.send(b"mycmd a\t");
+    session.expect(b"mycmd alpha", Duration::from_secs(10));
+    session.send(b"\n");
+    session.expect(b"args:alpha\r\n", Duration::from_secs(10));
+    session.prompt();
+    cleanup(&mut session, &home, &work);
+}
+
 /// A completion function the shell cannot finish says why — above the line.
 ///
 /// `nix`'s own completion script is a `<(...)` loop, so Tab on
@@ -426,9 +445,8 @@ fn a_completion_function_that_cannot_finish_reports_above_the_line() {
     let mut session = Session::spawn(&home, &work, &[("PS1", "P> "), ("PATH", &path)]);
     session.prompt();
     session.line("mycmd () { echo \"args:$*\"; }");
-    session.line(
-        "f () { local l; while IFS= read -r l; do COMPREPLY+=(\"$l\"); done < <(printf 'alpha\\n'); }",
-    );
+    // The writing half: `>(…)` has no reader to run beside the command.
+    session.line("f () { cat >(cat); }");
     session.line("complete -F f mycmd");
 
     session.send(b"mycmd a\t");

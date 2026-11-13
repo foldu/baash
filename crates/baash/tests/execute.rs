@@ -95,6 +95,43 @@ fn echo_prints_its_arguments() {
 /// the caller's text points at the wrong line — bash prints `lib.sh: line 2`
 /// and a call site sends the reader to the wrong file. The completion path
 /// made the same mistake with no text at all, which is how it showed up.
+/// `<(…)` writes its body's output to a file and hands the command a path.
+///
+/// The body runs to completion first — one thread cannot stream through a pipe
+/// — so the consumer reads a whole file, which is what `read`, `diff` and
+/// `grep` want.
+#[test]
+fn a_process_substitution_hands_a_command_a_path() {
+    assert_eq!(out("cat <(echo hi)"), "hi\n");
+    assert_eq!(
+        out("while read -r l; do printf '[%s]' \"$l\"; done < <(printf 'a\\nb\\n')"),
+        "[a][b]"
+    );
+    assert_eq!(out("diff <(echo x) <(echo x) && echo same"), "same\n");
+    // A part of a word, not a word list: the path joins what surrounds it.
+    assert_eq!(out("f() { echo $#; }; f a<(echo x)b"), "1\n");
+}
+
+/// The descriptor behind the path outlives the expansion, and a redirect may
+/// not land on it — `exec 3< <(…)` used to close the redirect instead.
+#[test]
+fn a_process_substitution_survives_the_redirect_that_uses_it() {
+    assert_eq!(out("exec 3< <(echo x); read -r v <&3; echo \"$v\""), "x\n");
+}
+
+/// `>(…)` writes; that needs a reader running while the command does, which is
+/// the second process this shell does not have.
+#[test]
+fn the_writing_half_of_process_substitution_is_refused() {
+    let output = run("cat >(cat)");
+    assert_eq!(code(&output), 1);
+    assert!(
+        stderr(&output).contains("BAASH-E0301"),
+        "{}",
+        stderr(&output)
+    );
+}
+
 #[test]
 fn a_diagnostic_inside_a_function_names_its_definition_file() {
     let dir = TestDir::new("function-source");

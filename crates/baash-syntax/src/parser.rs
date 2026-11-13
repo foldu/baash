@@ -2280,11 +2280,7 @@ impl<'a> Parser<'a, '_> {
                     parts.push(Part::CmdSub(sub));
                     i = close;
                 }
-                b'<' | b'>'
-                    if quote == Quote::Plain
-                        && i == span.start
-                        && src.get(i + 1) == Some(&b'(') =>
-                {
+                b'<' | b'>' if quote == Quote::Plain && src.get(i + 1) == Some(&b'(') => {
                     flush_run(&mut run, &mut parts);
                     let rp = lexer::region_end(src, i + 2, self.depth).unwrap_or(end);
                     let full_end = (rp + 1).min(end);

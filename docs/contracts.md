@@ -1130,6 +1130,17 @@ the non-blocking drain and does nothing at all when this shell has no tracked
 child: `waitpid(-1)` is process-wide, and the integration tests run several
 interpreters in one process.
 
+**`<(…)` hands a path; `>(…)` is still refused.** The reading direction is
+`Shell::process_substitution` in the VM: the body runs in a scope with
+descriptor 1 on an unlinked file, exactly as `$(…)` does — one thread cannot
+write and read a pipe at the same time, so the body finishes *before* the word
+is used and the word is a file rather than a stream. The descriptor is duplicated
+above fd 60 (a redirect must not be able to land on it — `exec 3< <(…)` does)
+and cleared of `CLOEXEC` so that a child finds the data at `/dev/fd/N`;
+`eval_node` closes it when the node that produced the word returns, which is
+bash's lifetime. `>(…)` needs a reader running *while* the command writes, so it
+keeps `BAASH-E0301`.
+
 **`exec` is a real `execve`.** `baash_sys::exec(plan)` replaces the process; the
 VM maps its `io::Error` to 127/126 and exits. See the `baash-sys` section for why
 a failed `exec` is not a rollback.
@@ -1173,7 +1184,7 @@ by `MAX_RECURSION`.
 Deferred, and listed in `baash_vm::tree`'s `# Deferred`: `select`, `time`,
 `coproc`, `set -u`/nounset, `$LINENO`/`$RANDOM`/`$SECONDS`/`$PIPESTATUS`,
 `command`/`type`/`hash`/`builtin`, `getopts`, aliases, `mapfile`/`readarray`,
-pattern parameter operators, `[[ =~ ]]`, process substitution, `~user`, and
+pattern parameter operators, `[[ =~ ]]`, `>(…)`, `~user`, and
 `set -x`. An executable text file without a shebang is reported as 126 instead
 of being retried as a shell script (POSIX requires the retry), which is what
 blocks the three `$REPO_ROOT/spec/testdata/*.sh` trap cases.

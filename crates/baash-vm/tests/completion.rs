@@ -470,10 +470,13 @@ fn a_completion_runs_output_includes_what_it_wrote_on_stderr() {
 }
 
 /// The same capture is where a rejected construct's diagnostic lands.
+///
+/// `>(…)` rather than `<(…)`: the reading direction now works, and a diagnostic
+/// from a construct the shell cannot do is what this case is about.
 #[test]
 fn a_completion_runs_output_includes_its_diagnostics() {
     let mut capture = Capture::new();
-    capture.run("f() { local l; while IFS= read -r l; do :; done < <(printf 'x\\n'); }");
+    capture.run("f() { cat >(cat); }");
 
     let (bytes, status) = capture
         .interp

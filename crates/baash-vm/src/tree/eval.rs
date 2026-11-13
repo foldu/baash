@@ -60,11 +60,21 @@ impl Interp {
                 | NodeKind::ArithCommand { .. }
                 | NodeKind::Subshell { .. }
         );
+        // Every node evaluation owns the `<(…)` descriptors its words create,
+        // and closes them when it returns. The innermost node is the right
+        // owner because it is the command whose word produced the path: a
+        // function body or a substitution body evaluated in between tags its
+        // own descriptors and leaves the outer ones alone.
+        self.next_process_substitution_owner = self.next_process_substitution_owner.wrapping_add(1);
+        let owner = self.next_process_substitution_owner;
+        let enclosing = std::mem::replace(&mut self.process_substitution_owner, owner);
         let result = self.eval_kind(chunk, id, ctx);
+        self.process_substitution_owner = enclosing;
         self.set_status(result.status());
         if command {
             self.set_pipeline_status(&[result.status()]);
         }
+        self.close_process_substitutions(owner);
         result
     }
 
@@ -927,6 +937,132 @@ impl Interp {
             return Unwind::Exit(exit);
         }
         Unwind::Status(status)
+    }
+
+    /// Close the `<(…)` descriptors that `owner` created.
+    ///
+    /// Dropping the descriptor closes it, and the file was unlinked when it was
+    /// created, so this is also what releases the data.
+    fn close_process_substitutions(&mut self, owner: u64) {
+        self.process_substitutions.retain(|(tag, _)| *tag != owner);
+    }
+
+    /// Run `<(…)`'s body with its output on an unlinked file and return the
+    /// path that names it.
+    ///
+    /// The body runs to completion *before* the word is used, exactly as `$(…)`
+    /// does: with one thread and no second process there is no way to write and
+    /// read a pipe at the same time, so the file is what makes the construct
+    /// possible at all. That is the difference from bash, which streams through
+    /// a pipe; a body that never finishes hangs here just as `$(…)` would.
+    ///
+    /// The descriptor stays open — and is cleared of `FD_CLOEXEC` — so the
+    /// consumer, which may be a child that inherited it, finds the data at
+    /// `/dev/fd/N`. `eval_node` closes it when the node that produced the word
+    /// returns.
+    pub(crate) fn substitute_input(&mut self, src: &[u8]) -> Result<Vec<u8>, String> {
+        let source = Arc::new(baash_diag::SourceFile::new("<process substitution>", src));
+        let opts = self.parse_opts();
+        let chunk = match baash_syntax::parse_with(&source, &opts) {
+            baash_syntax::ParseOutcome::Ok(ast) => Arc::new(ParsedChunk {
+                ast,
+                source: source.clone(),
+            }),
+            baash_syntax::ParseOutcome::NeedMoreInput { open, .. } => {
+                let previous = std::mem::replace(&mut self.current, source);
+                self.diagnose(&Diagnostic::error(
+                    baash_syntax::codes::NEED_MORE_INPUT,
+                    open,
+                    "unexpected end of file in a process substitution",
+                ));
+                self.current = previous;
+                return Err("syntax error in a process substitution".to_string());
+            }
+            baash_syntax::ParseOutcome::Failed(diagnostics) => {
+                let previous = std::mem::replace(&mut self.current, source);
+                for diagnostic in &diagnostics {
+                    self.diagnose(diagnostic);
+                }
+                self.current = previous;
+                return Err("syntax error in a process substitution".to_string());
+            }
+        };
+
+        let capture = baash_sys::create_unlinked_temp(0)
+            .map_err(|error| format!("cannot create a process substitution file: {error}"))?;
+        // The descriptor the path names is *not* the one the body writes to.
+        // A redirect may take any number, `exec 3< <(…)` most obviously, and
+        // landing on this one would overwrite it — then closing it at the end
+        // of the command would close the redirect instead. bash keeps its own
+        // process-substitution descriptors above the user's range for the same
+        // reason; sixty is where this shell's saved-descriptor search starts.
+        let shared = baash_sys::dup_above(capture.as_raw_fd(), 60)
+            .map_err(|error| format!("cannot share a process substitution: {error}"))?;
+        // Fails before the body runs when the platform cannot name an open
+        // descriptor, which is the honest answer on Windows.
+        let path = baash_sys::fd_path(shared.as_raw_fd())
+            .ok_or_else(|| "process substitution needs /dev/fd".to_string())?;
+
+        // The body is a subprogram: bash does not run `ERR` in it unless
+        // `errtrace` is on, and it keeps `errexit` out the same way a command
+        // substitution does. It also gets a scope of its own, so a variable it
+        // sets does not escape.
+        let outer_buffer = self.pipeline_buffer.take();
+        let deferred = std::mem::replace(&mut self.defer_next_spawn, false);
+        let suppress_traps = !self.state.opts.errtrace;
+        if suppress_traps {
+            self.err_trap_suppressed += 1;
+        }
+        let saved_line = (self.line_source.clone(), self.line_offset, self.line_number);
+        let scope = self.open_scope();
+        if !self.state.opts.inherit_errexit {
+            self.state.opts.errexit = false;
+        }
+        // The body writes through descriptor 1, and an external command in it
+        // inherits the descriptor through its spawn plan.
+        let saved_stdout = baash_sys::dup(1).ok();
+        if let Err(error) = baash_sys::dup2(capture.as_raw_fd(), 1) {
+            self.close_scope(scope);
+            self.pipeline_buffer = outer_buffer;
+            self.defer_next_spawn = deferred;
+            if suppress_traps {
+                self.err_trap_suppressed -= 1;
+            }
+            return Err(format!("cannot redirect a process substitution: {error}"));
+        }
+        let unwind = self.eval_node(&chunk, chunk.ast.root, Ctx::default());
+        let _ = unwind.status();
+        self.pipeline_buffer = outer_buffer;
+        self.defer_next_spawn = deferred;
+        if suppress_traps {
+            self.err_trap_suppressed -= 1;
+        }
+        (self.line_source, self.line_offset, self.line_number) = saved_line;
+        match saved_stdout {
+            Some(saved) => {
+                let _ = baash_sys::dup2(saved.as_raw_fd(), 1);
+            }
+            None => {
+                let _ = baash_sys::close(1);
+            }
+        }
+        self.close_scope(scope);
+        let _ = self.after_foreground_wait();
+
+        // The file is unlinked already, so the descriptor is the only way to
+        // reach the data: keep the shared one, and let a child inherit it. A
+        // child inherits a Unix descriptor only when it is not close-on-exec;
+        // Windows has no such bit, and no `/dev/fd` either, so the check above
+        // has already refused there.
+        #[cfg(unix)]
+        baash_sys::set_cloexec(shared.as_raw_fd(), false)
+            .map_err(|error| format!("cannot share a process substitution: {error}"))?;
+        // The low-numbered one exists only to be written to; the data stays
+        // readable through the copy.
+        drop(capture);
+        self.process_substitutions
+            .push((self.process_substitution_owner, shared));
+        Ok(path)
     }
 
     /// Run a `$(…)` body in a scope, capture its stdout and strip trailing

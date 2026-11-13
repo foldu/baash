@@ -471,6 +471,18 @@ pub struct Interp {
     /// is cleared, and why a deleted program still resolves and then fails to
     /// spawn.
     path_cache: std::collections::BTreeMap<Vec<u8>, Vec<u8>>,
+    /// The descriptors behind live `<(…)` words, each tagged with the node
+    /// evaluation that created it.
+    ///
+    /// The word is a path, and the data behind it is an unlinked file that only
+    /// this descriptor keeps alive — so the descriptor has to outlive the
+    /// expansion and reach a child that opens `/dev/fd/N`. It goes when the
+    /// node that produced the word returns (`eval_node`), which is as long as
+    /// bash keeps its own process-substitution descriptors.
+    process_substitutions: Vec<(u64, baash_sys::OwnedFd)>,
+    /// The node evaluation whose words are being expanded now.
+    process_substitution_owner: u64,
+    next_process_substitution_owner: u64,
     /// A parsed empty chunk.
     ///
     /// `builtin`/`command` run a command that has no redirections and no
@@ -626,6 +638,9 @@ impl Interp {
             exit_trap_status: None,
             path_cache: std::collections::BTreeMap::new(),
             empty_chunk,
+            process_substitutions: Vec::new(),
+            process_substitution_owner: 0,
+            next_process_substitution_owner: 0,
             alias_eval_depth: 0,
             pipeline_status: std::collections::BTreeMap::new(),
             utf8_locale: false,
@@ -1588,6 +1603,28 @@ impl baash_lang::Shell for Interp {
                 cmd.span.clone(),
             )),
         }
+    }
+
+    /// Turn `<(…)` into the path that names its output.
+    ///
+    /// Only the reading direction is implemented. `>(…)` would have to run its
+    /// body *while* the command writes — a reader and a writer at the same
+    /// time — and this shell has one thread and no second process; a buffered
+    /// file handed back before the command ran would be a different construct
+    /// wearing the same syntax, so it keeps the diagnostic.
+    fn process_substitution(
+        &mut self,
+        subs: &baash_lang::ProcessSub,
+    ) -> Result<Vec<u8>, baash_lang::Error> {
+        if subs.dir == baash_lang::ProcSubDir::Output {
+            return Err(baash_lang::Error::unsupported(
+                baash_lang::UnsupportedOp::ProcessSubstitution,
+                subs.span.clone(),
+            ));
+        }
+        self.substitute_input(&subs.source).map_err(|message| {
+            baash_lang::Error::new(baash_lang::ErrorKind::Host { message }, subs.span.clone())
+        })
     }
 
     fn arithmetic(&mut self, expr: &baash_lang::Arithmetic) -> Result<Vec<u8>, baash_lang::Error> {

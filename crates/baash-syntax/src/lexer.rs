@@ -1005,9 +1005,10 @@ fn scan_extglob(src: &[u8], open: usize, depth: usize) -> Option<usize> {
 
 /// Scan a word, returning where it ends and whether something is left open.
 ///
-/// The word stops at an unquoted metacharacter. `<(` and `>(` are process
-/// substitution only at the very start of the word, which is where a shell
-/// would recognise them. An extglob operator immediately followed by `(`
+/// The word stops at an unquoted metacharacter, except at `<(`/`>(`: process
+/// substitution is a *part* of a word, not a word of its own, so
+/// `x=<(cmd)` and `a<(cmd)b` are one word each, as they are in bash. An
+/// extglob operator immediately followed by `(`
 /// consumes the balanced group as part of the word (see the module docs); if
 /// the group does not close, the `(` is just a word byte and nothing special
 /// is reported.
@@ -1028,7 +1029,7 @@ pub(crate) fn scan_word(
     while i < src.len() {
         let b = src[i];
         if is_meta(b) {
-            let proc_sub = (b == b'<' || b == b'>') && i == start && src.get(i + 1) == Some(&b'(');
+            let proc_sub = (b == b'<' || b == b'>') && src.get(i + 1) == Some(&b'(');
             if proc_sub {
                 nest.push(OpenConstruct {
                     kind: UnterminatedKind::ProcSub,

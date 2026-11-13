@@ -96,7 +96,10 @@ Two codes carry it, from one gating table over the AST (the same mechanism the
 POSIX superset uses):
 
 * **`BAASH-E0301`** (`UNSUPPORTED`) — a construct the shell has no mechanism
-  for at all: process substitution, which needs `/dev/fd`.
+  for at all: `>(…)`, the writing half of process substitution, which needs a
+  reader running while the command writes. `<(...)` is *not* refused: its body
+  writes a file before the word is used, which one thread can do (see
+  [contracts.md](contracts.md), `<(…)` hands a path).
 * **`BAASH-E0302`** (`CAPABILITY`) — a construct whose POSIX meaning is a
   second process or a job table: `f &`, `{ … } &`, `jobs`, `fg`, `bg`,
   `disown`, and `%1` in `wait`/`kill`.
@@ -112,7 +115,7 @@ $ baash -c 'f() { echo fn; }; f &'
 baash:1:19: error[BAASH-E0302]: &: f is not an external command, and shell code cannot run in the background
 $ baash -c 'jobs'
 baash:1:1: error[BAASH-E0302]: jobs: job control is not implemented in this shell
-$ baash -c 'echo <(echo hi)'
+$ baash -c 'echo >(cat)'
 baash:1:6: error[BAASH-E0301]: unsupported expansion: process substitution
 ```
 

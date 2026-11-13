@@ -409,6 +409,12 @@ fn translate_flags(flags: c_int) -> c_int {
 /// Windows has no `O_TMPFILE`; the file is created, unlinked-on-open semantics
 /// are faked by deleting it on close through [`TempFile`]'s `Drop`, which is
 /// what `create_unlinked_temp` returns. The caller only ever needs its bytes.
+/// Windows has no `/dev/fd`: a descriptor cannot be named to another program,
+/// so `<(…)` has nothing to expand to and the shell reports it.
+pub fn fd_path(_fd: RawFd) -> Option<Vec<u8>> {
+    None
+}
+
 pub fn create_unlinked_temp(_size_hint: usize) -> io::Result<OwnedFd> {
     let mut file = tempfile_path();
     if file.is_empty() {

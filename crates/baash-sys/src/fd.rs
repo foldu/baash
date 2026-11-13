@@ -341,6 +341,20 @@ pub fn set_cloexec(fd: RawFd, enabled: bool) -> io::Result<()> {
     Ok(rustix::io::fcntl_setfd(borrowed(fd), flags)?)
 }
 
+/// The path that names an open descriptor, for process substitution.
+///
+/// `<(…)` hands a command a *path*, not a descriptor, so the shell has to spell
+/// the path the consumer will open. `/dev/fd` is the portable one — Linux makes
+/// it a symlink to `/proc/self/fd`, and the fallback is that directory itself.
+/// A kernel with neither cannot name an open file at all, and the caller
+/// reports that rather than handing back a path that does not resolve.
+pub fn fd_path(fd: RawFd) -> Option<Vec<u8>> {
+    let dir = ["/dev/fd", "/proc/self/fd"]
+        .into_iter()
+        .find(|dir| std::path::Path::new(dir).exists())?;
+    Some(format!("{dir}/{fd}").into_bytes())
+}
+
 /// Create a writable, close-on-exec file with no directory entry.
 ///
 /// Used for here-doc bodies: the body is written in full, the descriptor is
