@@ -93,17 +93,17 @@ jobs:
             attr: .#portable
             triple: x86_64-linux
             binary: baash
-            archive: tar.gz
+            extension: ""
           - name: linux-aarch64
             attr: .#portable-aarch64
             triple: aarch64-linux
             binary: baash
-            archive: tar.gz
+            extension: ""
           - name: windows-x86_64
             attr: .#windows
             triple: x86_64-pc-windows-gnu
             binary: baash.exe
-            archive: zip
+            extension: .exe
     steps:
       - uses: actions/checkout@v7
       - uses: cachix/install-nix-action@v31
@@ -115,36 +115,19 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
           TRIPLE: ${{ matrix.triple }}
           BINARY: ${{ matrix.binary }}
-          ARCHIVE: ${{ matrix.archive }}
+          EXTENSION: ${{ matrix.extension }}
         run: |
           set -eu
-          name="baash-$VERSION-$TRIPLE"
-          # Staging lives outside `dist/`, so that `dist/` holds only what is
-          # published: both the upload glob and the checksum step then see
-          # archives and nothing else. With the tree inside `dist/`, `baash-*`
-          # matches the unpacked directory too, and `sha256sum` fails on it.
-          stage="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/$name"
-          dist="$PWD/dist"
-          rm -rf "$stage"
-          mkdir -p "$stage/bin" "$stage/share/baash" "$dist"
-          cp -L "result/bin/$BINARY" "$stage/bin/"
-          cp config/config.sh "$stage/share/baash/"
-          # The Linux artifacts install the icon theme; the Windows package is
-          # the executable and nothing else. `--no-preserve=mode` because the
-          # store's tree is read-only, and a packaging step that cannot write
-          # into its own output a second time is a trap for whoever re-runs it.
-          if [ -d result/share/icons ]; then
-            cp -r --no-preserve=mode result/share/icons "$stage/share/"
-          fi
-          cp LICENSE README.md THIRD-PARTY.md "$stage/"
-          case "$ARCHIVE" in
-            zip) (cd "$(dirname "$stage")" && zip -qr "$dist/$name.zip" "$name") ;;
-            # `-C` moves tar's *members*, not the archive: with `-f` after it,
-            # the tarball lands in the workspace root and `dist/` stays empty —
-            # which uploads nothing and fails on `if-no-files-found`. The path
-            # is therefore explicit.
-            *) tar -C "$(dirname "$stage")" -czf "$dist/$name.tar.gz" "$name" ;;
-          esac
+          # The asset is the executable itself. The icon theme, the launcher
+          # entry and the default `config.sh` are the nix package's, and a
+          # tarball around a single file would add a step to using it rather
+          # than protect anything.
+          #
+          # `install -m755` rather than `cp`: the store's copy is read-only and
+          # carries its own mode, and this makes the mode the asset needs
+          # explicit.
+          mkdir -p dist
+          install -m755 "result/bin/$BINARY" "dist/baash-$VERSION-$TRIPLE$EXTENSION"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
@@ -166,8 +149,8 @@ jobs:
         run: |
           set -eu
           cd dist
-          # Whatever the matrix produced: tarballs for Linux, a zip for Windows.
-          # A glob with no match stays literal, so a missing artifact fails here
+          # Whatever the matrix produced: one executable per target. A glob
+          # with no match stays literal, so a missing artifact fails here
           # rather than publishing a short list.
           sha256sum ./baash-* > SHA256SUMS
           cat SHA256SUMS
@@ -182,4 +165,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "baash ${GITHUB_REF_NAME#v}" \
             --generate-notes $prerelease \
-            dist/*.tar.gz dist/*.zip dist/SHA256SUMS
+            dist/baash-* dist/SHA256SUMS

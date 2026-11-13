@@ -224,22 +224,26 @@ nix build .#default
 ```
 
 `nix build .#default` installs more than the binary: `bin/baash`, the default
-`etc/xdg/baash/config.sh`, and the artwork in freedesktop's icon theme layout —
-`share/icons/hicolor/scalable/apps/baash.svg` plus a PNG at every size from 16
-to 256 px. There is deliberately no `.desktop` file: a shell is not a GUI
-program, and an entry that started `baash` without a terminal would fail. The
-icon sits where a desktop entry would look for it, waiting for something to
-name it.
+`etc/xdg/baash/config.sh`, a launcher entry at
+`share/applications/baash.desktop`, and the artwork in freedesktop's icon theme
+layout — `share/icons/hicolor/scalable/apps/baash.svg` plus a PNG at every size
+from 16 to 256 px. `Terminal=true` in the entry is what makes a menu item for a
+shell honest: a launcher opens it in a terminal, so it cannot leave a shell
+running with no tty. The entry is a file rather than something embedded in the
+executable because Linux has no operand for a PE icon resource — a desktop
+reads the theme, never the binary — and `checks.desktop` validates the file and
+resolves its `Exec` and `Icon` against the tree it is installed into.
 
-`nix build .#portable` (and `.#portable-aarch64`) is the release artifact rather
-than the install: the same program linked against glibc 2.17 through zig, so the
-tarball runs on a machine that has no nix. Inside nix, `.#default` stays the
-build to install — the store's glibc is the faster one.
+`nix build .#portable` (and `.#portable-aarch64`) is the executable the release
+publishes rather than an install: the same program linked against glibc 2.17
+through zig, so it runs on a machine that has no nix. Inside nix, `.#default`
+stays the build to install — the store's glibc is the faster one, and it is the
+one that carries the icons and the launcher entry.
 
 `just` wraps the loops the pipeline runs:
 
 ```sh
-just check         # nix flake check: build, fmt, clippy, licenses, windows, module
+just check         # nix flake check: build, fmt, clippy, licenses, desktop, windows, module
 just test          # the full suite, on a real pty
 just conformance   # the ratchet
 just licenses      # cargo deny check licenses
@@ -360,25 +364,26 @@ just release 0.2.0      # or: just release patch
 
 runs the gates (`check`, `test`, `conformance`), then bumps, commits, tags
 `v0.2.0` and pushes. The tag re-runs that same gate and builds three binaries
-from the flake, publishing a GitHub release containing
+from the flake, publishing a GitHub release with the executables themselves and
+their checksums:
 
 ```
-baash-0.2.0-x86_64-linux.tar.gz
-baash-0.2.0-aarch64-linux.tar.gz
-baash-0.2.0-x86_64-pc-windows-gnu.zip
+baash-0.2.0-x86_64-linux
+baash-0.2.0-aarch64-linux
+baash-0.2.0-x86_64-pc-windows-gnu.exe
 SHA256SUMS
 ```
 
-each archive holding `bin/baash` (or `bin/baash.exe`), the default
-`share/baash/config.sh`, `LICENSE` and `README.md`; the Linux archives also
-carry the icon theme tree under `share/icons/hicolor/`, so extracting one into
-`~/.local` puts the artwork where the desktop looks. The Linux binaries are the
-flake's `.#portable` builds: linked against glibc 2.17 through zig, so they run
-on any distribution from 2012 on and outside nix, without giving up glibc's
-allocator — a static musl build would start faster and run slower
-(`docs/performance.md`). A tag with a suffix (`v0.2.0-rc.1`) publishes as a
-prerelease. The tooling is `cargo-release` configured in `release.toml` and
-driven by the `justfile`.
+Each asset is the executable and nothing else: no archive to unpack, and no
+icon theme or launcher entry, which are the nix package's (`share/icons/hicolor`,
+`share/applications`, `etc/xdg/baash/config.sh`) rather than a download's.
+GitHub stores release assets as plain blobs and does not carry the Unix mode, so
+`chmod +x` the file after downloading it. The Linux binaries are the flake's
+`.#portable` builds: linked against glibc 2.17 through zig, so they run on any
+distribution from 2012 on and outside nix, without giving up glibc's allocator —
+a static musl build would start faster and run slower (`docs/performance.md`). A
+tag with a suffix (`v0.2.0-rc.1`) publishes as a prerelease. The tooling is
+`cargo-release` configured in `release.toml` and driven by the `justfile`.
 
 ## Conformance
 

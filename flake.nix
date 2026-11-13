@@ -345,13 +345,13 @@
                   cargo zigbuild --locked --release -p baash \
                     --target ${triple}.${glibc}
                 '';
-                # The layout `default` installs, so the tarball copies `share`
-                # without knowing which artifact it came from.
+                # The executable alone. This derivation is the *download*, not an
+                # install: the icon theme, the launcher entry and the default
+                # `config.sh` belong to `default`, which is what someone
+                # installs, and a release asset is one file rather than a tree.
                 installPhaseCommand = ''
                   mkdir -p $out/bin
                   install -m755 target/${triple}/release/baash $out/bin/
-                  install -Dm644 config/config.sh "$out/etc/xdg/baash/config.sh"
-                  cp -r --no-preserve=mode ${icons}/share "$out/share"
                 '';
               };
 
@@ -423,6 +423,11 @@
                 install -Dm644 config/config.sh "$out/etc/xdg/baash/config.sh"
                 # The artwork, in the one place a Linux desktop looks for it.
                 cp -r --no-preserve=mode ${icons}/share "$out/share"
+                # The launcher entry that names the artwork. `Terminal=true` in
+                # it is what makes a menu entry for a shell correct; the file is
+                # checked by `checks.desktop`, which validates it and resolves
+                # its `Exec` and `Icon` against this tree.
+                install -Dm644 assets/baash.desktop "$out/share/applications/baash.desktop"
               '';
 
               meta = {
@@ -515,6 +520,36 @@
 
           inherit licenses;
           windows = windows.package;
+
+          # A desktop environment reads the installed entry, not this project,
+          # so both halves are checked: `desktop-file-validate` for the
+          # specification, and the package tree for the two names the entry
+          # carries. An `Exec` that resolves to nothing is a menu entry that
+          # does not start; an `Icon` that resolves to nothing is a blank
+          # square, which is how the icon theme went unnoticed before it was
+          # installed.
+          desktop =
+            let
+              package = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+            in
+            pkgs.runCommand "baash-desktop-check"
+              {
+                nativeBuildInputs = [ pkgs.desktop-file-utils ];
+              }
+              ''
+                entry=${package}/share/applications/baash.desktop
+                desktop-file-validate "$entry"
+                exec=$(sed -n 's/^Exec=//p' "$entry")
+                test -x "${package}/bin/$exec"
+                icon=$(sed -n 's/^Icon=//p' "$entry")
+                test -s "${package}/share/icons/hicolor/scalable/apps/$icon.svg"
+                test -s "${package}/share/icons/hicolor/256x256/apps/$icon.png"
+                # The field that keeps a launcher from starting a shell with no
+                # tty.
+                grep -qx 'Terminal=true' "$entry"
+                mkdir -p $out
+                cp "$entry" $out/
+              '';
 
           # The module's product is one generated startup file, and nothing
           # else in this gate ever sources it. This evaluates a system with the

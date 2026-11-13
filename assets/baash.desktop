@@ -1,0 +1,29 @@
+# What a desktop's launcher reads to offer baash.
+#
+# `Terminal=true` is the field that makes this honest: a launcher starts the
+# program *in a terminal*, so the entry cannot leave a shell running with no
+# tty, which is what a shell started as a GUI program would be. The icon comes
+# from the hicolor theme this package installs (`share/icons/hicolor/…/baash.svg`
+# and a PNG at every size), not from anything inside the binary: there is no
+# Linux equivalent of a PE icon resource, and a desktop never asks an
+# executable for its artwork.
+#
+# `Exec=baash` is a name on `PATH` rather than an absolute path, which is what
+# the specification asks for and what an installed package is expected to
+# provide; `flake.nix` checks the entry against the tree it is installed into,
+# so the name always resolves to a binary of this package.
+#
+# `Shell` is not usable as a category: the specification reserves it, and
+# `desktop-file-validate` rejects it unless `OnlyShowIn` is set. `System` is the
+# one main category a shell fits, and one is deliberate — two main categories
+# put the same entry in the menu twice.
+[Desktop Entry]
+Type=Application
+Name=baash
+GenericName=Shell
+Comment=A POSIX- and bash-compatible interactive shell
+Exec=baash
+Icon=baash
+Terminal=true
+Categories=System;
+Keywords=shell;bash;terminal;prompt;command;

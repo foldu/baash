@@ -38,7 +38,7 @@ just test            # cargo test --workspace --all-features
 just bench           # cargo bench -p baash-bench -> the `=~` tables
 just conformance     # the Oils ratchet against crates/baash-spec/baseline.txt
 just licenses        # cargo deny check licenses
-just check           # nix flake check: build + fmt + clippy + licenses + windows
+just check           # nix flake check: build + fmt + clippy + licenses + desktop + windows
 ```
 
 Without `nix develop`, that gate is:
