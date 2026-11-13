@@ -1,17 +1,29 @@
-# Tag `vX.Y.Z` -> a GitHub release with the binaries.
+# Tag `vX.Y.Z` -> a GitHub release with three binaries.
 #
-# Both binaries come out of the flake, so a release is the artifact the checks
-# built rather than a second, separately-parameterised build. The tag is the
-# version: `just release` bumps `Cargo.toml`, commits, tags `v{{version}}` and
-# pushes, and the first job here refuses a tag that disagrees with the manifest.
+# The tag is the version: `just release` bumps `Cargo.toml`, commits, tags
+# `v{{version}}` and pushes, and the first job here refuses a tag that disagrees
+# with the manifest.
+#
+# The gate runs *here*, on the tag, before anything is built. `just release`
+# already runs the same checks locally, but a tag can be pushed by hand and an
+# artifact nobody tested is worse than no artifact.
+#
+# The Linux binaries are the flake's `portable` builds: the same program linked
+# against glibc 2.17 instead of the store's glibc, so unpacking the tarball
+# outside nix is all it takes, and the allocator stays glibc's — a static musl
+# build would start 0.17 ms faster and run 10–40 ms slower per second of typing
+# (`docs/performance.md`). Both are cross-built by zig on an x86 runner, so a
+# second runner architecture is not needed.
 name: Release
 
 on:
   push:
     tags: ["v*"]
 
+# Nothing but the publishing job may write to the repository, and it is the only
+# one that needs to.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -41,58 +53,109 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-  linux:
+  gate:
     needs: version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: cachix/install-nix-action@v31
-      - run: nix build .#default -o result
-      - name: Package
-        env:
-          VERSION: ${{ needs.version.outputs.version }}
-        run: |
-          set -eu
-          name="baash-$VERSION-x86_64-linux"
-          mkdir -p "dist/$name/bin" "dist/$name/share/baash"
-          cp -L result/bin/baash "dist/$name/bin/"
-          cp config/config.sh "dist/$name/share/baash/"
-          cp -r result/share/icons "dist/$name/share/"
-          cp LICENSE README.md THIRD-PARTY.md "dist/$name/"
-          tar -C dist -czf "$name.tar.gz" "$name"
-      - uses: actions/upload-artifact@v7
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          name: linux
-          path: baash-*.tar.gz
-          if-no-files-found: error
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      # `dash` is the suite's reference shell. `bash-completion` is the library
+      # `completion_compat.rs` compares the shell against: installed on purpose,
+      # so that suite runs on a tag instead of skipping.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y dash bash-completion
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features -- --deny warnings
+      # A runner is a VM with a real `/dev/pts`, so the pty-driven
+      # `interactive_*` tests run here rather than skipping.
+      - run: cargo test --workspace --all-features
+      - name: Conformance ratchet
+        run: |
+          cargo build -p baash
+          cargo run -p baash-spec -- --shell target/debug/baash \
+            --list-failures --ratchet --tolerance 5
 
-  windows:
-    needs: version
+  # One job per artifact, because they differ only in three values. Three
+  # near-identical copies of the packaging lines would drift; a matrix cannot.
+  build:
+    needs: [version, gate]
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            attr: .#portable
+            triple: x86_64-linux
+            binary: baash
+            archive: tar.gz
+          - name: linux-aarch64
+            attr: .#portable-aarch64
+            triple: aarch64-linux
+            binary: baash
+            archive: tar.gz
+          - name: windows-x86_64
+            attr: .#windows
+            triple: x86_64-pc-windows-gnu
+            binary: baash.exe
+            archive: zip
     steps:
       - uses: actions/checkout@v7
       - uses: cachix/install-nix-action@v31
-      - run: nix build .#windows -o result
+      # Both Linux artifacts come out of an x86 runner: `.#portable-aarch64`
+      # links with zig, so nothing is emulated at build time.
+      - run: nix build ${{ matrix.attr }} -o result
       - name: Package
         env:
           VERSION: ${{ needs.version.outputs.version }}
+          TRIPLE: ${{ matrix.triple }}
+          BINARY: ${{ matrix.binary }}
+          ARCHIVE: ${{ matrix.archive }}
         run: |
           set -eu
-          name="baash-$VERSION-x86_64-pc-windows-gnu"
-          mkdir -p "dist/$name/bin" "dist/$name/share/baash"
-          cp -L result/bin/baash.exe "dist/$name/bin/"
-          cp config/config.sh "dist/$name/share/baash/"
-          cp LICENSE README.md THIRD-PARTY.md "dist/$name/"
-          cd dist && zip -r "$name.zip" "$name" >/dev/null
+          name="baash-$VERSION-$TRIPLE"
+          # Staging lives outside `dist/`, so that `dist/` holds only what is
+          # published: both the upload glob and the checksum step then see
+          # archives and nothing else. With the tree inside `dist/`, `baash-*`
+          # matches the unpacked directory too, and `sha256sum` fails on it.
+          stage="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/$name"
+          dist="$PWD/dist"
+          rm -rf "$stage"
+          mkdir -p "$stage/bin" "$stage/share/baash" "$dist"
+          cp -L "result/bin/$BINARY" "$stage/bin/"
+          cp config/config.sh "$stage/share/baash/"
+          # The Linux artifacts install the icon theme; the Windows package is
+          # the executable and nothing else. `--no-preserve=mode` because the
+          # store's tree is read-only, and a packaging step that cannot write
+          # into its own output a second time is a trap for whoever re-runs it.
+          if [ -d result/share/icons ]; then
+            cp -r --no-preserve=mode result/share/icons "$stage/share/"
+          fi
+          cp LICENSE README.md THIRD-PARTY.md "$stage/"
+          case "$ARCHIVE" in
+            zip) (cd "$(dirname "$stage")" && zip -qr "$dist/$name.zip" "$name") ;;
+            # `-C` moves tar's *members*, not the archive: with `-f` after it,
+            # the tarball lands in the workspace root and `dist/` stays empty —
+            # which uploads nothing and fails on `if-no-files-found`. The path
+            # is therefore explicit.
+            *) tar -C "$(dirname "$stage")" -czf "$dist/$name.tar.gz" "$name" ;;
+          esac
       - uses: actions/upload-artifact@v7
         with:
-          name: windows
-          path: baash-*.zip
+          name: ${{ matrix.name }}
+          path: dist/*
           if-no-files-found: error
 
   release:
-    needs: [version, linux, windows]
+    needs: [version, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -103,7 +166,10 @@ jobs:
         run: |
           set -eu
           cd dist
-          sha256sum ./*.tar.gz ./*.zip > SHA256SUMS
+          # Whatever the matrix produced: tarballs for Linux, a zip for Windows.
+          # A glob with no match stays literal, so a missing artifact fails here
+          # rather than publishing a short list.
+          sha256sum ./baash-* > SHA256SUMS
           cat SHA256SUMS
       - name: Publish
         env:

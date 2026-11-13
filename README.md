@@ -231,6 +231,11 @@ program, and an entry that started `baash` without a terminal would fail. The
 icon sits where a desktop entry would look for it, waiting for something to
 name it.
 
+`nix build .#portable` (and `.#portable-aarch64`) is the release artifact rather
+than the install: the same program linked against glibc 2.17 through zig, so the
+tarball runs on a machine that has no nix. Inside nix, `.#default` stays the
+build to install — the store's glibc is the faster one.
+
 `just` wraps the loops the pipeline runs:
 
 ```sh
@@ -354,21 +359,26 @@ just release 0.2.0      # or: just release patch
 ```
 
 runs the gates (`check`, `test`, `conformance`), then bumps, commits, tags
-`v0.2.0` and pushes. The tag builds both binaries from the
-flake and publishes a GitHub release containing
+`v0.2.0` and pushes. The tag re-runs that same gate and builds three binaries
+from the flake, publishing a GitHub release containing
 
 ```
 baash-0.2.0-x86_64-linux.tar.gz
+baash-0.2.0-aarch64-linux.tar.gz
 baash-0.2.0-x86_64-pc-windows-gnu.zip
 SHA256SUMS
 ```
 
 each archive holding `bin/baash` (or `bin/baash.exe`), the default
-`share/baash/config.sh`, `LICENSE` and `README.md`; the Linux archive also
-carries the icon theme tree under `share/icons/hicolor/`, so extracting it into
-`~/.local` puts the artwork where the desktop looks. A tag with a suffix
-(`v0.2.0-rc.1`) publishes as a prerelease. The tooling is `cargo-release`
-configured in `release.toml` and driven by the `justfile`.
+`share/baash/config.sh`, `LICENSE` and `README.md`; the Linux archives also
+carry the icon theme tree under `share/icons/hicolor/`, so extracting one into
+`~/.local` puts the artwork where the desktop looks. The Linux binaries are the
+flake's `.#portable` builds: linked against glibc 2.17 through zig, so they run
+on any distribution from 2012 on and outside nix, without giving up glibc's
+allocator — a static musl build would start faster and run slower
+(`docs/performance.md`). A tag with a suffix (`v0.2.0-rc.1`) publishes as a
+prerelease. The tooling is `cargo-release` configured in `release.toml` and
+driven by the `justfile`.
 
 ## Conformance
 

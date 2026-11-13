@@ -115,11 +115,21 @@ package list to `nix build .#windows`: rustup, zig, cargo-zigbuild, the host
 GitHub is a mirror, not the source of truth, so its workflow
 (`.github/workflows/ci.yml`) runs the same three gates with a rustup toolchain
 and no nix — the build has no C dependencies, so that is enough, and it keeps
-the mirror fast. Releases live there: a tag `vX.Y.Z` builds both binaries from
-the flake and publishes them with checksums, and the first job refuses a tag
-whose version disagrees with `Cargo.toml`. Cutting one is `just release
-<version>` — `cargo-release` with `release.toml` — so the manifest bump, the
-commit and the tag cannot drift apart.
+the mirror fast. Releases live there: a tag `vX.Y.Z` re-runs that gate, builds
+three artifacts from the flake (`.#portable` for x86_64 and aarch64 Linux,
+`.#windows` for Windows) and publishes them with checksums, and the first job
+refuses a tag whose version disagrees with `Cargo.toml`. Cutting one is `just
+release <version>` — `cargo-release` with `release.toml` — so the manifest bump,
+the commit and the tag cannot drift apart.
+
+The two Linux artifacts are linked against glibc 2.17 through zig rather than
+against the store's glibc, because a tarball whose interpreter is
+`/nix/store/…` runs on the machine that built it and nowhere else. They are not
+static musl: that removes the loader and costs 10–40 ms per second of typing
+(`performance.md`). The aarch64 binary is *built*, not observed on hardware —
+it executes under `qemu-aarch64`'s user emulation, and the two platforms that
+have actually been run are the two in `portability.md`, so it should be treated
+as unverified until a guest runs it.
 
 ## 3. Layers
 
