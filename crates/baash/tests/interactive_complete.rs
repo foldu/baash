@@ -427,13 +427,11 @@ fn a_completion_function_reads_from_a_process_substitution() {
     cleanup(&mut session, &home, &work);
 }
 
-/// A completion function the shell cannot finish says why — above the line.
+/// A completion function that fails says why — above the line.
 ///
-/// `nix`'s own completion script is a `<(...)` loop, so Tab on
-/// `nix shell nixpkgs#` reaches exactly this path. The diagnostic used to be
-/// written through the frame, which put it in the middle of the line being
-/// typed and pointed at 1:1 of nothing; it now goes above the line, with the
-/// script's own line under it, and the line is drawn again underneath.
+/// The diagnostic used to be written through the frame, which put it in the
+/// middle of the line being typed; it now goes above the line, with the
+/// function's own line under it, and the line is drawn again underneath.
 #[test]
 fn a_completion_function_that_cannot_finish_reports_above_the_line() {
     let home = temp_dir("rejected-home");
@@ -445,12 +443,11 @@ fn a_completion_function_that_cannot_finish_reports_above_the_line() {
     let mut session = Session::spawn(&home, &work, &[("PS1", "P> "), ("PATH", &path)]);
     session.prompt();
     session.line("mycmd () { echo \"args:$*\"; }");
-    // The writing half: `>(…)` has no reader to run beside the command.
-    session.line("f () { cat >(cat); }");
+    session.line("f () { local v=${x?boom}; }");
     session.line("complete -F f mycmd");
 
     session.send(b"mycmd a\t");
-    session.expect(b"unsupported expansion", Duration::from_secs(10));
+    session.expect(b"x: boom", Duration::from_secs(10));
     // The message erased the frame, so the line is painted again under it,
     // intact — and running it proves the line never changed.
     session.expect(b"mycmd a", Duration::from_secs(10));

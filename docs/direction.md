@@ -68,7 +68,7 @@ shell does not have.* It must name the construct and the reason.
 | `exec cmd` (top level) | works on Unix, rejected on Windows | no `exec` on Windows |
 | `exec 3<file` | works | just the fd table |
 | `<(...)` | works, buffered: the body finishes before the word is used | no second process to stream through |
-| `>(...)` | rejected (`BAASH-E0301`) | needs a reader while the writer runs |
+| `>(...)` | works, buffered: the reader runs after the command | no second process to stream through |
 | `coproc` | **open** — see §7 | |
 | `set -m` | accepted, inert | rc files should not break |
 | `^Z` | unhandled: stops the child and the shell together (bash with `set +m`) | no job control |

@@ -1138,8 +1138,13 @@ is used and the word is a file rather than a stream. The descriptor is duplicate
 above fd 60 (a redirect must not be able to land on it — `exec 3< <(…)` does)
 and cleared of `CLOEXEC` so that a child finds the data at `/dev/fd/N`;
 `eval_node` closes it when the node that produced the word returns, which is
-bash's lifetime. `>(…)` needs a reader running *while* the command writes, so it
-keeps `BAASH-E0301`.
+bash's lifetime. `>(…)` is the mirror: the word names a file the command writes,
+the body is recorded with its node, and `eval_node` runs it — standard input on
+the file — once that command returns, in the order the words were expanded. The
+reader is not the command, so `$?` and `$PIPESTATUS` are put back after it; and
+because it runs after rather than beside the writer, a command that only closes
+its descriptor later, or a `exec 5> >(…)` that writes after that command has
+ended, is seen by nobody. That is the price of one thread.
 
 **`exec` is a real `execve`.** `baash_sys::exec(plan)` replaces the process; the
 VM maps its `io::Error` to 127/126 and exits. See the `baash-sys` section for why

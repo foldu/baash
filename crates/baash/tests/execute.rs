@@ -119,17 +119,18 @@ fn a_process_substitution_survives_the_redirect_that_uses_it() {
     assert_eq!(out("exec 3< <(echo x); read -r v <&3; echo \"$v\""), "x\n");
 }
 
-/// `>(…)` writes; that needs a reader running while the command does, which is
-/// the second process this shell does not have.
+/// `>(…)` hands back a path the command writes, and its body reads that file
+/// afterwards — after the command, because a reader cannot start until the
+/// writer is done. The reader's own status is not the command's.
 #[test]
-fn the_writing_half_of_process_substitution_is_refused() {
-    let output = run("cat >(cat)");
-    assert_eq!(code(&output), 1);
-    assert!(
-        stderr(&output).contains("BAASH-E0301"),
-        "{}",
-        stderr(&output)
-    );
+fn a_process_substitution_reads_what_the_command_wrote() {
+    assert_eq!(out("echo hi > >(cat)"), "hi\n");
+    assert_eq!(out("echo abc > >(tr a-z A-Z)"), "ABC\n");
+    assert_eq!(out("seq 1 10 > >(wc -l)"), "10\n");
+    assert_eq!(out("echo hi | tee >(cat)"), "hi\nhi\n");
+    assert_eq!(out("echo hi > >(false); echo \"status:$?\""), "status:0\n");
+    // The reader runs where the command ended, not at the next prompt.
+    assert_eq!(out("echo q > >(cat); echo done"), "q\ndone\n");
 }
 
 #[test]

@@ -144,10 +144,7 @@ names the mounted one, and `BAASH_NO_BASH_COMPLETION=1` turns all of it off.
 
 Not implemented yet: the directory stack (`pushd`/`popd`/`dirs`), `umask`,
 `let`, `ulimit`, `times`, `enable`, `$RANDOM`/`$SECONDS`/`$FUNCNAME`, xtrace
-(`set -x`), `~user`,
-the writing half of process substitution (`>(...)`, rejected as
-`BAASH-E0301`), and `complete -C`/
-`-G` at the prompt. Missing built-ins
+(`set -x`), `~user`, and `complete -C`/`-G` at the prompt. Missing built-ins
 answer status 2 with `BAASH-E0508`; missing special variables expand to nothing.
 `printf`, `pwd`, `test` and `[` are served from `PATH` by design.
 [`docs/state.md`](docs/state.md) has the full inventory; the interactive

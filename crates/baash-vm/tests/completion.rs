@@ -469,14 +469,11 @@ fn a_completion_runs_output_includes_what_it_wrote_on_stderr() {
     assert!(text.contains("to-err"), "stderr missing: {text}");
 }
 
-/// The same capture is where a rejected construct's diagnostic lands.
-///
-/// `>(…)` rather than `<(…)`: the reading direction now works, and a diagnostic
-/// from a construct the shell cannot do is what this case is about.
+/// The same capture is where a diagnostic raised inside the function lands.
 #[test]
 fn a_completion_runs_output_includes_its_diagnostics() {
     let mut capture = Capture::new();
-    capture.run("f() { cat >(cat); }");
+    capture.run("f() { echo ${x?boom}; }");
 
     let (bytes, status) = capture
         .interp
@@ -485,7 +482,7 @@ fn a_completion_runs_output_includes_its_diagnostics() {
     let text = String::from_utf8_lossy(&bytes);
     assert!(!status.is_success());
     assert!(
-        text.contains("unsupported expansion"),
+        text.contains("x: boom"),
         "the diagnostic was not captured: {text}"
     );
 }

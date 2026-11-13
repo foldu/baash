@@ -480,6 +480,12 @@ pub struct Interp {
     /// node that produced the word returns (`eval_node`), which is as long as
     /// bash keeps its own process-substitution descriptors.
     process_substitutions: Vec<(u64, baash_sys::OwnedFd)>,
+    /// The `>(…)` bodies waiting to run, with the file the command writes to.
+    ///
+    /// A reader cannot start until the writer has finished, so the body runs
+    /// when the node that produced the word returns — after the command, in the
+    /// order the words were expanded.
+    output_substitutions: Vec<(u64, baash_sys::OwnedFd, Arc<ParsedChunk>)>,
     /// The node evaluation whose words are being expanded now.
     process_substitution_owner: u64,
     next_process_substitution_owner: u64,
@@ -639,6 +645,7 @@ impl Interp {
             path_cache: std::collections::BTreeMap::new(),
             empty_chunk,
             process_substitutions: Vec::new(),
+            output_substitutions: Vec::new(),
             process_substitution_owner: 0,
             next_process_substitution_owner: 0,
             alias_eval_depth: 0,
@@ -1605,24 +1612,23 @@ impl baash_lang::Shell for Interp {
         }
     }
 
-    /// Turn `<(…)` into the path that names its output.
+    /// Turn `<(…)` / `>(…)` into the path that names the file behind it.
     ///
-    /// Only the reading direction is implemented. `>(…)` would have to run its
-    /// body *while* the command writes — a reader and a writer at the same
-    /// time — and this shell has one thread and no second process; a buffered
-    /// file handed back before the command ran would be a different construct
-    /// wearing the same syntax, so it keeps the diagnostic.
+    /// The two directions differ in *when* their body runs, not in what they
+    /// hand back: `<(…)` writes its file before the word is used, `>(…)` reads
+    /// one after the command that wrote it. Neither streams — a stream needs the
+    /// body and the command to run at the same time, and this shell has one
+    /// thread — so `>(…)` is a buffered reader where bash starts it with the
+    /// command.
     fn process_substitution(
         &mut self,
         subs: &baash_lang::ProcessSub,
     ) -> Result<Vec<u8>, baash_lang::Error> {
-        if subs.dir == baash_lang::ProcSubDir::Output {
-            return Err(baash_lang::Error::unsupported(
-                baash_lang::UnsupportedOp::ProcessSubstitution,
-                subs.span.clone(),
-            ));
-        }
-        self.substitute_input(&subs.source).map_err(|message| {
+        let result = match subs.dir {
+            baash_lang::ProcSubDir::Input => self.substitute_input(&subs.source),
+            baash_lang::ProcSubDir::Output => self.substitute_output(&subs.source),
+        };
+        result.map_err(|message| {
             baash_lang::Error::new(baash_lang::ErrorKind::Host { message }, subs.span.clone())
         })
     }

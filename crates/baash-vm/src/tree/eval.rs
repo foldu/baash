@@ -70,6 +70,10 @@ impl Interp {
         let enclosing = std::mem::replace(&mut self.process_substitution_owner, owner);
         let result = self.eval_kind(chunk, id, ctx);
         self.process_substitution_owner = enclosing;
+        // A `>(…)` reader runs after its writer, and its status is not the
+        // command's: this happens before `$?` is published, and puts back what
+        // it finds.
+        self.run_output_substitutions(owner);
         self.set_status(result.status());
         if command {
             self.set_pipeline_status(&[result.status()]);
@@ -947,6 +951,97 @@ impl Interp {
         self.process_substitutions.retain(|(tag, _)| *tag != owner);
     }
 
+    /// Parse a `<(…)`/`>(…)` body, reporting a syntax error against it.
+    fn parse_substitution(&mut self, src: &[u8]) -> Result<Arc<ParsedChunk>, String> {
+        let source = Arc::new(baash_diag::SourceFile::new("<process substitution>", src));
+        let opts = self.parse_opts();
+        match baash_syntax::parse_with(&source, &opts) {
+            baash_syntax::ParseOutcome::Ok(ast) => Ok(Arc::new(ParsedChunk {
+                ast,
+                source: source.clone(),
+            })),
+            baash_syntax::ParseOutcome::NeedMoreInput { open, .. } => {
+                let previous = std::mem::replace(&mut self.current, source);
+                self.diagnose(&Diagnostic::error(
+                    baash_syntax::codes::NEED_MORE_INPUT,
+                    open,
+                    "unexpected end of file in a process substitution",
+                ));
+                self.current = previous;
+                Err("syntax error in a process substitution".to_string())
+            }
+            baash_syntax::ParseOutcome::Failed(diagnostics) => {
+                let previous = std::mem::replace(&mut self.current, source);
+                for diagnostic in &diagnostics {
+                    self.diagnose(diagnostic);
+                }
+                self.current = previous;
+                Err("syntax error in a process substitution".to_string())
+            }
+        }
+    }
+
+    /// Run a substitution body with `target` moved onto `fd`.
+    ///
+    /// The body is a subprogram: bash does not run `ERR` in it unless
+    /// `errtrace` is on, keeps `errexit` out the way a command substitution
+    /// does, gives it its own `$LINENO` and a scope, so nothing it sets
+    /// escapes. `target` is 1 for `<(…)` (the body writes the file) and 0 for
+    /// `>(…)` (the body reads it).
+    fn run_substitution_body(
+        &mut self,
+        chunk: &Arc<ParsedChunk>,
+        target: baash_sys::RawFd,
+        fd: baash_sys::RawFd,
+    ) -> Result<(), String> {
+        let outer_buffer = self.pipeline_buffer.take();
+        let deferred = std::mem::replace(&mut self.defer_next_spawn, false);
+        let suppress_traps = !self.state.opts.errtrace;
+        if suppress_traps {
+            self.err_trap_suppressed += 1;
+        }
+        let saved_line = (self.line_source.clone(), self.line_offset, self.line_number);
+        let scope = self.open_scope();
+        if !self.state.opts.inherit_errexit {
+            self.state.opts.errexit = false;
+        }
+        let saved = baash_sys::dup(target).ok();
+        if let Err(error) = baash_sys::dup2(fd, target) {
+            if let Some(saved) = saved.as_ref() {
+                let _ = baash_sys::dup2(saved.as_raw_fd(), target);
+            }
+            self.close_scope(scope);
+            self.pipeline_buffer = outer_buffer;
+            self.defer_next_spawn = deferred;
+            if suppress_traps {
+                self.err_trap_suppressed -= 1;
+            }
+            (self.line_source, self.line_offset, self.line_number) = saved_line;
+            return Err(format!("cannot redirect a process substitution: {error}"));
+        }
+        let unwind = self.eval_node(chunk, chunk.ast.root, Ctx::default());
+        let _ = unwind.status();
+        self.pipeline_buffer = outer_buffer;
+        self.defer_next_spawn = deferred;
+        if suppress_traps {
+            self.err_trap_suppressed -= 1;
+        }
+        (self.line_source, self.line_offset, self.line_number) = saved_line;
+        match saved {
+            Some(saved) => {
+                let _ = baash_sys::dup2(saved.as_raw_fd(), target);
+            }
+            // The descriptor was closed on entry; leave it closed rather than
+            // inventing one.
+            None => {
+                let _ = baash_sys::close(target);
+            }
+        }
+        self.close_scope(scope);
+        let _ = self.after_foreground_wait();
+        Ok(())
+    }
+
     /// Run `<(…)`'s body with its output on an unlinked file and return the
     /// path that names it.
     ///
@@ -961,94 +1056,9 @@ impl Interp {
     /// `/dev/fd/N`. `eval_node` closes it when the node that produced the word
     /// returns.
     pub(crate) fn substitute_input(&mut self, src: &[u8]) -> Result<Vec<u8>, String> {
-        let source = Arc::new(baash_diag::SourceFile::new("<process substitution>", src));
-        let opts = self.parse_opts();
-        let chunk = match baash_syntax::parse_with(&source, &opts) {
-            baash_syntax::ParseOutcome::Ok(ast) => Arc::new(ParsedChunk {
-                ast,
-                source: source.clone(),
-            }),
-            baash_syntax::ParseOutcome::NeedMoreInput { open, .. } => {
-                let previous = std::mem::replace(&mut self.current, source);
-                self.diagnose(&Diagnostic::error(
-                    baash_syntax::codes::NEED_MORE_INPUT,
-                    open,
-                    "unexpected end of file in a process substitution",
-                ));
-                self.current = previous;
-                return Err("syntax error in a process substitution".to_string());
-            }
-            baash_syntax::ParseOutcome::Failed(diagnostics) => {
-                let previous = std::mem::replace(&mut self.current, source);
-                for diagnostic in &diagnostics {
-                    self.diagnose(diagnostic);
-                }
-                self.current = previous;
-                return Err("syntax error in a process substitution".to_string());
-            }
-        };
-
-        let capture = baash_sys::create_unlinked_temp(0)
-            .map_err(|error| format!("cannot create a process substitution file: {error}"))?;
-        // The descriptor the path names is *not* the one the body writes to.
-        // A redirect may take any number, `exec 3< <(…)` most obviously, and
-        // landing on this one would overwrite it — then closing it at the end
-        // of the command would close the redirect instead. bash keeps its own
-        // process-substitution descriptors above the user's range for the same
-        // reason; sixty is where this shell's saved-descriptor search starts.
-        let shared = baash_sys::dup_above(capture.as_raw_fd(), 60)
-            .map_err(|error| format!("cannot share a process substitution: {error}"))?;
-        // Fails before the body runs when the platform cannot name an open
-        // descriptor, which is the honest answer on Windows.
-        let path = baash_sys::fd_path(shared.as_raw_fd())
-            .ok_or_else(|| "process substitution needs /dev/fd".to_string())?;
-
-        // The body is a subprogram: bash does not run `ERR` in it unless
-        // `errtrace` is on, and it keeps `errexit` out the same way a command
-        // substitution does. It also gets a scope of its own, so a variable it
-        // sets does not escape.
-        let outer_buffer = self.pipeline_buffer.take();
-        let deferred = std::mem::replace(&mut self.defer_next_spawn, false);
-        let suppress_traps = !self.state.opts.errtrace;
-        if suppress_traps {
-            self.err_trap_suppressed += 1;
-        }
-        let saved_line = (self.line_source.clone(), self.line_offset, self.line_number);
-        let scope = self.open_scope();
-        if !self.state.opts.inherit_errexit {
-            self.state.opts.errexit = false;
-        }
-        // The body writes through descriptor 1, and an external command in it
-        // inherits the descriptor through its spawn plan.
-        let saved_stdout = baash_sys::dup(1).ok();
-        if let Err(error) = baash_sys::dup2(capture.as_raw_fd(), 1) {
-            self.close_scope(scope);
-            self.pipeline_buffer = outer_buffer;
-            self.defer_next_spawn = deferred;
-            if suppress_traps {
-                self.err_trap_suppressed -= 1;
-            }
-            return Err(format!("cannot redirect a process substitution: {error}"));
-        }
-        let unwind = self.eval_node(&chunk, chunk.ast.root, Ctx::default());
-        let _ = unwind.status();
-        self.pipeline_buffer = outer_buffer;
-        self.defer_next_spawn = deferred;
-        if suppress_traps {
-            self.err_trap_suppressed -= 1;
-        }
-        (self.line_source, self.line_offset, self.line_number) = saved_line;
-        match saved_stdout {
-            Some(saved) => {
-                let _ = baash_sys::dup2(saved.as_raw_fd(), 1);
-            }
-            None => {
-                let _ = baash_sys::close(1);
-            }
-        }
-        self.close_scope(scope);
-        let _ = self.after_foreground_wait();
-
+        let chunk = self.parse_substitution(src)?;
+        let (capture, shared, path) = self.substitution_file()?;
+        self.run_substitution_body(&chunk, 1, capture.as_raw_fd())?;
         // The file is unlinked already, so the descriptor is the only way to
         // reach the data: keep the shared one, and let a child inherit it. A
         // child inherits a Unix descriptor only when it is not close-on-exec;
@@ -1063,6 +1073,81 @@ impl Interp {
         self.process_substitutions
             .push((self.process_substitution_owner, shared));
         Ok(path)
+    }
+
+    /// Record `>(…)` and return the path the command writes to.
+    ///
+    /// Nothing runs yet: this body is a *reader*, and its input is what the
+    /// command produces. `eval_node` runs it when the node that produced the
+    /// word returns — after the command, in the order the words were expanded.
+    /// bash runs the reader concurrently and can therefore see the output as it
+    /// is written; this shell has one thread, so it reads the file afterwards.
+    pub(crate) fn substitute_output(&mut self, src: &[u8]) -> Result<Vec<u8>, String> {
+        let chunk = self.parse_substitution(src)?;
+        let (file, shared, path) = self.substitution_file()?;
+        #[cfg(unix)]
+        baash_sys::set_cloexec(shared.as_raw_fd(), false)
+            .map_err(|error| format!("cannot share a process substitution: {error}"))?;
+        drop(file);
+        self.output_substitutions
+            .push((self.process_substitution_owner, shared, chunk));
+        Ok(path)
+    }
+
+    /// The writable file a substitution hands out, its shared descriptor above
+    /// the user's range, and the `/dev/fd/N` path that names it.
+    ///
+    /// The descriptor the path names is *not* the one the body writes to. A
+    /// redirect may take any number, `exec 3< <(…)` most obviously, and landing
+    /// on this one would overwrite it — then closing it at the end of the
+    /// command would close the redirect instead. bash keeps its own
+    /// process-substitution descriptors above the user's range for the same
+    /// reason; sixty is where this shell's saved-descriptor search starts.
+    fn substitution_file(
+        &mut self,
+    ) -> Result<(baash_sys::OwnedFd, baash_sys::OwnedFd, Vec<u8>), String> {
+        let file = baash_sys::create_unlinked_temp(0)
+            .map_err(|error| format!("cannot create a process substitution file: {error}"))?;
+        let shared = baash_sys::dup_above(file.as_raw_fd(), 60)
+            .map_err(|error| format!("cannot share a process substitution: {error}"))?;
+        // Fails before anything runs when the platform cannot name an open
+        // descriptor, which is the honest answer on Windows.
+        let path = baash_sys::fd_path(shared.as_raw_fd())
+            .ok_or_else(|| "process substitution needs /dev/fd".to_string())?;
+        Ok((file, shared, path))
+    }
+
+    /// Run the `>(…)` bodies that `owner` collected, in expansion order, with
+    /// their standard input on the file the command wrote.
+    ///
+    /// The consumer is not the command: `$?` and `$PIPESTATUS` are put back
+    /// afterwards, so `echo hi > >(false); echo $?` still reports the `echo`.
+    fn run_output_substitutions(&mut self, owner: u64) {
+        let mut mine = Vec::new();
+        let mut rest = Vec::new();
+        for entry in std::mem::take(&mut self.output_substitutions) {
+            if entry.0 == owner {
+                mine.push(entry);
+            } else {
+                rest.push(entry);
+            }
+        }
+        self.output_substitutions = rest;
+        if mine.is_empty() {
+            return;
+        }
+        let saved_status = self.status();
+        let saved_pipeline = self.pipeline_status.clone();
+        for (_, fd, chunk) in mine {
+            let raw = fd.as_raw_fd();
+            // `shared` was a duplicate, so its offset is the file's: put it
+            // back at the start before the reader sees it.
+            let _ = baash_sys::lseek(raw, 0, baash_sys::seek::SET);
+            let _ = self.run_substitution_body(&chunk, 0, raw);
+        }
+        self.pipeline_status = saved_pipeline;
+        self.set_status(saved_status);
+        self.sync_specials();
     }
 
     /// Run a `$(…)` body in a scope, capture its stdout and strip trailing
