@@ -326,6 +326,20 @@ impl CompletionEngine {
     /// returns nothing, the rule's `-o default|bashdefault|dirnames` fallback
     /// runs; `-o plusdirs` adds directories to whatever came back.
     pub fn deferred_menu(&self, deferred: &Deferred, replies: &Replies) -> Menu {
+        // The parser's word is not the replacement span for a `-F` completion.
+        // bash splices `COMPREPLY` over the `COMP_WORDS` element under the
+        // cursor, and that split is `COMP_WORDBREAKS`'s, where `:` separates
+        // `host` from `path`. Without this, `rsync host:src/<TAB>` replaced the
+        // whole token with `src/…` and the host disappeared. The span is only
+        // ever *narrowed*: a quoted word's insertion point is already inside
+        // the quote, where the parser's start is the later one, and readline
+        // replaces from there too.
+        let mut ctx = deferred.ctx().clone();
+        let start = deferred.line_start() + deferred.word().start;
+        if start > ctx.replace.start && start <= ctx.replace.end {
+            ctx.prefix = deferred.line()[deferred.word().start..deferred.point()].to_vec();
+            ctx.replace.start = start;
+        }
         let spec = deferred.spec();
         let options = &replies.options;
         let mut candidates: Vec<Candidate> = replies
@@ -381,7 +395,7 @@ impl CompletionEngine {
             }
         }
         candidates.truncate(self.config.max_candidates);
-        Menu::new(deferred.ctx().clone(), candidates)
+        Menu::new(ctx, candidates)
     }
 
     /// The static carapace tables' menu, when they have something to say.

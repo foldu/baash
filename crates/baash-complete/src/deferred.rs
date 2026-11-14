@@ -57,6 +57,16 @@ pub struct Deferred {
     words: Vec<Vec<u8>>,
     /// `COMP_CWORD`: the index of the word the cursor is in.
     cword: usize,
+    /// The span of that word within [`Deferred::line`], which is what the
+    /// replies replace.
+    ///
+    /// A `-F` function's `COMPREPLY` entries are spliced over the `COMP_WORDS`
+    /// element under the cursor, not over the parser's word: `rsync
+    /// host:src/<TAB>` replaces `src/` and keeps `host:`, and the same is true
+    /// of `scp`, `git` remotes and every other `host:path` completion.
+    word: Span,
+    /// Where [`Deferred::line`] starts in the editing line.
+    line_start: usize,
 }
 
 impl Deferred {
@@ -75,7 +85,7 @@ impl Deferred {
         let cursor = cursor.min(line.len());
         let start = command_start(line, cursor);
         let region = &line[start..cursor.max(start)];
-        let (words, cword) = split_words(region, cursor - start, breaks);
+        let (words, cword, word) = split_words(region, cursor - start, breaks);
         Self {
             ctx,
             spec,
@@ -84,6 +94,8 @@ impl Deferred {
             line: region.to_vec(),
             words,
             cword,
+            word,
+            line_start: start,
         }
     }
 
@@ -110,6 +122,19 @@ impl Deferred {
     /// `COMP_CWORD`.
     pub fn cword(&self) -> usize {
         self.cword
+    }
+
+    /// The span of the current `COMP_WORDS` element within [`Deferred::line`].
+    ///
+    /// A completion replaces exactly this, so a break character the parser
+    /// does not split on (a `:` in `host:path`) stays where the user put it.
+    pub fn word(&self) -> Span {
+        self.word.clone()
+    }
+
+    /// Where [`Deferred::line`] begins in the editing line.
+    pub fn line_start(&self) -> usize {
+        self.line_start
     }
 
     /// The command word, which bash passes as the function's `$1`.
@@ -210,13 +235,18 @@ pub fn command_start(line: &[u8], cursor: usize) -> usize {
     start
 }
 
-/// Split `text` on `COMP_WORDBREAKS`, returning the words and the cursor's
-/// index.
+/// Split `text` on `COMP_WORDBREAKS`, returning the words, the cursor's index
+/// and the span of the word it is in.
 ///
 /// `cursor` is an offset into `text`. Quote characters are kept and quoted
 /// breaks are ignored, which is what bash's splitter does; a break character
 /// that is not layout becomes a word of its own.
-pub fn split_words(text: &[u8], cursor: usize, breaks: &[u8]) -> (Vec<Vec<u8>>, usize) {
+///
+/// The span is what a completion replaces, and it is not the parser's word: a
+/// `-F` function's replies are spliced over the `COMP_WORDS` element, so
+/// `host:src/al<TAB>` keeps the host, which is how `scp`/`rsync` completions
+/// work in bash.
+pub fn split_words(text: &[u8], cursor: usize, breaks: &[u8]) -> (Vec<Vec<u8>>, usize, Span) {
     let breaks: &[u8] = if breaks.is_empty() {
         DEFAULT_WORDBREAKS
     } else {
@@ -231,6 +261,13 @@ pub fn split_words(text: &[u8], cursor: usize, breaks: &[u8]) -> (Vec<Vec<u8>>, 
     let mut quote = Quote::None;
     let mut at = 0usize;
     while at < text.len() {
+        // The element starts at its first byte, whatever that byte is. The
+        // quote arms below `continue` before reaching the plain-word
+        // assignment, which used to leave a quoted element's span starting at
+        // the previous word (`cmd "/a b"` gave `0..len` for the second word).
+        if current.is_empty() {
+            start = at;
+        }
         let byte = text[at];
         if quote == Quote::Single {
             current.push(byte);
@@ -301,9 +338,6 @@ pub fn split_words(text: &[u8], cursor: usize, breaks: &[u8]) -> (Vec<Vec<u8>>, 
             at += 1;
             continue;
         }
-        if current.is_empty() {
-            start = at;
-        }
         current.push(byte);
         ends_with_break = false;
         at += 1;
@@ -337,7 +371,7 @@ pub fn split_words(text: &[u8], cursor: usize, breaks: &[u8]) -> (Vec<Vec<u8>>, 
         spans.insert(index, cursor..cursor);
         index
     };
-    (words, index)
+    (words, index, spans[index].clone())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -349,6 +383,12 @@ enum Quote {
 
 #[cfg(test)]
 mod tests {
+    /// The words and the index, without the span the production caller also
+    /// needs.
+    fn split_words(text: &[u8], cursor: usize, breaks: &[u8]) -> (Vec<Vec<u8>>, usize) {
+        let (words, index, _span) = super::split_words(text, cursor, breaks);
+        (words, index)
+    }
     use super::*;
 
     #[test]

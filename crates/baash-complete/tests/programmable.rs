@@ -604,3 +604,55 @@ fn an_empty_reply_falls_back_to_the_rules_options() {
         insert_bytes(&menu)
     );
 }
+
+/// A `-F` reply replaces the `COMP_WORDS` element, not the parser's word.
+///
+/// `:` is in `COMP_WORDBREAKS`, so bash replaces `src/a` inside
+/// `jupiter.home.5kw.li:src/a` and leaves the host alone. This is the shape
+/// bash-completion's `scp`/`rsync` completions rely on: their replies are
+/// `src/alpha`, without the host, because the host is not part of the word they
+/// are spliced over.
+#[test]
+fn a_reply_replaces_the_word_break_element_and_keeps_the_host() {
+    let engine =
+        CompletionEngine::new().with_specs(Rules::new(vec![(b"rsync", spec_function("_f"))]));
+    let line: &[u8] = b"rsync -azvP ./ jupiter.home.5kw.li:src/a";
+    let deferred = engine.deferred(line, line.len()).expect("deferred");
+    let menu = engine.deferred_menu(
+        &deferred,
+        &Replies::new(vec![b"src/alpha".to_vec()], Vec::new()),
+    );
+    let mut buffer = line.to_vec();
+    let span = menu.apply(&mut buffer, 0).expect("an insertion");
+    assert_eq!(
+        &buffer[..],
+        b"rsync -azvP ./ jupiter.home.5kw.li:src/alpha ",
+        "the host stays; the reply replaces the path"
+    );
+    assert_eq!(span.start, line.len() - 5, "the reply replaces `src/a`");
+}
+
+/// The narrowing never widens the parser's span: inside a quote the insertion
+/// point is already past the break character, and readline replaces from there
+/// too.
+#[test]
+fn a_quoted_word_keeps_the_parser_replacement_point() {
+    let engine =
+        CompletionEngine::new().with_specs(Rules::new(vec![(b"cmd", spec_function("_f"))]));
+    let line: &[u8] = b"cmd \"/tmp/My Fi\"";
+    let deferred = engine.deferred(line, line.len()).expect("deferred");
+    assert_eq!(
+        deferred.word(),
+        4..line.len(),
+        "the element is the quoted word"
+    );
+    let parsed = baash_complete::context(line, line.len(), &baash_syntax::ParseOpts::DEFAULT);
+    let menu = engine.deferred_menu(
+        &deferred,
+        &Replies::new(vec![b"/tmp/My File".to_vec()], Vec::new()),
+    );
+    assert_eq!(
+        menu.replace, parsed.replace,
+        "the parser already inserts past the opening quote, so nothing narrows"
+    );
+}

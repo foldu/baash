@@ -1117,6 +1117,16 @@ at a boundary, and a `trap` on `INT` still runs. What is **not** implemented is
 bash's abort: an in-process command runs to completion, and the signal is gone
 by the time the prompt returns.
 
+**A `-F` reply replaces the `COMP_WORDS` element, not the parser's word.**
+bash splices `COMPREPLY` over the word delimited by `COMP_WORDBREAKS`, and
+`:` is one of them, so `rsync host:src/<TAB>` replaces `src/` and keeps
+`host:` — which is exactly what bash-completion's `scp`/`rsync` rules assume
+when they answer with `src/alpha` and no host. `deferred_menu` therefore
+narrows the replacement start to the `COMP_WORDS` element the function was
+called with; it never widens it, because inside a quote the parser's insertion
+point is already past the break character and readline replaces from there too.
+Getting this wrong deleted the host from every `host:path` completion.
+
 **`read` never over-reads.** A seekable descriptor is read in one chunk and
 rewound by the surplus with `lseek`; a pipe is read one byte at a time because
 bytes cannot be given back to it. `Interp::read_buffers` only holds a surplus

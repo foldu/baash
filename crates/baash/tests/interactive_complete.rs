@@ -680,6 +680,34 @@ fn a_large_path_is_scanned_off_the_keystroke_path() {
     cleanup(&mut session, &home, &work);
 }
 
+/// A `-F` reply replaces the `COMP_WORDS` element, not the shell's word.
+///
+/// `:` is in `COMP_WORDBREAKS`, so a remote argument is three elements:
+/// `host`, `:` and `path`. bash-completion's `scp`/`rsync` completions reply
+/// with the path alone, because that is what readline splices over — and
+/// splicing it over the whole shell word used to delete the host, so
+/// `rsync host:src/<TAB>` left `src/…`.
+#[test]
+fn a_remote_argument_keeps_its_host_when_the_rule_answers() {
+    let (mut session, home, work) = session("remote-host");
+
+    session.line("_remote() { COMPREPLY=(src/alpha); }");
+    session.line("complete -F _remote rsync");
+    session.send(b"rsync -azvP ./ jupiter.home.5kw.li:src/a\t");
+    session.expect(b"jupiter.home.5kw.li:src/alpha", Duration::from_secs(10));
+    // The completed line is still there, so `exit` would be appended to it (and
+    // a real `rsync` would then run). Clear it first: this harness has no
+    // `Ctrl-C` in `cleanup`, unlike the carapace one.
+    session.send(b"\x03");
+    session.prompt();
+    // `exit 0`, not the bare `exit` `cleanup` sends: `Ctrl-C` left `$?` at 130
+    // and a bare `exit` inherits it.
+    session.send(b"exit 0\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 /// The real bash-completion library, end to end: its `-D` loader installs a
 /// command's script on the first Tab (status 124), and the retry runs it.
 #[test]
