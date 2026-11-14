@@ -40,9 +40,11 @@ use baash_runtime::History;
 use crate::completion::MenuState;
 use crate::key::{Code, Decoder, Key, Modifiers};
 use crate::line::Line;
+use crate::paste::quoted;
 use crate::prompt::{ExpandedPrompt, Prompt};
 use crate::render::{Frame, MenuView, Renderer};
 use crate::term::{Input, Terminal};
+use crate::undo::{EditKind, Undo};
 
 /// How long the prompt waits for a cursor-position report.
 ///
@@ -258,6 +260,13 @@ pub struct Config {
     /// 500 ms); this is the backstop for a hook that never answers, so the
     /// line is submitted as typed rather than held forever.
     pub submit_wait: std::time::Duration,
+    /// Whether a pasted word is quoted when the shell would read it as syntax.
+    ///
+    /// On by default: pasting `https://…/watch?v=abc&t=10` must not run
+    /// `https://…/watch?v=abc` in the background. The rule is deliberately
+    /// narrow ([`crate::paste`]), and the first `Backspace` after a quoted
+    /// paste removes the quote pair, so a wrong guess costs one keystroke.
+    pub paste_quoting: bool,
 }
 
 impl Default for Config {
@@ -270,6 +279,7 @@ impl Default for Config {
             max_menu_rows: 8,
             auto_suggest: true,
             submit_wait: DEFERRED_KEY_WAIT,
+            paste_quoting: true,
         }
     }
 }
@@ -366,6 +376,27 @@ pub struct Editor<'a> {
     deferred_deadline: Option<std::time::Instant>,
     /// How long a deferred key may wait (see [`Config::submit_wait`]).
     submit_wait: std::time::Duration,
+    /// Whether a pasted word that the shell would read as syntax is quoted
+    /// (see [`Config::paste_quoting`]).
+    paste_quoting: bool,
+    /// The undo history for the line being edited.
+    undo: Undo,
+    /// Where the quotes of the last auto-quoted paste are, while they can
+    /// still be taken off as a pair by `Backspace`.
+    ///
+    /// Cleared by any other key: the offsets are only meaningful while the
+    /// buffer is exactly what the paste left, and a `Backspace` that removes
+    /// both quotes is the escape hatch that makes the guess cheap.
+    paste_quotes: Option<PasteQuotes>,
+}
+
+/// The two quote bytes an auto-quoted paste was wrapped in.
+#[derive(Clone, Copy, Debug)]
+struct PasteQuotes {
+    /// The offset of the opening quote.
+    open: usize,
+    /// The offset of the closing quote.
+    close: usize,
 }
 
 impl<'a> Editor<'a> {
@@ -411,6 +442,9 @@ impl<'a> Editor<'a> {
             deferred_key: None,
             deferred_deadline: None,
             submit_wait: config.submit_wait,
+            paste_quoting: config.paste_quoting,
+            undo: Undo::default(),
+            paste_quotes: None,
         }
     }
 
@@ -602,11 +636,111 @@ impl<'a> Editor<'a> {
         key: Key,
         shell: &mut Option<&mut dyn ShellCompletion>,
     ) -> io::Result<Flow> {
+        // A paste is its own undo step; a typed character may join the run
+        // before it (`undo.rs`). Anything else is a step of its own, and a key
+        // that did not touch the text records nothing at all.
+        let kind = match key.code {
+            Code::Paste(_) => EditKind::Paste,
+            Code::Char(_) | Code::Byte(_) => EditKind::Typing,
+            _ => EditKind::Other,
+        };
         let flow = self.handle_with(key, shell)?;
         if flow == Flow::Continue {
+            self.record_edit(kind);
             self.draw()?;
         }
         Ok(flow)
+    }
+
+    /// Note the line's new state in the undo history.
+    ///
+    /// `kind` decides whether the edit joins the previous step; a key that did
+    /// not change the text is not a step. Any key also retires the "the last
+    /// thing that happened was a quoted paste" marker, since a later
+    /// `Backspace` must then be an ordinary one.
+    fn record_edit(&mut self, kind: EditKind) {
+        if kind != EditKind::Paste {
+            self.paste_quotes = None;
+        }
+        self.undo.record(&self.line, kind);
+    }
+
+    /// Undo the last edit of the line being typed.
+    fn undo(&mut self) {
+        self.paste_quotes = None;
+        self.menu = None;
+        if self.undo.undo(&mut self.line) {
+            self.dirty = true;
+        }
+    }
+
+    /// Redo the edit the last undo took back.
+    fn redo(&mut self) {
+        self.paste_quotes = None;
+        self.menu = None;
+        if self.undo.redo(&mut self.line) {
+            self.dirty = true;
+        }
+    }
+
+    /// Insert a bracketed paste, quoting it when the shell would read it as
+    /// syntax rather than as the data it is.
+    ///
+    /// The quote context comes from the completer, which is the one thing here
+    /// that has a lexer; the policy is [`crate::paste`]. A paste that is
+    /// wrapped in quotes is remembered so that one `Backspace` can take the
+    /// pair off again.
+    fn insert_paste(&mut self, bytes: &[u8]) {
+        let at = self.line.cursor();
+        let quoted = self
+            .paste_quoting
+            .then(|| {
+                let context = self.completer.quote_context(self.line.buffer(), at);
+                quoted(bytes, context)
+            })
+            .flatten();
+        let Some(quoted) = quoted else {
+            self.line.insert(bytes);
+            return;
+        };
+        if quoted.wrapped {
+            // Only a pair this editor added can be taken off again; an escape
+            // made inside the user's own `'…'` has no pair of its own.
+            self.paste_quotes = Some(PasteQuotes {
+                open: at,
+                close: at + quoted.text.len() - 1,
+            });
+        }
+        self.line.insert(&quoted.text);
+    }
+
+    /// Take the quotes off the last auto-quoted paste, if they are still there.
+    ///
+    /// Returns `false` when this `Backspace` is an ordinary one. The check is
+    /// structural rather than a flag: a buffer that no longer holds a quote at
+    /// each recorded offset (because something was typed, killed or undone) is
+    /// not the paste any more, and a stale marker must not eat bytes.
+    fn unquote_paste(&mut self) -> bool {
+        let Some(PasteQuotes { open, close }) = self.paste_quotes.take() else {
+            return false;
+        };
+        let buffer = self.line.buffer();
+        if open >= close
+            || close >= buffer.len()
+            || buffer[open] != b'\''
+            || buffer[close] != b'\''
+            || self.line.cursor() != close + 1
+        {
+            return false;
+        }
+        // Remove the closing quote, then the opening one, and leave the cursor
+        // after the (now bare) pasted text.
+        self.line.set_cursor(close);
+        self.line.delete();
+        self.line.set_cursor(open);
+        self.line.delete();
+        self.line.set_cursor(close - 1);
+        true
     }
 
     /// Reset per-line state and paint the first prompt.
@@ -625,6 +759,11 @@ impl<'a> Editor<'a> {
         self.completion_pending = false;
         self.deferred_key = None;
         self.deferred_deadline = None;
+        // A new line starts a new history: `Ctrl-Z` must never reach back into
+        // the command before this one, and the pasted-quote offsets belong to
+        // the old buffer.
+        self.undo.reset(&self.line);
+        self.paste_quotes = None;
         self.renderer.reset();
         self.dirty = true;
     }
@@ -903,9 +1042,7 @@ impl<'a> Editor<'a> {
             (Code::Byte(byte), _) => {
                 self.line.insert(&[byte]);
             }
-            (Code::Paste(bytes), _) => {
-                self.line.insert(&bytes);
-            }
+            (Code::Paste(bytes), _) => self.insert_paste(&bytes),
             (Code::Enter, Modifiers::NONE) => return Ok(Flow::Submit),
             (Code::Tab, Modifiers::NONE) => self.complete_with(shell)?,
             // Shift-Tab is the menu's backward step; on the line it is not a
@@ -923,7 +1060,12 @@ impl<'a> Editor<'a> {
             }
             (Code::FocusOut, _) => self.dirty = false,
             (Code::Backspace, Modifiers::NONE) => {
-                self.line.backspace();
+                // The first Backspace after an auto-quoted paste takes the
+                // quotes off again, leaving the pasted text: the paste was
+                // guessed at, and undoing the guess must cost one keystroke.
+                if !self.unquote_paste() {
+                    self.line.backspace();
+                }
             }
             // Alt-Backspace: `ESC DEL` or `ESC BS` in the legacy encoding, and
             // `CSI 127 ; 3 u` from a terminal that disambiguates. Both are
@@ -990,16 +1132,22 @@ impl<'a> Editor<'a> {
                 }
                 self.line.delete();
             }
-            // The console's end-of-file key. The editor turns processed input
-            // off so `Ctrl-C` is a keystroke rather than a signal, which also
-            // means `Ctrl-Z` arrives as a byte; without this arm a Windows
-            // user would have no key that ends the session.
-            #[cfg(windows)]
+            // Undo. On Windows the console has no end-of-file byte, so an
+            // empty line still spends `Ctrl-Z` on leaving the session; with
+            // text on the line it undoes, which is what every other platform
+            // does with both spellings (`Ctrl-Z` and readline's `Ctrl-_`).
             (Code::Char('z'), Modifiers::CTRL) => {
+                #[cfg(windows)]
                 if self.line.buffer().is_empty() && !self.line.in_continuation() {
                     return Ok(Flow::Eof);
                 }
+                self.undo();
             }
+            (Code::Char('_'), Modifiers::CTRL) => self.undo(),
+            // `Ctrl-Shift-Z` needs a guard: in a pattern `|` is alternation, so
+            // `CTRL | SHIFT` would mean either one (`redo` by `Ctrl-Z`, which
+            // the arm above already handles).
+            (Code::Char('z'), mods) if mods == Modifiers::CTRL | Modifiers::SHIFT => self.redo(),
             (Code::Char('e'), Modifiers::CTRL) => {
                 // `End`'s readline spelling. Moving to the end is the same
                 // gesture as pressing End there, so being there already
@@ -1188,6 +1336,9 @@ impl<'a> Editor<'a> {
         let was_pending = self.completion_pending;
         self.apply_completion(state)?;
         if was_pending && !self.completion_pending {
+            // A menu that only opened shows nothing new in the text; one that
+            // inserted a candidate is an undo step of its own.
+            self.record_edit(EditKind::Other);
             self.draw()?;
         }
         Ok(())

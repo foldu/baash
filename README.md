@@ -65,6 +65,13 @@ expansion (so
 before each prompt with its output above it. `Ctrl-R` is
 readline-compatible reverse incremental search.
 
+Paste is safe by default: a bracketed paste that the shell would read as syntax
+is quoted, so `https://…/watch?v=abc&t=10` arrives as one argument instead of
+running a command in the background. The rule is narrow — a pasted pipeline is
+still a pipeline, `*.rs` still globs — and the guess is cheap to reverse: one
+`Backspace` takes the quotes off, and `Ctrl-Z` undoes the paste as a single
+step (`docs/contracts.md`).
+
 While `PS1` is untouched, the prompt is one tide-like line:
 
 ```text

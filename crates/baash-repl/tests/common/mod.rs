@@ -143,6 +143,13 @@ impl Completer for StubCompleter {
         let context = self.engine.context(line, cursor);
         Menu::new(context, self.candidates.clone())
     }
+
+    fn quote_context(&self, line: &[u8], cursor: usize) -> baash_complete::QuoteCtx {
+        // The stub fixes the *candidates*, not the line: the quote context
+        // comes from the real lexer, so a test can paste into `'…'` or `"…"`
+        // and get what the shell would.
+        self.engine.context(line, cursor).quote
+    }
 }
 
 /// A "is this buffer incomplete?" predicate.

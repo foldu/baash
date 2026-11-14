@@ -346,9 +346,14 @@ Known gaps, stated so they are not mistaken for behaviour:
   Left, so the editor sees only the legacy encodings and the new
   `Ctrl-Left`/`Ctrl-Delete` bindings do not fire (`docs/terminal.md` §12). The
   console has no bracketed-paste protocol — a paste arrives as keystrokes, so
-  `\x1b[200~` is never reached — and no focus sequence or cursor-position
-  report, so `?1004` is not written and the prompt keeps anchoring at column 0
-  after output that did not end with a newline (`docs/terminal.md` §5, §6).
+  `\x1b[200~` is never reached and the paste quoting in `docs/contracts.md`
+  ("A paste that is data is quoted") never fires: on Windows a pasted URL is
+  typed, and `&` is read as syntax exactly as it would be if the user had
+  typed it. `Ctrl-Z` still undoes, except on an empty line, where the console
+  has no end-of-file byte and that key leaves the session. There is no focus
+  sequence or cursor-position report either, so `?1004` is not written and the
+  prompt keeps anchoring at column 0 after output that did not end with a
+  newline (`docs/terminal.md` §5, §6).
   Still unobserved: the 250 ms resize sampling path (`§7`), `Ctrl-L`'s
   scrollback push (`§8`), whether OSC 52 reaches the Windows clipboard (`§9`),
   click-to-move, which needs both `click_events` and the cursor report (`§10`),

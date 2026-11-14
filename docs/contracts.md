@@ -1267,6 +1267,35 @@ over it) and `ESC [ O` leaves it alone. The Windows console has no such
 protocols: its paste goes into the input buffer, where the shell only sees the
 resulting keystrokes, and it has no focus sequence at all.
 
+**A paste that is data is quoted, and one paste is one undo step.** A bracketed
+paste is bytes copied from somewhere else, and the shell reads bytes as syntax:
+pasting `https://…/watch?v=abc&t=10` used to run the URL's command in the
+background and leave `t=10` as an assignment, `?q=$USER` expanded a variable,
+and a backtick in a query string ran what was inside it. `paste::quoted` wraps a
+paste in one pair of single quotes when the parse would otherwise change, and
+the rule is deliberately narrow: **no newline** (a pasted script is commands),
+not already one quoted word, and then either no whitespace plus a byte that
+changes the parse (`& ; | ( ) < > $ ` \ " ' !`, or a leading `#`) — or
+whitespace plus a path shape (`/`, `~`, `./`, `../`). Whitespace alone is never
+a reason, so a pasted pipeline is still a pipeline; `*.rs` and `~/src` lex as
+one plain word and keep their expansion. The wrapping is per quote context,
+which the completer answers (`Completer::quote_context`, one lex of the line
+the editor already has): inside `'…'` only the quote itself is escaped (the
+`'\''` repair — without it, pasting `don't` leaves an unterminated string),
+inside `"…"` only `$ ` \ " !` are, and a bare word is wrapped whole. A paste
+that already arrives as one quoted word is left alone at a bare cursor, but not
+inside the user's own quotes, where the same bytes are literal data.
+
+The guess is cheap to reverse, which is what makes it acceptable to make: the
+first `Backspace` after a quoted paste deletes both quotes and leaves the text,
+and the editor's undo history (`undo.rs`, `Ctrl-Z`/`Ctrl-_`, `Ctrl-Shift-Z`)
+records **one step per paste** — a run of typed characters is one step, every
+other edit its own. The history is a bounded stack of `Line::snapshot`s (64
+steps, 8 MiB of text), reset at every prompt so an undo never reaches into the
+previous command or into the scrollback. `fish` chose the opposite default
+(`fish-shell#2188`, closed as a duplicate): it never quotes, and relies on one
+`Ctrl-Z` undoing the whole paste, which is the mechanism copied here.
+
 **A key is a code and its modifiers.** `Key { code: Code, mods: Modifiers }`
 replaces the old one-variant-per-combination enum: `Modifiers` is a bit set
 with the kitty keyboard protocol's values (shift 1, alt 2, ctrl 4, super 8,

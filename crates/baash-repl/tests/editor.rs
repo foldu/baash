@@ -1845,3 +1845,148 @@ fn fixing_the_line_takes_the_hint_away() {
         final_frame(&text)
     );
 }
+
+/// A paste is data, so the shell must not read it as syntax.
+///
+/// `https://…/watch?v=abc&t=10` typed at a prompt runs `echo` in the background
+/// and leaves `t=10` as an assignment; pasted, it is one argument. The terminal
+/// brackets the paste (`ESC[200~` … `ESC[201~`), which is what tells the editor
+/// it was not typed.
+#[test]
+fn a_pasted_url_runs_as_one_argument() {
+    let (result, _) = run(
+        FakeTerminal::new(
+            b"printf '<%s>\\n' \x1b[200~https://www.youtube.com/watch?v=abc&t=10\x1b[201~\r",
+        ),
+        &StubCompleter::empty(),
+        &baash_repl::NeverNeedsMore,
+        plain_config(),
+    );
+    assert_eq!(
+        result,
+        ReadResult::Line(b"printf '<%s>\\n' 'https://www.youtube.com/watch?v=abc&t=10'\n".to_vec())
+    );
+}
+
+/// A pasted command stays a command: whitespace alone is not a reason to quote.
+#[test]
+fn a_pasted_command_is_left_alone() {
+    for script in [
+        &b"make -j8 && make test"[..],
+        b"curl -fsSL https://x/install.sh | sh",
+        b"git status",
+    ] {
+        let mut input = b"\x1b[200~".to_vec();
+        input.extend_from_slice(script);
+        input.extend_from_slice(b"\x1b[201~\r");
+        let (result, _) = run(
+            FakeTerminal::new(&input),
+            &StubCompleter::empty(),
+            &baash_repl::NeverNeedsMore,
+            plain_config(),
+        );
+        let ReadResult::Line(line) = result else {
+            panic!("expected a line");
+        };
+        let mut expected = script.to_vec();
+        expected.push(b'\n');
+        assert_eq!(line, expected, "pasted {}", String::from_utf8_lossy(script));
+    }
+}
+
+/// The guess is reversible with one keystroke: `Backspace` right after a quoted
+/// paste removes the pair, leaving the pasted text.
+#[test]
+fn a_backspace_after_a_quoted_paste_takes_the_quotes_off() {
+    let mut keys = chars("echo ");
+    keys.push(Key::of(Code::Paste(b"a&b".to_vec())));
+    keys.push(Key::of(Code::Backspace));
+    assert_eq!(apply_keys(&keys), (b"echo a&b".to_vec(), 8));
+
+    // A second Backspace is an ordinary one: the marker is spent.
+    keys.push(Key::of(Code::Backspace));
+    assert_eq!(apply_keys(&keys), (b"echo a&".to_vec(), 7));
+}
+
+/// One paste is one undo step, so the guess costs one `Ctrl-Z`.
+#[test]
+fn a_paste_is_one_undo_step() {
+    let mut keys = chars("echo ");
+    keys.push(Key::of(Code::Paste(b"https://x/watch?v=1&t=2".to_vec())));
+    keys.push(Key::ctrl('z'));
+    assert_eq!(
+        apply_keys(&keys),
+        (b"echo ".to_vec(), 5),
+        "the whole paste comes back out"
+    );
+    keys.push(Key::ctrl('z'));
+    assert_eq!(apply_keys(&keys), (b"".to_vec(), 0), "then the typing");
+    // Redo walks forward again.
+    keys.push(Key::with(
+        Code::Char('z'),
+        Modifiers::CTRL | Modifiers::SHIFT,
+    ));
+    assert_eq!(apply_keys(&keys).0, b"echo ");
+}
+
+/// `Ctrl-_` is readline's other undo spelling, and a run of typed characters is
+/// one step.
+#[test]
+fn typed_characters_undo_as_a_run() {
+    let mut keys = chars("git status");
+    keys.push(Key::ctrl('_'));
+    assert_eq!(apply_keys(&keys), (b"".to_vec(), 0));
+}
+
+/// Inside single quotes the only byte that can end the string is the quote, and
+/// pasting an apostrophe must not break the line: `'don't'` is a syntax error.
+#[test]
+fn an_apostrophe_pasted_inside_single_quotes_is_escaped() {
+    let mut input = b"echo '\x1b[200~don't\x1b[201~'\r".to_vec();
+    let (result, _) = run(
+        FakeTerminal::new(&input),
+        &StubCompleter::empty(),
+        &baash_repl::NeverNeedsMore,
+        plain_config(),
+    );
+    assert_eq!(
+        result,
+        ReadResult::Line(b"echo 'don'\\''t'\n".to_vec()),
+        "the pasted quote closes and reopens the string"
+    );
+    input.clear();
+}
+
+/// Inside double quotes only `$`, a backtick, a backslash, `"` and `!` are live;
+/// `&` and `?` are already literal and must not be escaped.
+#[test]
+fn pasting_inside_double_quotes_escapes_only_what_is_live() {
+    let mut input = b"echo \"\x1b[200~a&b\x1b[201~\"\r".to_vec();
+    let (result, _) = run(
+        FakeTerminal::new(&input),
+        &StubCompleter::empty(),
+        &baash_repl::NeverNeedsMore,
+        plain_config(),
+    );
+    assert_eq!(result, ReadResult::Line(b"echo \"a&b\"\n".to_vec()));
+
+    input.clear();
+}
+
+/// An escape inside the user's own quote is not a word this editor wrapped, so
+/// `Backspace` must be an ordinary one.
+///
+/// A paste of `'x'` inside `'…'` is escaped as `'\''x'\''`, which begins and
+/// ends with a quote — a marker keyed on the offsets alone would delete those
+/// two bytes and leave the line unbalanced.
+#[test]
+fn a_backspace_after_an_in_place_escape_deletes_one_character() {
+    let mut keys = chars("echo '");
+    keys.push(Key::of(Code::Paste(b"'x'".to_vec())));
+    let (buffer, _) = apply_keys(&keys);
+    assert_eq!(buffer, b"echo ''\\''x'\\''");
+    keys.push(Key::of(Code::Backspace));
+    let (buffer, cursor) = apply_keys(&keys);
+    assert_eq!(buffer, b"echo ''\\''x'\\'", "one character, not a pair");
+    assert_eq!(cursor, buffer.len());
+}

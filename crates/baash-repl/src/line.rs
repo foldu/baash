@@ -52,6 +52,35 @@ impl KillRing {
     }
 }
 
+/// The line's text, cursor and continuation boundary at one moment.
+///
+/// The editor's undo history compares and restores these; a snapshot is not
+/// valid for another line, and `Line::restore` re-establishes all three so an
+/// undo cannot move the edit boundary into scrollback.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Snapshot {
+    buffer: Vec<u8>,
+    cursor: usize,
+    start: usize,
+}
+
+impl Snapshot {
+    /// The whole buffer, including any continuation lines.
+    pub fn text(&self) -> &[u8] {
+        &self.buffer
+    }
+
+    /// The cursor as a byte offset into [`Snapshot::text`].
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// The byte offset the editable region started at.
+    pub fn start(&self) -> usize {
+        self.start
+    }
+}
+
 /// The editable line.
 #[derive(Debug, Default)]
 pub struct Line {
@@ -119,6 +148,25 @@ impl Line {
         self.buffer.extend_from_slice(text);
         self.start = 0;
         self.cursor = self.buffer.len();
+    }
+
+    /// The line's text, cursor and boundary, for the undo history.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            buffer: self.buffer.clone(),
+            cursor: self.cursor,
+            start: self.start,
+        }
+    }
+
+    /// Put the line back the way `snapshot` found it.
+    ///
+    /// The kill ring is deliberately left alone: an undo is not a kill, and
+    /// `Ctrl-Y` after one should still yank what it yanked before.
+    pub fn restore(&mut self, snapshot: &Snapshot) {
+        self.buffer.clone_from(&snapshot.buffer);
+        self.cursor = snapshot.cursor;
+        self.start = snapshot.start;
     }
 
     /// Take the buffer, leaving an empty line behind.

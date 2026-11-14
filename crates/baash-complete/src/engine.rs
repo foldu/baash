@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use baash_syntax::Expect;
 use baash_syntax::ParseOpts;
 
+use baash_lang::QuoteCtx;
+
 use crate::candidate::{CandKind, Candidate, dedupe};
 #[cfg(feature = "carapace")]
 use crate::carapace::CarapaceProvider;
@@ -48,6 +50,19 @@ pub trait Completer {
     /// `cursor` is clamped to the line, and a line that does not parse is a
     /// normal input, not an error.
     fn complete(&self, line: &[u8], cursor: usize) -> Menu;
+
+    /// The quote context at `cursor`.
+    ///
+    /// The line editor pastes at the cursor and has to know whether that point
+    /// is inside a quoted string before it decides how to escape the paste: a
+    /// `'` inside `'…'` needs `'\''`, a `&` inside `"…"` needs nothing at all.
+    /// The editor holds a `Completer` and deliberately no parser
+    /// (`docs/contracts.md`), so the question is answered here, where the
+    /// lexer already runs. A completer that does not lex answers `Unquoted`,
+    /// which is also the answer at a fresh prompt.
+    fn quote_context(&self, _line: &[u8], _cursor: usize) -> QuoteCtx {
+        QuoteCtx::Unquoted
+    }
 }
 
 /// Knobs for [`CompletionEngine`].
@@ -790,6 +805,12 @@ impl Completer for CompletionEngine {
         let ctx = self.context(line, cursor);
         let candidates = self.gather(&ctx);
         Menu::new(ctx, candidates)
+    }
+
+    fn quote_context(&self, line: &[u8], cursor: usize) -> QuoteCtx {
+        // One lex of the line the editor already has; the same answer the
+        // menu carries, without gathering candidates.
+        self.context(line, cursor).quote
     }
 }
 

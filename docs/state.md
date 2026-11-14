@@ -231,6 +231,11 @@ delegates everything else: line editing to `baash-repl`, execution to the
   holds;
 * **`Ctrl-R` reverse incremental search** with the `(reverse-i-search)` prompt,
   repeat-search, `Enter`/arrows to accept, `Esc`/`Ctrl-G` to abort;
+* **bracketed paste that is data is quoted** — a pasted URL with `&`, `$` or a
+  backtick reaches the command as one argument — and **`Ctrl-Z`/`Ctrl-_` undo**
+  the line, one step per paste and one per run of typed characters, with
+  `Ctrl-Shift-Z` redoing and one `Backspace` taking a quoted paste's quotes off
+  (`docs/contracts.md`);
 * **`PS2` continuation** — `for x in a b; do` ⏎ shows `> `, and the assembled
   command runs correctly after `done`;
 * entering commands, running programs, `$((…))`, `exit`;

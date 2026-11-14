@@ -90,9 +90,11 @@ mod display;
 mod editor;
 mod key;
 mod line;
+mod paste;
 mod prompt;
 mod render;
 mod term;
+mod undo;
 
 pub use baash_highlight::Theme;
 
