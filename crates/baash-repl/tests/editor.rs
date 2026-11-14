@@ -1990,3 +1990,58 @@ fn a_backspace_after_an_in_place_escape_deletes_one_character() {
     assert_eq!(buffer, b"echo ''\\''x'\\'", "one character, not a pair");
     assert_eq!(cursor, buffer.len());
 }
+
+/// A pasted block is a multiline edit, not a command to run.
+///
+/// The newlines in it are buffer rows, so nothing in the paste submits: the
+/// user presses `Enter` once, at the end, and it runs as one command. Its inner
+/// rows carry the continuation prompt, so the block reads as the multiline
+/// thing it is rather than as one overlong line.
+#[test]
+fn a_pasted_block_is_a_multiline_buffer_that_waits_for_enter() {
+    let mut term = FakeTerminal::sized(b"", 80, 24);
+    let sink = term.output_handle();
+    let completer = StubCompleter::empty();
+    let mut editor = Editor::with_config(
+        &mut term,
+        &completer,
+        &baash_repl::NeverNeedsMore,
+        plain_config(),
+    );
+    editor
+        .step(Key::of(Code::Paste(b"echo one\necho two".to_vec())))
+        .expect("paste");
+    // Nothing has run yet: the line holds both rows.
+    assert_eq!(editor.line().buffer(), b"echo one\necho two");
+    let frame = output_text(&sink);
+    assert!(
+        frame.contains("echo one\r\n> echo two"),
+        "the second row carries the continuation prompt: {frame:?}"
+    );
+
+    // Enter submits the whole block as one command.
+    let (result, _) = run(
+        FakeTerminal::new(b"\x1b[200~echo one\necho two\x1b[201~\r"),
+        &StubCompleter::empty(),
+        &baash_repl::NeverNeedsMore,
+        plain_config(),
+    );
+    assert_eq!(result, ReadResult::Line(b"echo one\necho two\n".to_vec()));
+}
+
+/// A copy that carries `\r\n` — a browser code block, a Windows editor — must
+/// not put carriage returns inside the words.
+#[test]
+fn a_crlf_paste_becomes_newlines() {
+    let (result, _) = run(
+        FakeTerminal::new(b"\x1b[200~echo one\r\necho two\r\n\x1b[201~\r"),
+        &StubCompleter::empty(),
+        &baash_repl::NeverNeedsMore,
+        plain_config(),
+    );
+    assert_eq!(
+        result,
+        ReadResult::Line(b"echo one\necho two\n".to_vec()),
+        "no \\r in the buffer, and no phantom empty last line"
+    );
+}

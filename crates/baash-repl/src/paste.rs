@@ -27,7 +27,9 @@
 //!
 //! None of this applies to a paste with a newline in it: a pasted script is
 //! commands by definition, and folding it into one quoted word would be worse
-//! than useless. Neither does it apply, at a bare cursor, to a paste that
+//! than useless. The editor shows such a block as a multiline edit — one row
+//! per line, each inner row behind the continuation prompt — and nothing in it
+//! submits anything, so running it waits for `Enter`. Neither does it apply, at a bare cursor, to a paste that
 //! already arrives quoted — the user copied a shell-ready argument, and
 //! `''url''` would only be noise. Inside the user's own quotes there is no such
 //! thing: the bytes are literal data, and a `'` among them still has to be
@@ -40,6 +42,37 @@
 //! what makes the guess cheap enough to make by default.
 
 use baash_lang::{QuoteCtx, quote};
+
+/// The bytes a paste actually contributes.
+///
+/// A copy from a browser or a Windows editor carries `\r\n`, and a lone `\r`
+/// reaching the line is a `^M` inside the word — visible in the frame, and
+/// silently part of the argument. Both become `\n`; every other byte is left
+/// exactly as it was copied, escapes included, because `docs/contracts.md`
+/// promises that a paste is inserted verbatim and a shell that quietly drops
+/// bytes from the user's clipboard is worse than one that shows them.
+///
+/// One trailing newline goes: copying a line usually takes its terminator, and
+/// a block that ends with an empty row makes `Enter` run on nothing.
+pub(crate) fn normalise(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\r' {
+            if bytes.get(index + 1) == Some(&b'\n') {
+                index += 1;
+            }
+            out.push(b'\n');
+        } else {
+            out.push(bytes[index]);
+        }
+        index += 1;
+    }
+    if out.last() == Some(&b'\n') {
+        out.pop();
+    }
+    out
+}
 
 /// A paste's quoted form.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -189,10 +222,27 @@ fn escaped(bytes: &[u8], index: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{QuoteCtx, quoted};
+    use super::{QuoteCtx, normalise, quoted};
 
     fn unquoted(bytes: &[u8]) -> Option<String> {
         quoted(bytes, QuoteCtx::Unquoted).map(|out| String::from_utf8_lossy(&out.text).into_owned())
+    }
+
+    #[test]
+    fn a_pasted_block_gets_line_endings_not_carriage_returns() {
+        // What a browser or a Windows editor puts on the clipboard.
+        assert_eq!(
+            normalise(b"echo one\r\necho two\r\n"),
+            b"echo one\necho two"
+        );
+        // A lone `\r` is a line break too; neither leaves a `^M` in a word.
+        assert_eq!(normalise(b"echo one\recho two"), b"echo one\necho two");
+        // Blank lines inside the block survive; only the one at the end goes.
+        assert_eq!(normalise(b"a\n\nb\n"), b"a\n\nb");
+        // Everything else is the user's bytes, escapes included.
+        assert_eq!(normalise(b"echo \x1b[A"), b"echo \x1b[A");
+        assert_eq!(normalise(b"\tkeep the tab\n"), b"\tkeep the tab");
+        assert_eq!(normalise(b""), b"");
     }
 
     #[test]

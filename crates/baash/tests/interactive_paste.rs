@@ -314,3 +314,53 @@ fn ctrl_z_takes_a_paste_back() {
 
     cleanup(&mut session, &home, &work);
 }
+
+/// A pasted block waits for `Enter`, and its rows are a multiline edit.
+///
+/// Pasting a script must not run it: the newlines are buffer rows (the terminal
+/// brackets the paste, so none of them is Enter), and the editor shows the
+/// block with the continuation prompt in front of each inner line.
+#[test]
+fn a_pasted_block_waits_for_enter() {
+    let (mut session, home, work) = session("block");
+
+    // The *output* cannot be mistaken for the echo of the line: the echoed
+    // text holds the arithmetic, the result only exists once the command ran.
+    session.paste(b"echo $((6*7))\necho $((7*7))");
+    // Give the shell every chance to run it without being asked.
+    std::thread::sleep(Duration::from_millis(500));
+    session.drain();
+    let before = String::from_utf8_lossy(&session.output).into_owned();
+    assert!(
+        !before.contains("42") && !before.contains("49"),
+        "nothing runs before Enter: {before}"
+    );
+    assert!(
+        before.contains("> echo $((7*7))"),
+        "the block is painted with the continuation prompt: {before}"
+    );
+
+    session.send(b"\n");
+    session.expect(b"42\r\n49\r\n", Duration::from_secs(10));
+
+    cleanup(&mut session, &home, &work);
+}
+
+/// A block copied from a browser carries `\r\n`; those must be rows, not `^M`
+/// bytes inside the arguments.
+#[test]
+fn a_crlf_block_runs_without_carriage_returns() {
+    let (mut session, home, work) = session("crlf");
+
+    session.paste(b"printf '<%s>\\n' one\r\nprintf '<%s>\\n' two\r\n");
+    session.send(b"\n");
+    session.expect(b"<one>\r\n<two>\r\n", Duration::from_secs(10));
+    session.drain();
+    let output = String::from_utf8_lossy(&session.output).into_owned();
+    assert!(
+        !output.contains("one\r\r"),
+        "no carriage return reaches the argument: {output:?}"
+    );
+
+    cleanup(&mut session, &home, &work);
+}

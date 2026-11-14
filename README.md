@@ -70,7 +70,9 @@ is quoted, so `https://…/watch?v=abc&t=10` arrives as one argument instead of
 running a command in the background. The rule is narrow — a pasted pipeline is
 still a pipeline, `*.rs` still globs — and the guess is cheap to reverse: one
 `Backspace` takes the quotes off, and `Ctrl-Z` undoes the paste as a single
-step (`docs/contracts.md`).
+step. A pasted *block* is commands, so it is never quoted and never run: it
+lands as a multiline edit, one line per row, and waits for `Enter`
+(`docs/contracts.md`).
 
 While `PS1` is untouched, the prompt is one tide-like line:
 

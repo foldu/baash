@@ -40,7 +40,7 @@ use baash_runtime::History;
 use crate::completion::MenuState;
 use crate::key::{Code, Decoder, Key, Modifiers};
 use crate::line::Line;
-use crate::paste::quoted;
+use crate::paste::{normalise, quoted};
 use crate::prompt::{ExpandedPrompt, Prompt};
 use crate::render::{Frame, MenuView, Renderer};
 use crate::term::{Input, Terminal};
@@ -381,6 +381,13 @@ pub struct Editor<'a> {
     paste_quoting: bool,
     /// The undo history for the line being edited.
     undo: Undo,
+    /// Whether the newlines in the buffer came from a paste.
+    ///
+    /// They make the buffer a multiline block whose inner rows carry the
+    /// continuation prompt. A recalled history entry that spans lines is *not*
+    /// one: readline paints those as plain rows, and the block structure is
+    /// already visible without a `PS2` in front of every line.
+    pasted_block: bool,
     /// Where the quotes of the last auto-quoted paste are, while they can
     /// still be taken off as a pair by `Backspace`.
     ///
@@ -444,6 +451,7 @@ impl<'a> Editor<'a> {
             submit_wait: config.submit_wait,
             paste_quoting: config.paste_quoting,
             undo: Undo::default(),
+            pasted_block: false,
             paste_quotes: None,
         }
     }
@@ -691,16 +699,28 @@ impl<'a> Editor<'a> {
     /// wrapped in quotes is remembered so that one `Backspace` can take the
     /// pair off again.
     fn insert_paste(&mut self, bytes: &[u8]) {
+        // Line endings first: a browser or a Windows editor pastes `\r\n`, and
+        // a carriage return that reaches the buffer is a `^M` inside the
+        // argument rather than a line break.
+        let text = normalise(bytes);
+        if text.is_empty() {
+            return;
+        }
+        // A block is commands, never one argument, and it is shown as the
+        // multiline edit it is: the user presses Enter to run it, and nothing
+        // in the paste submits anything.
+        if text.contains(&b'\n') {
+            self.pasted_block = true;
+            self.line.insert(&text);
+            return;
+        }
         let at = self.line.cursor();
         let quoted = self
             .paste_quoting
-            .then(|| {
-                let context = self.completer.quote_context(self.line.buffer(), at);
-                quoted(bytes, context)
-            })
+            .then(|| quoted(&text, self.completer.quote_context(self.line.buffer(), at)))
             .flatten();
         let Some(quoted) = quoted else {
-            self.line.insert(bytes);
+            self.line.insert(&text);
             return;
         };
         if quoted.wrapped {
@@ -763,6 +783,7 @@ impl<'a> Editor<'a> {
         // the command before this one, and the pasted-quote offsets belong to
         // the old buffer.
         self.undo.reset(&self.line);
+        self.pasted_block = false;
         self.paste_quotes = None;
         self.renderer.reset();
         self.dirty = true;
@@ -1721,6 +1742,12 @@ impl<'a> Editor<'a> {
             self.suggestion()
         };
         let (hint, bad) = self.check();
+        // A buffer holding newlines but no committed prefix is a pasted block:
+        // its inner rows get the continuation prompt, so the block reads as the
+        // multiline edit it is. A typed continuation has already committed its
+        // earlier lines, which leaves `editable()` single-line and `None` here.
+        let continuation = (self.pasted_block && self.line.editable().contains(&b'\n'))
+            .then(|| self.prompt.secondary_text());
         let mut frame = Frame {
             prompt,
             line: self.line.editable(),
@@ -1729,6 +1756,7 @@ impl<'a> Editor<'a> {
             ghost: ghost.as_deref(),
             hint: hint.as_deref(),
             bad,
+            continuation,
         };
         // A frame taller than the screen scrolls its own top row out of reach,
         // and the next repaint would then paint a second prompt below the

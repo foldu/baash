@@ -1286,6 +1286,21 @@ inside `"…"` only `$ ` \ " !` are, and a bare word is wrapped whole. A paste
 that already arrives as one quoted word is left alone at a bare cursor, but not
 inside the user's own quotes, where the same bytes are literal data.
 
+**A pasted block is a multiline edit, and nothing in a paste submits.** A
+terminal brackets a paste, so a newline inside it reaches the buffer as a row
+rather than as `Enter`: pasting a script cannot run it, and the user presses
+`Enter` once at the end. The block is painted as the multiline buffer it is —
+its inner rows carry the `PS2` prompt, the way a typed continuation does —
+while every line stays editable, which is the difference from a typed
+continuation (that one commits its earlier lines as it goes). Line endings are
+normalised first (`paste::normalise`): `\r\n` and a lone `\r` become `\n`, since
+a carriage return that reaches the line is a `^M` inside the word and silently
+part of the argument; every other byte, escapes included, is inserted exactly as
+copied. One trailing newline is dropped — copying a line usually takes its
+terminator, and a block ending in an empty row makes `Enter` run on nothing. A
+recalled history entry that spans lines is *not* a pasted block: readline paints
+those as plain rows, without a `PS2` on each line.
+
 The guess is cheap to reverse, which is what makes it acceptable to make: the
 first `Backspace` after a quoted paste deletes both quotes and leaves the text,
 and the editor's undo history (`undo.rs`, `Ctrl-Z`/`Ctrl-_`, `Ctrl-Shift-Z`)

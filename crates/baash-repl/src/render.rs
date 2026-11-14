@@ -81,6 +81,14 @@ pub struct Frame<'a> {
     /// The stretch of [`Frame::line`] the hint is about. Painted as an error
     /// when colour is on, so the message has a place to point at.
     pub bad: Option<Range<usize>>,
+    /// The `PS2` prompt to paint at the start of every continuation row.
+    ///
+    /// A line can hold newlines without any of them having been submitted: a
+    /// pasted block is one editable buffer (`docs/contracts.md`), and its inner
+    /// lines are painted at the left margin with the continuation prompt in
+    /// front, the way a typed `PS2` line is. `None` for the ordinary one-line
+    /// buffer, which has no continuation row to decorate.
+    pub continuation: Option<&'a ExpandedPrompt>,
 }
 
 impl Frame<'_> {
@@ -100,6 +108,7 @@ impl Frame<'_> {
             &Theme::DARK,
             false,
             self.bad.as_ref(),
+            self.continuation,
         );
         if let Some(ghost) = self.ghost {
             paint_ghost(&mut canvas, ghost, color);
@@ -195,6 +204,7 @@ impl Renderer {
             theme,
             color,
             frame.bad.as_ref(),
+            frame.continuation,
         );
         if let Some(ghost) = frame.ghost {
             paint_ghost(&mut canvas, ghost, color);
@@ -502,6 +512,7 @@ fn paint_line(
     theme: &Theme,
     color: bool,
     bad: Option<&Range<usize>>,
+    continuation: Option<&ExpandedPrompt>,
 ) -> (u16, u16) {
     let expanded = Expanded::new(line);
     let spans: Vec<Styled> = if color {
@@ -529,7 +540,15 @@ fn paint_line(
             }
             style = next_style;
         }
-        canvas.cell(&expanded.bytes()[segment.display.clone()], segment.width);
+        let text = &expanded.bytes()[segment.display.clone()];
+        // A newline that is not the last thing in the buffer starts a
+        // continuation row, which carries the `PS2` prompt the way a typed one
+        // does. The final newline (if any) ends the buffer and gets none.
+        let continues = text == b"\n" && continuation.is_some() && segment.src.end < line.len();
+        canvas.cell(text, segment.width);
+        if continues && let Some(continuation) = continuation {
+            paint_prompt(canvas, continuation);
+        }
     }
     if style != Style::PLAIN {
         canvas.raw(RESET);
