@@ -91,6 +91,7 @@ pub mod spawn;
 #[cfg(unix)]
 pub mod term;
 pub mod time;
+pub mod tty;
 #[cfg(unix)]
 pub mod wait;
 #[cfg(target_os = "linux")]
@@ -129,6 +130,7 @@ pub use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 #[cfg(unix)]
 pub use term::{NoEcho, RawMode, parent_pid, pid, set_window_size_fd, window_size, window_size_fd};
 pub use time::strftime_local;
+pub use tty::Tty;
 #[cfg(unix)]
 pub use wait::{wait_any_nohang, wait_pid, wait_pid_nohang};
 

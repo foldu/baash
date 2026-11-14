@@ -23,6 +23,7 @@
 //! by history expansion (`remove_current` deletes that row again). Nothing is
 //! filtered by pattern or by leading space: the file-era policies are gone.
 
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -30,6 +31,15 @@ use crate::store::Store;
 
 /// How many earlier commands a new session starts with.
 pub const RECENT_DEPTH: usize = 1000;
+
+/// How many commands `Ctrl-R` may search.
+///
+/// The ring holds [`RETENTION`] and a new session starts with [`RECENT_DEPTH`],
+/// which is not enough for the search a picker makes worth having: "the command
+/// I ran three weeks ago" is exactly what it is for. So opening the picker asks
+/// the database for more rows. Twenty thousand lines is a few hundred kilobytes
+/// — bounded, and read once when the picker opens rather than per keystroke.
+pub const PICKER_DEPTH: usize = 20_000;
 
 /// How many entries the in-memory ring keeps.
 ///
@@ -271,6 +281,44 @@ impl History {
     /// The command texts, oldest first.
     pub fn commands(&self) -> impl DoubleEndedIterator<Item = &[u8]> {
         self.entries.iter().map(|entry| entry.text.as_slice())
+    }
+
+    /// The commands a picker searches: newest first, each text once.
+    ///
+    /// This is the ring plus the newest `depth` rows of the database, because
+    /// the ring only holds this session and the last [`RECENT_DEPTH`] commands
+    /// of the previous ones. The database read is synchronous — it happens
+    /// once, when the picker opens, and it is the one place a picker may wait
+    /// for a disk.
+    ///
+    /// A text appears once, at its newest position. Repeating `ls` forty times
+    /// must not fill the screen with forty `ls` rows, and the one that is kept
+    /// is the one that sorts first when nothing is typed. The database keeps
+    /// every command regardless; this is a view, not a policy.
+    pub fn pool(&self, depth: usize) -> Vec<Entry> {
+        let mut by_id: BTreeMap<i64, Vec<u8>> = BTreeMap::new();
+        if let Some(store) = self.store.as_ref() {
+            for row in store.recent(depth) {
+                by_id.insert(row.id, row.text);
+            }
+        }
+        // The ring wins on an id both sides know: it holds the text exactly as
+        // the session submitted it, including a line whose insert is still in
+        // flight.
+        for entry in &self.entries {
+            by_id.insert(entry.id, entry.text.clone());
+        }
+        let mut seen: HashSet<&Vec<u8>> = HashSet::with_capacity(by_id.len());
+        let mut pool = Vec::with_capacity(by_id.len());
+        for (id, text) in by_id.iter().rev() {
+            if seen.insert(text) {
+                pool.push(Entry {
+                    id: *id,
+                    text: text.clone(),
+                });
+            }
+        }
+        pool
     }
 
     /// The number the next added entry will probably receive.
@@ -550,6 +598,46 @@ mod tests {
         assert_eq!(history.suggestion(b"git c"), Some(&b"ommit -m x"[..]));
         assert_eq!(history.suggestion(b"zzz"), None);
         assert_eq!(history.suggestion(b""), None);
+    }
+
+    #[test]
+    fn the_pool_lists_each_command_once_newest_first() {
+        let mut history = History::new();
+        for line in lines(&[b"one", b"two", b"one", b"three"]) {
+            history.push(&line);
+        }
+        let pool = history.pool(10);
+        let texts: Vec<&[u8]> = pool.iter().map(Entry::text).collect();
+        assert_eq!(texts, lines(&[b"three", b"one", b"two"]));
+    }
+
+    #[test]
+    fn the_pool_reaches_past_the_ring_into_the_database() {
+        let path = file("pool");
+        {
+            let mut history = History::open(&path, RECENT_DEPTH).unwrap();
+            for index in 0..5 {
+                let line = format!("command {index}");
+                history.push(line.as_bytes());
+                history.finish(Some(0), Some(1));
+            }
+        }
+        // A ring that starts with the newest two rows only, as a long-lived
+        // session's does: the older three exist only in the database.
+        let history = History::open(&path, 2).unwrap();
+        assert_eq!(history.len(), 2, "the ring is what a session starts with");
+        let pool = history.pool(PICKER_DEPTH);
+        let texts: Vec<&[u8]> = pool.iter().map(Entry::text).collect();
+        assert_eq!(
+            texts,
+            lines(&[
+                b"command 4",
+                b"command 3",
+                b"command 2",
+                b"command 1",
+                b"command 0"
+            ])
+        );
     }
 
     #[test]

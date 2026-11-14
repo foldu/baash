@@ -18,6 +18,7 @@
 
 use crate::errors::{Error, ShellError, codes, display};
 
+mod baashzf;
 mod complete;
 mod getopts;
 mod history;
@@ -360,6 +361,7 @@ pub const BUILTINS: &[BuiltinDef] = &[
     def("true", Tier::Regular, Some(bi_true)),
     // Bash extensions (DESIGN.md §3.4); registered so search order and
     // "command not found" diagnostics can distinguish them.
+    def("baashzf", Tier::Extension, Some(baashzf::bi_baashzf)),
     def("builtin", Tier::Extension, Some(meta::bi_builtin)),
     def("compgen", Tier::Extension, Some(complete::bi_compgen)),
     def("complete", Tier::Extension, Some(complete::bi_complete)),

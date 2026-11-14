@@ -4,8 +4,7 @@
 //! bytes a user sees: the rendered `PS1` (with `\u`, `\w` and a command
 //! substitution), the cursor column the editor computed for it,
 //! `PROMPT_COMMAND`'s output above the prompt, a `PS1` assigned by a command
-//! taking effect at the next prompt, and `Ctrl-R` finding and running an
-//! earlier line.
+//! taking effect at the next prompt, and the history picker `Ctrl-R` opens.
 //!
 //! The prompt-escape *table* is tested in `baash-lang`; this file only proves it
 //! is wired to the shell's variables and to the terminal.
@@ -711,24 +710,44 @@ fn prompt_escapes_read_real_history_and_job_numbers() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// `Ctrl-R` opens the picker on the alternate screen, filters by subsequence,
+/// and `Enter` *accepts* the command onto the line instead of running it.
+///
+/// The accept/run split is the part worth pinning: the picker puts a command
+/// on the line, and the line is still an edit until the user presses `Enter`
+/// again. An accidental `Enter` in the picker therefore cannot run anything.
 #[test]
-fn ctrl_r_finds_an_earlier_command_and_enter_runs_it() {
+fn ctrl_r_opens_the_picker_and_enter_accepts_the_command() {
     let home = temp_dir("search-home");
     let mut session = Session::spawn(&home, &home, &["--norc", "-i"], &[("PS1", "S> ")]);
     session.prompt("S> ");
     session.line("echo first", "S> ");
     session.line("echo second", "S> ");
 
-    session.send(b"\x12fir");
-    session.expect(
-        b"(reverse-i-search)`fir': echo first",
-        Duration::from_secs(10),
-    );
+    session.send(b"\x12");
+    session.expect(b"\x1b[?1049h", Duration::from_secs(10));
+    // The query row, the newest match selected, the count at the bottom.
+    session.expect(b"history> ", Duration::from_secs(10));
+    session.expect(b"> echo second", Duration::from_secs(10));
+    session.expect(b"2/2", Duration::from_secs(10));
+
+    // `efi` is not a substring of `echo first`, so only a subsequence match
+    // can find it: e, then f, then i.
+    session.send(b"efi");
+    session.expect(b"> echo first", Duration::from_secs(10));
+    // One match out of the two commands there are: matches/pool.
+    session.expect(b"1/2", Duration::from_secs(10));
+
+    // Accepting gives the screen back and puts the command on the line, which
+    // nothing has run yet.
+    session.send(b"\r");
+    session.expect(b"\x1b[?1049l", Duration::from_secs(10));
+    session.expect(b"echo first", Duration::from_secs(10));
     session.send(b"\r");
     session.expect(b"first\r\n", Duration::from_secs(10));
     session.prompt("S> ");
 
-    session.send(b"exit\n");
+    session.send(b"exit 0\n");
     session.wait_child();
     let _ = std::fs::remove_dir_all(&home);
 }

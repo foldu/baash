@@ -35,6 +35,7 @@ baash-sys = { path = "crates/baash-sys" }
 baash-complete = { path = "crates/baash-complete" }
 baash-complete-data = { path = "crates/baash-complete-data" }
 baash-repl = { path = "crates/baash-repl" }
+baash-picker = { path = "crates/baash-picker" }
 baash-tools = { path = "crates/baash-tools" }
 baash-utils = { path = "crates/baash-utils" }
 

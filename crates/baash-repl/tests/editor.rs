@@ -1183,10 +1183,11 @@ fn a_session_leaves_raw_mode_balanced_after_every_line() {
 }
 
 // ---------------------------------------------------------------------------
-// Ctrl-R reverse incremental search
+// The history picker (`Ctrl-R`)
 // ---------------------------------------------------------------------------
 
-/// The keys a search uses, spelled out so the tests read like the interaction.
+/// The keys the picker uses, spelled out so the tests read like the
+/// interaction.
 const CTRL_R: Key = Key::ctrl('r');
 const CTRL_G: Key = Key::ctrl('g');
 
@@ -1197,69 +1198,103 @@ fn search(text: &str) -> Vec<Key> {
     keys
 }
 
-#[test]
-fn ctrl_r_shows_the_newest_entry_and_typing_narrows() {
-    let entries = ["echo hello world", "echo hi there"];
-    let (buffer, _, _) = drive(&entries, &[CTRL_R]);
-    assert_eq!(buffer, b"echo hi there", "the newest entry is shown");
+/// `Ctrl-R`, `text`, and the `Enter` that accepts the selection.
+fn pick(text: &str) -> Vec<Key> {
+    let mut keys = search(text);
+    keys.push(Key::of(Code::Enter));
+    keys
+}
 
-    let (buffer, cursor, output) = drive(&entries, &search("hello"));
-    assert_eq!(buffer, b"echo hello world", "typing narrows the match");
-    assert_eq!(cursor, 5, "the cursor is at the start of the match");
+/// The bytes that switch to the alternate screen, and back.
+const ENTER_SCREEN: &[u8] = b"\x1b[?1049h";
+const LEAVE_SCREEN: &[u8] = b"\x1b[?1049l";
+
+#[test]
+fn ctrl_r_opens_the_picker_on_the_alternate_screen() {
+    let (buffer, _, output) = drive(&["echo hello world", "echo hi there"], &[CTRL_R]);
+    assert_eq!(buffer, b"", "the line is untouched while the picker is up");
     assert!(
-        output.contains("(reverse-i-search)`hello': echo hello world"),
-        "the search prompt names the query and the match: {output:?}"
+        output
+            .as_bytes()
+            .windows(ENTER_SCREEN.len())
+            .any(|window| window == ENTER_SCREEN),
+        "the picker takes the alternate screen: {output:?}"
+    );
+    assert!(
+        output.contains("history> "),
+        "the query row names what is being searched: {output:?}"
+    );
+    assert!(
+        output.contains("echo hi there"),
+        "the newest command is listed first: {output:?}"
+    );
+    assert!(
+        output.contains("2/2"),
+        "the count is the last row: {output:?}"
     );
 }
 
 #[test]
-fn ctrl_r_again_walks_to_the_next_older_match() {
-    let entries = ["a one", "a two", "m three"];
-    let (buffer, _, _) = drive(&entries, &search("a"));
-    assert_eq!(buffer, b"a two");
-    let (buffer, _, _) = drive(&entries, &[CTRL_R, Key::char('a'), CTRL_R]);
-    assert_eq!(buffer, b"a one", "a second Ctrl-R finds the older match");
-}
-
-#[test]
-fn a_query_with_no_older_match_reports_failure_and_keeps_the_last_match() {
-    let entries = ["first alpha", "second alpha"];
-    let (buffer, _, output) = drive(&entries, &[CTRL_R, Key::char('a'), CTRL_R, CTRL_R]);
-    assert_eq!(buffer, b"first alpha", "the last match stays on the line");
+fn typing_filters_and_enter_accepts_onto_the_line() {
+    // A subsequence finds the command, and `Enter` puts it on the line — it
+    // does not run it, so the line is still being edited.
+    let (buffer, cursor, output) = drive(&["echo hello world", "echo hi there"], &pick("ehw"));
+    assert_eq!(buffer, b"echo hello world");
+    assert_eq!(cursor, buffer.len(), "the cursor is at the end");
     assert!(
-        output.contains("(failed reverse-i-search)`a': first alpha"),
-        "the prompt says the search failed: {output:?}"
+        output
+            .as_bytes()
+            .windows(LEAVE_SCREEN.len())
+            .any(|window| window == LEAVE_SCREEN),
+        "accepting gives the screen back: {output:?}"
     );
-}
 
-#[test]
-fn enter_accepts_the_match_and_executes_it() {
+    // The line is only run by the Enter that comes after the picker closes.
     let (result, _) = run(
-        FakeTerminal::new(b"\x12hi\r"),
+        FakeTerminal::new(b"\x12ehw\r\r"),
         &StubCompleter::empty(),
         &baash_repl::NeverNeedsMore,
-        config_with_history(&["echo hello", "echo hi there"]),
+        config_with_history(&["echo hello world", "echo hi there"]),
     );
-    assert_eq!(result, ReadResult::Line(b"echo hi there\n".to_vec()));
+    assert_eq!(result, ReadResult::Line(b"echo hello world\n".to_vec()));
 }
 
 #[test]
-fn escape_restores_the_line_the_search_started_from() {
+fn a_query_that_matches_nothing_leaves_enter_with_nothing_to_accept() {
+    let mut keys = search("zzz");
+    keys.push(Key::of(Code::Enter));
+    let (buffer, _, output) = drive(&["echo hi there"], &keys);
+    assert_eq!(buffer, b"", "no match, so the line stays empty");
+    assert!(output.contains("no match"), "{output:?}");
+}
+
+#[test]
+fn enter_on_an_empty_history_leaves_the_line_alone() {
+    let mut keys = chars("keep");
+    keys.push(CTRL_R);
+    keys.push(Key::of(Code::Enter));
+    let (buffer, cursor, _) = drive(&[], &keys);
+    assert_eq!((buffer.as_slice(), cursor), (b"keep".as_slice(), 4));
+}
+
+#[test]
+fn escape_leaves_the_line_as_it_was() {
     let mut keys = chars("draft");
     keys.extend(search("hi"));
     keys.push(Key::of(Code::Esc));
-    let (buffer, cursor, _) = drive(&["echo hi there"], &keys);
-    assert_eq!(buffer, b"draft", "the original line comes back");
-    assert_eq!(cursor, 5);
+    let (buffer, cursor, output) = drive(&["echo hi there"], &keys);
+    assert_eq!((buffer.as_slice(), cursor), (b"draft".as_slice(), 5));
     assert!(
-        !drive(&["echo hi there"], &keys)
-            .2
-            .contains("reverse-i-search`hi': echo hi there\r")
+        output
+            .as_bytes()
+            .windows(LEAVE_SCREEN.len())
+            .any(|window| window == LEAVE_SCREEN),
+        "the screen comes back: {output:?}"
     );
 }
 
 #[test]
-fn ctrl_g_also_aborts_the_search() {
+fn ctrl_g_also_leaves_the_picker() {
     let mut keys = chars("draft");
     keys.extend(search("hi"));
     keys.push(CTRL_G);
@@ -1277,94 +1312,126 @@ fn ctrl_c_abandons_the_whole_line() {
     );
     assert_eq!(result, ReadResult::Interrupted);
     assert!(term.text().contains("^C"));
-}
-
-#[test]
-fn a_query_that_matches_nothing_says_so_and_does_not_change_the_line() {
-    let mut keys = search("zzz");
-    keys.push(Key::of(Code::Esc));
-    let (buffer, cursor, output) = drive(&["echo hi there"], &keys);
-    assert_eq!(
-        (buffer.as_slice(), cursor),
-        (b"".as_slice(), 0),
-        "line unchanged"
-    );
     assert!(
-        output.contains("(failed reverse-i-search)`zzz': echo hi there"),
-        "the failing spelling is used: {output:?}"
+        term.text()
+            .as_bytes()
+            .windows(LEAVE_SCREEN.len())
+            .any(|window| window == LEAVE_SCREEN),
+        "an interrupted picker still gives the screen back"
     );
 }
 
 #[test]
-fn empty_history_does_not_panic_and_leaves_the_line_alone() {
-    // Ctrl-R, Ctrl-G with nothing to search.
-    let mut keys = chars("keep");
-    keys.push(CTRL_R);
-    keys.push(CTRL_G);
-    let (buffer, cursor, output) = drive(&[], &keys);
-    assert_eq!((buffer.as_slice(), cursor), (b"keep".as_slice(), 4));
-    assert!(
-        output.contains("(failed reverse-i-search)`': keep"),
-        "{output:?}"
+fn down_and_ctrl_r_move_the_selection_to_older_matches() {
+    let entries = ["a one", "a two", "m three"];
+    // The newest match is selected first, so `Ctrl-R` again — the gesture that
+    // walked to the next older match before — steps down one row.
+    let (buffer, _, _) = drive(&entries, &pick("a"));
+    assert_eq!(buffer, b"a two");
+    let (buffer, _, _) = drive(
+        &entries,
+        &[CTRL_R, Key::char('a'), CTRL_R, Key::of(Code::Enter)],
     );
-
-    // ... and Enter on an empty ring runs what was typed.
-    let (result, _) = run(
-        FakeTerminal::new(b"\x12\r"),
-        &StubCompleter::empty(),
-        &baash_repl::NeverNeedsMore,
-        config_with_history(&[]),
+    assert_eq!(buffer, b"a one");
+    let (buffer, _, _) = drive(
+        &entries,
+        &[
+            CTRL_R,
+            Key::char('a'),
+            Key::of(Code::Down),
+            Key::of(Code::Enter),
+        ],
     );
-    assert_eq!(result, ReadResult::Line(b"\n".to_vec()));
+    assert_eq!(buffer, b"a one", "the arrow does the same thing");
+    // At the last match the selection stops instead of wrapping.
+    let (buffer, _, _) = drive(
+        &entries,
+        &[
+            CTRL_R,
+            Key::char('a'),
+            Key::of(Code::Down),
+            Key::of(Code::Down),
+            Key::of(Code::Enter),
+        ],
+    );
+    assert_eq!(buffer, b"a one");
 }
 
 #[test]
-fn backspace_edits_the_query_and_searches_again() {
-    let entries = ["echo hi there"];
+fn tab_accepts_like_enter() {
+    let mut keys = search("hi");
+    keys.push(Key::of(Code::Tab));
+    let (buffer, _, _) = drive(&["echo hi there"], &keys);
+    assert_eq!(buffer, b"echo hi there");
+}
+
+#[test]
+fn backspace_edits_the_query() {
     let mut keys = search("hiz");
     keys.push(Key::of(Code::Backspace));
-    let (buffer, _, output) = drive(&entries, &keys);
+    keys.push(Key::of(Code::Enter));
+    let (buffer, _, output) = drive(&["echo hi there"], &keys);
     assert_eq!(buffer, b"echo hi there");
     assert!(
-        output.contains("(reverse-i-search)`hi': echo hi there"),
-        "{output:?}"
+        output.contains("history> hi"),
+        "the query lost only the `z`: {output:?}"
     );
 }
 
 #[test]
-fn left_and_right_accept_the_match_and_put_the_cursor_on_it() {
-    // `wor` matches at index 11 of "echo hello world"; `->` puts the cursor at
-    // 12, so the typed byte lands between `w` and `o`.
-    let mut keys = search("wor");
-    keys.push(Key::of(Code::Right));
-    keys.push(Key::char('X'));
+fn ctrl_u_clears_the_query() {
+    let mut keys = search("hiz");
+    keys.push(Key::ctrl('u'));
     keys.push(Key::of(Code::Enter));
-    let (result, _) = run(
-        FakeTerminal::new(b"\x12wor\x1b[CX\r"),
-        &StubCompleter::empty(),
-        &baash_repl::NeverNeedsMore,
-        config_with_history(&["echo hello world"]),
-    );
-    assert_eq!(result, ReadResult::Line(b"echo hello wXorld\n".to_vec()));
+    let (buffer, _, _) = drive(&["echo hi there", "other"], &keys);
+    assert_eq!(buffer, b"other", "an empty query selects the newest entry");
+}
 
-    let (result, _) = run(
-        FakeTerminal::new(b"\x12wor\x1b[DY\r"),
-        &StubCompleter::empty(),
-        &baash_repl::NeverNeedsMore,
-        config_with_history(&["echo hello world"]),
+#[test]
+fn accepting_replaces_the_line_as_one_undo_step() {
+    let mut keys = chars("draft");
+    keys.extend(search("hi"));
+    keys.push(Key::of(Code::Enter));
+    assert_eq!(
+        drive(&["echo hi there"], &keys).0,
+        b"echo hi there",
+        "the picker's choice is on the line"
     );
-    assert_eq!(result, ReadResult::Line(b"echo helloY world\n".to_vec()));
+    keys.push(Key::ctrl('z'));
+    assert_eq!(
+        drive(&["echo hi there"], &keys).0,
+        b"draft",
+        "one Ctrl-Z puts back what was typed before the picker opened"
+    );
+}
 
-    // Right and then Left, which is where bash's own cursor ends up after a
-    // search: on the match, ready to type in front of it.
-    let (result, _) = run(
-        FakeTerminal::new(b"\x12wor\x1b[C\x1b[DY\r"),
-        &StubCompleter::empty(),
-        &baash_repl::NeverNeedsMore,
-        config_with_history(&["echo hello world"]),
+#[test]
+fn a_paste_into_the_picker_filters_with_it() {
+    let mut keys = vec![CTRL_R];
+    keys.push(Key::of(Code::Paste(b"ehw".to_vec())));
+    keys.push(Key::of(Code::Enter));
+    let (buffer, _, _) = drive(&["echo hello world", "echo hi there"], &keys);
+    assert_eq!(
+        buffer, b"echo hello world",
+        "the pasted bytes are the query"
     );
-    assert_eq!(result, ReadResult::Line(b"echo hello Yworld\n".to_vec()));
-    let _ = keys;
+}
+
+#[test]
+fn a_terminal_too_small_for_the_list_still_paints() {
+    // One row tall: the query row is all there is.
+    let mut term = FakeTerminal::sized(b"", 20, 1);
+    let sink = term.output_handle();
+    let completer = StubCompleter::empty();
+    let config = config_with_history(&["echo hi"]);
+    let mut editor =
+        Editor::with_config(&mut term, &completer, &baash_repl::NeverNeedsMore, config);
+    editor.step(CTRL_R).expect("ctrl-r");
+    let output = output_text(&sink);
+    assert!(output.contains("history> "), "{output:?}");
+    // The editor is still usable: the picker is not a trap.
+    editor.step(Key::of(Code::Esc)).expect("escape");
+    assert_eq!(editor.line().buffer(), b"");
 }
 
 /// A history entry that spans lines is painted as those lines.

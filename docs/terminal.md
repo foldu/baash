@@ -375,10 +375,49 @@ takes focus. A terminal that raises its own notification from `OSC 133 D`
 knows its own focus and is doing the better version; the shell's is the one
 that works everywhere, which is why it is a threshold and not a guess.
 
-## 14. What is not here, and why
+## 14. The alternate screen
 
-No terminal item is left. Two things were considered and are deliberately
-absent:
+```
+ESC [ ? 1049 h    switch to the alternate screen, saving the cursor
+ESC [ ? 1049 l    back to the primary screen, cursor restored
+```
+
+Written by the full-screen picker (`Ctrl-R`, and the `baashzf` builtin) around
+its whole life, and by nothing else. The point is that the picker's screen is
+not the transcript: every scrollback line and the command line under it are
+untouched while the picker is up, the terminal puts them back byte for byte, and
+not one picker frame can end up in a `script` log or in a terminal's history
+buffer.
+
+`1049` rather than `47` or `1047` because it also saves and restores the
+cursor: the sequence is written by a program that does not own the screen
+before or after, so the cursor has to come back where the editor left it
+without the picker tracking a position. Nothing else is enabled — no mouse
+tracking, no cursor hiding, no scroll-region tricks — and the picker repaints
+its whole screen on every key rather than diffing it, which is why it needs no
+other sequence.
+
+The picker is drawn from the top-left corner: `ESC [ H`, then one row at a time,
+each ending `ESC [ K`. The query row is first, the count row is pinned with
+`ESC [ ROWS ; 1 H`, and the cursor is put back on the query with
+`ESC [ 1 ; COL H`. Colours are the four SGR attributes the palette already
+has — dim for the prompt and the count, reverse for the selected row, bold for
+the matched characters — and none of them is written when colour is off, so a
+`NO_COLOR` user gets plain rows.
+
+Both screens are left by writing `1049 l` **before** anything is printed: while
+the alternate screen is up the terminal is in raw mode, and a `\n` written then
+reaches the terminal without the carriage return the tty driver would have
+added.
+
+Windows: the console implements `1049` as its own screen buffer, and
+`ENABLE_VIRTUAL_TERMINAL_PROCESSING` is what makes it accept the sequence; the
+picker is emulator-independent because it uses nothing a console might lack.
+That is unverified on a guest — no Windows run has driven `baashzf` yet.
+
+## 15. What is not here, and why
+
+Two things were considered and are deliberately absent:
 
 **Cursor shape (DECSCUSR).** `CSI Ps SP q` sets the shape a terminal draws for
 its cursor, and it is only worth sending when the editor has a second mode —

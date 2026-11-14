@@ -62,6 +62,10 @@ pub enum Code {
     Home,
     /// End.
     End,
+    /// Page up (`CSI 5 ~`).
+    PageUp,
+    /// Page down (`CSI 6 ~`).
+    PageDown,
     /// The left mouse button was pressed on the prompt or command line
     /// (SGR mouse, `CSI < 0 ; column ; row M`), both coordinates one-based.
     ///
@@ -735,6 +739,8 @@ fn cursor_key(fields: &Fields) -> Option<Key> {
         Some(1 | 7) => Code::Home,
         Some(4 | 8) => Code::End,
         Some(3) => Code::Delete,
+        Some(5) => Code::PageUp,
+        Some(6) => Code::PageDown,
         _ => return Some(Key::of(Code::Unknown(Vec::new()))),
     };
     Some(Key::with(code, fields.modifiers()))

@@ -145,6 +145,16 @@ the geometry a layout test asserts about: a pty starts at zero columns, which
 `window_size_fd` reads as "not a terminal", and the prompt a test measures can
 be longer than the narrow default the editor then falls back to.
 
+**`Tty` is the screen a program owns, and it is not standard input.** One
+object per platform — `/dev/tty` plus `RawMode` on Unix, `Console` plus
+`ConsoleMode` on Windows — that opens the controlling terminal, holds it in raw
+mode until dropped, and reads and writes bytes with a deadline
+(`Ok(None)` = nothing arrived, `Ok(Some(0))` = the terminal is gone). The
+deadline is what lets a full-screen program notice a resize while idle, and what
+makes a bare `Esc` distinguishable from the start of a sequence that never
+arrives. The split matters: `ls | baashzf` must paint on the terminal while its
+stdout is a pipe, which is why this opens the terminal rather than descriptor 0.
+
 **`parent_pid()` answers `Option<u32>`, and `None` means "not known here".**
 Unix always answers (zero included: `getppid` reporting no parent is what an
 isolated PID namespace looks like, and bash shows `PPID=0` there). Windows has
@@ -256,7 +266,8 @@ that cannot be opened is reported once and the shell keeps an in-memory ring,
 because losing recall is better than refusing to start.
 
 **Builtin tiers are exact and load-bearing** (DESIGN §2): 15 special, 15
-intrinsic, 7 regular, 18 bash extensions. `fc` is not registered at all: it
+intrinsic, 7 regular, 18 bash extensions and `baashzf` (this shell's own, at
+`Tier::Extension` so a function or a `PATH` command wins). `fc` is not registered at all: it
 edited a history file that no longer exists. `printf`, `test`, `[`, `echo`,
 `pwd`, `true` and `false` are regular, deliberately *not* intrinsic, because the
 standard requires them to remain exec-able. Search order comes from
@@ -282,8 +293,26 @@ not depend on), and `trap_saved_status() -> Option<Status>` answers the exit
 status a bare `exit` inside the `EXIT` trap must reuse. Both are defaulted, so a
 new host compiles without them.
 
-**Diagnostic text is unstable; match the codes.** State errors are `BAASH-E05xx`;
-an unimplemented builtin returns status 2 with `BAASH-E0508`.
+**`baashzf` is a picker over standard input, and the terminal is not stdout.**
+`list | baashzf` reads the whole list from descriptor 0, opens the controlling
+terminal (`baash_sys::Tty`) for the screen, and writes the chosen line to
+descriptor 1 — so the frames cannot end up in the pipe and the output cannot
+end up in the frames. It is registered `Tier::Extension`, so a function or a
+`PATH` command of the same name overrides it.
+
+```text
+list | baashzf      → the chosen line; 0 chosen, 1 nothing chosen,
+                      2 cannot run here, 130 cancelled
+```
+
+There is no file operand, no `-q`, no multi-select, no preview and no
+`$FZF_DEFAULT_COMMAND`: this is the picker the shell already had, plus the line
+protocol, and the whole list is read before the screen opens. A list whose
+standard input *is* the terminal is refused rather than read as candidates, and
+so is a `TERM=dumb` terminal, which cannot paint a full screen. The terminal's
+mode is restored by dropping the `Tty` **before** the chosen line is printed:
+in raw mode a `\n` reaches the terminal without the carriage return the driver
+would have added.
 
 ---
 
@@ -1538,27 +1567,99 @@ end; the prompt is the one already rendered, so the shell does not re-render
 `PS1` or run `PROMPT_COMMAND` for the review prompt (bash 5.3.20, measured).
 The line is submitted and recorded by the normal Enter path.
 
-**`Ctrl-R` is a prompt swap, not a screen mode.** `Search` remembers the
-original line and cursor, the query, the matched history index and whether the
-last search failed; while it is active `draw` uses
-`(reverse-i-search)`query': ` (or `(failed reverse-i-search)…`) as the prompt
-and the line is the match, so wrapping, painting and cursor arithmetic are the
-existing code. `Enter` submits the match, `Left`/`Right` accept it with the
-cursor on the first byte of the match and then act normally, `Esc`/`Ctrl-G`
-restore the original line and cursor, `Backspace` edits the query, `Ctrl-R`
-walks older, `Ctrl-C` returns `ReadResult::Interrupted`, and any other key
-accepts the match and is reprocessed. Matching is a substring search from the
-newest entry downwards; an empty ring is a failed search, never a panic.
+**`Ctrl-R` is the full-screen picker (`baash-picker`), not a prompt swap.** The
+editor holds `Option<Picker>`; while it is `Some` the editor owns the terminal's
+alternate screen and `draw` hands every repaint to `Picker::frame` instead of
+the frame renderer. The query is typed on the top row, the ranked matches fill
+the screen, and a count of `matches/candidates` is pinned to the last row.
+
+The interaction is the one bash's `Ctrl-R` is *not*:
+
+| key | what it does |
+|---|---|
+| text, `Backspace`, `Ctrl-W`, `Ctrl-U` | the query |
+| `Up`/`Ctrl-P`, `Down`/`Ctrl-N`/`Ctrl-R` | the selection (clamped, not wrapped) |
+| `PageUp`/`Ctrl-B`, `PageDown`/`Ctrl-F` | a screenful |
+| `Home`, `End` | the first, the last |
+| `Enter`, `Tab` | **accept into the line** — it does *not* run |
+| `Esc`, `Ctrl-G` | leave the line as it was |
+| `Ctrl-C` | `ReadResult::Interrupted` |
+| `Ctrl-Z` | one step, so it puts back the line the picker opened from |
+
+`Ctrl-R` still means "next older match" inside the picker, which is what makes
+the muscle memory keep working: it is a step down the list. Accepting is the
+deliberate difference from readline: the picker chooses *text for the line*, and
+the user presses `Enter` again to run it, so an accidental `Enter` cannot run a
+command that was only being looked at.
+
+The picker's candidates are `History::pool(PICKER_DEPTH)`: the session ring plus
+the newest database rows, de-duplicated by text, newest first. An empty query
+therefore lists the caller's order, and a tie in the fuzzy score keeps it. A
+continuation line never opens the picker — earlier lines are already scrollback.
 
 Deferred, with the list maintained at the top of `crates/baash-repl/src/lib.rs`:
-search-match highlighting and `Ctrl-S`, vi mode, multi-column menus and the
-full-screen picker, a `poll(2)` key timeout (a lone Esc is only distinguishable
-at end of input), `SIGWINCH` reflow, mouse, incremental/semantic highlighting.
+vi mode, multi-column menus, a `poll(2)` key timeout (a lone Esc is only
+distinguishable at end of input), `SIGWINCH` reflow, mouse, incremental/semantic
+highlighting, and a preview pane for the picker.
 History expansion itself is the binary's (`baash_lang::histexpand`); the editor
 only supplies the `set_initial_line` prefill used by `histverify`. The ring's
 `HISTCONTROL`/`HISTSIZE` policies are wired in `baash-runtime`; the pty tests are
 `crates/baash/tests/interactive_signals.rs`, `interactive_history.rs`,
 `interactive_history_expansion.rs` and `interactive_prompt.rs`.
+
+---
+
+## baash-picker
+
+**One screen, two callers, no terminal.** `baash-picker` owns the full-screen
+fuzzy picker: `Ctrl-R` in the editor and the `baashzf` builtin. It is a leaf
+crate — `nucleo-matcher` and `unicode-width`, nothing else — because both
+callers sit on opposite sides of the line editor and duplicating the screen
+would let the two drift. It never touches a terminal: `Picker::frame` returns
+the bytes of one screen and the caller writes them.
+
+```rust
+let mut picker = Picker::new(prompt, lines);   // lines in the caller's order
+picker.act(Action::Insert(b"gco".to_vec()));   // -> Outcome::Continue
+picker.act(Action::Down);                      // -> Outcome::Continue
+picker.act(Action::Accept);                    // -> Outcome::Accept
+picker.selected();                             // Option<&[u8]>, byte for byte
+picker.frame(columns, rows, color);            // the whole screen, as bytes
+```
+
+**Keys are semantic, not bytes.** `Action` is what a key *means*
+(`Insert`, `Backspace`, `KillWord`, `Clear`, `Down`, `Up`, `PageDown`,
+`PageUp`, `First`, `Last`, `Accept`, `Cancel`). The editor maps its decoded
+`Key` onto it — it has the kitty and `modifyOtherKeys` encodings, because a
+line needs to tell `Ctrl-I` from `Tab` — and `Decoder` maps the legacy bytes a
+console sends onto the same set, for a caller that owns the screen and asked for
+nothing. So the two cannot disagree about what `Ctrl-P` does, only about how it
+arrives.
+
+**Matching is fzf-shaped and bounded.** The query splits on spaces into terms,
+every term must match the candidate as a *subsequence* (`gco` finds
+`git checkout`), the scores add up, and case is smart — a lowercase term
+matches any case, a term with an uppercase letter in it matches case only
+(`nucleo`'s own rule, tested in `pick.rs`). The **greedy** matcher
+does the work for the reason the completion menu uses it: version 0.3.1's
+optimal matcher panics on ordinary ASCII subsequences. Ties keep the caller's
+order, and a stable sort is what makes that true.
+
+Matched *positions* are not stored on a hit. A picker may hold a hundred
+thousand candidates and only a screenful is painted, so storing the positions
+would allocate once per candidate per keystroke; `Picker::positions(row)`
+recomputes them for the rows about to be painted. Measured on release, a
+keystroke over 200 000 candidates costs 1–3.4 ms and over 20 000 costs under
+0.5 ms (`docs/performance.md`).
+
+**The screen is painted whole, from the top-left corner.** `ESC [ H`, one row at
+a time with `ESC [ K`, the count pinned with `ESC [ ROWS ; 1 H`, then the cursor
+back on the query with `ESC [ 1 ; COL H`. No partial repaint, no remembered
+geometry, no `Renderer`. `Picker::frame` also records the height it pinned so
+`PageUp`/`PageDown` move by what was last painted. Rows are one candidate each,
+truncated to the terminal width; a candidate that contains a newline (a pasted
+block) or a control byte is flattened to one row, because a row is the unit the
+arithmetic is built on.
 
 ---
 

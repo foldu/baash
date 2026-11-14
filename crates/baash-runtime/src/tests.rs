@@ -327,6 +327,7 @@ fn tier_table_has_exact_posix_membership() {
     assert_eq!(
         sorted_names(Tier::Extension),
         [
+            "baashzf",
             "builtin",
             "compgen",
             "complete",
@@ -352,8 +353,9 @@ fn tier_table_has_exact_posix_membership() {
     // 16 POSIX intrinsics minus `fc`; editing a history file has no meaning.
     assert_eq!(names_in(Tier::Intrinsic).count(), 15);
     assert_eq!(names_in(Tier::Regular).count(), 7);
-    assert_eq!(names_in(Tier::Extension).count(), 18);
-    assert_eq!(BUILTINS.len(), 55);
+    // 18 bash extensions plus `baashzf`, which is this shell's own.
+    assert_eq!(names_in(Tier::Extension).count(), 19);
+    assert_eq!(BUILTINS.len(), 56);
 }
 
 #[test]
@@ -398,9 +400,9 @@ fn builtin_names_are_unique_and_implemented_set_is_explicit() {
     assert_eq!(
         implemented,
         [
-            ":", "[", "alias", "builtin", "command", "compgen", "complete", "compopt", "exit",
-            "export", "false", "getopts", "history", "printf", "readonly", "set", "shift", "shopt",
-            "test", "trap", "true", "type", "unalias", "unset",
+            ":", "[", "alias", "baashzf", "builtin", "command", "compgen", "complete", "compopt",
+            "exit", "export", "false", "getopts", "history", "printf", "readonly", "set", "shift",
+            "shopt", "test", "trap", "true", "type", "unalias", "unset",
         ]
     );
     assert_eq!(stubs_in(Tier::Special), 15 - 8);

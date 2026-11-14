@@ -292,6 +292,32 @@ the memo was nearly all of glibc's cost and a minority of MinRX's; that is the
 whole reason MinRX was worth keeping as a selectable engine rather than
 retiring once the platform engine stopped compiling on every evaluation.
 
+### 2026-11-14: the history picker (`Ctrl-R`) and `baashzf`
+
+The picker's cost is one fuzzy rank per candidate per keystroke, and one
+database read when it opens. `x86_64-linux`, release, `NO_COLOR=1`, driven
+through a real pty by a script that timestamps the write and the frame that
+answers it (so the number includes the terminal round trip):
+
+| case | time |
+|---|---:|
+| `Ctrl-R` over a 21 050-row history database (20 000 rows read, de-duplicated, ranked) | 8.2–8.8 ms |
+| a keystroke, 20 000 candidates | 0.15–0.46 ms |
+| a keystroke, 200 000 candidates | 1.1–3.4 ms |
+| `baashzf` over a list of 3 | 0.15–0.44 ms per keystroke |
+
+The opening cost is the `SELECT id, text … ORDER BY id DESC LIMIT 20000` plus
+one `String` per candidate for the display form; it is paid once, on the
+keystroke that opens the picker, and it is the only place a picker waits for a
+disk. Everything after that touches only what is in memory, which is what keeps
+a keystroke sub-millisecond at the size a history actually reaches.
+
+Two costs were measured and removed rather than reported: storing every match's
+character positions allocated once per candidate per keystroke (47–184 ms at
+200 000), and repainting on the read deadline instead of when the screen was
+stale put a frame on the wire 40 times a second and delayed the first frame
+after a key by a whole 25 ms deadline.
+
 ## What this says
 
 * **Startup was not the problem.** A one-shot `baash -c ':'` costs 0.40 ms in

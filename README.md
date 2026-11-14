@@ -62,8 +62,16 @@ effect at the next prompt, the escapes read the shell's logical `PWD`,
 background children and history ring, `shopt promptvars` runs a second
 expansion (so
 `PS1='$(date +%H:%M) $ '` works), and `PROMPT_COMMAND` (string or array) runs
-before each prompt with its output above it. `Ctrl-R` is
-readline-compatible reverse incremental search.
+before each prompt with its output above it.
+
+`Ctrl-R` opens a full-screen fuzzy picker over your history — the query on the
+top row, ranked matches under it, a count at the bottom, on the terminal's
+alternate screen so the scrollback is untouched. It matches subsequences
+(`gco` finds `git checkout`), searches the ring *and* the newest 20 000 commands
+from the history database, and `Enter` puts the choice **on the line** for
+editing rather than running it, so an accidental `Enter` cannot run something
+you were only looking at. The same picker is a filter: `ls | baashzf` prints
+the line you choose (`docs/contracts.md`).
 
 Paste is safe by default: a bracketed paste that the shell would read as syntax
 is quoted, so `https://…/watch?v=abc&t=10` arrives as one argument instead of

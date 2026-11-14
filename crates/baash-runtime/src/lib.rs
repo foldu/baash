@@ -42,7 +42,7 @@ pub mod vfs;
 mod tests;
 
 pub use alias::AliasTable;
-pub use baash_history::{Entry as HistoryEntry, History};
+pub use baash_history::{Entry as HistoryEntry, History, PICKER_DEPTH};
 pub use builtins::{
     AssignPersistence, BUILTINS, BuiltinDef, Handler, Tier, builtin_names, declaration_scope,
     declare_array_from_flag, lookup as lookup_builtin, names_in, run_builtin, set_option_table,

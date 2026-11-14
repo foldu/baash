@@ -23,6 +23,9 @@
 //! | `prompt` | the rendered `PS1`/`PS2` the shell hands in ([`expand`]) |
 //! | `editor` | the [`Editor`] state machine and read loop |
 //!
+//! The full-screen picker `Ctrl-R` opens is not here: it is `baash-picker`,
+//! because the same screen is the `baashzf` builtin's, below this layer.
+//!
 //! The history ring itself (`baash_runtime::History`) is re-exported as
 //! [`History`]: entries, navigation, the `HIST*` policies and persistence.
 //!
@@ -31,24 +34,25 @@
 //! Consciously left out of this wave, in rough order of how much a daily user
 //! would miss them:
 //!
-//! * **Match highlighting in the search.** `Ctrl-R` shows the match with the
-//!   cursor on its first byte (readline reverses the matched range as well);
-//!   the renderer has no selection concept yet.
-//! * **`Ctrl-S` forward search.** `Ctrl-R` only walks backwards, which is also
-//!   what a terminal without `stty -ixon` can deliver.
+//! * **`Ctrl-S` forward search.** The picker's list is ordered best-match-first
+//!   and has no notion of "the next match after this one" — pressing `Ctrl-S`
+//!   inside it would want one.
+//! * **A preview pane and multi-select in the picker.** `Ctrl-R` and `baashzf`
+//!   take one line; `fzf`'s `--preview` and `Tab`-to-mark are not there.
+//! * **A row that scrolls sideways.** A match past the right edge of a
+//!   terminal is truncated with the rest of the line; `fzf` shifts the window
+//!   so the matched characters stay visible.
 //! * **Readline's menu-complete.** Tab cycles the menu (fish's pager) and
 //!   Enter inserts the selection; it does not insert on each repeated Tab.
 //! * **Vi mode and `set -o vi`.** No modal editing and no `bind`; of
 //!   readline's inputrc only `completion-ignore-case` is read
 //!   (`crates/baash/src/inputrc.rs`).
-//! * **The full-screen picker** (`DESIGN.md` §6.8). The inline menu is
-//!   columnar, paged and has a description column, but there is no separate
-//!   screen with a preview pane.
-//! * **A `poll(2)`-based key timeout.** `baash-sys` has no `poll` wrapper, so a
-//!   lone `Esc` is only decoded as `Esc` at end of input; on a real tty it is
-//!   indistinguishable from the start of `Alt-<key>`. Pressing `Esc` twice
-//!   cancels the menu (`Ctrl-C` and typing also do), and a timeout in the
-//!   `Terminal` implementation is the real fix; it does not touch the editor.
+//! * **A `poll(2)`-based key timeout for the line.** A lone `Esc` is only
+//!   decoded as `Esc` at end of input; on a real tty it is indistinguishable
+//!   from the start of `Alt-<key>`. Pressing `Esc` twice cancels the menu
+//!   (`Ctrl-C` and typing also do). The picker does have the deadline it needs
+//!   — `baash_sys::Tty::read` takes one — but the editor's `Terminal` trait has
+//!   no timed read in the path its decoder uses.
 //! * **Pty-driven editor tests.** The editor's tests drive a fake
 //!   [`Terminal`]; pty coverage lives in the binary
 //!   (`crates/baash/tests/interactive_jobs.rs`, `interactive_history.rs`),

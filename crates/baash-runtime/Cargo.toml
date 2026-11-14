@@ -14,6 +14,9 @@ baash-diag.workspace = true
 # costs this crate one call and no new seam.
 baash-pattern.workspace = true
 baash-history.workspace = true
+# The picker `baashzf` shows. The same screen `Ctrl-R` opens in the line
+# editor, from the other side of the boundary.
+baash-picker.workspace = true
 # `printf %T` needs `strftime` with the shell's exported `TZ`, and `test`
 # needs `access(2)` and the effective ids; both are syscall questions, so they
 # stay behind this crate's boundary rather than pulling `libc` in here.

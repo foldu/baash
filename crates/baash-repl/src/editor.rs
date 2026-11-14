@@ -14,14 +14,19 @@
 //! them, but they are scrollback now — the editor paints only the live segment
 //! (see [`crate::Line::start`]).
 //!
-//! # Reverse incremental search
+//! # The history picker (`Ctrl-R`)
 //!
-//! `Ctrl-R` (`Ctrl-R` again for older matches) searches the ring the editor
-//! already holds, with readline's interaction: the search *is* the prompt, the
-//! line being painted is the match, and `Enter` runs it. Nothing here is a new
-//! screen mode — [`Search`] only swaps the prompt and the buffer, so the
-//! renderer, the wrapping and the cursor arithmetic are the ones already used
-//! for typing.
+//! `Ctrl-R` opens the full-screen fuzzy picker from `baash-picker`: the query
+//! on the top row, ranked matches under it, a count at the bottom, and the
+//! terminal's alternate screen for as long as it is up. `Enter` (or `Tab`)
+//! *accepts* the selected command onto the line for editing; it never runs it,
+//! so an accidental `Enter` costs nothing. `Esc`/`Ctrl-G` leave the line as it
+//! was, `Ctrl-C` abandons it.
+//!
+//! The picker paints its own screen: while one is open, [`Editor::draw`] hands
+//! the terminal to it and the frame renderer stays out of the way. Leaving the
+//! alternate screen puts the primary one back exactly as it was, so the frame
+//! the editor last painted is still there and needs no re-anchoring.
 //!
 //! # Raw mode
 //!
@@ -34,14 +39,15 @@ use std::ops::Range;
 
 use baash_complete::{Completer, Menu};
 use baash_highlight::Theme;
+use baash_picker::{Action, Outcome, Picker};
 
-use baash_runtime::History;
+use baash_runtime::{History, PICKER_DEPTH};
 
 use crate::completion::MenuState;
 use crate::key::{Code, Decoder, Key, Modifiers};
 use crate::line::Line;
 use crate::paste::{normalise, quoted};
-use crate::prompt::{ExpandedPrompt, Prompt};
+use crate::prompt::Prompt;
 use crate::render::{Frame, MenuView, Renderer};
 use crate::term::{Input, Terminal};
 use crate::undo::{EditKind, Undo};
@@ -284,42 +290,6 @@ impl Default for Config {
     }
 }
 
-/// `Ctrl-R` reverse incremental search.
-///
-/// The query is what has been typed since the search began; the line itself
-/// holds the current match, so the renderer paints the match with the normal
-/// line code. `original` is what `Esc`/`Ctrl-G` put back.
-#[derive(Clone, Debug)]
-struct Search {
-    /// Bytes typed into the search.
-    query: Vec<u8>,
-    /// The line as it was when `Ctrl-R` was pressed.
-    original: Vec<u8>,
-    /// The cursor as it was when `Ctrl-R` was pressed.
-    original_cursor: usize,
-    /// Index into the history entries of the match being shown.
-    matched: Option<usize>,
-    /// Whether the last search failed. The line keeps the last match, as
-    /// readline does, while the prompt says the search failed.
-    failed: bool,
-}
-
-impl Search {
-    /// The prompt readline draws in place of `PS1`.
-    fn prompt(&self) -> ExpandedPrompt {
-        let prefix: &[u8] = if self.failed {
-            b"(failed reverse-i-search)`"
-        } else {
-            b"(reverse-i-search)`"
-        };
-        let mut bytes = Vec::with_capacity(prefix.len() + self.query.len() + 3);
-        bytes.extend_from_slice(prefix);
-        bytes.extend_from_slice(&self.query);
-        bytes.extend_from_slice(b"': ");
-        ExpandedPrompt::from_bytes(bytes)
-    }
-}
-
 /// The interactive line editor.
 pub struct Editor<'a> {
     term: &'a mut dyn Terminal,
@@ -338,8 +308,8 @@ pub struct Editor<'a> {
     /// A line to put in the buffer for the next read, used by `histverify`
     /// after history expansion.
     initial: Option<Vec<u8>>,
-    /// The reverse search in progress, if any.
-    search: Option<Search>,
+    /// The history picker, while it owns the screen.
+    picker: Option<Picker>,
     /// The last `Tab` inserted the candidates' common prefix, so the next one
     /// is what opens the menu. Any other key clears it.
     prefix_tab: bool,
@@ -438,7 +408,7 @@ impl<'a> Editor<'a> {
             decoder: Decoder::new(),
             menu: None,
             initial: None,
-            search: None,
+            picker: None,
             prefix_tab: false,
             suggestion_dismissed: false,
             secondary: false,
@@ -771,7 +741,7 @@ impl<'a> Editor<'a> {
             self.line.set_text(&initial);
         }
         self.menu = None;
-        self.search = None;
+        self.picker = None;
         self.prefix_tab = false;
         self.suggestion_dismissed = false;
         self.history.reset_navigation();
@@ -1029,8 +999,8 @@ impl<'a> Editor<'a> {
         key: Key,
         shell: &mut Option<&mut dyn ShellCompletion>,
     ) -> io::Result<Flow> {
-        if self.search.is_some() {
-            return self.handle_search(key, shell);
+        if self.picker.is_some() {
+            return self.handle_picker(key);
         }
         if self.menu.is_some() {
             return self.handle_menu(key);
@@ -1126,7 +1096,7 @@ impl<'a> Editor<'a> {
                     self.accept_suggestion();
                 }
             }
-            (Code::Char('r'), Modifiers::CTRL) => self.begin_search(),
+            (Code::Char('r'), Modifiers::CTRL) => self.open_picker()?,
             (Code::Up, Modifiers::NONE) | (Code::Char('p'), Modifiers::CTRL) => {
                 self.history_previous();
             }
@@ -1447,220 +1417,143 @@ impl<'a> Editor<'a> {
         }
     }
 
-    /// `Ctrl-R`: start a reverse search over the ring.
+    /// `Ctrl-R`: pick an earlier command on the full screen.
     ///
-    /// The current line and cursor are remembered for `Esc`/`Ctrl-G`, and the
-    /// newest entry is shown at once (readline does the same, so a second
-    /// `Ctrl-R` walks back one entry at a time). A continuation line never
-    /// enters the search: earlier lines are already scrollback.
-    fn begin_search(&mut self) {
-        if self.line.in_continuation() {
-            return;
+    /// The candidates are the history's *pool* — the ring plus older rows from
+    /// the database, de-duplicated, newest first ([`History::pool`]) — because
+    /// "the command I ran three weeks ago" is what a history search is for, and
+    /// a session ring does not hold it.
+    ///
+    /// A continuation line never opens the picker: its earlier lines are
+    /// already scrollback, and the picker would have to be closed again to get
+    /// back to them.
+    fn open_picker(&mut self) -> io::Result<()> {
+        if self.picker.is_some() || self.line.in_continuation() {
+            return Ok(());
         }
-        let mut search = Search {
-            query: Vec::new(),
-            original: self.line.buffer().to_vec(),
-            original_cursor: self.line.cursor(),
-            matched: None,
-            failed: true,
-        };
-        if self.history.is_empty() {
-            self.search = Some(search);
-            self.dirty = true;
-            return;
+        let lines: Vec<Vec<u8>> = self
+            .history
+            .pool(PICKER_DEPTH)
+            .iter()
+            .map(|entry| entry.text().to_vec())
+            .collect();
+        // The alternate screen comes first: it starts blank, so a frame
+        // painted before the switch would land on the primary screen and be
+        // lost.
+        self.term.write_all(baash_picker::ENTER_SCREEN)?;
+        let mut picker = Picker::new(b"history> ", lines);
+        let size = self.term.size();
+        let frame = picker.frame(
+            size.columns_or_fallback(),
+            size.rows_or_fallback(),
+            self.color,
+        );
+        if let Err(error) = self.term.write_all(&frame) {
+            // The switch already happened, so a failure here must not leave the
+            // terminal on a screen nothing is going to paint.
+            let _ = self.term.write_all(baash_picker::LEAVE_SCREEN);
+            return Err(error);
         }
-        let newest = self.history.len() - 1;
-        search.matched = Some(newest);
-        search.failed = false;
-        self.search = Some(search);
-        self.show_match(newest);
+        self.picker = Some(picker);
+        // The line still holds what the user had typed; `Esc` only has to put
+        // the screen back, not the buffer.
+        self.dirty = false;
+        Ok(())
     }
 
-    /// One key while the search prompt is up.
+    /// Give the screen back to the frame renderer.
     ///
-    /// The keys readline gives a meaning are handled here; every other key
-    /// accepts the match (the line already holds it) and is then processed
-    /// normally — which is how `Left`/`Right` put the cursor on the match for
-    /// editing.
-    fn handle_search(
-        &mut self,
-        key: Key,
-        shell: &mut Option<&mut dyn ShellCompletion>,
-    ) -> io::Result<Flow> {
-        let Key { code, mods } = key;
-        let mods = mods.binding();
-        match (code, mods) {
-            (Code::Char('r'), Modifiers::CTRL) => {
-                self.search_older();
-                Ok(Flow::Continue)
-            }
-            (Code::Char('g'), Modifiers::CTRL) | (Code::Esc, _) => {
-                self.abort_search();
-                Ok(Flow::Continue)
-            }
+    /// Nothing else to undo: the alternate screen holds every byte the picker
+    /// painted, and the primary screen behind it — the frame on it included —
+    /// is exactly as it was left.
+    fn close_picker(&mut self) -> io::Result<()> {
+        if self.picker.take().is_some() {
+            self.term.write_all(baash_picker::LEAVE_SCREEN)?;
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Paint the picker's screen.
+    fn paint_picker(&mut self) -> io::Result<()> {
+        let size = self.term.size();
+        let Some(picker) = self.picker.as_mut() else {
+            return Ok(());
+        };
+        let frame = picker.frame(
+            size.columns_or_fallback(),
+            size.rows_or_fallback(),
+            self.color,
+        );
+        self.term.write_all(&frame)
+    }
+
+    /// One key while the picker owns the screen.
+    ///
+    /// The keys mean what `baash_picker::decode` says they mean — that module
+    /// is where a screen-owning builtin decodes the same set — so this is only
+    /// the translation from the line editor's richer key type.
+    fn handle_picker(&mut self, key: Key) -> io::Result<Flow> {
+        let (code, mods) = (key.code, key.mods.binding());
+        let action = match (code, mods) {
+            // Ctrl-C abandons the whole line, as it does at the prompt: the
+            // picker is a mode of the line, not a program of its own.
             (Code::Char('c'), Modifiers::CTRL) => {
-                // The whole line is abandoned; there is nothing to restore.
-                self.search = None;
-                Ok(Flow::Interrupt)
+                self.close_picker()?;
+                return Ok(Flow::Interrupt);
             }
-            (Code::Enter, Modifiers::NONE) => {
-                self.search = None;
-                Ok(Flow::Submit)
+            // `Tab` accepts as well as `Enter`: the completion menu's `Tab`
+            // accepts a selection, and this is the same kind of list.
+            (Code::Enter | Code::Tab, Modifiers::NONE) => Action::Accept,
+            (Code::Esc, _) | (Code::Char('g'), Modifiers::CTRL) => Action::Cancel,
+            (Code::Backspace, Modifiers::NONE) => Action::Backspace,
+            (Code::Char('w'), Modifiers::CTRL) => Action::KillWord,
+            (Code::Char('u'), Modifiers::CTRL) => Action::Clear,
+            (Code::Up, Modifiers::NONE) | (Code::Char('p'), Modifiers::CTRL) => Action::Up,
+            (Code::Down, Modifiers::NONE)
+            | (Code::Char('n'), Modifiers::CTRL)
+            | (Code::Char('r'), Modifiers::CTRL) => Action::Down,
+            (Code::PageUp, Modifiers::NONE) | (Code::Char('b'), Modifiers::CTRL) => Action::PageUp,
+            (Code::PageDown, Modifiers::NONE) | (Code::Char('f'), Modifiers::CTRL) => {
+                Action::PageDown
             }
-            (Code::Backspace, Modifiers::NONE) => {
-                if let Some(search) = self.search.as_mut()
-                    && search.query.pop().is_some()
-                {
-                    self.research();
-                }
-                Ok(Flow::Continue)
-            }
+            (Code::Home, Modifiers::NONE) => Action::First,
+            (Code::End, Modifiers::NONE) => Action::Last,
+            (Code::Paste(bytes), _) => Action::Insert(bytes),
             (Code::Char(character), mods) if mods.is_text() => {
-                self.search_insert(shifted(character, mods).to_string().as_bytes());
-                Ok(Flow::Continue)
+                Action::Insert(shifted(character, mods).to_string().into_bytes())
             }
-            (Code::Byte(byte), _) => {
-                self.search_insert(&[byte]);
-                Ok(Flow::Continue)
-            }
-            (code, mods) => {
-                // Accept and let the key act on the accepted line.
-                self.search = None;
+            (Code::Byte(byte), _) => Action::Insert(vec![byte]),
+            // Another window may have painted over this one while the picker
+            // sat idle, so gaining focus repaints; losing it changes nothing.
+            (Code::FocusIn, _) => {
                 self.dirty = true;
-                self.handle_with(Key { code, mods }, shell)
+                return self.draw().map(|()| Flow::Continue);
             }
-        }
-    }
-
-    /// Add bytes to the query and search again from where we are.
-    fn search_insert(&mut self, bytes: &[u8]) {
-        if let Some(search) = self.search.as_mut() {
-            search.query.extend_from_slice(bytes);
-        }
-        self.research();
-    }
-
-    /// Re-run the search after a query edit.
-    ///
-    /// A failed search restarts from the newest entry (otherwise backspacing
-    /// out of a dead end would keep looking where it failed); a live match is
-    /// kept when it still contains the new query and the search walks older
-    /// from there, which is readline's narrowing.
-    fn research(&mut self) {
-        let Some(search) = self.search.as_ref() else {
-            return;
+            // Everything else is not a gesture the picker has: a mouse click,
+            // a motion key, a release report.
+            _ => return Ok(Flow::Continue),
         };
-        let query = search.query.clone();
-        let from = if search.failed {
-            self.history.len().saturating_sub(1)
-        } else {
-            match search.matched {
-                Some(index) => index,
-                None => self.history.len().saturating_sub(1),
-            }
+        let Some(picker) = self.picker.as_mut() else {
+            return Ok(Flow::Continue);
         };
-        if self.history.is_empty() {
-            if let Some(search) = self.search.as_mut() {
-                search.failed = true;
-                search.matched = None;
-            }
-            self.dirty = true;
-            return;
-        }
-        match self.find_match(&query, from) {
-            Some(index) => {
-                if let Some(search) = self.search.as_mut() {
-                    search.failed = false;
-                    search.matched = Some(index);
+        let outcome = picker.act(action);
+        let chosen = picker.selected().map(<[u8]>::to_vec);
+        match outcome {
+            Outcome::Continue => self.dirty = true,
+            Outcome::Accept => {
+                self.close_picker()?;
+                if let Some(text) = chosen {
+                    // One undo step for the whole replacement: `Ctrl-Z` after
+                    // accepting puts back the line the picker was opened from.
+                    self.record_edit(EditKind::Other);
+                    self.line.set_text(&text);
                 }
-                self.show_match(index);
             }
-            None => {
-                if let Some(search) = self.search.as_mut() {
-                    search.failed = true;
-                    search.matched = None;
-                }
-                self.dirty = true;
-            }
+            Outcome::Cancel => self.close_picker()?,
         }
-    }
-
-    /// `Ctrl-R` again: the next older match.
-    fn search_older(&mut self) {
-        let Some(search) = self.search.as_ref() else {
-            return;
-        };
-        let query = search.query.clone();
-        let from = match search.matched {
-            Some(0) | None => {
-                if let Some(search) = self.search.as_mut() {
-                    search.failed = true;
-                }
-                self.dirty = true;
-                return;
-            }
-            Some(index) => index - 1,
-        };
-        match self.find_match(&query, from) {
-            Some(index) => {
-                if let Some(search) = self.search.as_mut() {
-                    search.failed = false;
-                    search.matched = Some(index);
-                }
-                self.show_match(index);
-            }
-            None => {
-                if let Some(search) = self.search.as_mut() {
-                    search.failed = true;
-                    search.matched = None;
-                }
-                self.dirty = true;
-            }
-        }
-    }
-
-    /// The newest entry at or below `from` that contains `query`.
-    fn find_match(&self, query: &[u8], from: usize) -> Option<usize> {
-        let entries = self.history.entries();
-        let mut index = from.min(entries.len().checked_sub(1)?);
-        loop {
-            if contains(entries[index].text(), query) {
-                return Some(index);
-            }
-            index = index.checked_sub(1)?;
-        }
-    }
-
-    /// Put entry `index` on the line and the cursor at the start of the match.
-    ///
-    /// Leaving the cursor on the match (rather than at the end of the line)
-    /// is what makes readline's "a movement key accepts the match and puts the
-    /// cursor there for editing" work.
-    fn show_match(&mut self, index: usize) {
-        let query = self
-            .search
-            .as_ref()
-            .map(|search| search.query.clone())
-            .unwrap_or_default();
-        let Some(entry) = self.history.entries().get(index) else {
-            return;
-        };
-        let text = entry.text().to_vec();
-        let at = contains_at(&text, &query).unwrap_or(0);
-        self.line.set_text(&text);
-        self.line.set_cursor(at);
-        self.dirty = true;
-    }
-
-    /// `Esc`/`Ctrl-G`: restore the line the search started from.
-    fn abort_search(&mut self) {
-        let Some(search) = self.search.take() else {
-            return;
-        };
-        self.line.set_text(&search.original);
-        self.line
-            .set_cursor(search.original_cursor.min(search.original.len()));
-        self.dirty = true;
+        self.draw()?;
+        Ok(Flow::Continue)
     }
 
     fn accept_suggestion(&mut self) {
@@ -1703,7 +1596,7 @@ impl<'a> Editor<'a> {
     /// an earlier line — the message is still worth showing, the underline is
     /// not.
     fn check(&self) -> (Option<String>, Option<Range<usize>>) {
-        if self.search.is_some() {
+        if self.picker.is_some() {
             return (None, None);
         }
         let Some(issue) = self.syntax.check(self.line.buffer()) else {
@@ -1726,17 +1619,17 @@ impl<'a> Editor<'a> {
             return Ok(());
         }
         self.dirty = false;
-        let search_prompt = self.search.as_ref().map(Search::prompt);
-        let prompt = if let Some(prompt) = &search_prompt {
-            prompt
-        } else if self.secondary {
+        if self.picker.is_some() {
+            return self.paint_picker();
+        }
+        let prompt = if self.secondary {
             self.prompt.secondary_text()
         } else {
             self.prompt.primary_text()
         };
         let size = self.term.size();
         let columns = size.columns_or_fallback();
-        let ghost = if self.menu.is_some() || self.search.is_some() {
+        let ghost = if self.menu.is_some() {
             None
         } else {
             self.suggestion()
@@ -1783,19 +1676,6 @@ impl<'a> Editor<'a> {
         self.renderer
             .draw(self.term, &frame, &self.theme, self.color)
     }
-}
-
-/// The offset of `query` in `text`, or `None`. An empty query matches at 0.
-fn contains_at(text: &[u8], query: &[u8]) -> Option<usize> {
-    if query.is_empty() {
-        return Some(0);
-    }
-    text.windows(query.len()).position(|window| window == query)
-}
-
-/// Whether `query` occurs in `text`; an empty query occurs everywhere.
-fn contains(text: &[u8], query: &[u8]) -> bool {
-    contains_at(text, query).is_some()
 }
 
 /// Apply shift to a character a terminal reported unshifted.

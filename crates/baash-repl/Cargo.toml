@@ -11,6 +11,9 @@ description = "Line editor and terminal rendering"
 baash-highlight.workspace = true
 baash-complete.workspace = true
 baash-runtime.workspace = true
+# The full-screen picker `Ctrl-R` opens. A crate of its own because the
+# `baashzf` builtin shows the same screen from below this layer.
+baash-picker.workspace = true
 baash-lang.workspace = true
 baash-diag.workspace = true
 baash-sys.workspace = true

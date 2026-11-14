@@ -1,0 +1,15 @@
+[package]
+name = "baash-picker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The full-screen fuzzy picker: candidates in, one chosen candidate out"
+
+[dependencies]
+# The same matcher the completion menu's fuzzy tier uses, for the same reason:
+# `nucleo-matcher` has no threadpool (`DESIGN.md` §4.3), and the greedy variant
+# is `O(n)` per candidate, which is what keeps a keystroke's work bounded.
+nucleo-matcher.workspace = true
+unicode-width.workspace = true

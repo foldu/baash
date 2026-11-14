@@ -357,8 +357,12 @@ Known gaps, stated so they are not mistaken for behaviour:
   Still unobserved: the 250 ms resize sampling path (`§7`), `Ctrl-L`'s
   scrollback push (`§8`), whether OSC 52 reaches the Windows clipboard (`§9`),
   click-to-move, which needs both `click_events` and the cursor report (`§10`),
-  and the background-colour query, which the console does not answer, so
-  Windows keeps the dark palette (`§11`).
+  the background-colour query, which the console does not answer, so Windows
+  keeps the dark palette (`§11`), and the whole of `Ctrl-R`'s full-screen
+  picker (`docs/terminal.md` §14) including `baashzf`, which needs the console
+  to honour `ESC [ ? 1049 h` and `ENABLE_VIRTUAL_TERMINAL_PROCESSING`; the
+  picker's frames and keys are platform-neutral bytes, so what is unverified is
+  the console's own alternate screen, not the picker.
 
 Conformance is the other backlog, and it is measured: `docs/state.md` §6 and
 `docs/roadmap.md` carry the per-file picture, and `crates/baash-spec/baseline.txt`

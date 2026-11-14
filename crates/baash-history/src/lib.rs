@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
-pub use ring::{Entry, History, RECENT_DEPTH, RETENTION};
+pub use ring::{Entry, History, PICKER_DEPTH, RECENT_DEPTH, RETENTION};
 pub use store::Store;
 
 /// Where the history database lives, unless `BAASH_HISTORY_DB` says otherwise.

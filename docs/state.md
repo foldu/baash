@@ -151,6 +151,7 @@ as unverified until a guest runs it.
 | `baash-complete` | 4074 | completion engine: providers, contexts, nucleo ranking, menu layout |
 | `baash-complete-data` | 927 | generated carapace tables: 916 command trees, 58k options and one-line descriptions, compiled in behind the `carapace` feature; no dependencies |
 | `baash-repl` | 3470 | line editor, key decoding, history navigation, prompt adapter, renderer, terminal abstraction |
+| `baash-picker` | 957 | the full-screen fuzzy picker: query, nucleo ranking, the alternate-screen frame; no terminal, no shell |
 | `baash-utils` | 244 | embedded coreutils (uutils 0.8 subcrates): the `builtin-utils` fallback used when `PATH` finds nothing; on by default for Windows, opt-in on Linux |
 | `baash-highlight` | 386 | syntax highlighting (token → style), shared with the editor |
 | `baash-spec` | 3249 | the Oils-suite runner, comparator, ratchet |
@@ -162,7 +163,9 @@ as unverified until a guest runs it.
 registry. Expansion: `baash-lang`. Lexing and word syntax: `baash-syntax`.
 Anything that differs by platform: `baash-sys` (`fd.rs`/`term.rs` versus
 `windows.rs`/`console.rs`, the neutral grammar in `paths.rs`). Editor, keys,
-rendering: `baash-repl`. Candidates and ranking: `baash-complete`. The layering
+rendering: `baash-repl`. Candidates and ranking: `baash-complete`. The picker's
+screen and matching: `baash-picker`, because both `Ctrl-R` (above `baash-repl`)
+and the `baashzf` builtin (below `baash-runtime`) show it. The layering
 is `DESIGN.md` §4.1, and `baash-sys` is the only crate permitted `unsafe` — it
 denies undocumented blocks.
 
@@ -229,8 +232,17 @@ delegates everything else: line editing to `baash-repl`, execution to the
   prompt, and its stdout appears above the prompt — including output that does
   not end in a newline, which is terminated so the editor's column arithmetic
   holds;
-* **`Ctrl-R` reverse incremental search** with the `(reverse-i-search)` prompt,
-  repeat-search, `Enter`/arrows to accept, `Esc`/`Ctrl-G` to abort;
+* **`Ctrl-R` opens the full-screen fuzzy picker**: the query on the top row,
+  ranked matches (subsequence, case-sensitive when the query has case, scored by
+  `nucleo-matcher`) under it, `matches/candidates` pinned to the bottom, on the
+  terminal's alternate screen. `Enter`/`Tab` accept the choice **onto the line**
+  for editing — they never run it — `Esc`/`Ctrl-G` leave the line alone,
+  `Ctrl-C` abandons it, and one `Ctrl-Z` puts back the line the picker opened
+  from. Candidates are the ring plus the newest database rows, de-duplicated,
+  newest first (`docs/contracts.md`);
+* **`baashzf`**, the same picker as a filter: `ls | baashzf` prints the chosen
+  line, `2` when it cannot run (no terminal, `TERM=dumb`, or the terminal on
+  standard input) and `130` when it is cancelled;
 * **bracketed paste that is data is quoted** — a pasted URL with `&`, `$` or a
   backtick reaches the command as one argument — and **`Ctrl-Z`/`Ctrl-_` undo**
   the line, one step per paste and one per run of typed characters, with
@@ -325,8 +337,9 @@ delegates everything else: line editing to `baash-repl`, execution to the
 3. **Editor depth.** No undo and no `vi` mode (`set -o vi` sets a shopt today
    but the editor ignores it). Bracketed paste appears in the key decoder
    (`Paste` in `key.rs`) but is unverified.
-4. **Search depth.** `Ctrl-R` does not highlight the matched bytes (the cursor
-   sits on their first byte), and there is no `Ctrl-S` forward search.
+4. **Search depth.** The picker has no `Ctrl-S` forward search, no preview
+   pane and no multi-select, and a row is truncated at the terminal width rather
+   than scrolled sideways, so a match past the right edge is not visible.
 
 **Known prompt limitations** (measured or deliberately deferred):
 
@@ -524,7 +537,10 @@ Harnesses: `crates/baash-sys/tests/pty.rs` (real pty, termios, window size,
 events, and the expanded ring contents at a real prompt), `crates/baash/tests/interactive_prompt.rs` (the rendered
 prompt, `PROMPT_COMMAND`, prompt escapes, `PS1` from an rc file and from a
 command, `Ctrl-R` end to end, the prompt marks and titles, click coordinates,
-resize repaint, `Ctrl-L`, OSC 52 and the unambiguous-keyboard request pair), `crates/baash/tests/interactive_complete.rs`
+resize repaint, `Ctrl-L`, OSC 52, the unambiguous-keyboard request pair and the
+picker `Ctrl-R` opens), `crates/baash/tests/interactive_baashzf.rs` (`baashzf`
+end to end: a piped list, the alternate screen, a chosen line, and the
+cancelled/empty/refused statuses), `crates/baash/tests/interactive_complete.rs`
 (variable, keyword, function, `complete -W`, directory, `-o default`, history
 and quoted-filename completion at a real prompt),
 `crates/baash/tests/interactive_zoxide.rs` (the script `zoxide init bash` prints
