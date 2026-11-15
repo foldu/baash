@@ -54,3 +54,28 @@ what makes a bug report about a release actionable.
 
 The release body is generated from the commits. A release worth announcing
 wants a hand-written summary on top: `gh release edit v0.1.0 --notes-file …`.
+
+## When the push is refused
+
+`git push` can fail for reasons that have nothing to do with the release, and
+the tag is still local when it does — `git tag -l` answers, and nothing was
+published. The two that have happened:
+
+* **`Bad owner or permissions on …ssh_config.d/…`, `Could not read from remote
+  repository`.** A sandboxed terminal maps the user differently, so OpenSSH
+  refuses the system config's root-owned `Include`, and the ambient
+  `SSH_AUTH_SOCK` is not the agent that holds the key. Name an `ssh` that works:
+
+  ```sh
+  GIT_SSH_COMMAND=$HOME/.dsh/bin/fwd-ssh git push shithub master --follow-tags
+  ```
+
+  Both remotes accept that command; it is the same history, and it is what the
+  recipe's last line runs when the variable is set.
+* **`/etc/bashrc: … unbound variable`** after a recipe line is shell startup
+  noise from the environment, not a failed command: look at the line's own
+  output.
+
+A release commit and tag are cheap to correct while they are local: delete the
+tag (`git tag -d v0.1.0-rc.1`), undo the commit (`git reset --hard HEAD~1`), fix,
+and run the recipe again. Once the tag is pushed, cut `-rc.2` instead.

@@ -50,11 +50,19 @@ portable-aarch64:
 
 # Cut a release: gate, bump, commit, tag `v<version>`, push; the tag publishes.
 release version: check test conformance
-    cargo release --execute {{version}}
+    # `--no-confirm`: this recipe is the confirmation, and cargo-release's own
+    # prompt is read from a stdin this sandboxed terminal does not give it —
+    # the first 0.1.0-rc.1 attempt answered `y`, printed the plan, and changed
+    # nothing while reporting success.
+    cargo release --execute --no-confirm {{version}}
     git push --follow-tags
     # `.github/workflows/release.yml` is what publishes, and it runs on GitHub,
     # so the same tag has to reach that remote too. GitLab is the source of
     # truth; both remotes are the same history (`docs/releasing.md`).
+    #
+    # A sandboxed terminal cannot use the system `ssh` — root-owned config
+    # includes and an agent it cannot reach — so `GIT_SSH_COMMAND` may need to
+    # name a wrapper that can (`docs/releasing.md`, "When the push is refused").
     git push shithub master --follow-tags
 
 # Regenerate the embedded completion tables from the pinned carapace.
