@@ -318,6 +318,33 @@ character positions allocated once per candidate per keystroke (47–184 ms at
 stale put a frame on the wire 40 times a second and delayed the first frame
 after a key by a whole 25 ms deadline.
 
+## The test suite: 37 s to 5 s
+
+`cargo test` has to hold `RUST_TEST_THREADS=1` (`.cargo/config.toml`): `$( … )`
+captures output by redirecting descriptor 1, which is a property of the process,
+so two capture tests at once read each other's bytes. That serialises 1697
+cases.
+
+`cargo nextest run` gives every case its own *process*, so the descriptor
+belongs to nobody else and the same cases run at once. Warm, same tree, 32
+cores, debug profile:
+
+| command | cases | wall |
+| --- | ---: | ---: |
+| `cargo test --workspace --all-features` | 1697 (+4 ignored) | **36.6 s** |
+| `cargo nextest run --workspace --all-features` | 1692 (+4 skipped) | **5.1 s** |
+| `cargo test --workspace --all-features --doc` | 5 | 1.5 s |
+
+Wall time is not the only gain: a failure names one case and carries only that
+process's output, and `fail-fast = false` reports every failure in one run
+instead of stopping at the first.
+
+The 5 doctests are the one thing nextest does not run, so `just test` and both
+workflows run `cargo test … --doc` beside it. `threads-required = 2` on the
+`interactive_*` binaries (`.config/nextest.toml`) stops the pty cases taking
+every slot: each one is a child process, a pty and a temporary home, and
+sixteen of those at once spend the machine on context switches.
+
 ## What this says
 
 * **Startup was not the problem.** A one-shot `baash -c ':'` costs 0.40 ms in

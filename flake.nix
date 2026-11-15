@@ -616,6 +616,9 @@
               pkgs.just
               pkgs.cargo-release
               pkgs.cargo-deny
+              # One process per test, run in parallel: `docs/performance.md` has
+              # the measurement, and it is the loop's own test command.
+              pkgs.cargo-nextest
               # The reference shell for `crates/baash/tests/completion_compat.rs`.
               # nixpkgs builds bash twice and the plain one has `complete`,
               # `compgen` and `compopt` compiled *out*: with only that on `PATH`

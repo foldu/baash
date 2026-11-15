@@ -285,7 +285,7 @@ one that carries the icons and the launcher entry.
 
 ```sh
 just check         # nix flake check: build, fmt, clippy, licenses, desktop, windows, module
-just test          # the full suite, on a real pty
+just test          # nextest, in parallel, on a real pty
 just conformance   # the ratchet
 just licenses      # cargo deny check licenses
 just build         # result/bin/baash

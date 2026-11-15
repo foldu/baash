@@ -11,7 +11,17 @@ check:
     nix flake check --print-build-logs
 
 # The full suite. It drives a real pty, so it is not part of `check`.
+# One process per test, in parallel: 1697 cases in ~5 s instead of ~37
+# (`docs/performance.md`). Each case gets its own process, so the descriptor-1
+# property that forces `cargo test` to one thread at a time stops mattering.
+# Doctests are separate because nextest does not run them.
 test:
+    cargo nextest run --workspace --all-features
+    cargo test --workspace --all-features --doc
+
+# The same cases through libtest, one at a time: for a debugging session where
+# a breakpoint or a single-threaded assumption is the point.
+test-serial:
     cargo test --workspace --all-features
 
 # The `=~` benchmarks: the engine, and the shell's loop against bash.

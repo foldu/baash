@@ -35,7 +35,7 @@ just                 # list the tasks
 just build           # .#default      -> result/bin/baash
 just windows         # .#windows      -> result-windows/bin/baash.exe
 just windows-fast    # .#windows-fast -> result-windows-fast/ (no LTO)
-just test            # cargo test --workspace --all-features
+just test            # nextest, one process per test, in parallel
 just bench           # cargo bench -p baash-bench -> the `=~` tables
 just conformance     # the Oils ratchet against crates/baash-spec/baseline.txt
 just licenses        # cargo deny check licenses
@@ -47,7 +47,8 @@ Without `nix develop`, that gate is:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- --deny warnings
-cargo test --workspace --all-features
+cargo nextest run --workspace --all-features
+cargo test --workspace --all-features --doc
 cargo build -p baash
 cargo run -p baash-spec -- --shell "${CARGO_TARGET_DIR:-target}/debug/baash" \
     --list-failures --ratchet --tolerance 5
@@ -61,9 +62,12 @@ The gate is green *and* the behaviour was verified — not "it compiles".
 
 * Clippy runs with `--deny warnings` for the whole workspace, all targets, all
   features.
-* Tests run one at a time on purpose (`RUST_TEST_THREADS=1` in
-  `.cargo/config.toml`): `$( … )` redirects descriptor 1, a property of the
-  process, so two capture tests at once take each other's bytes apart.
+* `just test` is `cargo nextest run` plus the doctests: nextest gives every
+  case its own *process*, so `$( … )`'s redirect of descriptor 1 — a property of
+  the process, which is why `cargo test` has to run one test at a time
+  (`RUST_TEST_THREADS=1` in `.cargo/config.toml`) — belongs to nobody else, and
+  1697 cases run in about 5 s instead of 37 (`docs/performance.md`). Keep the
+  environment variable: a plain `cargo test` still needs it.
 * The ratchet must not drop below `crates/baash-spec/baseline.txt`; the noise
   margin is `--tolerance 5`. Lowering either is explained in the commit, never a
   way to turn red green.
@@ -83,7 +87,7 @@ The gate is green *and* the behaviour was verified — not "it compiles".
   a nix build sandbox (`openpty` succeeds, reads hang). Use a real host.
 * 18 conformance cases read the machine, not the shell (hostname, timezone data,
   euid, wall-clock timers), so a sandbox measures ~18 fewer passes.
-* `cargo test --workspace --all-features -- --list | grep -c ': test$'` counts
+* `cargo nextest list --workspace --all-features | wc -l` counts
   tests honestly; pty-driven binaries lose their libtest summary when stdout is
   redirected.
 

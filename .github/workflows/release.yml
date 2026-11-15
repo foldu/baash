@@ -71,9 +71,14 @@ jobs:
           sudo apt-get install -y dash bash-completion
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features -- --deny warnings
+      # `nextest` runs one process per test (`.config/nextest.toml`), which is
+      # both faster and the reason the descriptor-1 constraint of `cargo test`
+      # disappears; doctests are the one thing it does not run.
+      - uses: taiki-e/install-action@nextest
       # A runner is a VM with a real `/dev/pts`, so the pty-driven
       # `interactive_*` tests run here rather than skipping.
-      - run: cargo test --workspace --all-features
+      - run: cargo nextest run --workspace --all-features
+      - run: cargo test --workspace --all-features --doc
       - name: Conformance ratchet
         run: |
           cargo build -p baash

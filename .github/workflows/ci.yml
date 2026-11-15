@@ -52,9 +52,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y dash
           sudo apt-get install -y zoxide || echo "zoxide unavailable; that test will skip"
+      # `nextest` runs one process per test, so the descriptor-1 property that
+      # forces `cargo test` to one thread at a time (`.cargo/config.toml`) stops
+      # mattering and the suite is ~7x faster; `.config/nextest.toml` says why.
+      - uses: taiki-e/install-action@nextest
       # A GitHub-hosted runner is a VM with a real /dev/pts, so the pty-driven
       # `interactive_*` tests run here — unlike in a nix build sandbox.
-      - run: cargo test --workspace --all-features
+      - run: cargo nextest run --workspace --all-features
+      # The one thing nextest does not run.
+      - run: cargo test --workspace --all-features --doc
 
   licenses:
     runs-on: ubuntu-latest

@@ -1,0 +1,36 @@
+# `cargo nextest run`: one process per test, many at a time.
+#
+# `cargo test` runs a binary's cases as threads in one process, and the suite
+# has to hold `RUST_TEST_THREADS=1` (`.cargo/config.toml`): a subshell redirects
+# descriptor 1, and descriptor 1 is a property of the process, so two capture
+# tests at once read each other's bytes. nextest removes the reason instead of
+# the symptom — each case gets its own process, so the redirect is nobody
+# else's — and the suite runs in parallel. There is deliberately no
+# `test-threads` key: the default (one per core) is the point.
+#
+# Doctests are the one thing nextest does not run (5 of them, in `baash-complete`,
+# `baash-pattern` and the `baash-syntax` lexer), so the gate runs
+# `cargo test --doc` beside it: `just test` and both workflows do both.
+
+[profile.default]
+# Report every failure, not the first one.
+fail-fast = false
+# No retries: a flaky test is a finding, and hiding it is how a release ships
+# with a broken pty or a racy completion.
+retries = 0
+# Only what a person reads after a run.
+status-level = "fail"
+final-status-level = "fail"
+
+[[profile.default.overrides]]
+# The pty suites start the real shell and drive it, so each case is a child
+# process, a pty and a temporary home: they cost more than a unit test, and a
+# machine running sixteen of them at once spends its time switching instead.
+# `threads-required` is nextest's weight against the core count, so these take
+# two slots each and the CPU-bound cases keep theirs.
+#
+# The filter matches the *binary id* (`baash::interactive_complete`), which is
+# what `binary()` tests: a bare pattern is an exact match and a `^` anchor is
+# checked against the whole id, so the substring form is the one that works.
+filter = "binary(~interactive_)"
+threads-required = 2
