@@ -617,6 +617,8 @@ fn permission_bits(_argument: &[u8]) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::IsTerminal;
+
     use super::*;
     use crate::tests::TestHost;
 
@@ -743,7 +745,16 @@ mod tests {
             run(&mut host, &[b"!", b"-f", b"/nonexistent-baash-test"]),
             SUCCESS
         );
-        assert_eq!(run(&mut host, &[b"-t", b"0"]), FAILURE);
+        // `-t 0` asks about *this process's* stdin, which a test run inherits:
+        // `cargo test` from an interactive terminal has a terminal there, and a
+        // CI runner does not. Expect what stdin is, and keep a fixed
+        // expectation for a descriptor that is not open at all.
+        let stdin_is_tty = std::io::stdin().is_terminal();
+        assert_eq!(
+            run(&mut host, &[b"-t", b"0"]),
+            if stdin_is_tty { SUCCESS } else { FAILURE }
+        );
+        assert_eq!(run(&mut host, &[b"-t", b"999"]), FAILURE);
         #[cfg(unix)]
         assert_eq!(run(&mut host, &[b"-O", file.as_bytes()]), SUCCESS);
     }
