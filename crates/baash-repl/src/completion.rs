@@ -7,7 +7,7 @@
 
 use baash_complete::Menu;
 
-use crate::display::{truncate, width_of};
+use crate::display::{clip, width_of};
 use crate::render::MenuRow;
 
 /// Cells between two menu columns, and between a name and its description.
@@ -124,7 +124,7 @@ impl MenuState {
                 // uniform cell is simpler and is clipped at the row's end.
                 text.push_str(&" ".repeat(cell_width.saturating_sub(width_of(&text))));
             }
-            cells.push(truncate(&text, cell_width));
+            cells.push(clip(&text, cell_width));
         }
 
         let row_count = count.div_ceil(column_count);
@@ -152,7 +152,7 @@ impl MenuState {
                     text.push_str(&" ".repeat(COLUMN_GAP));
                 }
             }
-            let text = truncate(&text, columns);
+            let text = clip(&text, columns);
             // The row may have been clipped before or inside the selected
             // cell; keep the range inside what is actually painted.
             let selection = selection.and_then(|range: std::ops::Range<usize>| {
@@ -276,6 +276,30 @@ mod tests {
         let rows = state.rows(2, 12);
         assert!(rows.iter().any(|row| row.selected));
         assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn a_clipped_row_says_so() {
+        // A name that does not fit must not read as a name that ends there:
+        // `[Blue Archive OST] Burning Love ｜ Extended Versi` is exactly what a
+        // user mistook for a chopped file name.
+        let candidates = vec![Candidate::new(
+            "[Blue Archive OST] Burning Love ｜ Extended Version.webm",
+            CandKind::Path,
+        )];
+        let mut state = MenuState::new(menu_candidates(b"", candidates));
+        let rows = state.rows(4, 30);
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0].text.ends_with('…'),
+            "the row ends with the clip marker: {:?}",
+            rows[0].text
+        );
+        assert!(width_of(&rows[0].text) <= 30);
+        // A row that fits is left alone.
+        let candidates = vec![Candidate::new("short.webm", CandKind::Path)];
+        let mut state = MenuState::new(menu_candidates(b"", candidates));
+        assert!(!state.rows(4, 30)[0].text.contains('…'));
     }
 
     #[test]

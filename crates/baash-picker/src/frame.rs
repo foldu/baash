@@ -188,7 +188,15 @@ fn paint_row(
         out.extend_from_slice(REVERSE);
     }
     out.extend_from_slice(marker.as_bytes());
-    let width = columns.saturating_sub(width_of(&marker));
+    // A row that simply stops is indistinguishable from a name that ends
+    // there, so a line that does not fit keeps a cell for `…`. The picker
+    // holds commands and paths, both of which are long often enough for the
+    // difference to matter.
+    let space = columns.saturating_sub(width_of(&marker));
+    // One cell has to be left for the `…` itself; a one-column terminal shows
+    // the marker and nothing else.
+    let clipped = width_of(text) > space && space >= 1;
+    let width = if clipped { space - 1 } else { space };
     let mut used = 0;
     let mut bold = false;
     for (index, character) in text.chars().enumerate() {
@@ -204,6 +212,12 @@ fn paint_row(
         }
         let mut buffer = [0u8; 4];
         out.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+    }
+    if color && bold {
+        out.extend_from_slice(BOLD_OFF);
+    }
+    if clipped {
+        out.extend_from_slice("…".as_bytes());
     }
     if color && (bold || selected) {
         out.extend_from_slice(RESET);

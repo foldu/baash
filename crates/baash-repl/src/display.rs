@@ -146,6 +146,23 @@ pub fn width_of(text: &str) -> usize {
         .sum()
 }
 
+/// Cut `text` to at most `columns` cells, marking that it was cut.
+///
+/// A menu row that simply stops is indistinguishable from a name that ends
+/// there: `[Blue Archive OST] Burning Love ｜ Extended Versi` looks like a file
+/// called `… Versi`. One cell is spent on `…` so a clipped row says so.
+pub fn clip(text: &str, columns: usize) -> String {
+    if width_of(text) <= columns {
+        return text.to_owned();
+    }
+    if columns == 0 {
+        return String::new();
+    }
+    let mut out = truncate(text, columns - 1);
+    out.push('…');
+    out
+}
+
 /// Cut `text` to at most `columns` cells without splitting a character.
 pub fn truncate(text: &str, columns: usize) -> String {
     let mut out = String::new();

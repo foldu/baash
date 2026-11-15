@@ -1526,7 +1526,11 @@ or End; Esc dismisses it for the current line, and any edit brings it back.
 
 The menu is columnar: entries are packed into as many columns as the terminal
 width allows, descriptions start at one column across rows, and a narrow
-terminal degrades to one clipped column rather than wrapping. It is painted
+terminal degrades to one column rather than wrapping. A cell wider than its
+column is cut and ends in `…` (`display::clip`, which spends one cell on the
+marker), because a row that stops at the margin reads exactly like a name that
+ends there: `[Blue Archive OST] Burning Love ｜ Extended Versi` was reported as
+a chopped-up file name. It is painted
 *below* the line and the cursor is put back on the line; scrolling within the
 menu is by row and keeps the selected cell visible. At a blank command word
 history contributes whole previous commands (newest first, fuzzy-ranked like
@@ -1657,7 +1661,8 @@ a time with `ESC [ K`, the count pinned with `ESC [ ROWS ; 1 H`, then the cursor
 back on the query with `ESC [ 1 ; COL H`. No partial repaint, no remembered
 geometry, no `Renderer`. `Picker::frame` also records the height it pinned so
 `PageUp`/`PageDown` move by what was last painted. Rows are one candidate each,
-truncated to the terminal width; a candidate that contains a newline (a pasted
+cut to the terminal width and ending in `…` when they do not fit, so a cut name
+is not read as a short one; a candidate that contains a newline (a pasted
 block) or a control byte is flattened to one row, because a row is the unit the
 arithmetic is built on.
 
