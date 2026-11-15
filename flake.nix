@@ -616,6 +616,12 @@
               pkgs.just
               pkgs.cargo-release
               pkgs.cargo-deny
+              # The reference shell for `crates/baash/tests/completion_compat.rs`.
+              # nixpkgs builds bash twice and the plain one has `complete`,
+              # `compgen` and `compopt` compiled *out*: with only that on `PATH`
+              # every completion case answers 127 and the suite cannot compare
+              # anything. `bash-interactive` is the build a user actually runs.
+              pkgs.bashInteractive
               # `crates/baash/tests/interactive_zoxide.rs` drives the real
               # `zoxide init bash` script against a pty, so the integration is
               # tested against the file a user would source and not a copy of it.

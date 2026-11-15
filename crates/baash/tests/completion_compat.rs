@@ -22,8 +22,10 @@
 //!   copies it in, the dev shell does, and it is what the binary embeds), else
 //!   the system copy. A checkout with neither reports a skip. Comparing two
 //!   different library versions would compare the libraries, not the shells.
-//! * bash is required. Windows and a bare CI image have none, and the test
-//!   reports the skip rather than pretending to have compared anything.
+//! * a bash that can complete is required. Windows and a bare CI image have
+//!   none, and neither can nixpkgs' non-interactive `bash` — it compiles
+//!   `complete`, `compgen` and `compopt` out. The test skips rather than
+//!   pretending to have compared anything, and says which shell it wanted.
 //!
 //! Not covered here, and measured elsewhere: `complete -C` (a command's
 //! output as candidates) is not run by the shell at all, and `complete -p
@@ -433,7 +435,11 @@ fn the_bash_completion_library_agrees_with_bash() {
 /// Run every case under both shells and report all the differences at once.
 fn compare(cases: &[Case], needs_library: bool) {
     let Some(bash) = find_bash() else {
-        eprintln!("skipped: no bash to compare against");
+        eprintln!(
+            "skipped: no bash with the completion builtins to compare against \
+             (nixpkgs' non-interactive `bash` has none; `bash-interactive` does, \
+             and `nix develop` provides it)"
+        );
         return;
     };
     let library = if needs_library {
@@ -546,18 +552,36 @@ fn status(output: &Output) -> String {
     }
 }
 
-/// `bash` from `$BASH` or from `PATH`.
+/// A `bash` that can be the reference: `$BASH`, then `PATH`.
+///
+/// Candidate order is not enough, because not every bash can complete at all.
+/// nixpkgs builds the shell twice: `bash` is the non-interactive one and
+/// compiles `complete`, `compgen` and `compopt` *out*, `bash-interactive`
+/// keeps them. A `PATH` with only the first is a `PATH` where the reference
+/// answers 127 to every case, and the report would blame baash for it. So each
+/// candidate is asked whether it has the builtins before it is trusted.
 fn find_bash() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("BASH") {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|directory| directory.join("bash"))
-        .find(|candidate| candidate.is_file())
+    let from_bash = std::env::var_os("BASH").map(PathBuf::from);
+    let from_path = std::env::split_paths(&path).map(|directory| directory.join("bash"));
+    from_bash
+        .into_iter()
+        .chain(from_path)
+        .filter(|candidate| candidate.is_file())
+        .find(|candidate| completes(candidate))
+}
+
+/// Whether `bash` has the completion builtins compiled in.
+fn completes(bash: &Path) -> bool {
+    Command::new(bash)
+        .arg("--norc")
+        .arg("-c")
+        .arg("type -t compgen >/dev/null && type -t complete >/dev/null")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// The bash-completion file both shells source.
