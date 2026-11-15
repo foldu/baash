@@ -218,16 +218,17 @@ other's history.
 ## Installing
 
 A release is one executable per target, published on the
-[releases page](https://github.com/foldu/baash/releases): Linux x86-64 and
-aarch64, and Windows x86-64. The Linux ones are linked against glibc 2.17 and
+[releases page](https://github.com/foldu/baash/releases), named
+`baash-<version>-<triple>`: `x86_64-linux`, `aarch64-linux` and
+`x86_64-pc-windows-gnu.exe`. The Linux ones are linked against glibc 2.17 and
 need no nix and no shared library beyond libc, so unpacking them is the whole
 installation:
 
 ```sh
-curl -LO https://github.com/foldu/baash/releases/download/v0.1.0-rc.1/baash-0.1.0-rc.1-linux-x86_64
+curl -LO https://github.com/foldu/baash/releases/download/v0.1.0-rc.1/baash-0.1.0-rc.1-x86_64-linux
 curl -LO https://github.com/foldu/baash/releases/download/v0.1.0-rc.1/SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing
-install -m755 baash-0.1.0-rc.1-linux-x86_64 ~/.local/bin/baash
+install -m755 baash-0.1.0-rc.1-x86_64-linux ~/.local/bin/baash
 ```
 
 A version with a suffix (`v0.1.0-rc.1`) is a prerelease: GitHub hides it from

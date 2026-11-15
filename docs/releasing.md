@@ -46,9 +46,9 @@ gh run list -R foldu/baash --limit 5
 gh run watch -R foldu/baash
 ```
 
-The run publishes four assets: `baash-<version>-linux-x86_64`,
-`baash-<version>-linux-aarch64`, `baash-<version>-windows-x86_64.exe` and
-`SHA256SUMS`. Check that all four exist, that the checksums verify, and that an
+The run publishes four assets, named `baash-<version>-<triple>`, where the
+triple is the workflow matrix's: `x86_64-linux`, `aarch64-linux`,
+`x86_64-pc-windows-gnu.exe`, plus `SHA256SUMS`. Check that all four exist, that the checksums verify, and that an
 artifact's `baash --version` names the commit the tag points at — the label is
 what makes a bug report about a release actionable.
 
