@@ -60,7 +60,7 @@ OPTIONS
                     alias for `system`. The environment variable
                     `BAASH_REGEX_ENGINE` is read when the flag is absent.
     -h, --help      Print this help.
-    -V, --version   Print the version.
+    -V, --version   Print the version, and the commit it came from.
 
 Exit status: the status of the last command, or 2 for a usage or syntax error.
 ";
@@ -377,7 +377,16 @@ fn dispatch(mode: Mode, interactive_flag: bool, flags: ShellFlags) -> ExitCode {
             ExitCode::SUCCESS
         }
         Mode::Version => {
-            println!("baash {}", env!("CARGO_PKG_VERSION"));
+            // The commit as well as the package version: every build of this
+            // tree says `0.0.0`, so the commit is the only thing that tells a
+            // bug report which binary produced it. `BAASH_GIT_VERSION` is the
+            // build script's; it says `-dirty` when the tree it compiled had
+            // uncommitted code.
+            println!(
+                "baash {} ({})",
+                env!("CARGO_PKG_VERSION"),
+                env!("BAASH_GIT_VERSION")
+            );
             ExitCode::SUCCESS
         }
         Mode::Highlight => highlight_stdin(),

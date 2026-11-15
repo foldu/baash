@@ -39,6 +39,19 @@
 
       rustVersion = "1.99.1";
 
+      # The commit `baash --version` prints. The build sandbox has no `.git`, so
+      # `crates/baash/build.rs` cannot ask git there: the flake knows, and a
+      # store path is the only thing that survives into the binary. A dirty
+      # checkout says so — `abc1234-dirty` is a build that is not the commit it
+      # names — and a flake evaluated from a plain directory says `unknown`,
+      # because there is no commit to name.
+      #
+      # Deliberately *not* part of `commonArgs`: that feeds `cargoArtifacts` and
+      # the Windows `deps` halves, which exist to be shared between commits.
+      # An env var that moves with every commit would rebuild the whole
+      # dependency graph each time and undo the split.
+      gitVersion = self.shortRev or self.dirtyShortRev or "unknown";
+
       eachSystem =
         f:
         nixpkgs.lib.genAttrs systems (
@@ -276,6 +289,11 @@
                   // {
                     cargoArtifacts = deps;
                     doInstallCargoArtifacts = false;
+                    # Only the package half: `deps` is keyed on the workspace and
+                    # has to be shared between commits (`gitVersion`, above).
+                    env = windowsCommon.env // {
+                      BAASH_GIT_VERSION = gitVersion;
+                    };
                     buildPhaseCargoCommand = ''
                       ${prepare}
                       ${cargoBuild}
@@ -325,6 +343,11 @@
                 inherit pname src;
                 version = "0.0.0";
                 strictDeps = true;
+                # The commit `--version` prints; `cargoArtifacts` is null here,
+                # so there is no shared half for it to invalidate.
+                env = {
+                  BAASH_GIT_VERSION = gitVersion;
+                };
                 # The suite is the CI gate, on a real pty; a release build is a
                 # packaging step, as it is for `default`.
                 doCheck = false;
@@ -376,6 +399,7 @@
               commonArgs
               embedCompletion
               icons
+              gitVersion
               licenses
               portable
               portableAarch64
@@ -395,6 +419,7 @@
           commonArgs,
           embedCompletion,
           icons,
+          gitVersion,
           portable,
           portableAarch64,
           windows,
@@ -407,6 +432,12 @@
             // {
               pname = "baash";
               version = "0.0.0";
+              # The commit `--version` prints. Only the package, not the
+              # `cargoArtifacts` it seeds from: those are shared between commits
+              # and this value is not (`gitVersion`, above).
+              env = {
+                BAASH_GIT_VERSION = gitVersion;
+              };
               inherit cargoArtifacts;
               preBuild = embedCompletion;
               # Tests are their own gate (`cargo test` in CI, on a real pty);

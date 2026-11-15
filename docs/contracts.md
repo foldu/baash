@@ -2072,6 +2072,36 @@ one chunk; an interactive pipe now uses the line-at-a-time reader (bash
 expands each line of `-i`, and the second line must see the first), while
 `-i -c` stays whole-string and never expands.
 
+### `--version` names the commit (`crates/baash/build.rs`)
+
+`baash -V` prints `baash <package version> (<label>)`. The label is the commit
+the binary was built from — `0cded50`, or `v0.2.0-12-g0cded50` once annotated
+tags exist — with `-dirty` appended when the tree that compiled it had
+uncommitted code. The package version is `0.0.0` for every build of this tree,
+so the label is the only thing that tells two binaries apart, and it is what a
+bug report quotes.
+
+`build.rs` publishes it as the compile-time `BAASH_GIT_VERSION`, taking the
+first source that applies: the environment variable of that name, which is
+`flake.nix`'s `gitVersion` (`self.shortRev or self.dirtyShortRev or "unknown"`)
+and the only one that can work in the Nix sandbox, where the store path built
+from has no `.git`; `git describe --always --dirty --abbrev=7` in a checkout;
+and `unknown`, for an unpacked tarball or a source drop with no history. A build
+never fails over its label.
+
+The flake passes it to the packages only — not to `cargoArtifacts` or the
+Windows `deps` halves — because those are keyed on the workspace and shared
+between commits: a per-commit variable there would rebuild the dependency graph
+on every commit. (The portable builds set it too; they have no `cargoArtifacts`
+to invalidate.)
+`build.rs` registers `.git/HEAD`, the ref `HEAD` names, `.git/packed-refs`,
+`Cargo.toml` and `crates/` with `rerun-if-changed`, because cargo reruns a build
+script only for the paths it names and a commit moves the ref, not `HEAD`; a
+watch on `HEAD` alone would leave the previous commit's label in the binary. A
+change outside those paths (a document, the flake) does not relabel, so a label
+without `-dirty` means "no code was edited", not "the tree is clean". The test
+is `crates/baash/tests/version.rs`.
+
 ### baash-vm additions
 
 `Interp::each_candidate` is the single resolution walk (alias → keyword →
