@@ -885,11 +885,15 @@ fn completion_ignore_case_matches_through_the_inputrc() {
 #[test]
 fn compopt_accepts_a_command_name() {
     let (mut session, home, work) = session("compopt-name");
-    session.line("f () { compopt -o nospace mpv; COMPREPLY=(done); }");
-    session.line("complete -F f mpv");
+    // A name no static carapace table knows. The precedence is `external
+    // carapace > static tables > complete -F` (`docs/contracts.md`), so a name
+    // like `mpv` — which the tables carry — never reaches the function below,
+    // and every assertion here would be about a rule that never ran.
+    session.line("f () { compopt -o nospace zzcmd; COMPREPLY=(done); }");
+    session.line("complete -F f zzcmd");
 
-    session.send(b"mpv \t");
-    session.expect(b"done", Duration::from_secs(10));
+    session.send(b"zzcmd \t");
+    session.expect(b"zzcmd done", Duration::from_secs(10));
     assert!(
         find(&session.output, b"compopt: usage").is_none(),
         "the named form is not a usage error: {:?}",
@@ -898,9 +902,22 @@ fn compopt_accepts_a_command_name() {
     session.send(b"\x03");
     session.prompt();
 
-    // The option was saved on the rule, which is what `complete -p` prints.
-    session.line("complete -p mpv");
-    session.expect(b"nospace", Duration::from_secs(10));
+    // The option was saved on the rule, which is what `complete -p` prints —
+    // and that is also the proof the function ran, because nothing else calls
+    // `compopt -o nospace zzcmd`.
+    //
+    // The needle is the whole spec rather than the word `nospace`: the line
+    // that defined the function was echoed above and contains `nospace` too, so
+    // the short needle held whether or not the rule kept the option.
+    session.line("complete -p zzcmd");
+    session.expect(b"-o nospace -F f zzcmd", Duration::from_secs(10));
+    session.prompt();
+    // And `complete -p` succeeding is asserted here, where it names the
+    // command: the harness's clean-exit check reports a disagreement with `$?`
+    // as "the shell must exit cleanly at `exit`", which points at the wrong
+    // thing.
+    session.line("echo st=$?");
+    session.expect(b"st=0", Duration::from_secs(10));
     session.prompt();
     cleanup(&mut session, &home, &work);
 }
