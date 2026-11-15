@@ -277,8 +277,14 @@ fn session(tag: &str) -> (Session, PathBuf, PathBuf) {
     (session, home, work)
 }
 
+/// Leave the shell and prove it exited 0.
+///
+/// `exit 0` rather than a bare `exit`, which inherits the status of whatever
+/// the test last ran: a case whose last command failed would fail here as "the
+/// shell must exit cleanly at `exit`", naming the harness instead of the
+/// command. A crash or a hang still shows up as a status that is not 0.
 fn cleanup(session: &mut Session, home: &Path, work: &Path) {
-    session.send(b"exit\n");
+    session.send(b"exit 0\n");
     session.wait_child();
     let _ = std::fs::remove_dir_all(home);
     let _ = std::fs::remove_dir_all(work);
