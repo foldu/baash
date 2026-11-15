@@ -8,7 +8,6 @@
 //! same command and compares — which is also the only way to notice that the
 //! label went stale.
 
-use std::path::Path;
 use std::process::{Command, Output};
 
 /// `baash --version`, required to succeed.
@@ -89,10 +88,8 @@ fn version_names_the_commit_this_checkout_is_on() {
     assert_eq!(
         committed(label),
         committed(&expected),
-        "the label names a different commit than the checkout: \
-         is `{}` stale, or built with BAASH_GIT_VERSION set?",
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("build.rs")
-            .display()
+        "the label names a different commit than the checkout: the binary is \
+         stale, or `crates/baash/build.rs` took BAASH_GIT_VERSION from the \
+         environment"
     );
 }
