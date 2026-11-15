@@ -18,8 +18,6 @@
 //! nameref), `-o` (is a shell option on), `-O`/`-G` (owner/group) and `-N`
 //! (mtime newer than atime) are bash's; everything else is POSIX.
 
-use std::time::SystemTime;
-
 use crate::errors::codes;
 use crate::{ShellHost, Status, vfs};
 use baash_diag::Diagnostic;
@@ -302,9 +300,9 @@ impl Parser<'_, '_> {
                     _ => left >= right,
                 }
             }
-            b"-nt" => newer_than(left, right),
-            b"-ot" => older_than(left, right),
-            b"-ef" => same_file(left, right),
+            b"-nt" => crate::filecmp::newer_than(left, right),
+            b"-ot" => crate::filecmp::older_than(left, right),
+            b"-ef" => crate::filecmp::same_file(left, right),
             other => {
                 return Err(format!(
                     "test: {}: binary operator expected",
@@ -534,45 +532,6 @@ fn legal_number(text: &[u8]) -> Option<i64> {
 
 fn metadata(argument: &[u8]) -> Option<std::fs::Metadata> {
     std::fs::metadata(baash_sys::os::path_from_bytes(argument)).ok()
-}
-
-fn modification_time(argument: &[u8]) -> Option<SystemTime> {
-    metadata(argument)?.modified().ok()
-}
-
-/// `-nt`: `left` exists and `right` does not, or is newer.
-fn newer_than(left: &[u8], right: &[u8]) -> bool {
-    match (modification_time(left), modification_time(right)) {
-        (Some(left), Some(right)) => left > right,
-        (Some(_), None) => true,
-        _ => false,
-    }
-}
-
-/// `-ot`: `left` does not exist and `right` does, or is older.
-fn older_than(left: &[u8], right: &[u8]) -> bool {
-    match (modification_time(left), modification_time(right)) {
-        (Some(left), Some(right)) => left < right,
-        (None, Some(_)) => true,
-        _ => false,
-    }
-}
-
-/// `-ef`: the same file, by device and inode.
-#[cfg(unix)]
-fn same_file(left: &[u8], right: &[u8]) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    match (metadata(left), metadata(right)) {
-        (Some(left), Some(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
-        _ => false,
-    }
-}
-
-/// `-ef` needs inodes; without them the question cannot be answered.
-#[cfg(not(unix))]
-fn same_file(_left: &[u8], _right: &[u8]) -> bool {
-    false
 }
 
 /// `-O`: the file's owner is this (effective) user.

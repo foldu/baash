@@ -431,6 +431,60 @@ fn conditional_command_operators() {
     assert_eq!(out("[[ 1 -eq 2 ]]; echo $?"), "1\n");
 }
 
+/// `-nt`, `-ot` and `-ef`: the two-operand tests that ask the filesystem.
+///
+/// Inside `[[ … ]]` these were a *parse* error (`BAASH-E0204`) while `[ … ]`
+/// accepted them, so a startup file that wrote `[[ $a -ef $b ]]` — ordinary
+/// dotfile code, and how this was found — lost the whole conditional before
+/// anything in it ran.
+#[test]
+fn conditional_file_comparisons() {
+    let dir = TestDir::new("cond-filecmp");
+    let older = dir.at("older");
+    let newer = dir.at("newer");
+    let missing = dir.at("missing");
+    std::fs::write(&older, "x").unwrap();
+    // The modification time is the whole question, so the two writes must not
+    // land in the same nanosecond.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&newer, "y").unwrap();
+
+    let status = |source: &str| code(&run(source));
+
+    // Both commands answer, and the answer is the exit status.
+    assert_eq!(status(&format!("[[ {newer} -nt {older} ]]")), 0);
+    assert_eq!(status(&format!("[ {newer} -nt {older} ]")), 0);
+    assert_eq!(status(&format!("[[ {older} -nt {newer} ]]")), 1);
+    assert_eq!(status(&format!("[[ {older} -ot {newer} ]]")), 0);
+    assert_eq!(status(&format!("[[ {newer} -ot {older} ]]")), 1);
+    assert_eq!(status(&format!("[[ {older} -ef {older} ]]")), 0);
+    assert_eq!(status(&format!("[[ {older} -ef {newer} ]]")), 1);
+
+    // A missing side is an answer rather than an error: newer than nothing,
+    // older than nothing.
+    assert_eq!(status(&format!("[[ {older} -nt {missing} ]]")), 0);
+    assert_eq!(status(&format!("[[ {missing} -nt {older} ]]")), 1);
+    assert_eq!(status(&format!("[[ {missing} -ot {older} ]]")), 0);
+    assert_eq!(status(&format!("[[ {older} -ot {missing} ]]")), 1);
+    assert_eq!(status(&format!("[[ {missing} -ef {missing} ]]")), 1);
+
+    // The form a startup file writes: variables, expanded like any operand.
+    assert_eq!(
+        status(&format!(
+            "a={older}; b={newer}; [[ $a -ef $a && $b -nt $a ]]"
+        )),
+        0
+    );
+
+    // A hard link is the same file and a copy is not, which is what device and
+    // inode means.
+    let link = dir.at("link");
+    std::fs::hard_link(&older, &link).unwrap();
+    assert_eq!(status(&format!("[[ {older} -ef {link} ]]")), 0);
+    assert_eq!(status(&format!("[[ {older} -nt {link} ]]")), 1);
+    assert_eq!(status(&format!("[[ {link} -ot {older} ]]")), 1);
+}
+
 #[test]
 fn globbing_matches_quoting_and_ranges() {
     let dir = TestDir::new("glob");

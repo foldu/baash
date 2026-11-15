@@ -706,7 +706,19 @@ fn extglob_end(body: &[u8], open: usize) -> usize {
 pub(crate) fn binary_operator(word: &[u8]) -> bool {
     matches!(
         word,
-        b"-eq" | b"-ne" | b"-lt" | b"-le" | b"-gt" | b"-ge" | b"==" | b"=" | b"!=" | b"=~"
+        b"-eq"
+            | b"-ne"
+            | b"-lt"
+            | b"-le"
+            | b"-gt"
+            | b"-ge"
+            | b"-nt"
+            | b"-ot"
+            | b"-ef"
+            | b"=="
+            | b"="
+            | b"!="
+            | b"=~"
     )
 }
 

@@ -372,6 +372,18 @@ impl Parser<'_> {
             }
             b"<" => Ok(left.bytes < right.bytes),
             b">" => Ok(left.bytes > right.bytes),
+            // The three that ask the filesystem about both sides. `test`/`[`
+            // answers them from the same predicates, because bash answers them
+            // identically in the two commands (`filecmp`).
+            b"-nt" => Ok(baash_runtime::filecmp::newer_than(
+                &left.bytes,
+                &right.bytes,
+            )),
+            b"-ot" => Ok(baash_runtime::filecmp::older_than(
+                &left.bytes,
+                &right.bytes,
+            )),
+            b"-ef" => Ok(baash_runtime::filecmp::same_file(&left.bytes, &right.bytes)),
             b"-eq" | b"-ne" | b"-lt" | b"-le" | b"-gt" | b"-ge" => {
                 // bash parses each operand as an *arithmetic expression*, not
                 // as an integer literal: `1+2 -eq 3` and `x -eq 0` (an unset

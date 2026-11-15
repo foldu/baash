@@ -33,6 +33,7 @@ mod command;
 pub mod complete;
 pub mod declare;
 mod errors;
+pub mod filecmp;
 mod opts;
 mod traps;
 mod vars;

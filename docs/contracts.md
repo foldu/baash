@@ -1216,6 +1216,16 @@ patterns and the `$…` constructs in a here-document body are single words, so
 they use the real front end with caller-relative spans. (An earlier revision
 synthesised `": <fragment>"` and took `words[1]`; that is gone.)
 
+**`[[ … ]]`'s operator tables are the grammar, not a hint.** `tree::words`'
+`unary_operator` and `binary_operator` decide whether a word is an operator or
+an operand, so a word missing from the binary table is an operand: `[[ a -nt b ]]`
+was a *parse* error (`BAASH-E0204`), the whole conditional rejected before any
+command reached it, while `[ a -nt b ]` worked. `-nt`, `-ot` and `-ef` are in it
+now and answered by `baash_runtime::filecmp`. `baash_syntax`'s
+`is_test_operator` is a *different* list — it places the operator slot for
+completion and already had all three — so the two tables are not the same table
+and both must be kept.
+
 **Here-document body expansion lives here**, as a double-quote-like scanner, and
 is a candidate to move into `baash-lang` once a here-doc body has a word model.
 
@@ -1908,6 +1918,18 @@ mounted tree is invisible to `ls`, `cat` and any child process. There are no
 writes, no symlinks and no `.`/`..` resolution inside a mount; `ShellState`
 clones the table for a subshell, so paths and slices are copied and the bytes
 are not.
+
+**`baash_runtime::filecmp` answers `-nt`, `-ot` and `-ef` for both commands.**
+`test`/`[` and `[[ … ]]` ask the same three questions about a pair of paths, and
+bash answers them identically in both, so the predicates exist once —
+`newer_than`, `older_than`, `same_file` — instead of twice and drifting. The
+answers are bash's, which are not the obvious ones: `-nt` is "left is newer
+than right, **or right does not exist**", a missing *left* is a false comparison
+rather than a diagnostic, and `-ef` is device plus inode, so two names for one
+file compare equal and a hard link is indistinguishable from its target. A
+platform without inodes answers `-ef` false rather than guessing
+(`docs/portability.md` §6). The mounted `Vfs` is not consulted: these are
+questions about the real filesystem, as they are for `test`.
 
 `crates/baash` reads startup files only when the shell is interactive, and it
 reads two layers. First **the shell's defaults**: `$XDG_CONFIG_DIRS/baash/config.sh`
