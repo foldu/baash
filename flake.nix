@@ -52,6 +52,13 @@
       # dependency graph each time and undo the split.
       gitVersion = self.shortRev or self.dirtyShortRev or "unknown";
 
+      # The workspace version, read from `Cargo.toml` rather than repeated
+      # here. `cargo release` bumps that one line, and the alternative — five
+      # literals in this file — is a store path that says `0.0.0` for a release
+      # and a version that has to be remembered in six places.
+      workspaceVersion =
+        (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+
       eachSystem =
         f:
         nixpkgs.lib.genAttrs systems (
@@ -120,7 +127,7 @@
             commonArgs = {
               inherit src;
               pname = "baash";
-              version = "0.0.0";
+              version = workspaceVersion;
               strictDeps = true;
             };
 
@@ -161,7 +168,7 @@
             # keeps `THIRD-PARTY.md` honest when a dependency appears.
             licenses = craneLib.mkCargoDerivation {
               pname = "baash-licenses";
-              version = "0.0.0";
+              version = workspaceVersion;
               inherit src;
               cargoArtifacts = null;
               doInstallCargoArtifacts = false;
@@ -207,7 +214,7 @@
               let
                 windowsCommon = {
                   inherit pname src;
-                  version = "0.0.0";
+                  version = workspaceVersion;
                   strictDeps = true;
                   preBuild = embedCompletion;
                   cargoVendorDir = windowsCraneLib.vendorCargoDeps { inherit src; };
@@ -341,7 +348,7 @@
               }:
               portableCraneLib.mkCargoDerivation {
                 inherit pname src;
-                version = "0.0.0";
+                version = workspaceVersion;
                 strictDeps = true;
                 # The commit `--version` prints; `cargoArtifacts` is null here,
                 # so there is no shared half for it to invalidate.
@@ -431,7 +438,7 @@
             commonArgs
             // {
               pname = "baash";
-              version = "0.0.0";
+              version = workspaceVersion;
               # The commit `--version` prints. Only the package, not the
               # `cargoArtifacts` it seeds from: those are shared between commits
               # and this value is not (`gitVersion`, above).

@@ -52,6 +52,10 @@ portable-aarch64:
 release version: check test conformance
     cargo release --execute {{version}}
     git push --follow-tags
+    # `.github/workflows/release.yml` is what publishes, and it runs on GitHub,
+    # so the same tag has to reach that remote too. GitLab is the source of
+    # truth; both remotes are the same history (`docs/releasing.md`).
+    git push shithub master --follow-tags
 
 # Regenerate the embedded completion tables from the pinned carapace.
 carapace-data:
