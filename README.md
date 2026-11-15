@@ -14,14 +14,15 @@ comparable.
 
 | | passing | of 2787 |
 | --- | ---: | ---: |
-| `baash`, any `## OK <shell>` alternative | **2344** | 84.1% |
-| `baash`, strict (primary expectation only) | **2292** | 82.2% |
-| bash 5.3.20, on the same run | 2577 | 92.5% |
+| `baash`, any `## OK <shell>` alternative | **2356** | 84.5% |
+| `baash`, strict (primary expectation only) | **2304** | 82.7% |
+| bash 5.3.20, on the same run | 2578 | 92.5% |
 
-53 of the passing cases pass only because a per-shell `## OK …` alternative
-matched, which is the difference between the two `baash` rows. bash passes 464
-cases we do not (and we pass 67 it fails), so we pass 84.6% of what bash passes. Both numbers live in
-`crates/baash-spec/baseline.txt`, and CI fails if either drops below it.
+52 of the passing cases pass only because a per-shell `## OK …` alternative
+matched, which is the difference between the two `baash` rows. bash passes 295
+cases we do not (and we pass 73 it fails), so we pass 88.5% of what bash passes.
+Both numbers live in `crates/baash-spec/baseline.txt`, and CI fails if either
+drops below it.
 
 Conformance is measured but no longer the priority: interactive use comes
 first, and [`docs/state.md`](docs/state.md) is the resume document (what
@@ -44,8 +45,9 @@ substitution, arithmetic, `[[ ]]` including `=~`, globbing with
 `typeset`/`readonly`/`export` with bash's own `-p` layout, the pattern
 operators (`${x#pat}`, `${x%pat}`, `${x//a/b}`, `${x@Q}`), traps, `set -e` and
 `set -u`, `break`/`continue`/`return`/`exit`, `exec`, background `&` with
-`$!`/`wait`/`kill` by pid, history (`history` only — entries are numbered by a global database id in a
-Turso database, cleared per session, with no `HIST*` knobs),
+`$!`/`wait`/`kill` by pid, history (entries are numbered by a global database id in a Turso database,
+cleared per session, with no `HIST*` knobs), the full-screen `Ctrl-R` picker and
+the `baashzf` filter built on it,
 history expansion (`!!`, `!n`, `!-n`, `!string`, `!?string?`, `!#`, the word
 designators and modifiers, `^old^new^`), and the built-ins listed in
 `docs/contracts.md`.
@@ -212,6 +214,30 @@ having to copy it. `--rcfile`/`--norc` still win. History goes to
 `$XDG_DATA_HOME/baash/history.db` (`~/.local/share/baash/history.db`) rather
 than a `HISTFILE`, so two shells share one database instead of rewriting each
 other's history.
+
+## Installing
+
+A release is one executable per target, published on the
+[releases page](https://github.com/foldu/baash/releases): Linux x86-64 and
+aarch64, and Windows x86-64. The Linux ones are linked against glibc 2.17 and
+need no nix and no shared library beyond libc, so unpacking them is the whole
+installation:
+
+```sh
+curl -LO https://github.com/foldu/baash/releases/download/v0.1.0-rc.1/baash-0.1.0-rc.1-linux-x86_64
+curl -LO https://github.com/foldu/baash/releases/download/v0.1.0-rc.1/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+install -m755 baash-0.1.0-rc.1-linux-x86_64 ~/.local/bin/baash
+```
+
+A version with a suffix (`v0.1.0-rc.1`) is a prerelease: GitHub hides it from
+the front page and `nix`'s flake refs do not pick it up. `baash --version`
+prints the commit it was built from beside the version, which is what makes a
+bug report about a prerelease actionable.
+
+Inside nix, `nix build .#default` is the better install — the store's glibc is
+the faster one, and it carries the launcher entry and the icon theme (see
+[Building](#building)).
 
 ## Building
 

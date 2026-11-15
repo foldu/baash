@@ -356,7 +356,8 @@ delegates everything else: line editing to `baash-repl`, execution to the
   one-second backstop (which remains as the fallback) — or at the next prompt.
   If the walk hangs, the counters stay stale; the prompt is unaffected.
 * `\s` is `baash`, so the conformance case that greps for `bash|osh` still
-  fails; `\v`/`\V` now report the crate version (`0.0` / `0.0.0`).
+  fails; `\v`/`\V` report the crate version, `\v` with the patch level
+  dropped (`0.1` / `0.1.0`).
 * With `set -e`, a failing `PROMPT_COMMAND` exits bash and does not exit this
   shell; the status is ignored.
 * `PROMPT_COMMAND`'s stdout is captured and re-emitted so the prompt always
