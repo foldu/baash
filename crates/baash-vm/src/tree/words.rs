@@ -723,6 +723,14 @@ pub(crate) fn binary_operator(word: &[u8]) -> bool {
 }
 
 /// Whether `word` denotes a one-operand test operator.
+///
+/// This table decides whether the next word is an operator or an operand, so a
+/// word missing from it is an *operand* (`[[ -G x ]]` read as two words and was
+/// rejected as "unexpected token"), and a word in it with no arm in the
+/// evaluator is a parse error too (`[[ -O x ]]`). Both happened: `-G` and `-R`
+/// were missing here, `-O`, `-N`, `-k`, `-u`, `-g` and `-t` were missing there.
+/// `baash_syntax`'s `is_test_operator` is a third list — it only places the
+/// operator slot for completion — so all three have to be kept.
 pub(crate) fn unary_operator(word: &[u8]) -> bool {
     matches!(
         word,
@@ -733,6 +741,7 @@ pub(crate) fn unary_operator(word: &[u8]) -> bool {
             | b"-e"
             | b"-f"
             | b"-g"
+            | b"-G"
             | b"-h"
             | b"-k"
             | b"-L"
@@ -740,6 +749,7 @@ pub(crate) fn unary_operator(word: &[u8]) -> bool {
             | b"-O"
             | b"-p"
             | b"-r"
+            | b"-R"
             | b"-S"
             | b"-s"
             | b"-t"

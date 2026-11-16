@@ -485,6 +485,112 @@ fn conditional_file_comparisons() {
     assert_eq!(status(&format!("[[ {link} -ot {older} ]]")), 1);
 }
 
+/// `-O`, `-G`, `-N`, `-u`, `-g`, `-k`, `-t` and `-R`: the one-operand tests
+/// `test`/`[` already answered and `[[ … ]]` rejected.
+///
+/// Every one of them was a *parse* error inside `[[ … ]]` (`BAASH-E0204`, and
+/// `-R` "unexpected token" because the operator table did not list it) while
+/// `[ … ]` answered — so the same condition written with the two bracket
+/// spellings disagreed about whether it was even shell syntax. `-p` and `-S`
+/// had a second disagreement: the conditional asked `symlink_metadata` and the
+/// built-in followed the link, so `[[ -p link-to-a-fifo ]]` was false and
+/// `[ -p link-to-a-fifo ]` was true.
+#[test]
+fn conditional_file_tests() {
+    let dir = TestDir::new("cond-filetests");
+    let file = dir.at("f");
+    let missing = dir.at("missing");
+    std::fs::write(&file, "x").unwrap();
+
+    let status = |source: &str| code(&run(source));
+
+    // Owner and group, on a file this test just created.
+    if cfg!(unix) {
+        assert_eq!(status(&format!("[[ -O {file} ]]")), 0);
+        assert_eq!(status(&format!("[ -O {file} ]")), 0);
+        assert_eq!(status(&format!("[[ -G {file} ]]")), 0);
+        assert_eq!(status(&format!("[ -G {file} ]")), 0);
+    }
+    // A path that does not exist answers false, and that is not an error.
+    assert_eq!(status(&format!("[[ -O {missing} ]]")), 1);
+    assert_eq!(status(&format!("[[ -N {missing} ]]")), 1);
+    assert_eq!(status(&format!("[[ -R {missing} ]]")), 1);
+
+    // `-N` is mtime newer than atime, so the two times are set rather than
+    // written and hoped for.
+    if cfg!(unix) {
+        use std::time::{Duration, SystemTime};
+
+        let when = |read: SystemTime, written: SystemTime| {
+            let times = std::fs::FileTimes::new()
+                .set_accessed(read)
+                .set_modified(written);
+            std::fs::File::options()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_times(times)
+                .unwrap();
+        };
+        let now = SystemTime::now();
+        let past = now - Duration::from_secs(3_600);
+        when(past, now);
+        assert_eq!(status(&format!("[[ -N {file} ]]")), 0);
+        assert_eq!(status(&format!("[ -N {file} ]")), 0);
+        when(now, past);
+        assert_eq!(status(&format!("[[ -N {file} ]]")), 1);
+        assert_eq!(status(&format!("[ -N {file} ]")), 1);
+    }
+
+    // The set-id and sticky bits. `chmod` runs as a child, which is the one
+    // way to set them on a file this process owns.
+    if cfg!(unix) {
+        for (mode, operator) in [(0o4755, "-u"), (0o2755, "-g"), (0o1755, "-k")] {
+            std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(mode))
+                .unwrap();
+            assert_eq!(status(&format!("[[ {operator} {file} ]]")), 0, "{operator}");
+            assert_eq!(status(&format!("[ {operator} {file} ]")), 0, "{operator}");
+            std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+                .unwrap();
+            assert_eq!(status(&format!("[[ {operator} {file} ]]")), 1, "{operator}");
+        }
+    }
+
+    // `-t`: a descriptor number, and stdin here is not a terminal. The
+    // agreement with `[ -t ]` is the point; which way it answers is the host's.
+    let both = |descriptor: &str| {
+        (
+            status(&format!("[[ -t {descriptor} ]]")),
+            status(&format!("[ -t {descriptor} ]")),
+        )
+    };
+    assert_eq!(both("0"), (1, 1));
+    assert_eq!(both("999"), (1, 1));
+    // A non-number is "integer expected" and status 2, in both commands.
+    assert_eq!(both("x"), (2, 2));
+
+    // `-R` asks about a name, so it reads the operand the way `-v` does.
+    assert_eq!(status("declare -n r=f; [[ -R r ]]"), 0);
+    assert_eq!(status("declare -n r=f; [[ -R f ]]"), 1);
+    assert_eq!(status("declare -n r=f; [ -R r ]"), 0);
+    assert_eq!(status("f=1; [[ -R f ]]"), 1);
+
+    // A symlink to a socket is a socket, which is the `-p`/`-S` fix: the
+    // conditional used `symlink_metadata` and answered false.
+    if cfg!(unix) {
+        let socket = dir.at("sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let link = dir.at("socklink");
+        std::os::unix::fs::symlink(&socket, &link).unwrap();
+        assert_eq!(status(&format!("[[ -S {link} ]]")), 0);
+        assert_eq!(status(&format!("[ -S {link} ]")), 0);
+        // The link is still a link: `-L` is the test that asks about the name
+        // rather than about what it points at.
+        assert_eq!(status(&format!("[[ -L {link} ]]")), 0);
+        drop(listener);
+    }
+}
+
 #[test]
 fn globbing_matches_quoting_and_ranges() {
     let dir = TestDir::new("glob");

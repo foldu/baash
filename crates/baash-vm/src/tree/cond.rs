@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use baash_lang::Field;
 use baash_lang::Shell as _;
-use baash_runtime::{ShellHost, Status, vfs};
+use baash_runtime::{ShellHost, Status, filetest, vfs};
 
 use super::words::{CondToken, binary_operator, conditional_tokens, unary_operator};
 use super::{Interp, ParsedChunk, SourceFile};
@@ -516,22 +516,18 @@ impl Parser<'_> {
                 None => metadata().is_ok_and(|meta| meta.len() > 0),
             },
             b"-L" | b"-h" => link().is_ok_and(|meta| meta.file_type().is_symlink()),
+            // The four special file types follow a symlink, as every file test
+            // but `-h`/`-L` does: bash answers `-p` true for a symlink to a
+            // FIFO, and `test -p` agrees. This used `symlink_metadata`, so the
+            // two commands disagreed on exactly that case.
             b"-p" | b"-S" | b"-b" | b"-c" => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::FileTypeExt;
-                    let kind = link().map(|meta| meta.file_type()).ok();
-                    match operator {
-                        b"-p" => kind.is_some_and(|kind| kind.is_fifo()),
-                        b"-S" => kind.is_some_and(|kind| kind.is_socket()),
-                        b"-b" => kind.is_some_and(|kind| kind.is_block_device()),
-                        _ => kind.is_some_and(|kind| kind.is_char_device()),
-                    }
-                }
-                #[cfg(not(unix))]
-                {
-                    false
-                }
+                let kind = match operator {
+                    b"-p" => filetest::Kind::Fifo,
+                    b"-S" => filetest::Kind::Socket,
+                    b"-b" => filetest::Kind::BlockDevice,
+                    _ => filetest::Kind::CharDevice,
+                };
+                filetest::is_kind(&operand.bytes, kind)
             }
             b"-r" | b"-w" | b"-x" => {
                 if let Some(kind) = mounted {
@@ -561,6 +557,47 @@ impl Parser<'_> {
                     metadata().is_ok()
                 }
             }
+            // `-O`, `-G`, `-N`, `-u`, `-g`, `-k`: the owner, mtime and
+            // set-id questions. `test`/`[` asks the same ones, so both go
+            // through `baash_runtime::filetest` and cannot drift apart — which
+            // they had: every one of these was a *parse* error here
+            // (`BAASH-E0204`) while `[ -O file ]` answered, because the
+            // operator table knew the word and the evaluator had no arm.
+            b"-O" => filetest::owned_by_user(&operand.bytes),
+            b"-G" => filetest::owned_by_group(&operand.bytes),
+            b"-N" => filetest::modified_later_than_read(&operand.bytes),
+            b"-u" => {
+                filetest::permission_bits(&operand.bytes).is_some_and(|mode| mode & 0o4000 != 0)
+            }
+            b"-g" => {
+                filetest::permission_bits(&operand.bytes).is_some_and(|mode| mode & 0o2000 != 0)
+            }
+            b"-k" => {
+                filetest::permission_bits(&operand.bytes).is_some_and(|mode| mode & 0o1000 != 0)
+            }
+            // `-t descriptor`: bash reads the operand with `legal_number`, not
+            // as an arithmetic expression, and a non-number is "integer
+            // expected" with status 2 — the message `-eq` reports for the same
+            // mistake, so the two arms read alike.
+            b"-t" => {
+                // The validation pass does not expand operands, so there is no
+                // number to read then — `compare` guards `-eq` the same way.
+                if self.validate {
+                    return Ok(true);
+                }
+                let Some(descriptor) = filetest::legal_number(&operand.bytes) else {
+                    self.report("integer expression expected");
+                    return Err(String::new());
+                };
+                filetest::is_tty(descriptor)
+            }
+            // `-R name`: the name is a nameref. Like `-v`, both commands ask
+            // about a *name*, so the operand is the expanded word: `[[ -R r ]]`
+            // looks up `r` itself, and `[[ -R $r ]]` looks up what `r` holds.
+            b"-R" => match self.interp.state.vars.lookup(&operand.bytes) {
+                Some(var) => var.attrs.nameref && var.value.is_set(),
+                None => false,
+            },
             // `[[ -o name ]]`: a shell option by the name `set -o` takes.
             // bash answers false for an unknown one instead of failing, so a
             // typo in a startup file cannot make a conditional a syntax error,

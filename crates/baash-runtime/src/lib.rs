@@ -34,6 +34,7 @@ pub mod complete;
 pub mod declare;
 mod errors;
 pub mod filecmp;
+pub mod filetest;
 mod opts;
 mod traps;
 mod vars;

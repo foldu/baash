@@ -16,9 +16,12 @@
 //! Errors are status 2, false is status 1, and `[` additionally requires the
 //! final `]` argument. `-v` (is a variable/element set), `-R` (is it a
 //! nameref), `-o` (is a shell option on), `-O`/`-G` (owner/group) and `-N`
-//! (mtime newer than atime) are bash's; everything else is POSIX.
+//! (mtime newer than atime) are bash's; everything else is POSIX. The file
+//! predicates are `crate::filetest`'s, because `[[ … ]]` asks the same
+//! questions and the two commands must answer them identically.
 
 use crate::errors::codes;
+use crate::filetest::{self, Kind};
 use crate::{ShellHost, Status, vfs};
 use baash_diag::Diagnostic;
 use baash_sys::Access;
@@ -322,7 +325,7 @@ impl Parser<'_, '_> {
             // (`test -t -a x`) and defaults to descriptor 1 at the end.
             self.advance(false)?;
             if self.pos < self.args.len() {
-                if legal_number(self.args[self.pos]).is_some() {
+                if filetest::legal_number(self.args[self.pos]).is_some() {
                     let argument = self.args[self.pos];
                     self.advance(false)?;
                     return self.unary_test(operator, argument);
@@ -356,9 +359,9 @@ impl Parser<'_, '_> {
             b'r' => mounted.is_some() || baash_sys::access(argument, Access::Read),
             b'w' => baash_sys::access(argument, Access::Write),
             b'x' => mounted == Some(vfs::Kind::Dir) || baash_sys::access(argument, Access::Execute),
-            b'O' => owned_by_user(argument),
-            b'G' => owned_by_group(argument),
-            b'N' => modified_later_than_read(argument),
+            b'O' => filetest::owned_by_user(argument),
+            b'G' => filetest::owned_by_group(argument),
+            b'N' => filetest::modified_later_than_read(argument),
             b'f' => match mounted {
                 Some(kind) => kind == vfs::Kind::File,
                 None => metadata(argument).is_some_and(|metadata| metadata.is_file()),
@@ -371,21 +374,21 @@ impl Parser<'_, '_> {
                 Some(len) => len > 0,
                 None => metadata(argument).is_some_and(|metadata| metadata.len() > 0),
             },
-            b'S' => unix_file_type(argument, FileType::Socket),
-            b'c' => unix_file_type(argument, FileType::CharDevice),
-            b'b' => unix_file_type(argument, FileType::BlockDevice),
-            b'p' => unix_file_type(argument, FileType::Fifo),
+            b'S' => filetest::is_kind(argument, Kind::Socket),
+            b'c' => filetest::is_kind(argument, Kind::CharDevice),
+            b'b' => filetest::is_kind(argument, Kind::BlockDevice),
+            b'p' => filetest::is_kind(argument, Kind::Fifo),
             b'L' | b'h' => {
                 !argument.is_empty()
                     && std::fs::symlink_metadata(baash_sys::os::path_from_bytes(argument))
                         .is_ok_and(|metadata| metadata.file_type().is_symlink())
             }
-            b'u' => permission_bits(argument).is_some_and(|mode| mode & 0o4000 != 0),
-            b'g' => permission_bits(argument).is_some_and(|mode| mode & 0o2000 != 0),
-            b'k' => permission_bits(argument).is_some_and(|mode| mode & 0o1000 != 0),
+            b'u' => filetest::permission_bits(argument).is_some_and(|mode| mode & 0o4000 != 0),
+            b'g' => filetest::permission_bits(argument).is_some_and(|mode| mode & 0o2000 != 0),
+            b'k' => filetest::permission_bits(argument).is_some_and(|mode| mode & 0o1000 != 0),
             b't' => {
                 let descriptor = self.integer(argument)?;
-                i32::try_from(descriptor).is_ok_and(baash_sys::is_tty)
+                filetest::is_tty(descriptor)
             }
             b'n' => !argument.is_empty(),
             b'z' => argument.is_empty(),
@@ -418,7 +421,7 @@ impl Parser<'_, '_> {
         // `test -v N` asks about `$N` — but only for an operand that is not an
         // array reference.
         if !argument.contains(&b'[')
-            && let Some(number) = legal_number(argument)
+            && let Some(number) = filetest::legal_number(argument)
         {
             return number >= 0 && number <= self.host.state().vars.arg_count() as i64;
         }
@@ -435,7 +438,7 @@ impl Parser<'_, '_> {
 
     /// Parse an integer operand, or report bash's "integer expected".
     fn integer(&self, text: &[u8]) -> Result<i64, String> {
-        legal_number(text)
+        filetest::legal_number(text)
             .ok_or_else(|| format!("test: {}: integer expected", String::from_utf8_lossy(text)))
     }
 }
@@ -494,125 +497,8 @@ fn test_unop(operator: &[u8]) -> bool {
         )
 }
 
-/// bash's `legal_number`: base-10 `strtoimax`, surrounding blanks allowed.
-fn legal_number(text: &[u8]) -> Option<i64> {
-    let mut at = 0;
-    while let Some(b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r') = text.get(at).copied() {
-        at += 1;
-    }
-    let mut negative = false;
-    if let Some(byte @ (b'+' | b'-')) = text.get(at).copied() {
-        negative = byte == b'-';
-        at += 1;
-    }
-    let digits = at;
-    let mut magnitude: u128 = 0;
-    while let Some(byte @ b'0'..=b'9') = text.get(at).copied() {
-        magnitude = magnitude
-            .saturating_mul(10)
-            .saturating_add(u128::from(byte - b'0'));
-        at += 1;
-    }
-    if at == digits {
-        return None;
-    }
-    // `strtoimax` reports ERANGE, which `legal_number` turns into "not a
-    // number" rather than a clamp.
-    let magnitude = if negative {
-        (magnitude as i128).wrapping_neg()
-    } else {
-        magnitude as i128
-    };
-    let value = i64::try_from(magnitude).ok()?;
-    while let Some(b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r') = text.get(at).copied() {
-        at += 1;
-    }
-    (at == text.len()).then_some(value)
-}
-
 fn metadata(argument: &[u8]) -> Option<std::fs::Metadata> {
     std::fs::metadata(baash_sys::os::path_from_bytes(argument)).ok()
-}
-
-/// `-O`: the file's owner is this (effective) user.
-fn owned_by_user(argument: &[u8]) -> bool {
-    let path = baash_sys::os::path_from_bytes(argument);
-    match (
-        baash_sys::os::own_uid(),
-        baash_sys::os::owner_uid(&path),
-        metadata(argument),
-    ) {
-        (Some(ours), Some(theirs), Some(_)) => ours == theirs,
-        _ => false,
-    }
-}
-
-/// `-G`: the file's group is this (effective) group.
-fn owned_by_group(argument: &[u8]) -> bool {
-    let path = baash_sys::os::path_from_bytes(argument);
-    match (
-        baash_sys::os::own_gid(),
-        baash_sys::os::owner_gid(&path),
-        metadata(argument),
-    ) {
-        (Some(ours), Some(theirs), Some(_)) => ours == theirs,
-        _ => false,
-    }
-}
-
-/// `-N`: the file was modified after it was last read.
-fn modified_later_than_read(argument: &[u8]) -> bool {
-    let Some(metadata) = metadata(argument) else {
-        return false;
-    };
-    match (metadata.modified(), metadata.accessed()) {
-        (Ok(modified), Ok(accessed)) => modified > accessed,
-        _ => false,
-    }
-}
-
-/// The file type questions that only Unix can answer.
-enum FileType {
-    Socket,
-    CharDevice,
-    BlockDevice,
-    Fifo,
-}
-
-#[cfg(unix)]
-fn unix_file_type(argument: &[u8], wanted: FileType) -> bool {
-    use std::os::unix::fs::FileTypeExt;
-
-    let Some(metadata) = metadata(argument) else {
-        return false;
-    };
-    let file_type = metadata.file_type();
-    match wanted {
-        FileType::Socket => file_type.is_socket(),
-        FileType::CharDevice => file_type.is_char_device(),
-        FileType::BlockDevice => file_type.is_block_device(),
-        FileType::Fifo => file_type.is_fifo(),
-    }
-}
-
-/// Without Unix file types the answer is "no", not a guess.
-#[cfg(not(unix))]
-fn unix_file_type(_argument: &[u8], _wanted: FileType) -> bool {
-    false
-}
-
-/// The permission bits (`-u`/`-g`/`-k` ask about the set-id and sticky bits).
-#[cfg(unix)]
-fn permission_bits(argument: &[u8]) -> Option<u32> {
-    use std::os::unix::fs::PermissionsExt;
-
-    metadata(argument).map(|metadata| metadata.permissions().mode())
-}
-
-/// There are no set-id or sticky bits to inspect off Unix.
-#[cfg(not(unix))]
-fn permission_bits(_argument: &[u8]) -> Option<u32> {
-    None
 }
 
 #[cfg(test)]

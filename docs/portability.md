@@ -293,10 +293,11 @@ separate code path. Two of them necessarily approximate a Unix answer there:
 * `printf '%(…)T'` has no IANA timezone database behind the Windows C library.
   The common `strftime` specifiers are formatted in UTC and `TZ` is ignored;
   `%Z`/`%z` report `UTC`/`+0000`.
-* `test -x` reports existence (Windows has no execute bit), `-w` follows the
-  read-only attribute, and `-O`/`-G`, `-u`/`-g`/`-k`, `-nt`/`-ot`/`-ef` and the
-  socket/character/block/FIFO tests answer false because the metadata is not
-  there to inspect.
+* `test`/`[` and `[[ … ]]` answer `-x` as existence (Windows has no execute
+  bit) and `-w` from the read-only attribute, and `-O`/`-G`, `-u`/`-g`/`-k`,
+  `-nt`/`-ot`/`-ef` and the socket/character/block/FIFO tests false because the
+  metadata is not there to inspect. Both commands share the predicates
+  (`baash_runtime::filetest`, `filecmp`), so they cannot disagree about it.
 
 Both are deliberate approximations, not silent wrongness: a script that needs
 the Unix answer gets a different value rather than a misleading success.
@@ -324,9 +325,10 @@ Known gaps, stated so they are not mistaken for behaviour:
   event, so a `Ctrl-C` during a built-in loop does nothing until it returns, and
   `trap INT` never runs for a console event (§9, "Console handles").
 * **`umask` is rejected on Windows**, since there is no mask to set.
-* **`test` answers from Windows metadata:** `-x` is existence, `-w` the
-  read-only attribute, and `-O`/`-G`, `-u`/`-g`/`-k`, `-nt`/`-ot`/`-ef` and the
-  file-type tests are false (§6, "Built-in gaps").
+* **The file tests answer from Windows metadata:** `test`/`[` and `[[ … ]]`
+  both, `-x` as existence, `-w` from the read-only attribute, and `-O`/`-G`,
+  `-u`/`-g`/`-k`, `-nt`/`-ot`/`-ef` and the file-type tests false (§6,
+  "Built-in gaps").
 * **`printf '%(…)T'`** formats in UTC and ignores `TZ`, because the Windows C
   library has no IANA database behind it.
 * **`coproc` is not in the grammar.** `coproc NAME { … }` is a parse error

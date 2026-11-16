@@ -1226,6 +1226,22 @@ now and answered by `baash_runtime::filecmp`. `baash_syntax`'s
 completion and already had all three — so the two tables are not the same table
 and both must be kept.
 
+The same disease has a second half, and the *unary* table fails in two
+directions. A word in `unary_operator` with no arm in `unary_test` is a parse
+error, not a false answer: `-O`, `-G`, `-N`, `-u`, `-g`, `-k` and `-t` were all
+rejected that way while `test -O file` answered. A word missing from the table
+is worse, because it is read as an *operand*: `[[ -R r ]]` was "unexpected
+token". Both sides are closed now. `baash_runtime::filetest` holds the
+predicates for the two commands, as `filecmp` does for the three that compare a
+pair of paths, and `-t` reads its operand with `legal_number` rather than with
+`-eq`'s arithmetic parser, because bash answers `[[ -t 0+1 ]]` with "integer
+expected" instead of 1. Two consequences worth knowing: the validation pass does
+not expand operands, so an arm that *reads* one (`-t`'s number) must guard on
+`self.validate` and accept the shape, exactly as `compare` does for `-eq`; and
+the four special file types follow a symlink, as `test` always did and
+`[[ ]]` did not (it asked `symlink_metadata`), so `[[ -p link-to-a-fifo ]]` is
+now true.
+
 **Here-document body expansion lives here**, as a double-quote-like scanner, and
 is a candidate to move into `baash-lang` once a here-doc body has a word model.
 
@@ -1930,6 +1946,14 @@ file compare equal and a hard link is indistinguishable from its target. A
 platform without inodes answers `-ef` false rather than guessing
 (`docs/portability.md` §6). The mounted `Vfs` is not consulted: these are
 questions about the real filesystem, as they are for `test`.
+
+**`baash_runtime::filetest` is the one-operand half of the same rule**: `-O`
+(owner), `-G` (group), `-N` (modified since it was last read), `-u`/`-g`/`-k`
+(the set-id and sticky bits), the socket/character/block/FIFO tests, and `-t`
+with `legal_number`. A question the platform cannot answer is false, never a
+diagnostic: no uids means no owner to compare, so `-O` and `-G` are false on
+Windows and so are the mode bits (`docs/portability.md` §6). A missing path
+answers every one of them false, which is bash's answer and not an error.
 
 `crates/baash` reads startup files only when the shell is interactive, and it
 reads two layers. First **the shell's defaults**: `$XDG_CONFIG_DIRS/baash/config.sh`
