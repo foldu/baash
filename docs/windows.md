@@ -128,3 +128,19 @@ encodings reach the editor.
   the environment block all use it (`os::bytes_from_os`/`os::os_from_bytes`).
   A new `from_utf8_lossy` on a path is a bug: display may be lossy, the name
   may not.
+* **A `Ctrl-C` test needs a real key, so it needs the console session.** The
+  `schtasks /it` window takes the focus when it starts, so
+  `virsh send-key win --holdtime 25 KEY_LEFTCTRL KEY_C` is a chord the console
+  sees; the default `--holdtime 0` presses and releases within one guest tick
+  and the key goes missing. Text is the same thing one `send-key` per
+  character — `KEY_LEFTSHIFT KEY_4` is `$`, and lowercase letters need no
+  modifier, which is why the probes spell `echo not-reached` rather than shout.
+* **A screenshot is the only readback, and two identical ones do not mean a
+  frozen guest.** A console scrolling lines that are all the same text repaints
+  to a byte-identical PNG; read the taskbar clock, or sample
+  `(Get-Process -Id N).CPU` twice, before concluding that output stopped.
+* **The guest's disk is not a workspace.** `winvm reset` reverts to `base`, so
+  yesterday's `C:\baash\baash.exe` and its output files are gone; when a window
+  you expected is not there, `Test-Path` and
+  `(Get-CimInstance Win32_OperatingSystem).LastBootUpTime` before believing a
+  screenshot.

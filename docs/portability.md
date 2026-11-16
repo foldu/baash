@@ -559,10 +559,29 @@ runs for a console event, and `Ctrl-\` has no equivalent at all. The
 Unix-side abort (`Unwind::Interrupt`) is shared, though: a foreground child
 killed by `Ctrl-C` arrives as `WaitOutcome::Signaled(SIGINT)`
 (`STATUS_CONTROL_C_EXIT`), and the interpreter's first boundary after that wait
-abandons the command, so `while true; do ping -n 100 127.0.0.1; done` should
-stop after one key on Windows too. That path is compiled by
-`nix build .#windows-fast` but was **not** run on the guest for this change
-(2026-11-16); the built-in loop remains the documented gap.
+abandons the command.
+
+**Verified on the `winvm` guest (2026-11-16)** — the plain console host
+(`conhost`, not the Windows Terminal tab the 2026-11-12 run used) started with
+`schtasks /it` in the interactive session, keys injected with
+`virsh send-key --holdtime` and read back from screenshots:
+
+| case | what was seen |
+|---|---|
+| `ping -t localhost` | the replies, `Control-C`, `Ping statistics`, the prompt, `$?` = 130 — `ping` handles the key itself and still exits `STATUS_CONTROL_C_EXIT` |
+| `ping -t localhost; echo not-reached` | statistics, `Control-C`, the prompt: `not-reached` was never printed |
+| `while true; do ping -n 100 127.0.0.1; done` | one key stopped the `ping` *and* the loop — no second `Pinging …`, the prompt, `$?` = 130 |
+| `echo abc`, then `Ctrl-C` | `echo abc^C`, a fresh prompt, and the next command runs |
+| three keys in a row while a child ran, then `echo still-works` | `still-works`: nothing stayed latched to swallow the next line |
+| `while true; do i=$((i+1)); echo $i; done` | two keys changed nothing: the counter was at 50903 afterwards and 339785 a minute later, with the process alive and using CPU |
+| `baash.exe script`, its body `ping -t localhost`, then `Ctrl-C` | the shell died with its child: the window closed and the scheduled task's result was `0xC000013A` |
+
+The last row is the symmetry the two platforms are meant to have: an
+interactive shell survives what kills its child, and a script dies of it. The
+built-in loop stays the gap a user notices first, and it is the shape of the
+platform that makes it a gap — `Ctrl-C` is a *byte* at the prompt and a console
+*event* only while a command runs, and the event is exactly what the handler
+swallows.
 
 ### Command resolution on Windows (2026-11-06)
 
