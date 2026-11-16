@@ -1179,6 +1179,20 @@ it, so an rc file that sets it does not break. Because the
 shell does not put children in their own group, `Ctrl-Z` stops the child *and*
 the shell, which is bash's behaviour with `set +m`.
 
+**A missing command still performs its redirections.** POSIX XCU 2.9.1
+redirects a simple command before dispatching it, and bash keeps that order for
+a name it cannot resolve: `x 2>file` creates `file` and writes the diagnostic
+there, `x 2>/dev/null` is silent, and `x >file 2>&1` puts the message in
+`file`. `command_not_found` used to write to the shell's own descriptor 2 with
+the redirections unopened, so both idioms failed in the direction that matters
+— a `2>/dev/null` guard on a command that may not exist printed the message
+anyway. The simple-command path now applies the redirections around the
+diagnostic (`command_not_found_redirected`); a redirection that *fails* is
+reported as itself, status 1, and the name is never looked at, which is bash's
+order and its status. `exec` and `command` plumbing resolve through
+`run_command_direct`, whose caller has already committed the redirections, so
+that path diagnoses directly.
+
 **One foreground wait path.** `run_external`, `run_pipeline`, `eval_subshell`,
 command substitution and completion capture all call
 `wait_foreground_children`: it holds the `SIGINT`/`SIGQUIT` ignore across the

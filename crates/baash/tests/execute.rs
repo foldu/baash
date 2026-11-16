@@ -88,6 +88,65 @@ fn echo_prints_its_arguments() {
     assert_eq!(out("echo"), "\n");
 }
 
+/// A command's redirections are performed even when its name does not resolve.
+///
+/// POSIX XCU 2.9.1 redirects before dispatch, and bash does that for a name it
+/// cannot find: `x 2>file` creates the file and writes the diagnostic into it,
+/// and `x 2>/dev/null` prints nothing. The shell used to diagnose straight to
+/// its own descriptor 2 with the redirections unopened, so the quieting idiom
+/// — `2>/dev/null` on a command that may not exist, which is ordinary
+/// defensive script code — printed the message anyway, and `x >file` did not
+/// even create `file`.
+#[test]
+fn a_missing_command_still_performs_its_redirections() {
+    const MISSING: &str = "baash-no-such-command";
+    let dir = TestDir::new("not-found-redirect");
+
+    let written = dir.at("err");
+    let output = run(&format!("{MISSING} 2>{written}"));
+    assert_eq!(code(&output), 127);
+    assert_eq!(
+        stderr(&output),
+        "",
+        "the diagnostic belongs in the file, not on the shell's own stderr"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&written).expect("the redirection created the file"),
+        format!("baash: {MISSING}: command not found\n")
+    );
+
+    // The quieting idiom.
+    let quiet = run(&format!("{MISSING} 2>/dev/null"));
+    assert_eq!(code(&quiet), 127);
+    assert_eq!(stderr(&quiet), "", "`2>/dev/null` must be silent");
+
+    // Inside a command substitution, where a stray message would be captured as
+    // the value instead of merely being seen.
+    let captured = run(&format!("v=$({MISSING} 2>/dev/null); printf '[%s]' \"$v\""));
+    assert_eq!(stdout(&captured), "[]");
+    assert_eq!(stderr(&captured), "");
+
+    // `>file 2>&1` sends both and creates the file.
+    let both = dir.at("both");
+    let output = run(&format!("{MISSING} >{both} 2>&1"));
+    assert_eq!(code(&output), 127);
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        std::fs::read_to_string(&both).expect("the redirection created the file"),
+        format!("baash: {MISSING}: command not found\n")
+    );
+
+    // A redirection that fails is reported as itself and the name is never
+    // looked at — bash's order, and its status of 1 rather than 127.
+    let broken = run(&format!("{MISSING} >/nonexistent-baash-directory/x"));
+    assert_eq!(code(&broken), 1);
+    assert!(
+        !stderr(&broken).contains("command not found"),
+        "stderr: {}",
+        stderr(&broken)
+    );
+}
+
 /// A diagnostic from inside a function names the file the function was
 /// *defined* in, not the file that called it.
 ///

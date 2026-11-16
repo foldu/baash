@@ -434,10 +434,10 @@ impl Interp {
                 {
                     unwind
                 } else {
-                    self.command_not_found(&name)
+                    self.command_not_found_redirected(chunk, &command.redirects, &name)
                 }
                 #[cfg(not(feature = "builtin-utils"))]
-                self.command_not_found(&name)
+                self.command_not_found_redirected(chunk, &command.redirects, &name)
             }
         };
         // `$_` is the last argument of the command that just ran. Expansion
@@ -559,6 +559,44 @@ impl Interp {
                     .unwrap_or_default(),
             ),
         }
+    }
+
+    /// `command not found` for a simple command, with its own redirections
+    /// performed first.
+    ///
+    /// POSIX XCU 2.9.1 performs the redirections of every simple command before
+    /// dispatching it, and bash does that for a name it cannot resolve too:
+    /// `x 2>file` creates `file` and writes the diagnostic into it, and
+    /// `x 2>/dev/null` prints nothing. This path used to diagnose straight to
+    /// the shell's descriptor 2 with the redirections unopened, so both idioms
+    /// broke — `2>/dev/null` on a command that may not exist is ordinary
+    /// defensive script code, and it printed the message anyway, while a plain
+    /// `x >file` did not even create `file`.
+    ///
+    /// A redirection that fails is reported as itself and the command is not
+    /// looked at, which is the order bash has: the failure is status 1, not
+    /// 127, and no "command not found" is printed.
+    fn command_not_found_redirected(
+        &mut self,
+        chunk: &Arc<ParsedChunk>,
+        redirects: &[Redirect],
+        name: &[u8],
+    ) -> Unwind {
+        let saved = match self.apply_redirects(chunk, redirects) {
+            Ok(saved) => saved,
+            Err(()) => {
+                return self.apply_consequence(
+                    ShellError::Utility {
+                        status: Status::FAILURE,
+                        redirection: true,
+                    },
+                    Status::FAILURE,
+                );
+            }
+        };
+        let unwind = self.command_not_found(name);
+        self.restore_fds(saved);
+        unwind
     }
 
     /// The `command not found` diagnostic and its POSIX §2.8.1 class.
