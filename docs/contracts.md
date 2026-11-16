@@ -264,6 +264,12 @@ the line will be shown with — and it uses `RETURNING id` rather than
 `last_insert_rowid()`, because a pooled connection is not guaranteed to be the
 same one a moment later. `finish` is fire-and-forget.
 
+That round trip costs 24.9 µs p50 and 72.3 µs max in a release build, which is
+the price of two thread hand-offs rather than of the SQL: `sqlx` hands each
+statement to its connection thread and wakes the task to collect the answer.
+The numbers for both engines, and why the debug build is the same as the release
+one here, are in `docs/performance.md`.
+
 There is no history file, and there is no `sync_history`: `HISTFILE`,
 `HISTSIZE`, `HISTFILESIZE`, `HISTCONTROL`, `HISTIGNORE`, `HISTTIMEFORMAT`, the
 `histappend` shopt, `history -a/-n/-r/-w/-p/-s` and `fc` are deleted rather

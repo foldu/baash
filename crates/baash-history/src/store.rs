@@ -594,6 +594,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
+    /// The one write the shell waits for, timed.
+    ///
+    /// `cargo test -p baash-history --release --lib -- --ignored --nocapture`
+    #[test]
+    #[ignore = "measurement, not a test"]
+    fn insert_round_trip() {
+        let path = path("cost");
+        let store = Store::open(&path).unwrap();
+        const WARMUP: usize = 50;
+        const RUNS: usize = 2000;
+        let mut samples = Vec::with_capacity(RUNS);
+        for seq in 0..(WARMUP + RUNS) {
+            let text = format!("echo command number {seq}");
+            let started = std::time::Instant::now();
+            let id = store.begin(seq as i64 + 1, text.as_bytes(), Some(b"/tmp".to_vec()));
+            let elapsed = started.elapsed();
+            assert!(id.is_some(), "the insert failed");
+            if seq >= WARMUP {
+                samples.push(elapsed.as_secs_f64() * 1e6);
+            }
+        }
+        store.flush();
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let at = |fraction: f64| samples[((samples.len() as f64) * fraction) as usize];
+        let mean: f64 = samples.iter().sum::<f64>() / samples.len() as f64;
+        println!(
+            "insert round trip, release, WAL file, {RUNS} runs: \
+             p50 {:.1} us, p90 {:.1} us, p99 {:.1} us, max {:.1} us, mean {:.1} us",
+            at(0.50),
+            at(0.90),
+            at(0.99),
+            samples[samples.len() - 1],
+            mean,
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
     #[test]
     fn a_binary_command_is_stored_byte_for_byte() {
         let store = Store::open_in_memory().unwrap();

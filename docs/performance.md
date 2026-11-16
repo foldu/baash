@@ -318,6 +318,32 @@ character positions allocated once per candidate per keystroke (47–184 ms at
 stale put a frame on the wire 40 times a second and delayed the first frame
 after a key by a whole 25 ms deadline.
 
+### 2026-11-16: the one write the shell waits for, Turso against SQLite
+
+`Store::begin` runs once per submitted line, because the row id it returns *is*
+the history number the line is shown with. It goes channel → worker thread →
+INSERT → reply, so the measurement is the whole round trip, not the SQL. Same
+harness on both engines: 50 warm-up inserts, then 2000 into a WAL-mode file
+database, `x86_64-linux`, NixOS host disk:
+
+| engine | build | p50 | p90 | p99 | max |
+|---|---|---:|---:|---:|---:|
+| Turso 0.8.3 | release | 12.0 µs | 15.9 µs | 26.4 µs | 165.1 µs |
+| SQLite (sqlx 0.9) | release | 24.9 µs | 26.5 µs | 35.7 µs | 72.3 µs |
+| Turso 0.8.3 | debug | 277.5 µs | 288.2 µs | 1503.6 µs | 1621.9 µs |
+| SQLite (sqlx 0.9) | debug | 24.0 µs | 26.3 µs | 64.2 µs | 222.7 µs |
+
+The median doubled in release and the tail halved; the debug build got eleven
+times faster. That pattern is the explanation: under sqlx the round trip is
+dominated by thread hand-offs — worker → `sqlx`'s connection thread → waker →
+current-thread `tokio` → reply — which an optimiser cannot help, so debug and
+release land on the same number. Turso's hand-rolled `block_on` needed one hop
+fewer for the median, but its SQL work was compiled code, which is where its
+debug build spent 1.5 ms at p99.
+
+`cargo test -p baash-history --release --lib -- --ignored --nocapture` reproduces
+it; the harness is the ignored `insert_round_trip` in `store.rs`.
+
 ## The test suite: 37 s to 5 s
 
 `cargo test` has to hold `RUST_TEST_THREADS=1` (`.cargo/config.toml`): `$( … )`
