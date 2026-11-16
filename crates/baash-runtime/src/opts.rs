@@ -389,6 +389,16 @@ option_table! {
     /// `shopt -s gnu_errfmt`: diagnostics in GNU `file:line: message` form.
     GnuErrFmt => gnu_errfmt, "gnu_errfmt", None, [Shopt], true, false, false, &[];
 
+    /// `shopt -s histappend`: append to the history file instead of replacing
+    /// it at exit.
+    ///
+    /// Accepted without effect, which is the honest reading here: the history
+    /// is a database that gains a row per command (`crates/baash-history`), so
+    /// there is no exit-time rewrite for the option to choose between. It is
+    /// in the table because a distribution's `.bashrc` sets it — Ubuntu's
+    /// does, and rejecting it put a diagnostic on every interactive start.
+    Histappend => histappend, "histappend", None, [Shopt], true, false, false, &[];
+
     /// `shopt -s histreedit`: offer a failed history expansion for editing.
     Histreedit => histreedit, "histreedit", None, [Shopt], true, false, false, &[];
 

@@ -292,8 +292,9 @@ delegates everything else: line editing to `baash-repl`, execution to the
   `history [n]`, `-c` and `-d`; `Up`/`Down` navigation and ghost text. Numbers
   are the row ids, seeded from the newest 1000 rows of every session. There is
   no history file: `HISTFILE`, `HISTSIZE`, `HISTFILESIZE`, `HISTCONTROL`,
-  `HISTIGNORE`, `HISTTIMEFORMAT`, the `histappend` shopt, `history
-  -a/-n/-r/-w/-p/-s` and `fc` are gone. The database lives in
+  `HISTIGNORE`, `HISTTIMEFORMAT`, `history -a/-n/-r/-w/-p/-s` and `fc` are
+  gone. The `histappend` shopt is accepted and inert, because the database
+  appends every command and a stock `.bashrc` sets it. The database lives in
   `$XDG_DATA_HOME/baash/history.db` (`%LOCALAPPDATA%\baash\history.db` on
   Windows), `BAASH_HISTORY_DB` overrides it, and an empty value disables
   persistence;

@@ -175,9 +175,10 @@ fn option_tables_are_separate_but_share_members() {
     let shopt: Vec<&str> = opts.names(OptionKind::Shopt).collect();
 
     assert_eq!(set_o.len(), 27);
-    // 45 bash `shopt` options minus `histappend`, which configured a history
-    // file the shell no longer has.
-    assert_eq!(shopt.len(), 44);
+    // 45 bash `shopt` options. `histappend` is in the table and has no effect:
+    // the history is a database that always appends, and a distribution's
+    // `.bashrc` sets the option (docs/contracts.md, "Shell options").
+    assert_eq!(shopt.len(), 45);
     assert!(set_o.contains(&"errexit"));
     assert!(set_o.contains(&"pipefail"));
     assert!(!set_o.contains(&"extglob"));

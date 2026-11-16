@@ -271,9 +271,13 @@ The numbers for both engines, and why the debug build is the same as the release
 one here, are in `docs/performance.md`.
 
 There is no history file, and there is no `sync_history`: `HISTFILE`,
-`HISTSIZE`, `HISTFILESIZE`, `HISTCONTROL`, `HISTIGNORE`, `HISTTIMEFORMAT`, the
-`histappend` shopt, `history -a/-n/-r/-w/-p/-s` and `fc` are deleted rather
-than emulated. `History::push` records every non-blank line; `remove_current`
+`HISTSIZE`, `HISTFILESIZE`, `HISTCONTROL`, `HISTIGNORE`, `HISTTIMEFORMAT`,
+`history -a/-n/-r/-w/-p/-s` and `fc` are deleted rather than emulated. The
+`histappend` shopt is the exception: it is in the `shopt` table and sets its
+own flag, and nothing reads it — the database gains a row per command, so there
+is no exit-time rewrite for it to choose between, and a distribution's
+`.bashrc` sets it (Ubuntu's does), which is not worth a diagnostic on every
+start. `History::push` records every non-blank line; `remove_current`
 deletes the row again when history expansion replaces the typed line. `history
 -c` empties the ring and deletes only *this session's* rows: the rest of the
 table is the history, and it is back in the seed at the next start. A database

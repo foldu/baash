@@ -45,6 +45,16 @@ impl Session {
 
     /// Same session with explicit shell arguments, still under `PS1=@@ `.
     fn spawn_with(args: &[&str]) -> Self {
+        Self::spawn_in(None, args)
+    }
+
+    /// Same session, started in `dir` when one is given.
+    ///
+    /// The test that reads the *machine's* startup files uses this to start
+    /// somewhere a per-directory hook has nothing to do: a hook like `direnv`'s
+    /// answers for the current directory, and a test that inherits the
+    /// checkout's cwd makes it run the project's build tool at every prompt.
+    fn spawn_in(dir: Option<&std::path::Path>, args: &[&str]) -> Self {
         let pty = open_pty().expect("open a pty");
         let master = pty.master.as_raw_fd();
         let slave = pty.slave.as_raw_fd();
@@ -71,7 +81,13 @@ impl Session {
         environment.push(b"TERM=dumb".to_vec());
         environment.push(b"BAASH_HISTORY_DB=".to_vec());
 
+        let directory = dir.map(<std::path::Path>::to_path_buf);
         let child = fork_child_status(move || {
+            if let Some(dir) = &directory
+                && std::env::set_current_dir(dir).is_err()
+            {
+                return 110;
+            }
             if become_session_leader(slave).is_err() {
                 return 111;
             }
@@ -163,6 +179,19 @@ impl Session {
 
     fn prompt(&mut self) {
         self.expect(PROMPT, Duration::from_secs(10));
+    }
+
+    /// Wait until the shell is reading lines, without looking at the prompt.
+    ///
+    /// [`Session::prompt`] is what every other test uses, but the one test that
+    /// runs the *machine's own* startup files cannot: a `.bashrc` that assigns
+    /// `PS1` — Ubuntu's does — replaces the marker this harness plants in the
+    /// environment, and a hook in it may take seconds to answer (`direnv`
+    /// exporting a flake). Arithmetic has one right answer that the echoed
+    /// input does not contain, so the output itself is the signal.
+    fn ready(&mut self, timeout: Duration) {
+        self.line("echo $((40+2))");
+        self.expect(b"42", timeout);
     }
 
     fn line(&mut self, text: &str) {
@@ -471,19 +500,28 @@ fn errexit_does_not_exit_the_shell_on_ctrl_c() {
 /// report was that only this path died, so it gets its own case.
 #[test]
 fn the_default_startup_files_do_not_make_ctrl_c_fatal() {
-    let mut session = Session::spawn_with(&["-i"]);
-    session.prompt();
+    // The machine's own files run here, so neither the prompt nor the timing is
+    // the test's: readiness is a command's output (see [`Session::ready`]).
+    let dir = std::env::temp_dir().join(format!("baash-ctrlc-defaults-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("make a working directory");
+    let mut session = Session::spawn_in(Some(&dir), &["-i"]);
+    session.ready(Duration::from_secs(60));
+
+    // Nothing in the temporary directory is a project, so a hook in the
+    // startup files (`direnv`'s) has nothing to load here.
 
     session.line("while true; do echo lol; done");
     session.expect(b"lol", Duration::from_secs(10));
     settle();
     session.send(b"\x03");
-    session.prompt();
     session.line("echo status=$?");
     session.expect(b"status=130", Duration::from_secs(10));
-    session.prompt();
+    // Still reading lines, which is what a shell that took the interrupt does.
+    session.line("echo still=$((40+2))");
+    session.expect(b"still=42", Duration::from_secs(10));
     session.line("exit");
     session.wait_child();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The cause of the death, hermetically: a startup file that runs a command
