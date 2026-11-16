@@ -225,6 +225,13 @@ impl Interp {
         let mut last = Status::SUCCESS;
         let mut index = 0;
         while index < items.len() {
+            // An untrapped `Ctrl-C` aborts the whole command line, not one
+            // item of it. The latch is checked here as well as at a simple
+            // command because a list can hold compound items whose bodies are
+            // nothing but arithmetic or `[[ … ]]`.
+            if self.interrupt_pending() {
+                return Unwind::Interrupt;
+            }
             let item = &items[index];
             index += 1;
             // `set -n` stops execution from here on. The rest of the input is
@@ -378,6 +385,12 @@ impl Interp {
                     // reaped, never between two of its stages.
                     if let Some(exit) = self.after_foreground_wait() {
                         return Unwind::Exit(exit);
+                    }
+                    // A stage aborts at its own command boundary; the
+                    // pipeline as a whole must not report success and let the
+                    // rest of the line run.
+                    if self.interrupt_pending() {
+                        return Unwind::Interrupt;
                     }
                     let status = combine_pipeline(&statuses, pipefail);
                     stage_statuses = statuses;
@@ -622,6 +635,12 @@ impl Interp {
 
         let mut last = Status::SUCCESS;
         for value in words {
+            // A `for` body can be an arithmetic command or `[[ … ]]`, neither
+            // of which crosses a simple-command boundary; the iteration
+            // boundary is the commutator for the latch.
+            if self.interrupt_pending() {
+                return Unwind::Interrupt;
+            }
             // bash treats the `for` header as one DEBUG event *per iteration*
             // (a loop with no iterations runs no trap at all), reported on the
             // header's line rather than the previous body's.
@@ -677,6 +696,9 @@ impl Interp {
         }
         let mut last = Status::SUCCESS;
         loop {
+            if self.interrupt_pending() {
+                return Unwind::Interrupt;
+            }
             // The header is re-evaluated on every iteration, and `$LINENO`
             // inside it is the header's line even after the body moved the
             // cursor (bash agrees; `for (( i = 0; i < $LINENO; i++ ))` runs
@@ -839,6 +861,13 @@ impl Interp {
     ) -> Unwind {
         let mut last = Status::SUCCESS;
         loop {
+            // The iteration boundary is where a `Ctrl-C` leaves the loop: the
+            // body may be a compound command with no simple command in it
+            // (`while :; do (( i += 1 )); done`), and the condition of the
+            // next iteration must not be evaluated after the abort.
+            if self.interrupt_pending() {
+                return Unwind::Interrupt;
+            }
             // The condition is inside the loop: `while break; do …; done` leaves
             // the loop, exactly as bash does, instead of reporting a stray
             // `break`.

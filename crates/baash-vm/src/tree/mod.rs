@@ -179,6 +179,16 @@ pub enum Unwind {
     /// `eval_list` handles this, by skipping the items that begin on the line
     /// that failed.
     Discard(Status),
+    /// `Ctrl-C` with no `INT` trap: abandon the command that is running, the
+    /// way bash's `SIGINT` handler does.
+    ///
+    /// Nothing absorbs this below the top level, which is what makes it leave
+    /// a loop, a `case` arm, a function and a `$( … )` body — a `break`
+    /// written in the user's source is the only thing that should stop *one*
+    /// loop. The interactive reader ([`Interp::run_named`]'s caller) absorbs it
+    /// as status 130 and keeps the session; a non-interactive shell never
+    /// constructs it, because `SIGINT` keeps its default action there.
+    Interrupt,
 }
 
 impl Unwind {
@@ -190,6 +200,8 @@ impl Unwind {
             | Unwind::Return(status)
             | Unwind::Exit(status)
             | Unwind::Discard(status) => status,
+            // What an interrupted foreground command reports: `128 + SIGINT`.
+            Unwind::Interrupt => Status(130),
             Unwind::Break(_) | Unwind::Continue(_) | Unwind::Trap(_) => Status::SUCCESS,
         }
     }
@@ -197,6 +209,21 @@ impl Unwind {
     /// Whether this unwind still has to reach a handler.
     pub fn is_unwinding(self) -> bool {
         !matches!(self, Unwind::Status(_))
+    }
+}
+
+#[cfg(test)]
+mod unwind_tests {
+    use super::Unwind;
+    use baash_runtime::Status;
+
+    /// The status an interrupted interactive command reports, and the fact that
+    /// it is an unwind: a `Status(130)` would let the next item of the list
+    /// run and lose the "abandon the line" half.
+    #[test]
+    fn an_interrupt_is_status_130_and_unwinds() {
+        assert_eq!(Unwind::Interrupt.status(), Status(130));
+        assert!(Unwind::Interrupt.is_unwinding());
     }
 }
 
@@ -522,6 +549,17 @@ pub struct Interp {
     /// location", and this is the best one the interpreter knows. A sourced
     /// file therefore reports the offending line instead of `file:1:1`.
     current_span: baash_diag::Span,
+    /// A `Ctrl-C` that no `INT` trap claimed, waiting to abort the current
+    /// input line (`Unwind::Interrupt`).
+    ///
+    /// Set by the command-boundary signal poll in `tree/traps.rs`. It is a
+    /// *latch*, not a one-shot: it stays set until the interactive reader
+    /// clears it after `run_named` returns, so a command substitution or an
+    /// `eval` that absorbs the unwind as status 130 cannot let the rest of the
+    /// line run as if nothing happened. A subshell must not clear it either —
+    /// `Ctrl-C` inside `$( … )` aborts the line, as in bash, it just does not
+    /// end the session.
+    interrupt_pending: bool,
 }
 
 /// One `name=(…)` argument in a declaration command.
@@ -656,6 +694,7 @@ impl Interp {
             line_number: 1,
             lineno: b"1".to_vec(),
             current_span: 0..0,
+            interrupt_pending: false,
         };
         // POSIX initializes `OPTIND` to 1 at shell startup, and `getopts`
         // counts from there; a script that never mentions it still needs the
@@ -898,6 +937,16 @@ impl Interp {
         self.state.vars.set_positional(argv);
     }
 
+    /// Whether an untrapped `Ctrl-C` is waiting to abort the running command.
+    ///
+    /// This is the evaluator's safe-point check: an in-process command loop
+    /// polls it between commands and unwinds with [`Unwind::Interrupt`]; the
+    /// interactive reader clears it after the line is over
+    /// ([`Interp::finish_interactive_line`]).
+    pub fn interrupt_pending(&self) -> bool {
+        self.interrupt_pending
+    }
+
     /// `$?`.
     pub fn status(&self) -> Status {
         self.state.vars.last_status()
@@ -1089,6 +1138,10 @@ impl Interp {
                 self.warn_control_flow("break/continue is only meaningful inside a loop");
                 Status::SUCCESS
             }
+            // The line is over: the session continues at 130, exactly like an
+            // interrupted foreground child. The reader clears the latch, not
+            // this function, so a nested `eval`/`$( … )` cannot swallow it.
+            Unwind::Interrupt => Status(130),
             Unwind::Trap(_) | Unwind::Discard(_) => Status::SUCCESS,
         }
     }

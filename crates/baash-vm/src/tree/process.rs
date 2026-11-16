@@ -436,6 +436,16 @@ impl Interp {
     /// substitution), so the `SIGINT`/`SIGQUIT` ignore cannot drift between
     /// them. The shell and its child share a process group, so there is no
     /// terminal handover here.
+    ///
+    /// A child that dies of `SIGINT` is the terminal's `Ctrl-C`: the shell
+    /// ignored that signal for the duration of the wait (bash's rule, which is
+    /// why an `INT` trap does not run for it), so the child's status is the
+    /// only record that the key was pressed. bash abandons the command in that
+    /// case, including a loop that runs one child per iteration
+    /// (`while true; do sleep 5; done`), so the abort latch is set here and the
+    /// evaluator unwinds at the next safe point. `trap '' INT` needs no special
+    /// case: `SIG_IGN` is inherited, so that child does not die of `SIGINT` and
+    /// nothing is latched.
     pub(crate) fn wait_foreground_children(
         &mut self,
         pids: &[i32],
@@ -452,6 +462,11 @@ impl Interp {
             }
         }
         drop(guard);
+        if self.interactive
+            && outcomes.contains(&baash_sys::WaitOutcome::Signaled(baash_sys::SIGINT))
+        {
+            self.interrupt_pending = true;
+        }
         Ok(outcomes)
     }
 }

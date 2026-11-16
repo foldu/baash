@@ -1143,6 +1143,20 @@ re-enters itself. `SIGINT`/`SIGQUIT` are ignored while waiting for a foreground
 child, and *discarded* if they were trapped (bash's rule: `kill -INT` during
 `sleep` runs no `INT` trap, while `USR1` runs afterwards).
 
+An `INT` drained at a command boundary with **no handler** in an interactive
+shell is not dropped: it sets `Interp::interrupt_pending` and the evaluator
+returns `Unwind::Interrupt`, which the interactive reader absorbs as status
+130. The safe points are the start of a simple command, a loop iteration, and
+the point after a command's words have been expanded — never inside a built-in.
+The latch is a latch, not a one-shot: `$( … )`, `eval` and `source` convert the
+unwind to 130 but do not clear it, so the rest of the line cannot run as if
+nothing happened, and the reader clears it (and drains any late `INT`/`QUIT`)
+once the line is over. A foreground child that dies of `SIGINT` sets the same
+latch in `wait_foreground_children`: the shell ignored `SIGINT` for the duration
+of that wait, so the child's status is the only record that the key was pressed.
+That is what makes `while true; do sleep 5; done` stop after one `Ctrl-C`
+instead of spawning the next child.
+
 **An interactive shell blocks the terminal's signals for its whole life.** The
 editor turns `ISIG` off while it owns the line, but a *command* runs with the
 terminal back in cooked mode — `read` and every other builtin that wants a line
@@ -1156,10 +1170,18 @@ while the shell is interactive, so a `trap - INT` cannot unblock them again.
 Blocked rather than `SIG_IGN`, because an ignored disposition survives `exec`
 and children would stop honouring `Ctrl-C`, while the spawn path already clears
 the mask. A foreground child still receives its own copy through the shared
-process group, a pending untrapped `INT` is read off the `signalfd` and dropped
-at a boundary, and a `trap` on `INT` still runs. What is **not** implemented is
-bash's abort: an in-process command runs to completion, and the signal is gone
-by the time the prompt returns.
+process group; a pending untrapped `INT` is read off the `signalfd` at a
+boundary and **aborts the running command** (`Unwind::Interrupt`, status 130,
+session intact); a `trap` on `INT` still runs and resumes; `trap '' INT` still
+ignores. A scope saves and restores this state
+(`enter_scope_signals`/`leave_scope_signals`): the body of `( … )`, `$( … )` or
+a pipeline stage keeps `SIGINT`/`SIGQUIT` blocked, because there is no child
+process to receive them, and the mask is forced back on the way out. The state's
+generation is an `Option<u64>`, so "never applied" is distinct from "the table
+still has generation 0": the old plain counter let the first `sync_traps` of a
+trap-less interactive shell return early, and a startup file's `$( … )` (NixOS's
+`eval "$(zoxide init bash)"` is the one that found this) then left the mask
+unblocked for the rest of the session — the next `Ctrl-C` in a loop killed it.
 
 **A `-F` reply replaces the `COMP_WORDS` element, not the parser's word.**
 bash splices `COMPREPLY` over the word delimited by `COMP_WORDBREAKS`, and

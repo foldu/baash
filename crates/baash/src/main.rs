@@ -1393,6 +1393,10 @@ fn run_repl(shell: &mut Interp) -> ExitCode {
                 editor.command_started(command);
                 let started = std::time::Instant::now();
                 let status = shell.run_named("<stdin>", &bytes);
+                // A `Ctrl-C` that arrived after the line's last command
+                // boundary is not that line's: drop it, and clear the abort
+                // flag the command boundary set (the status is already 130).
+                shell.finish_interactive_line();
                 let elapsed = started.elapsed();
                 last_duration = prompt_duration(shell, elapsed);
                 editor.command_finished(status.0);
@@ -1682,6 +1686,9 @@ fn run_stdin(shell: &mut Interp) -> ExitCode {
         // the shell state, so the loop stops here too.
         let started = std::time::Instant::now();
         status = shell.run_named("<stdin>", &chunk);
+        if shell.is_interactive() {
+            shell.finish_interactive_line();
+        }
         let elapsed = started.elapsed();
         if shell.is_interactive() {
             shell

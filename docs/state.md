@@ -311,14 +311,19 @@ delegates everything else: line editing to `baash-repl`, execution to the
   reloads the expansion into the editing line (the editor's
   `set_initial_line` seam) instead of running it;
 * `Ctrl-C` on a line → discards it, `$?` = 130; `Ctrl-D` on an empty line →
-  exit 0;
+  exit 0; `Ctrl-C` while a command runs → the command aborts at its next
+  command boundary (a loop stops, a `$( … )` body stops and the line is
+  abandoned), `$?` = 130, and the session, its variables and its history stay
+  (`crates/baash/tests/interactive_signals.rs`);
 * **no job control** (W1, `docs/direction.md`): the shell and its children
   share one process group, so `Ctrl-Z` stops the child and the shell together,
   as bash does with `set +m`. There is no job table, no `%` specifications and
   no terminal handover. `jobs`, `fg`, `bg` and `disown` remain known names but
   report `BAASH-E0302` (`CAPABILITY`) with status 1; `%1` operands to `wait`/`kill`
   do the same. `set -m`/`set -o monitor` is accepted and inert. The `Ctrl-C`
-  path is unchanged: the child dies, the shell survives and `$?` is 130
+  path is unchanged: the child dies, the shell survives and `$?` is 130; the
+  child's `SIGINT` death also aborts the command that ran it, so
+  `while true; do sleep 5; done` stops after one key
   (`crates/baash/tests/interactive_signals.rs`);
 * `$!`, `wait` (pids, and bare `wait` for all live children) and `kill` (pids
   and signals) for children *this* shell started;

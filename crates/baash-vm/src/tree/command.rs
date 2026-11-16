@@ -167,6 +167,15 @@ impl Interp {
         if let Some(exit) = self.run_pending_signal_traps() {
             return Unwind::Exit(exit);
         }
+        // The same boundary is the safest place to *abort*: a `Ctrl-C` no trap
+        // claimed sets the latch, and the command about to start must not run.
+        // It is checked before anything of this command is applied — no
+        // alias, no expansion, no redirection — and it unwinds past every
+        // compound command to the interactive reader, which reports 130 and
+        // keeps the session.
+        if self.interrupt_pending() {
+            return Unwind::Interrupt;
+        }
         if let Some(exit) = self.state.take_exit_request() {
             return Unwind::Exit(exit);
         }
@@ -215,7 +224,7 @@ impl Interp {
         // command substitution inside one goes where the redirection sends it
         // (`x=$(cmd) 2>/dev/null` prints nothing). With a command word the
         // order is the other way round, and bash agrees with POSIX there.
-        let early = if argv.is_empty() && !command.redirects.is_empty() {
+        let mut early = if argv.is_empty() && !command.redirects.is_empty() {
             match self.apply_redirects(chunk, &command.redirects) {
                 Ok(saved) => Some(saved),
                 Err(()) => {
@@ -313,6 +322,20 @@ impl Interp {
                 "circular name reference",
             );
             return Unwind::Exit(Status::FAILURE);
+        }
+
+        // A command substitution in this command's words or assignments runs
+        // on this thread, and a `Ctrl-C` inside it sets the latch. Nothing of
+        // *this* command has run yet — no word, no assignment, no redirection
+        // that outlives it — so it must not run now either; bash abandons the
+        // whole command, not just the substitution. The early redirections of
+        // an assignment-only command are already applied, so they are undone
+        // here rather than leaked.
+        if self.interrupt_pending() {
+            if let Some(saved) = early.take() {
+                self.restore_fds(saved);
+            }
+            return Unwind::Interrupt;
         }
 
         // `DEBUG` runs before the command, after its words have been expanded

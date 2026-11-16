@@ -53,7 +53,13 @@ pub(crate) struct SignalState {
     /// Signals whose disposition this shell set to `SIG_IGN`.
     ignored: Vec<i32>,
     /// The trap-table generation this state was built from.
-    generation: u64,
+    ///
+    /// `None` means "never applied", which is deliberately distinct from "the
+    /// table has generation 0": an interactive shell with no traps at all still
+    /// needs its `SIGINT`/`SIGQUIT` block installed and a reader open, and a
+    /// subshell body starts from a state that must be rebuilt even though the
+    /// restored table's generation is unchanged.
+    generation: Option<u64>,
 }
 
 impl Interp {
@@ -64,10 +70,10 @@ impl Interp {
     /// the next one runs.
     pub(crate) fn sync_traps(&mut self) {
         let generation = self.state.traps.generation();
-        if generation == self.signals.generation {
+        if self.signals.generation == Some(generation) {
             return;
         }
-        self.signals.generation = generation;
+        self.signals.generation = Some(generation);
 
         let caught = self.state.traps.caught_signals();
         let ignored = self.state.traps.ignored_signals();
@@ -183,12 +189,21 @@ impl Interp {
 
     /// Run the traps for the signals that have arrived. Returns an exit status
     /// when one of them called `exit`.
+    ///
+    /// An untrapped `SIGINT` in an interactive shell is not dropped here: it
+    /// sets [`Interp::interrupt_pending`], and the evaluator turns that into
+    /// [`super::Unwind::Interrupt`] at the next safe point. That is the half of
+    /// bash's `Ctrl-C` promise the block alone never delivered — the session
+    /// survived, but the in-process command ran to completion.
     pub(crate) fn run_pending_signal_traps(&mut self) -> Option<Status> {
         self.sync_traps();
         let signals = self.drain_signals(&[]);
         for signal in signals {
             let action = self.state.traps.signal_action(signal).cloned();
             let Some(TrapAction::Command(code)) = action else {
+                if self.interrupts_command(signal) {
+                    self.interrupt_pending = true;
+                }
                 continue;
             };
             let outcome = self.run_trap_code(&code);
@@ -197,6 +212,100 @@ impl Interp {
             }
         }
         None
+    }
+
+    /// Whether draining `signal` at a boundary must abort the running command
+    /// rather than be dropped.
+    ///
+    /// Only an untrapped `INT` in an interactive shell: bash's handler abandons
+    /// the command, while a script's `SIGINT` keeps the default action and never
+    /// reaches this poll. `trap '' INT` is `SIG_IGN`, so the kernel normally
+    /// discards the signal — but one generated in the window before the
+    /// disposition was installed still reaches the reader, and the *table*, not
+    /// the kernel, is the contract: an ignored signal is dropped here exactly as
+    /// `SIG_IGN` would have dropped it. A handler has already run by the time
+    /// this is asked, and a handler resumes the command, which is the `Command`
+    /// half excluded here.
+    fn interrupts_command(&self, signal: i32) -> bool {
+        signal == baash_sys::SIGINT
+            && self.interactive
+            && !self.in_trap
+            && !matches!(
+                self.state.traps.signal_action(signal),
+                Some(TrapAction::Command(_)) | Some(TrapAction::Ignore)
+            )
+    }
+
+    /// The interactive reader's end-of-line housekeeping.
+    ///
+    /// A `Ctrl-C` that arrived after the line's last command boundary belongs
+    /// to no command: it is dropped here rather than left pending, which would
+    /// abort the *next* line the user types. The latch is cleared at the same
+    /// point, because the abort it stood for has already been reported as
+    /// status 130 by [`Interp::run_named`].
+    pub fn finish_interactive_line(&mut self) {
+        self.interrupt_pending = false;
+        self.sync_traps();
+        for signal in self.drain_signals(&[]) {
+            // A handler still runs: `kill -USR1` at the prompt, or a trapped
+            // `INT` that arrived after the last boundary, is the user's
+            // business and not this line's. An `exit` in it is a request like
+            // any other.
+            if let Some(TrapAction::Command(code)) = self.state.traps.signal_action(signal).cloned()
+                && let Some(status) = self.run_trap_code(&code).exit
+            {
+                self.state.request_exit(status);
+            }
+            // An untrapped `INT`/`QUIT` here belongs to no command: it is
+            // dropped rather than left pending, where it would abort a line the
+            // user has not typed yet.
+        }
+    }
+
+    /// Enter an in-process subshell's signal state, returning the parent's.
+    ///
+    /// The body starts with the parent's traps cleared, so its mask must be
+    /// rebuilt from that table rather than inherited — but an interactive
+    /// shell keeps `SIGINT`/`SIGQUIT` blocked even here, because there is no
+    /// child process to take them: unblocking them would hand the next `Ctrl-C`
+    /// the default action and end the session the whole design exists to keep.
+    /// A body that never reaches a command boundary therefore still cannot be
+    /// killed by the terminal.
+    pub(crate) fn enter_scope_signals(&mut self) -> SignalState {
+        let saved = std::mem::take(&mut self.signals);
+        // A body still waiting on its first command boundary must not sit on
+        // an unblocked terminal signal; `sync_traps` re-derives the rest.
+        let mut bare = baash_sys::SignalSet::empty();
+        if self.interactive {
+            bare.insert(baash_sys::SIGINT);
+            bare.insert(baash_sys::SIGQUIT);
+        }
+        let _ = baash_sys::replace_signal_mask(&bare);
+        saved
+    }
+
+    /// Put the parent's signal state back after a subshell body.
+    ///
+    /// The body emptied the process mask and may have set `SIG_IGN` for a
+    /// signal the parent does not ignore. Restoring the *table* is not enough:
+    /// `sync_traps` is generation-driven, and the parent's table can be exactly
+    /// the one it had before, so the state is rebuilt from `None` and the
+    /// body's ignore list is kept just long enough for the stale-disposition
+    /// sweep to undo it. Without this, `x=$(echo hi)` in a startup file left
+    /// `SIGINT` unblocked for the rest of the session, and the next `Ctrl-C`
+    /// during an in-process loop killed the shell.
+    pub(crate) fn leave_scope_signals(&mut self, saved: SignalState) {
+        let body_ignored = std::mem::take(&mut self.signals.ignored);
+        let body_blocked = self.signals.blocked;
+        self.signals = saved;
+        self.signals.blocked = body_blocked;
+        self.signals.ignored = body_ignored;
+        // `None` forces the generation check; a cleared reader forces the mask
+        // syscall even when the wanted set is unchanged, because the body set
+        // the mask to something that is not it.
+        self.signals.generation = None;
+        self.signals.reader = None;
+        self.sync_traps();
     }
 
     /// After a foreground child has been reaped: discard `INT`/`QUIT` (bash
@@ -438,4 +547,76 @@ pub(crate) fn builtin_name(argv: &[Vec<u8>], fallback: &str) -> String {
     argv.first()
         .map(|name| String::from_utf8_lossy(name).into_owned())
         .unwrap_or_else(|| fallback.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use baash_runtime::TrapKey;
+
+    /// The one decision the command-boundary poll makes: which drained signal
+    /// is an abort, and which is a trap, an ignore, or a script's business.
+    #[test]
+    fn only_an_untrapped_int_in_an_interactive_shell_interrupts() {
+        let mut interactive = Interp::new(true);
+        assert!(interactive.interrupts_command(baash_sys::SIGINT));
+        // `USR1` with no trap is a trap the shell simply has no handler for;
+        // it is dropped, and the command keeps running.
+        assert!(!interactive.interrupts_command(baash_sys::SIGTERM));
+
+        interactive
+            .state
+            .traps
+            .set(TrapKey::Signal(baash_sys::SIGINT), TrapAction::Ignore);
+        assert!(!interactive.interrupts_command(baash_sys::SIGINT));
+
+        interactive.state.traps.set(
+            TrapKey::Signal(baash_sys::SIGINT),
+            TrapAction::Command(b"echo caught".to_vec()),
+        );
+        assert!(!interactive.interrupts_command(baash_sys::SIGINT));
+
+        // A script's `SIGINT` has the default action; this poll never sees it.
+        assert!(!Interp::new(false).interrupts_command(baash_sys::SIGINT));
+    }
+
+    /// The regression the `Option<u64>` generation fixes: an interactive shell
+    /// with no traps at all still has to install its `SIGINT`/`SIGQUIT` block
+    /// and open the reader. With a plain generation counter the first
+    /// `sync_traps` returned early (generation 0 == generation 0), so a later
+    /// scope that emptied the mask left the shell killable.
+    #[cfg(unix)]
+    #[test]
+    fn an_interactive_shell_blocks_int_even_with_no_traps() {
+        // Start from a known mask and put it back even if an assertion fails.
+        let guard = baash_sys::SignalSet::empty().set().expect("clear the mask");
+        let mut shell = Interp::new(true);
+        shell.sync_traps();
+        let blocked = baash_sys::SignalSet::current().expect("read the mask");
+        assert!(blocked.contains(baash_sys::SIGINT));
+        assert!(blocked.contains(baash_sys::SIGQUIT));
+
+        // A scope empties the mask for its body; the interactive block must
+        // survive the body and the restore.
+        let saved = shell.enter_scope_signals();
+        let body = baash_sys::SignalSet::current().expect("read the mask");
+        assert!(body.contains(baash_sys::SIGINT));
+        shell.leave_scope_signals(saved);
+        let restored = baash_sys::SignalSet::current().expect("read the mask");
+        assert!(restored.contains(baash_sys::SIGINT));
+        assert!(restored.contains(baash_sys::SIGQUIT));
+        drop(guard);
+    }
+
+    /// A non-interactive shell leaves the mask alone: a script's `SIGINT` must
+    /// keep the default action, or the process would have to run forever.
+    #[cfg(unix)]
+    #[test]
+    fn a_script_keeps_the_default_signal_disposition() {
+        let guard = baash_sys::SignalSet::empty().set().expect("clear the mask");
+        let mut shell = Interp::new(false);
+        shell.sync_traps();
+        assert!(baash_sys::SignalSet::current().expect("read").is_empty());
+        drop(guard);
+    }
 }

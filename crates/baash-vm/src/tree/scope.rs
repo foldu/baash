@@ -56,6 +56,11 @@ use super::Interp;
 /// leaves the snapshot behind, so the two calls are always paired.
 pub(crate) struct Scope {
     state: ShellState,
+    /// The parent's blocked mask, reader and `SIG_IGN` bookkeeping.
+    ///
+    /// The body runs with its own (empty, then rebuilt) state; this is what
+    /// puts the parent's back, including the interactive `SIGINT` block.
+    signals: super::traps::SignalState,
     read_buffers: BTreeMap<RawFd, Vec<u8>>,
     path_cache: BTreeMap<Vec<u8>, Vec<u8>>,
     pipeline_status: BTreeMap<i64, Vec<u8>>,
@@ -79,14 +84,17 @@ impl Interp {
         // the parent's table, which the close puts back.
         self.state.traps.clear_for_subshell();
         // The dispositions follow from the table, so they are reset for the
-        // body and reapplied by `sync_traps` on the way out.
-        self.signals = super::traps::SignalState::default();
-        let _ = baash_sys::replace_signal_mask(&baash_sys::SignalSet::empty());
+        // body and reapplied when the scope closes. An interactive shell keeps
+        // the terminal's signals blocked inside the body: there is no child
+        // process to receive them, so unblocking them would kill the session
+        // (`enter_scope_signals`).
+        let signals = self.enter_scope_signals();
 
         self.scope_depth += 1;
 
         Scope {
             state,
+            signals,
             read_buffers: std::mem::take(&mut self.read_buffers),
             path_cache: self.path_cache.clone(),
             pipeline_status: self.pipeline_status.clone(),
@@ -120,8 +128,9 @@ impl Interp {
             // has the same failure mode for `cd -` to a deleted directory).
             let _ = baash_sys::chdir(&cwd);
         }
-        // Restored traps must reach the process, not only the table.
-        self.sync_traps();
+        // Restored traps must reach the process, not only the table. The mask
+        // needs this even when the table did not change: the body emptied it.
+        self.leave_scope_signals(scope.signals);
     }
 
     /// Run `body` as a subshell and report its status.

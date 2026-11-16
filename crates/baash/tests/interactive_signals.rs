@@ -5,6 +5,16 @@
 //! group, so the child dies and the shell must survive the wait and report
 //! status 130. This is the surviving part of the old job-control pty test: the
 //! `^Z`/`jobs`/`fg`/`bg` half was deleted with job control.
+//!
+//! The second half of the promise is bash's *abort*: `while true; do echo lol;
+//! done` must stop, not outlive the key that asked it to. The shell blocks
+//! `SIGINT`, so nothing can interrupt it asynchronously; the pending signal is
+//! drained at a command boundary, a foreground child that dies of `SIGINT` is
+//! recorded at the wait, and the evaluator unwinds to the interactive reader
+//! with status 130. The tests below pin every shape that has to keep or lose
+//! the session: a builtin loop, a loop that runs a child, `trap '' INT`,
+//! `trap 'echo …' INT`, a `$( … )` body, a redirected loop, and a script that
+//! must still die.
 
 #![forbid(unsafe_code)]
 
@@ -30,6 +40,11 @@ struct Session {
 
 impl Session {
     fn spawn() -> Self {
+        Self::spawn_with(&["--norc", "-i"])
+    }
+
+    /// Same session with explicit shell arguments, still under `PS1=@@ `.
+    fn spawn_with(args: &[&str]) -> Self {
         let pty = open_pty().expect("open a pty");
         let master = pty.master.as_raw_fd();
         let slave = pty.slave.as_raw_fd();
@@ -69,9 +84,11 @@ impl Session {
                 let _ = close(slave);
             }
             let _ = close(master);
+            let mut argv = vec!["baash"];
+            argv.extend_from_slice(args);
             let plan = match SpawnPlan::new_with_env(
                 binary,
-                ["baash", "--norc", "-i"],
+                argv,
                 environment.iter().map(Vec::as_slice),
             ) {
                 Ok(plan) => plan,
@@ -153,6 +170,23 @@ impl Session {
         self.send(b"\n");
     }
 
+    /// Drain for `millis` and report how many bytes arrived.
+    ///
+    /// The loop tests use this where the output is *not* allowed to stop: an
+    /// ignored `INT` keeps producing, and a resumed `INT` trap keeps producing
+    /// after the handler's line. The spawning prompt and the handler itself are
+    /// well under a thousand bytes, so the threshold separates "still looping"
+    /// from "back at a prompt" without counting exact iterations.
+    fn output_for(&mut self, millis: u64) -> usize {
+        let before = self.output.len();
+        let deadline = Instant::now() + Duration::from_millis(millis);
+        while Instant::now() < deadline {
+            self.drain();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.output.len() - before
+    }
+
     fn wait_child(&mut self) {
         if self.reaped {
             return;
@@ -212,33 +246,44 @@ fn ctrl_c_on_a_foreground_command_leaves_status_130_and_the_shell_alive() {
     session.wait_child();
 }
 
-/// `Ctrl-C` while the shell itself runs a command must not end the session.
+/// `Ctrl-C` while the shell itself runs a command must not end the session,
+/// and the command it interrupted must stop.
 ///
 /// The editor turns the terminal's keyboard signals off for the line, but a
 /// command runs with the terminal back in cooked mode — that is what lets
 /// `read` use the line discipline — so the same key is a `SIGINT` for the
 /// foreground process group, and that group is the shell's own. With the
-/// default disposition the shell died: an in-process command, or the gap
-/// between a command's output and the next prompt, lost the whole session
-/// (`interactive_carapace::a_fast_enter_waits_for_a_pending_lookup` met the
-/// gap and failed about one run in ten).
+/// default disposition the shell died; blocking the signal kept the session but
+/// let the builtin run to completion, which left `while true; do echo lol;
+/// done` printing forever. The block is still what keeps the session alive: the
+/// pending `INT` is drained at the command boundary and aborts the command
+/// there, which is bash's abort without bash's asynchronous handler.
 ///
-/// The signal is blocked for the life of an interactive shell, so the builtin
-/// finishes and the next command still runs. The marker is computed by the
-/// shell rather than typed, so the editor's echo of the line cannot match it.
+/// `read -t` is the one builtin that blocks without a child, so it is the way
+/// to be inside the shell — and not inside the editor — when the key arrives.
+/// The signal is blocked, so the read is not interrupted; it ends on its own
+/// two-second timeout and the *next* command boundary abandons the line. That
+/// is why `done-42` must not appear: the `echo` is part of the aborted command.
 #[test]
-fn ctrl_c_during_in_process_shell_code_does_not_end_the_session() {
+fn ctrl_c_while_a_builtin_is_blocked_aborts_the_command() {
     let mut session = Session::spawn();
     session.prompt();
 
-    // `read -t` is the only builtin that blocks without a child, so it is the
-    // one way to be inside the shell — and not inside the editor — when the
-    // key arrives. The timeout ends it two seconds later, which is what the
-    // test waits for.
     session.line("read -t 2 ignored; echo done-$((6*7))");
     settle();
     session.send(b"\x03");
-    session.expect(b"done-42", Duration::from_secs(15));
+    // `read` is not interrupted (the signal is blocked) and it consumes input,
+    // so wait out its two-second timeout before typing the next line; the
+    // abort is observed at the `echo` boundary after it.
+    session.output_for(2_500);
+    session.line("echo status=$?");
+    session.expect(b"status=130", Duration::from_secs(10));
+    session.prompt();
+    assert!(
+        find(&session.output, b"done-42").is_none(),
+        "the rest of the interrupted line ran: {}",
+        String::from_utf8_lossy(&session.output)
+    );
 
     session.line("echo still-here");
     session.expect(b"still-here", Duration::from_secs(10));
@@ -246,4 +291,247 @@ fn ctrl_c_during_in_process_shell_code_does_not_end_the_session() {
 
     session.line("exit");
     session.wait_child();
+}
+
+/// The reported case: a loop of builtins must stop and leave `$?` at 130.
+#[test]
+fn ctrl_c_aborts_a_builtin_loop_and_keeps_the_session() {
+    let mut session = Session::spawn();
+    session.prompt();
+
+    session.line("while true; do echo lol; done");
+    session.expect(b"lol", Duration::from_secs(10));
+    settle();
+    session.send(b"\x03");
+    session.prompt();
+    session.line("echo status=$?");
+    session.expect(b"status=130", Duration::from_secs(10));
+    session.prompt();
+
+    // The session kept its editor, its variables and its history.
+    session.line("echo still-here");
+    session.expect(b"still-here", Duration::from_secs(10));
+    session.prompt();
+
+    session.line("exit");
+    session.wait_child();
+}
+
+/// A loop that runs a foreground child per iteration.
+///
+/// This is the other shape: the shell is inside `wait`, `SIGINT` is ignored for
+/// the duration (bash's rule, so no `INT` trap runs), and the `sleep` dies of
+/// the terminal's signal. Without a check for that status the loop would spawn
+/// the next `sleep` for ever — `^C^C^C` would kill one child per key and never
+/// the loop.
+#[test]
+fn ctrl_c_aborts_a_loop_that_runs_a_child_each_iteration() {
+    let mut session = Session::spawn();
+    session.prompt();
+
+    session.line("while true; do sleep 5; done");
+    settle();
+    session.send(b"\x03");
+    session.prompt();
+    session.line("echo status=$?");
+    session.expect(b"status=130", Duration::from_secs(10));
+    session.prompt();
+
+    session.line("echo still-here");
+    session.expect(b"still-here", Duration::from_secs(10));
+    session.prompt();
+
+    session.line("exit");
+    session.wait_child();
+}
+
+/// `trap '' INT` is `SIG_IGN`, inherited by the child too: the loop must keep
+/// running and the shell must keep the ignored disposition.
+#[test]
+fn an_ignored_int_leaves_the_loop_running() {
+    let mut session = Session::spawn();
+    session.prompt();
+
+    session.line("trap '' INT; while true; do echo lol; done");
+    session.expect(b"lol", Duration::from_secs(10));
+    settle();
+    session.send(b"\x03");
+    let produced = session.output_for(600);
+    assert!(
+        produced > 1000,
+        "the loop stopped {produced} bytes after an ignored Ctrl-C"
+    );
+    // No `exit`: the shell is still in the loop. `Drop` ends it with SIGTERM,
+    // which the ignored `INT` does not cover.
+}
+
+/// `trap 'echo …' INT` runs the handler and then *resumes* the loop, exactly as
+/// bash does. Only a `break` written in the handler stops it (which this shell
+/// does not support from a trap; see the commit).
+#[test]
+fn an_int_trap_runs_and_the_loop_resumes() {
+    let mut session = Session::spawn();
+    session.prompt();
+
+    // The marker is computed by the shell, so the editor's echo of the typed
+    // `$((6*7))` cannot match it.
+    session.line("trap 'echo TRAP-RAN-$((6*7))' INT; while true; do echo lol; done");
+    session.expect(b"lol", Duration::from_secs(10));
+    settle();
+    session.send(b"\x03");
+    session.expect(b"TRAP-RAN-42", Duration::from_secs(10));
+    let produced = session.output_for(500);
+    assert!(
+        produced > 1000,
+        "the loop did not resume after the handler: {produced} bytes"
+    );
+}
+
+/// A `while` inside `$( … )` aborts the substitution, not the process, and the
+/// rest of the line does not run — bash abandons the line here too.
+#[test]
+fn ctrl_c_inside_a_command_substitution_keeps_the_session() {
+    let mut session = Session::spawn();
+    session.prompt();
+
+    session.line("x=$(while true; do echo lol; done); echo AFTER-$((6*7))");
+    settle();
+    session.send(b"\x03");
+    session.prompt();
+    session.line("echo status=$?");
+    session.expect(b"status=130", Duration::from_secs(10));
+    session.prompt();
+    assert!(
+        find(&session.output, b"AFTER-42").is_none(),
+        "the rest of the interrupted line ran: {}",
+        String::from_utf8_lossy(&session.output)
+    );
+
+    session.line("exit");
+    session.wait_child();
+}
+
+/// A redirection on the interrupted command must be undone with the abort, or
+/// the next prompt writes into the file.
+#[test]
+fn an_interrupted_loop_restores_its_redirection() {
+    let path = std::env::temp_dir().join(format!("baash-ctrlc-redirect-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let mut session = Session::spawn();
+    session.prompt();
+
+    session.line(&format!(
+        "while true; do echo lol; done > {}",
+        path.display()
+    ));
+    settle();
+    session.send(b"\x03");
+    session.prompt();
+    assert!(
+        std::fs::metadata(&path)
+            .map(|meta| meta.len() > 0)
+            .unwrap_or(false),
+        "the redirected loop produced no file output"
+    );
+
+    session.line("echo status=$?");
+    session.expect(b"status=130", Duration::from_secs(10));
+    // `status=130` is the proof that stdout points at the terminal again.
+    session.prompt();
+    session.line("exit");
+    session.wait_child();
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `set -e` must not turn the abort into an exit: the status is 130, not a
+/// failed command.
+#[test]
+fn errexit_does_not_exit_the_shell_on_ctrl_c() {
+    let mut session = Session::spawn();
+    session.prompt();
+
+    session.line("set -e; while true; do echo lol; done");
+    session.expect(b"lol", Duration::from_secs(10));
+    settle();
+    session.send(b"\x03");
+    session.prompt();
+    session.line("echo status=$?");
+    session.expect(b"status=130", Duration::from_secs(10));
+    session.prompt();
+
+    session.line("echo still-here");
+    session.expect(b"still-here", Duration::from_secs(10));
+    session.prompt();
+    session.line("exit");
+    session.wait_child();
+}
+
+/// The default startup path: `-i` reads the shell's own config (and, on a
+/// machine where a distributor installed one, that file instead). The first
+/// report was that only this path died, so it gets its own case.
+#[test]
+fn the_default_startup_files_do_not_make_ctrl_c_fatal() {
+    let mut session = Session::spawn_with(&["-i"]);
+    session.prompt();
+
+    session.line("while true; do echo lol; done");
+    session.expect(b"lol", Duration::from_secs(10));
+    settle();
+    session.send(b"\x03");
+    session.prompt();
+    session.line("echo status=$?");
+    session.expect(b"status=130", Duration::from_secs(10));
+    session.prompt();
+    session.line("exit");
+    session.wait_child();
+}
+
+/// The cause of the death, hermetically: a startup file that runs a command
+/// substitution. `$( … )` is an in-process scope; it emptied the signal mask
+/// and the parent's `sync_traps` then saw an unchanged trap generation and
+/// never put `SIGINT` back, so the next `Ctrl-C` in a loop had the default
+/// action. No default config, no bash-completion: just one substitution.
+#[test]
+fn a_startup_file_command_substitution_does_not_leave_sigint_unblocked() {
+    let path = std::env::temp_dir().join(format!("baash-ctrlc-rc-{}", std::process::id()));
+    std::fs::write(&path, "x=$(echo hi)\n").expect("write the startup file");
+    let path_text = path.to_str().expect("a UTF-8 temp path");
+    let mut session = Session::spawn_with(&["--rcfile", path_text, "-i"]);
+    session.prompt();
+
+    session.line("while true; do echo lol; done");
+    session.expect(b"lol", Duration::from_secs(10));
+    settle();
+    session.send(b"\x03");
+    session.prompt();
+    session.line("echo status=$?");
+    session.expect(b"status=130", Duration::from_secs(10));
+    session.prompt();
+    session.line("exit");
+    session.wait_child();
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A script is not interactive: `SIGINT` keeps its default action, and the
+/// process must die rather than abort a command and carry on.
+#[test]
+fn a_non_interactive_shell_still_dies_on_ctrl_c() {
+    let binary = env!("CARGO_BIN_EXE_baash");
+    let mut plan = SpawnPlan::new(binary, ["baash", "-c", "while true; do echo lol; done"])
+        .expect("build a spawn plan");
+    // The loop's output is not the test's business.
+    plan.open(b"/dev/null", baash_sys::flags::WRONLY, 0, 1)
+        .expect("redirect stdout");
+    plan.sigmask = Some(baash_sys::SignalSet::empty());
+    plan.reset_signals =
+        baash_sys::SignalSet::of(&[baash_sys::SIGPIPE, baash_sys::SIGINT, baash_sys::SIGQUIT]);
+    let child = baash_sys::spawn(plan).expect("spawn the script shell");
+    settle();
+    send_signal(child.pid(), baash_sys::SIGINT).expect("send SIGINT");
+    let status = baash_sys::wait_pid(child.pid()).expect("reap the script shell");
+    assert_eq!(
+        status,
+        baash_sys::WaitOutcome::Signaled(baash_sys::SIGINT),
+        "a non-interactive shell must die of SIGINT, not survive it"
+    );
 }

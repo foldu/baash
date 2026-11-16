@@ -553,10 +553,16 @@ previous build in `-c` mode: the old one printed only `hi`, the new one prints
 `hi` and `after`.
 
 What is still coarse: the handler swallows the event for the whole interactive
-process, so a `Ctrl-C` pressed while a *built-in* loop runs does nothing until
-it returns (bash would abandon it at the next command boundary — that needs a
-pending-interrupt check in the interpreter), `trap INT` never runs for a console
-event, and `Ctrl-\` has no equivalent at all.
+process, so the shell has no pending signal to drain and a `Ctrl-C` pressed
+while a *built-in* loop runs does nothing until it returns, `trap INT` never
+runs for a console event, and `Ctrl-\` has no equivalent at all. The
+Unix-side abort (`Unwind::Interrupt`) is shared, though: a foreground child
+killed by `Ctrl-C` arrives as `WaitOutcome::Signaled(SIGINT)`
+(`STATUS_CONTROL_C_EXIT`), and the interpreter's first boundary after that wait
+abandons the command, so `while true; do ping -n 100 127.0.0.1; done` should
+stop after one key on Windows too. That path is compiled by
+`nix build .#windows-fast` but was **not** run on the guest for this change
+(2026-11-16); the built-in loop remains the documented gap.
 
 ### Command resolution on Windows (2026-11-06)
 
