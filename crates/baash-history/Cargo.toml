@@ -5,10 +5,29 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "Command history: a navigation ring backed by Turso"
+description = "Command history: a navigation ring backed by SQLite"
 
 [dependencies]
 baash-sys.workspace = true
-# The store. `default-features = false` keeps mimalloc (a process-wide global
-# allocator from a dependency) and full-text search out of the shell.
-turso = { version = "0.8.3", default-features = false }
+# The store: SQLite through sqlx, with the amalgamation compiled in. `bundled`
+# is what `sqlite` means in sqlx 0.9, so a host's `libsqlite3` is never
+# consulted — the database engine ships inside the binary, the same way the
+# uutils built-ins do. `macros` is not for the `query!` family: the shell
+# builds its SQL at runtime and has no database to check it against at compile
+# time. It is what carries `sqlx::migrate!`, which embeds `migrations/` in the
+# binary so an installed shell can bring an old database forward without the
+# directory being on disk.
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+    "migrate",
+    "macros",
+] }
+# The runtime, confined to the worker thread (`store.rs`): the shell's own
+# thread stays synchronous. `rt` is the current-thread runtime, and nothing
+# here needs the multi-threaded one.
+tokio = { version = "1", default-features = false, features = [
+    "rt",
+    "sync",
+    "time",
+] }

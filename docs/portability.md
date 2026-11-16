@@ -625,65 +625,46 @@ with the shell. Interactively, in a console window: `pwd` → `C:\Users\win`
 with the prompt abbreviated to `~`, then `cd C:/Windows` and the prompt showing
 `C:\Windows` — the path segment and the `$` are correct in both.
 
-### Turso on Windows: verified (2026-10-30)
+### The history database on Windows: SQLite through sqlx
 
-`turso = "0.8"` (0.8.3, the latest stable — `cargo add` picks it over the
-`0.9.0-pre.2` pre-release) builds for `x86_64-pc-windows-gnu` with the recipe
-above
-and **runs under Wine**: `CREATE TABLE`, `INSERT`, `SELECT` and a row read back
-all succeed. Its API is async (`Builder::new_local(path).build().await`,
-`db.connect()`, `conn.execute(..).await`, `rows.next().await`), which is what a
-compio-driven shell wants, and its I/O backends include io_uring and IOCP, the
-same two runtimes the shell needs. Both Linux and the Wine run were verified with
-0.8.3.
+`baash-history` stores history in SQLite, compiled into the binary: `sqlx 0.9`
+with the `sqlite` feature, which means `libsqlite3-sys` with `bundled`, so the
+amalgamation is built by `cc` and cross-compiled with everything else — the
+host's `libsqlite3` is never consulted, on Windows or anywhere else.
 
-A `turso` limitation that shaped the schema: the column form
-`id INTEGER PRIMARY KEY AUTOINCREMENT` is accepted and keeps a high-water mark
-in memory (a delete then insert gives the next id), but with a **file**
-database reopened in multiprocess-WAL mode it does not: after `history -c`, the
-next insert reused id 1. Measuring that is why `baash-history` never deletes a
-row whose id it has shown — it tombstones it and prunes only rows below the
-newest id (see `docs/contracts.md`).
+The reason it is not a bespoke engine is the property two shells need: WAL mode
+with working cross-process locking. On Windows that is the default behaviour of
+SQLite — its wal-index lives in a `-shm` file that is mmapped precisely because
+anonymous shared memory is not portable to Windows — so nothing here is
+platform-conditional. The pool is opened with `journal_mode=WAL`, a five-second
+`busy_timeout` (a write that lands while the other shell is writing waits rather
+than failing) and `synchronous=NORMAL`.
 
-Two shells share one history file, so the connection is opened with
-`experimental_multiprocess_wal(true)` plus a five-second `busy_timeout`: without
-the first, the second `Builder::build()` on the same path fails with "database
-is locked" even when the first is idle; without the second, a write that lands
-while the other shell is writing fails instead of waiting. Both were verified
-in one process (two stores on one file, each seeing the other's rows), and the
-mode is refused for `:memory:`, which takes the plain builder.
+`sqlx` is async and has no compio backend, so the runtime is `tokio`'s
+**current-thread** runtime, built inside the history worker thread and nowhere
+else: the shell's own thread stays synchronous, `Store`'s callers see ordinary
+`std` channels, and compio keeps owning the terminal. Nothing outside
+`crates/baash-history/src/store.rs` names `tokio`.
 
-The runtime behaviour was verified on Linux first. `baash-history` — and with
-it turso, with both of those options — cross-compiles for
-`x86_64-pc-windows-gnu` and has since run on the guest, where the interactive
-shell opens `history.db` plus a WAL (§9, "The console host"). `baash-runtime`
-cross-compiles too, because deleting the history file removed its last
-unix-only code.
+The C dependency does bring the build's usual Windows questions — a `cc`
+compiler for the amalgamation — which the existing `cargo zigbuild` recipe
+already provides for `libmimalloc-sys`; see §10 for the derivations.
 
-One Windows build detail: `turso_sdk_kit`'s build script links a version
-resource by invoking plain `windres`, which `cargo-zigbuild` does not provide.
-The shim is checked in as `ci/windres` — `exec` the compiler named by
-`BAASH_WINDRES`, or `llvm-windres` by default, with the arguments it was given —
-and the Windows derivation puts it on `PATH` under the plain name with
-`BAASH_WINDRES` naming the real compiler (`llvmPackages.bintools-unwrapped`:
-the wrapped path needs a stdenv environment that a build script does not have).
+Verified on the guest (2026-11-16): three interactive sessions sharing one
+`%LOCALAPPDATA%\baash\history.db`, the second opened while the first was still
+running. The row ids came out 1 `echo beta-marker` and 2 `exit` from the second
+shell, 3 `history` and 4 `exit` from the first, 5 `history` from a third
+started after both closed — one counter, so one database. The third shell read
+the second one's command back, and no session printed a history diagnostic.
+Before the swap the second shell could not open the file at all, so this is the
+behaviour the change exists for, not a side effect.
 
-It is a wrapper *script*, not a symlink, on purpose: nix-wrapped binutils
-resolve their own directory from `argv[0]`, so a symlink to one of those breaks
-it. LLVM's binary does not care, but the script is the form that stays correct
-whichever resource compiler is behind it.
-
-Either way, the resource compiler **preprocesses** the script before compiling
-it, so a C preprocessor has to be on `PATH` as well — this is the part that is
-easy to miss because it only bites where the wrapper was not in the picture:
-
-* LLVM's looks for `clang` and gives up instead, so the derivation takes
-  `llvmPackages.clang` next to the bintools. `--no-preprocess` is not a way out:
-  the script turso generates is built out of `#define`s (`FLAGSMASK`, `VORG_NT`
-  …), which then never expand.
-* The MinGW cross-`windres` shells out to `x86_64-w64-mingw32-gcc` and fails
-  with `x86_64-w64-mingw32-gcc: command not found`, so that wrapper has to
-  prepend the MinGW `bin` to `PATH` rather than just `exec` the one binary.
+One Windows detail that outlived the engine swap: `build.rs` stamps the exe's
+icon with a resource compiler, and LLVM's `llvm-windres` — the one the
+derivation puts in `BAASH_WINDRES` — **preprocesses** its script, so a `clang`
+has to be reachable on `PATH` too. Nothing calls plain `windres` any more, so
+the shim that existed only for turso's hardcoded `Command::new("windres")` is
+gone, and `nix build .#windows-fast` is the check that it stays gone.
 
 ## 10. The two Windows builds, and why there are four derivations (2026-11-12)
 

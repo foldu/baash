@@ -231,29 +231,38 @@ never advances the counter.
 
 **History is one ring, and the database is behind it.** `ShellState::history`
 is a `baash_history::History`: numbered entries, Up/Down navigation, ghost-text
-suggestions. `baash_history::Store` is the Turso database on its own thread; the
-ring queues a write when a line is submitted and an update when it finishes
-(`$?` and wall time), so nothing on the keystroke path waits for a disk. The
-interactive loop swaps the ring in and out of the editor around each command
-(`baash-repl` depends on this crate for the *type*), so the built-in and Up/Down
-navigate the same entries.
+suggestions. `baash_history::Store` is SQLite (bundled, through `sqlx`) on its
+own thread; the ring queues a write when a line is submitted and an update when
+it finishes (`$?` and wall time), so nothing on the keystroke path waits for a
+disk. The interactive loop swaps the ring in and out of the editor around each
+command (`baash-repl` depends on this crate for the *type*), so the built-in and
+Up/Down navigate the same entries.
+
+The async stays inside that thread. `sqlx` has no synchronous API and no compio
+backend, so `Store` builds a current-thread `tokio` runtime in the worker, runs
+the pool and the request queue on it, and answers its callers over ordinary
+`std` channels; the queue is FIFO and drained before the thread exits, which is
+what makes the database see operations in the order they were typed and what
+puts the last command's row on disk. Nothing outside `store.rs` names `tokio`,
+and the shell keeps compio for the terminal.
 
 Numbers are the database's row ids: global, assigned at insert, and never
 reused. The ring is seeded with the newest 1000 rows of every session,
 `history` prints the ids, and `!12` resolves to the row with id 12 in any shell.
 Trimming leaves numbers alone, deleting leaves a gap, and nothing renumbers.
 
-Deletion is a tombstone. Turso hands out `max(id) + 1` — `AUTOINCREMENT` parses
-but did not keep its high-water mark across a reopen in the multiprocess WAL
-mode, so after `history -c` the next command was numbered 1 again while id 1
-already meant `echo one` in another session. A real `DELETE` therefore cannot
-be used if a number is to keep meaning one command. `-d` and `-c` set `deleted`,
-reads filter it, and startup prunes hidden rows *below* the newest id, which
-cannot shrink the maximum and so cannot cause reuse. The insert is the
-one write the shell waits for — the id it returns *is* the number the line will
-be shown with — and it costs 16 µs p50 / 86 µs max in release (260 µs p50 in
-the debug build), which is below the noise floor of pressing Enter. `finish` is
-fire-and-forget.
+Deletion is a tombstone. `commands.id` is a plain `INTEGER PRIMARY KEY`, so
+SQLite hands out `max(id) + 1`; a real `DELETE` of the newest row would give its
+number to the next insert, and a number must never name a different command.
+`-d` and `-c` therefore set `deleted`, reads filter it, and startup prunes hidden
+rows *below* the newest id, which cannot shrink the maximum and so cannot cause
+reuse. SQLite's `AUTOINCREMENT` would keep a high-water mark in `sqlite_sequence`
+and make a real `DELETE` safe; the invariant is carried by the rows themselves
+instead, so it survives the side table being lost to a copy or a repair. The
+insert is the one write the shell waits for — the id it returns *is* the number
+the line will be shown with — and it uses `RETURNING id` rather than
+`last_insert_rowid()`, because a pooled connection is not guaranteed to be the
+same one a moment later. `finish` is fire-and-forget.
 
 There is no history file, and there is no `sync_history`: `HISTFILE`,
 `HISTSIZE`, `HISTFILESIZE`, `HISTCONTROL`, `HISTIGNORE`, `HISTTIMEFORMAT`, the

@@ -173,8 +173,8 @@ an `Arc` now and the first write copies it (`Arc::make_mut`), so
 Startup is dominated by the dynamic loader. callgrind on `baash -c ':'` puts
 **78%** of the run in `_dl_relocate_object_no_relro` and another ~9% in symbol
 lookup: the binary has **43,641 dynamic relocations** against bash's 1,563,
-because it links a large Rust dependency graph (turso's vtables are most of
-`.data.rel.ro`). Our own initialisation is ~5%, so no amount of tidying it
+because it links a large Rust dependency graph (the dependency tree's vtables
+are most of `.data.rel.ro`). Our own initialisation is ~5%, so no amount of tidying it
 would be felt. Packing the relocations (`-z pack-relative-relocs`) shrinks the
 section 1 MB → 17 KB and changes nothing, because the loader's work is per
 relocation, not per byte.

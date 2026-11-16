@@ -19,7 +19,8 @@ cargo clippy --target x86_64-pc-windows-gnu -p baash -- -D warnings
 It needs the target installed (`rustup target add x86_64-pc-windows-gnu`;
 the flake's `windows` derivation pins a toolchain that has it) and a resource
 compiler for the exe's icon, which `build.rs` runs even for a check — set
-`BAASH_WINDRES` to `llvm-windres`, or put `windres` on `PATH`. `--all-targets`
+`BAASH_WINDRES` to `llvm-windres`, or put `windres` on `PATH`. LLVM's
+preprocesses the script, so a `clang` has to be reachable too. `--all-targets`
 does not work for it: the pty tests and `baash-spec` are Unix-only by design.
 
 ## Build it
@@ -33,8 +34,8 @@ day to day.
 | `just windows` | CI, the guest, a release: fat LTO, cgu 1, stripped, 20.6 MB | ~80 s |
 | `just windows-fast` | editing: the same profile, LTO off, 29.7 MB | ~15 s |
 
-`flake.nix`'s `mkWindows` is the source of truth for the flags: a `windres`
-shim on `PATH` with `BAASH_WINDRES` at LLVM's `windres`, and
+`flake.nix`'s `mkWindows` is the source of truth for the flags:
+`BAASH_WINDRES` at LLVM's `windres` (with `clang` beside it), and
 `-Wno-error=date-time` for `libmimalloc-sys`.
 
 Both are a cached dependency half plus a thin per-change half, so an edit under
@@ -59,9 +60,8 @@ the image rather than drawn by it.
 | `crates/baash/build.rs` | compiles it for a Windows target, and only then |
 
 `build.rs` finds the resource compiler in `BAASH_WINDRES` — the flake's
-`prepare` phase already exports LLVM's `llvm-windres` there for
-`turso_sdk_kit` — then falls back to `windres` on `PATH` (the `ci/windres`
-shim) and to `llvm-windres`. It compiles the script to a COFF object under
+`prepare` phase exports LLVM's `llvm-windres` there — then falls back to
+`windres` on `PATH` and to `llvm-windres`. It compiles the script to a COFF object under
 `OUT_DIR` and hands the binary target one `cargo:rustc-link-arg-bins`, so the
 object is linked into `baash.exe` and nowhere else. A non-Windows build returns
 before any of that: no Linux toolchain grows a resource compiler requirement.

@@ -5,14 +5,14 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0-rc.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.94"
 license = "GPL-3.0-or-later"
 # Not published: the crates exist to build the binary.
 publish = false
 
 [workspace.dependencies]
 # The runtime carapace provider parses carapace's `export` output. Already in
-# the tree through `baash-history`'s embedded Turso, so this adds no compiled
+# the tree through `baash-history`'s SQLite driver, so this adds no compiled
 # crate — it is a direct use of a dependency the binary already carries.
 serde_json = "1"
 # The stock prompt's status. `gix` (gitoxide) reads the index and walks the

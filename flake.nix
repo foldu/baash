@@ -225,10 +225,9 @@
                   # asks for by exact name, which the MinGW cross toolchain does
                   # not have.
                   #
-                  # `ci/windres` is the shim `turso_sdk_kit`'s build script
-                  # needs, because it asks for `windres` by name; the compiler
-                  # it execs preprocesses the script and looks for `clang` to do
-                  # it.
+                  # `build.rs` compiles the window icon with `windres`, and
+                  # LLVM's preprocesses the script, looking for `clang` to do
+                  # it — hence the resource compiler and the C compiler both.
                   nativeBuildInputs = [
                     pkgs.cargo-zigbuild
                     pkgs.zig
@@ -252,13 +251,10 @@
                   };
                 };
 
-                # The shim, the resource compiler and the zig caches, in front
-                # of every cargo call in either half.
+                # The resource compiler and the zig caches, in front of every
+                # cargo call in either half.
                 prepare = ''
                   mkdir -p target/x86_64-pc-windows-gnu
-                  cp --no-preserve=mode ${./ci/windres} target/windres
-                  chmod 755 target/windres
-                  export PATH="$PWD/target:$PATH"
                   # The unwrapped path, not `bintools`: that derivation's
                   # `bin/llvm-windres` is a wrapper that needs the stdenv's
                   # environment, and a build script does not have it.

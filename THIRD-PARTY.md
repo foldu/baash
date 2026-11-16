@@ -143,6 +143,19 @@ disappears upstream is a data change, not a build detail.
 
 [carapace]: https://github.com/carapace-sh/carapace-bin
 
+## SQLite — public domain
+
+`crates/baash-history` links SQLite, compiled from the amalgamation that
+[`libsqlite3-sys`][libsqlite3-sys] vendors (`sqlx`'s `bundled` flavour), so the
+database engine travels inside the binary instead of being looked up on the
+host. SQLite is in the public domain: its author has [dedicated it][blessing] to
+the public domain rather than licensing it, so no notice has to be kept with a
+redistribution. The wrapper crates around it — `sqlx`, `tokio`,
+`libsqlite3-sys` — keep their own licenses and are covered below.
+
+[libsqlite3-sys]: https://crates.io/crates/libsqlite3-sys
+[blessing]: https://www.sqlite.org/copyright.html
+
 ## Rust dependencies
 
 The crates.io dependencies keep their own licenses — overwhelmingly

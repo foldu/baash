@@ -9,16 +9,20 @@
 //! * [`History`] is the session ring the editor and the `history` built-in
 //!   share: entries numbered by their database id, Up/Down navigation,
 //!   ghost-text suggestions.
-//! * [`Store`] is the embedded [Turso] database behind it, written from its
-//!   own thread so a slow disk never reaches the keystroke path.
+//! * [`Store`] is the embedded SQLite database behind it, written from its own
+//!   thread so a slow disk never reaches the keystroke path.
+//!
+//! SQLite, not a bespoke engine: WAL mode is what lets two shells share one
+//! file — and it is the one thing a shell database cannot do without — on
+//! every platform the shell runs on, with no feature flag and no backend to
+//! choose between. The engine is compiled into the binary (`sqlx`'s bundled
+//! `libsqlite3-sys`), so the host's `libsqlite3` is never consulted.
 //!
 //! The database lives in `baash/history.db` under the platform's per-user data
 //! directory — `$XDG_DATA_HOME` or `~/.local/share` on Unix,
 //! `%LOCALAPPDATA%` on Windows, both resolved by [`baash_sys::dirs`].
 //! [`default_path`] applies that rule, and `BAASH_HISTORY_DB` overrides it (an
 //! empty value disables persistence).
-//!
-//! [Turso]: https://turso.tech
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -26,12 +30,7 @@
 mod ring;
 mod store;
 
-use std::future::Future;
 use std::path::PathBuf;
-use std::pin::pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
-use std::time::Duration;
 
 pub use ring::{Entry, History, PICKER_DEPTH, RECENT_DEPTH, RETENTION};
 pub use store::Store;
@@ -51,46 +50,4 @@ pub fn default_path() -> Option<PathBuf> {
     }
     let root = baash_sys::dirs::data_home()?;
     Some(root.join("baash").join("history.db"))
-}
-
-/// Drive a future that does its own I/O, on this thread.
-///
-/// Turso's futures schedule their own completions and only need a waker that
-/// wakes this thread; there is no executor to run here. A few spins cover an
-/// operation that is already finished, and then the thread parks — the waker
-/// unparks it, so the park costs nothing but the wait.
-fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(ThreadWaker {
-        thread: std::thread::current(),
-    }));
-    let mut context = Context::from_waker(&waker);
-    let mut future = pin!(future);
-    let mut spins = 0u8;
-    loop {
-        match future.as_mut().poll(&mut context) {
-            Poll::Ready(value) => return value,
-            Poll::Pending => {
-                if spins < 32 {
-                    spins += 1;
-                    std::thread::yield_now();
-                } else {
-                    std::thread::park_timeout(Duration::from_millis(1));
-                }
-            }
-        }
-    }
-}
-
-struct ThreadWaker {
-    thread: std::thread::Thread,
-}
-
-impl Wake for ThreadWaker {
-    fn wake(self: Arc<Self>) {
-        self.thread.unpark();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.thread.unpark();
-    }
 }

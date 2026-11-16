@@ -110,7 +110,7 @@ Two things stay jobs, for reasons the sandbox dictates:
 
 The Windows derivation is the reason the old CI job shrank from a `nix shell`
 package list to `nix build .#windows`: rustup, zig, cargo-zigbuild, the host
-`cc` and the `windres` shim are all inputs of the derivation now.
+`cc` and the resource compiler are all inputs of the derivation now.
 
 GitHub is a mirror, not the source of truth, so its workflow
 (`.github/workflows/ci.yml`) runs the same three gates with a rustup toolchain
@@ -144,7 +144,7 @@ as unverified until a guest runs it.
 | `baash-syntax` | 6678 | lexer + recursive-descent parser producing `Word`/`Command`; the superset grammar |
 | `baash-lang` | 12422 | shell *text* semantics: word expansion, patterns (`baash-pattern`), parameter operators, prompt escapes, arithmetic; no I/O |
 | `baash-runtime` | 13084 | shell *state*: variables/arrays/namerefs, options, builtin registry and state-only bodies, traps bookkeeping, completion registry, `declare -p` rendering; re-exports the history ring |
-| `baash-history` | 1308 | command history: the session ring (navigation, numbering) and the Turso database behind it, written from its own thread |
+| `baash-history` | 1338 | command history: the session ring (navigation, numbering) and the SQLite database behind it, written from its own thread |
 | `baash-vm` | 15036 | the evaluator (tree-walking) and everything that needs both state and syscalls: command execution, redirection, child processes, traps |
 | `baash-pattern` | 4197 | Thompson-NFA glob: `O(n·m)`, never exponential; `extglob`/`nocasematch`/`utf8` flags |
 | `baash-diag` | 1946 | diagnostic model and miette rendering; error-code space |
@@ -288,7 +288,7 @@ delegates everything else: line editing to `baash-repl`, execution to the
     Right/End, dismissed with Esc for the current line (typing brings it
     back);
 * **history as a shell feature**: one ring shared by the editor and the
-  `history` built-in (`baash-history`), backed by an embedded Turso database;
+  `history` built-in (`baash-history`), backed by an embedded SQLite database;
   `history [n]`, `-c` and `-d`; `Up`/`Down` navigation and ghost text. Numbers
   are the row ids, seeded from the newest 1000 rows of every session. There is
   no history file: `HISTFILE`, `HISTSIZE`, `HISTFILESIZE`, `HISTCONTROL`,
@@ -719,8 +719,8 @@ Where the waves stand:
   `TerminateProcess` for signals, explicit refusals for what Windows lacks),
   `baash-lang`'s prompt helpers are portable, and deleting the history file took
   the last unix-only code out of `baash-runtime`. `baash-sys`, `baash-lang`,
-  `baash-history` (turso 0.8.3 included, with the `windres` wrapper in
-  `portability.md` §9), `baash-runtime`, `baash-vm`, `baash-repl` and `baash` itself
+  `baash-history` (with SQLite's amalgamation compiled in),
+  `baash-runtime`, `baash-vm`, `baash-repl` and `baash` itself
   cross-compile to `x86_64-pc-windows-gnu`. `baash.exe -c 'echo hi'` runs under
   Wine, and so does a script with `$( … )`, `for`, `if`, a function, `case`,
   arithmetic, brace expansion and `while`. What is left: the standard utilities
@@ -740,10 +740,9 @@ Where the waves stand:
   catalog is thread-local and single-utility: warm dispatch is 3.7 µs, and a
   utility's first call costs 57–191 µs (thread plus catalog). The exe is a nix
   derivation (`packages.<system>.windows`): `cargo zigbuild` against a
-  rust-overlay toolchain that carries the target's std, `ci/windres` for
-  `turso_sdk_kit`'s hardcoded `windres` call, and `llvmPackages.clang` because
-  that resource compiler preprocesses the script. Nothing about it is
-  improvised in CI any more.
+  rust-overlay toolchain that carries the target's std, and
+  `llvmPackages.clang` because the resource compiler that stamps the exe's icon
+  preprocesses its script. Nothing about it is improvised in CI any more.
   `$PPID` is the one identity variable Windows cannot answer, so it is left
   unset there rather than zero (`parent_pid() -> Option<u32>`).
 
@@ -769,13 +768,13 @@ Where the waves stand:
   cannot record when a command ran, where, or with what status, and two shells
   sharing one rewrite each other's content. `baash-history` keeps
   `commands(id, session, seq, text, cwd, started_at, duration_ms, status)` in
-  an embedded Turso database (`$XDG_DATA_HOME/baash/history.db`, i.e.
+  an embedded SQLite database (`$XDG_DATA_HOME/baash/history.db`, i.e.
   `~/.local/share/baash/history.db`; `%LOCALAPPDATA%\baash\history.db` on
   Windows), opens it only for the terminal REPL, and
   treats an empty `BAASH_HISTORY_DB` as "no persistence". WAL plus a busy timeout
-  is what lets two shells share the file: the second connection gets
-  `experimental_multiprocess_wal(true)`, and a write that lands while another
-  shell is writing waits instead of failing. A database that cannot be opened
+  is what lets two shells share the file, and both are SQLite's own behaviour
+  on every platform: a write that lands while another shell is writing waits
+  instead of failing. A database that cannot be opened
   is reported once and the shell runs with an in-memory ring. Verified: two
   `Store`s on one file see each other's rows, and a non-terminal `-i` (piped
   stdin, `-c`) opens nothing, so the conformance run never touches the user's

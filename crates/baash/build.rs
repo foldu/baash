@@ -35,9 +35,9 @@ fn main() {
     let object = out.join("baash.res.o");
 
     // `BAASH_WINDRES` first: `flake.nix` points it at LLVM's resource compiler,
-    // which is the only one installed there. `windres` on `PATH` is the name
-    // the Windows build already exports a shim under (ci/windres), and the last
-    // fallback is the same compiler under its own name.
+    // which is the only one installed there. The other two names are what a
+    // host with MinGW or LLVM on `PATH` already provides, so a developer
+    // building for Windows outside the flake needs no configuration.
     let windres = env::var_os("BAASH_WINDRES")
         .map(PathBuf::from)
         .or_else(|| on_path("windres"))

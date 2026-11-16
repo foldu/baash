@@ -40,16 +40,6 @@ allow = [
 [licenses.private]
 ignore = true
 
-# `cfg_block` (0.1.1, via turso) carries `license-file = "LICENSE"` instead of
-# an SPDX field, and that file is the Apache-2.0 text ("Copyright 2022 Trevor
-# Gross"). A clarification names the expression so the gate stays strict —
-# `hash` is xxHash32 (seed 0) of the file after newline normalisation, which is
-# what cargo-deny compares against, and a wrong value is silently ignored.
-[[licenses.clarify]]
-crate = "cfg_block"
-expression = "Apache-2.0"
-license-files = [{ path = "LICENSE", hash = 0xc9663a1e }]
-
 [sources]
 # Nothing may arrive from an unpinned git branch or an unknown registry.
 unknown-registry = "deny"

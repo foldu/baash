@@ -1,21 +1,37 @@
-//! The database half: one Turso connection on its own thread.
+//! The database half: one SQLite connection on its own thread.
 //!
 //! The shell must never wait for a disk. Every write is a message to the
 //! worker that owns the connection; the only synchronous calls are
 //! [`Store::recent`], [`Store::flush`] and opening, which happen at startup,
 //! at exit, or because the user asked for `history`.
 //!
+//! The worker is also where the async lives. `sqlx` has no synchronous API and
+//! no compio backend, so a runtime has to exist somewhere; putting it here
+//! keeps it off the shell's thread, where compio owns the terminal
+//! (`crates/baash/src/main.rs` explains that seam). Nothing async escapes this
+//! module: the queue is `tokio`'s unbounded channel, the replies are ordinary
+//! `std` ones, and every caller above is synchronous.
+//!
+//! # Order and exit
+//!
+//! One queue, drained in order, is what makes the database see the user's
+//! operations in the order they typed them — `history -d 3` and then `history`
+//! cannot race. Dropping the last `Arc` sends `Shutdown` behind every write and
+//! joins the thread, so the last command's row is on disk before the process
+//! leaves.
+//!
 //! # Schema
+//!
+//! `migrations/` is compiled into the binary by `sqlx::migrate!` and applied at
+//! open, so a database from an older build is brought forward instead of being
+//! refused. The first migration is idempotent on purpose: a file written before
+//! the shell used SQLite already has these tables, and a user's history is
+//! worth more than a strict first step.
 //!
 //! ```text
 //! sessions(id, started_at, pid)
 //! commands(id, session, seq, text, cwd, started_at, duration_ms, status, deleted)
 //! ```
-//!
-//! There is one schema and no version bookkeeping: the tables are created if
-//! they are absent, and nothing else is promised. History is perishable data,
-//! so a future shape can start from an empty file rather than carry a
-//! migration path that will never be used.
 //!
 //! `text` and `cwd` are `BLOB`: shell text is bytes, not UTF-8. `id` is the
 //! row id, and it is also the history *number*: global, assigned by the
@@ -27,11 +43,11 @@
 //!
 //! `history -d` and `history -c` set `deleted`; reads filter it out. That is
 //! deliberate: a row id is a history *number*, and the number must never name
-//! a different command. Turso reuses `max(id)+1`, so a real `DELETE` of the
-//! newest row would hand the same number to the next command. Hidden rows are
-//! therefore kept, and pruned at startup only when a newer row exists
-//! (`deleted = 1 AND id < max(id)`), which cannot shrink the maximum and so
-//! cannot cause reuse.
+//! a different command. SQLite reuses `max(id)+1` for a rowid table, so a real
+//! `DELETE` of the newest row would hand the same number to the next command.
+//! Hidden rows are therefore kept, and pruned at startup only when a newer row
+//! exists (`deleted = 1 AND id < max(id)`), which cannot shrink the maximum and
+//! so cannot cause reuse.
 //!
 //! One row is written when a line is submitted (so a crashed shell still
 //! leaves the command behind) and updated when it finishes, with `$?` and the
@@ -42,10 +58,15 @@
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{self, SyncSender};
 use std::thread;
+use std::time::Duration;
 
-use turso::{Builder, Connection, Database, Row, Value};
+use sqlx::Row;
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
+};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// A command read back from the database, in the order it ran.
 pub(crate) struct Stored {
@@ -89,7 +110,7 @@ enum Request {
 /// command is lost on exit.
 pub struct Store {
     session: i64,
-    requests: Option<Sender<Request>>,
+    requests: Option<UnboundedSender<Request>>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
@@ -110,77 +131,56 @@ impl Store {
         let path = path
             .to_str()
             .ok_or_else(|| std::io::Error::other("the history database path is not valid UTF-8"))?;
-        Self::start(path)
+        Self::start(Some(path))
     }
 
     /// An empty database in memory, for tests and for `--no-history`.
     pub fn open_in_memory() -> std::io::Result<Arc<Self>> {
-        Self::start(":memory:")
+        Self::start(None)
     }
 
-    fn start(path: &str) -> std::io::Result<Arc<Self>> {
-        // Two shells share one file. Multiprocess WAL is what makes the
-        // second connection possible at all, and the busy timeout turns the
-        // instant when the other shell is mid-write into a short wait rather
-        // than a failed command.
-        //
-        // Not every IO backend offers it — turso refuses the option outright
-        // on some Windows builds, with "experimental multiprocess WAL is not
-        // supported by the active IO backend" — so the flag is a *preference*.
-        // Without it one shell still has history and a second one gets a
-        // locked-file error, which is worse but is not "no history at all";
-        // refusing to open the database would be worse than both.
-        let database = match Self::build(path, true) {
-            Ok(database) => database,
-            Err(first) => match Self::build(path, false) {
-                Ok(database) => database,
-                // Report the first failure: it is the one that names the
-                // feature the file really wanted.
-                Err(_) => return Err(error(first)),
-            },
-        };
-        let connection = database.connect().map_err(error)?;
-        connection
-            .busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(error)?;
-        crate::block_on(initialise(&connection)).map_err(error)?;
-        let session = crate::block_on(begin_session(&connection)).map_err(error)?;
-        let (requests, queue) = mpsc::channel();
+    fn start(path: Option<&str>) -> std::io::Result<Arc<Self>> {
+        let path = path.map(<str>::to_owned);
+        // The handshake is what keeps opening synchronous from the shell's
+        // point of view: the worker reports its session number (or why it could
+        // not open) and only then does `open` return.
+        let (ready, opened) = mpsc::sync_channel(1);
+        let (requests, queue) = unbounded_channel();
         let worker = thread::Builder::new()
             .name("baash-history".to_owned())
             .spawn(move || {
-                run(
-                    Db {
-                        _database: database,
-                        connection,
-                        session,
-                    },
-                    &queue,
-                );
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                {
+                    Ok(runtime) => runtime.block_on(worker_main(path, ready, queue)),
+                    Err(error) => {
+                        let _ =
+                            ready.send(Err(format!("cannot start the history runtime: {error}")));
+                    }
+                }
             })
-            .map_err(|spawn| {
-                std::io::Error::other(format!("cannot start the history thread: {spawn}"))
+            .map_err(|error| {
+                std::io::Error::other(format!("cannot start the history thread: {error}"))
             })?;
+        let session = match opened.recv() {
+            Ok(Ok(session)) => session,
+            Ok(Err(message)) => {
+                let _ = worker.join();
+                return Err(std::io::Error::other(message));
+            }
+            Err(_) => {
+                let _ = worker.join();
+                return Err(std::io::Error::other(
+                    "the history thread stopped before the database opened",
+                ));
+            }
+        };
         Ok(Arc::new(Self {
             session,
             requests: Some(requests),
             worker: Some(worker),
         }))
-    }
-
-    /// Build the database handle, asking for multiprocess WAL or not.
-    ///
-    /// Split out so the preference can be retried: the option is refused at
-    /// build time by an IO backend that cannot share the file, and a shell
-    /// that cannot share it is still a shell with history of its own.
-    fn build(path: &str, multiprocess: bool) -> turso::Result<turso::Database> {
-        let builder = Builder::new_local(path);
-        let builder = if multiprocess && path != ":memory:" {
-            builder.experimental_multiprocess_wal(true)
-        } else {
-            builder
-        };
-        crate::block_on(builder.build())
     }
 
     /// This shell's session number: the `sessions` row opened at startup.
@@ -267,15 +267,66 @@ impl Drop for Store {
 
 /// The worker's copy of the database.
 struct Db {
-    /// Kept alive: a connection borrows the database's internals.
-    _database: Database,
-    connection: Connection,
+    pool: SqlitePool,
     /// The `sessions` row this shell opened.
     session: i64,
 }
 
+async fn worker_main(
+    path: Option<String>,
+    ready: SyncSender<Result<i64, String>>,
+    queue: UnboundedReceiver<Request>,
+) {
+    let db = match open(path.as_deref()).await {
+        Ok(db) => db,
+        Err(message) => {
+            let _ = ready.send(Err(message));
+            return;
+        }
+    };
+    let _ = ready.send(Ok(db.session));
+    run(db, queue).await;
+}
+
+/// Open the pool, bring the schema forward, and start a session row.
+async fn open(path: Option<&str>) -> Result<Db, String> {
+    let mut options = match path {
+        Some(path) => SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            // WAL is what lets a second shell open this file while the first
+            // is running; `busy_timeout` is what turns the moment they collide
+            // into a short wait rather than a failed command.
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5)),
+        // A memory database has no journal to speak of — asking for WAL there
+        // is answered with "memory" — so the pragma is only set for a file.
+        None => SqliteConnectOptions::new().in_memory(true),
+    };
+    options = options
+        .synchronous(SqliteSynchronous::Normal)
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .min_connections(1)
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .map_err(|error| format!("cannot open the history database: {error}"))?;
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .map_err(|error| format!("cannot migrate the history database: {error}"))?;
+    prune(&pool)
+        .await
+        .map_err(|error| format!("cannot prune the history database: {error}"))?;
+    let session = begin_session(&pool)
+        .await
+        .map_err(|error| format!("cannot record a history session: {error}"))?;
+    Ok(Db { pool, session })
+}
+
 impl Db {
-    fn apply(&self, request: Request) {
+    async fn apply(&self, request: Request) {
         match request {
             Request::Begin {
                 seq,
@@ -284,11 +335,21 @@ impl Db {
                 started_at,
                 reply,
             } => {
+                // `RETURNING id` rather than `last_insert_rowid()`: the id has
+                // to come from the same statement that wrote the row, because
+                // a pool may not give the next call the same connection.
                 let sql = "INSERT INTO commands (session, seq, text, cwd, started_at) \
-                           VALUES (?1, ?2, ?3, ?4, ?5)";
-                let params = (self.session, seq, text, cwd, started_at);
-                let id = match crate::block_on(self.connection.execute(sql, params)) {
-                    Ok(_) => Some(self.connection.last_insert_rowid()),
+                           VALUES (?, ?, ?, ?, ?) RETURNING id";
+                let id = sqlx::query_scalar::<_, i64>(sql)
+                    .bind(self.session)
+                    .bind(seq)
+                    .bind(text)
+                    .bind(cwd)
+                    .bind(started_at)
+                    .fetch_one(&self.pool)
+                    .await;
+                let id = match id {
+                    Ok(id) => Some(id),
                     Err(error) => {
                         report(&error);
                         None
@@ -301,33 +362,38 @@ impl Db {
                 status,
                 duration_ms,
             } => {
-                let sql = "UPDATE commands SET status = ?1, duration_ms = ?2 WHERE id = ?3";
-                crate::block_on(self.connection.execute(sql, (status, duration_ms, id)))
+                let sql = "UPDATE commands SET status = ?, duration_ms = ? WHERE id = ?";
+                sqlx::query(sql)
+                    .bind(status)
+                    .bind(duration_ms)
+                    .bind(id)
+                    .execute(&self.pool)
+                    .await
                     .map_err(|error| report(&error))
                     .ok();
             }
             Request::Recent { limit, reply } => {
-                let rows = self.recent(limit).unwrap_or_else(|error| {
+                let rows = self.recent(limit).await.unwrap_or_else(|error| {
                     report(&error);
                     Vec::new()
                 });
                 let _ = reply.send(rows);
             }
             Request::Delete { id } => {
-                crate::block_on(
-                    self.connection
-                        .execute("UPDATE commands SET deleted = 1 WHERE id = ?1", (id,)),
-                )
-                .map_err(|error| report(&error))
-                .ok();
+                sqlx::query("UPDATE commands SET deleted = 1 WHERE id = ?")
+                    .bind(id)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|error| report(&error))
+                    .ok();
             }
             Request::ClearSession { session } => {
-                crate::block_on(self.connection.execute(
-                    "UPDATE commands SET deleted = 1 WHERE session = ?1 AND deleted = 0",
-                    (session,),
-                ))
-                .map_err(|error| report(&error))
-                .ok();
+                sqlx::query("UPDATE commands SET deleted = 1 WHERE session = ? AND deleted = 0")
+                    .bind(session)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|error| report(&error))
+                    .ok();
             }
             Request::Flush { reply } => {
                 let _ = reply.send(());
@@ -336,17 +402,18 @@ impl Db {
         }
     }
 
-    fn recent(&self, limit: usize) -> turso::Result<Vec<Stored>> {
+    async fn recent(&self, limit: usize) -> sqlx::Result<Vec<Stored>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let mut rows = crate::block_on(self.connection.query(
-            "SELECT id, text FROM commands WHERE deleted = 0 ORDER BY id DESC LIMIT ?1",
-            (limit,),
-        ))?;
-        let mut stored = Vec::new();
-        while let Some(row) = crate::block_on(rows.next())? {
+        let rows =
+            sqlx::query("SELECT id, text FROM commands WHERE deleted = 0 ORDER BY id DESC LIMIT ?")
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?;
+        let mut stored = Vec::with_capacity(rows.len());
+        for row in rows {
             stored.push(Stored {
-                id: as_integer(&row, 0).unwrap_or_default(),
-                text: as_blob(&row, 1).unwrap_or_default(),
+                id: row.try_get::<i64, _>(0).unwrap_or_default(),
+                text: blob(&row, 1).unwrap_or_default(),
             });
         }
         stored.reverse();
@@ -354,21 +421,24 @@ impl Db {
     }
 }
 
-fn run(db: Db, queue: &Receiver<Request>) {
-    while let Ok(request) = queue.recv() {
+async fn run(db: Db, mut queue: UnboundedReceiver<Request>) {
+    while let Some(request) = queue.recv().await {
         let stop = matches!(request, Request::Shutdown);
-        db.apply(request);
+        db.apply(request).await;
         if stop {
             break;
         }
     }
+    // Checkpoint and release the file: the next shell should not have to
+    // recover a WAL left behind by this one.
+    db.pool.close().await;
 }
 
 /// Report a database failure once per process.
 ///
 /// A broken database would otherwise print a diagnostic for every command the
 /// user runs. The first one is the one worth reading.
-fn report(error: &turso::Error) {
+fn report(error: &sqlx::Error) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static REPORTED: AtomicBool = AtomicBool::new(false);
     if !REPORTED.swap(true, Ordering::Relaxed) {
@@ -376,78 +446,45 @@ fn report(error: &turso::Error) {
     }
 }
 
-fn error(error: turso::Error) -> std::io::Error {
-    std::io::Error::other(error.to_string())
-}
-
-async fn initialise(connection: &Connection) -> turso::Result<()> {
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS sessions (\
-                 id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, pid INTEGER NOT NULL);\
-             CREATE TABLE IF NOT EXISTS commands (\
-                 id INTEGER PRIMARY KEY,\
-                 session INTEGER NOT NULL,\
-                 seq INTEGER NOT NULL,\
-                 text BLOB NOT NULL,\
-                 cwd BLOB,\
-                 started_at INTEGER NOT NULL,\
-                 duration_ms INTEGER,\
-                 status INTEGER,\
-                 deleted INTEGER NOT NULL DEFAULT 0);\
-             CREATE UNIQUE INDEX IF NOT EXISTS commands_key ON commands (session, seq);",
-        )
-        .await?;
-    prune(connection).await?;
-    Ok(())
-}
-
-/// Open a `sessions` row and return its id.
-async fn begin_session(connection: &Connection) -> turso::Result<i64> {
-    connection
-        .execute(
-            "INSERT INTO sessions (started_at, pid) VALUES (?1, ?2)",
-            (now_ms(), i64::from(std::process::id())),
-        )
-        .await?;
-    Ok(connection.last_insert_rowid())
-}
-
-fn as_integer(row: &Row, index: usize) -> Option<i64> {
-    match row.get_value(index).ok()? {
-        Value::Integer(value) => Some(value),
-        _ => None,
+/// Read one column as bytes, accepting a `TEXT` value too.
+///
+/// Every row this shell writes stores `BLOB`, but a database written by another
+/// tool — or by an earlier build — may hold text, and losing the history to a
+/// type mismatch would be worse than reading it as bytes.
+fn blob(row: &sqlx::sqlite::SqliteRow, index: usize) -> Option<Vec<u8>> {
+    if let Ok(bytes) = row.try_get::<Vec<u8>, _>(index) {
+        return Some(bytes);
     }
+    row.try_get::<String, _>(index).ok().map(String::into_bytes)
 }
 
-fn as_blob(row: &Row, index: usize) -> Option<Vec<u8>> {
-    match row.get_value(index).ok()? {
-        Value::Blob(bytes) => Some(bytes),
-        Value::Text(text) => Some(text.into_bytes()),
-        _ => None,
-    }
-}
-
-/// Milliseconds since the Unix epoch.
 /// Drop hidden rows that can no longer be the newest.
 ///
 /// A hidden row at the maximum id must stay until a newer row exists, because
 /// deleting it would let the database hand its id to the next insert.
-async fn prune(connection: &Connection) -> turso::Result<()> {
-    let mut rows = connection.query("SELECT max(id) FROM commands", ()).await?;
-    let Some(row) = rows.next().await? else {
+async fn prune(pool: &SqlitePool) -> sqlx::Result<()> {
+    let newest: Option<Option<i64>> = sqlx::query_scalar("SELECT max(id) FROM commands")
+        .fetch_optional(pool)
+        .await?;
+    let Some(Some(newest)) = newest else {
         return Ok(());
     };
-    let Some(newest) = as_integer(&row, 0) else {
-        return Ok(());
-    };
-    connection
-        .execute(
-            "DELETE FROM commands WHERE deleted = 1 AND id < ?1",
-            (newest,),
-        )
+    sqlx::query("DELETE FROM commands WHERE deleted = 1 AND id < ?")
+        .bind(newest)
+        .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Open a `sessions` row and return its id.
+async fn begin_session(pool: &SqlitePool) -> sqlx::Result<i64> {
+    sqlx::query_scalar::<_, i64>(
+        "INSERT INTO sessions (started_at, pid) VALUES (?, ?) RETURNING id",
+    )
+    .bind(now_ms())
+    .bind(i64::from(std::process::id()))
+    .fetch_one(pool)
+    .await
 }
 
 fn now_ms() -> i64 {
