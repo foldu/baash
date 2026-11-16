@@ -6,13 +6,17 @@
 # and the module imported but not enabled — copies the generated files into
 # `$XDG_CONFIG_DIRS` trees, and runs the shell the module installed against
 # them. The assertions are what a user would see: the completion framework's
-# functions, a real per-command script, zoxide's hook and the shell's own `ls`
-# alias in one run, none of the additions in the second, and an untouched
-# system in the third.
+# functions, a real per-command script, zoxide's hook, direnv's hook loading a
+# real `.envrc`, and the shell's own `ls` alias in one run; none of the
+# additions in the second; and an untouched system in the third.
 #
 # What this does not prove: a real `/etc` (the file is copied to a directory
 # instead), PAM (that `/etc/shells` is what allows `chsh`), or anything about a
 # machine's own `bash-completion` — the store path is the one the module names.
+# The hooks are called by hand here: a `-c` string never reaches a prompt, so
+# what this checks is that `PROMPT_COMMAND` carries both of them and that
+# calling one loads the `.envrc`. That the prompt is what calls them is a pty
+# run, which the sandbox cannot do (`openpty` succeeds, reads hang).
 {
   nixpkgs,
   pkgs,
@@ -34,17 +38,18 @@ let
       ++ modules;
     };
 
-  # Everything on: the library, carapace and zoxide. `carapace.enable` is left
-  # at its default, so this case is also the one that proves the default; the
-  # library and zoxide each have a visible effect at startup, while carapace's
-  # is membership of the system closure.
+  # Everything on: the library, carapace, zoxide and direnv. `carapace.enable`
+  # is left at its default, so this case is also the one that proves the
+  # default; the library, zoxide and direnv each have a visible effect at
+  # startup, while carapace's is membership of the system closure.
   both = evaluate [
     {
       programs.baash = {
         enable = true;
         zoxide.enable = true;
+        direnv.enable = true;
         # Appended last, so this also pins the order: after the defaults and
-        # after zoxide's hook.
+        # after the two hooks.
         extraConfig = "echo extra";
       };
     }
@@ -70,9 +75,13 @@ let
 
   file = config: config.environment.etc."xdg/baash/config.sh".source;
 
+  # The gate drives direnv's own `allow`, so it needs the binary it evaluates.
+  direnv = both.config.programs.baash.direnv.package;
+
   registered = system: builtins.elem package system.config.environment.shells;
   installed = system: builtins.elem package system.config.environment.systemPackages;
   zoxideInstalled = builtins.elem both.config.programs.baash.zoxide.package both.config.environment.systemPackages;
+  direnvInstalled = builtins.elem both.config.programs.baash.direnv.package both.config.environment.systemPackages;
   carapaceInstalled = builtins.elem both.config.programs.baash.carapace.package both.config.environment.systemPackages;
   carapaceAbsent = !builtins.elem bare.config.programs.baash.carapace.package bare.config.environment.systemPackages;
 in
@@ -82,6 +91,8 @@ else if !installed both || !installed bare then
   throw "programs.baash.enable did not add the package to environment.systemPackages"
 else if both.config.programs.baash.zoxide.enable && !zoxideInstalled then
   throw "programs.baash.zoxide.enable did not add zoxide to environment.systemPackages"
+else if both.config.programs.baash.direnv.enable && !direnvInstalled then
+  throw "programs.baash.direnv.enable did not add direnv to environment.systemPackages"
 else if !carapaceInstalled then
   throw "programs.baash.carapace.enable defaults to true but carapace is not in environment.systemPackages"
 else if !carapaceAbsent then
@@ -91,20 +102,40 @@ else if
 then
   throw "the module changed the system while programs.baash.enable was false"
 else
-  pkgs.runCommand "baash-module-test" { nativeBuildInputs = [ package ]; } ''
+  pkgs.runCommand "baash-module-test" {
+    nativeBuildInputs = [
+      package
+      direnv
+    ];
+  } ''
     export HOME=$TMPDIR
     mkdir -p $TMPDIR/on/baash $TMPDIR/off/baash
     cp ${file both.config} $TMPDIR/on/baash/config.sh
     cp ${file bare.config} $TMPDIR/off/baash/config.sh
+
+    # direnv keeps its allow list under `XDG_DATA_HOME`, and the hook only
+    # loads an `.envrc` that `direnv allow` has approved — so the gate approves
+    # one and then checks that entering the directory loads it.
+    export XDG_DATA_HOME=$TMPDIR/data
+    mkdir -p $TMPDIR/proj
+    echo 'export BAASH_MODULE_DIRENV=loaded' > $TMPDIR/proj/.envrc
+    direnv allow $TMPDIR/proj
 
     # `-i` is what reads a startup file; `-c` keeps the run off a pty.
     XDG_CONFIG_DIRS=$TMPDIR/on baash -i -c '
         echo "library=''${BAASH_BASH_COMPLETION-}"
         echo "framework=$(type -t _comp_initialize)"
         echo "zoxide=$(type -t __zoxide_hook)"
+        echo "direnv=$(type -t _direnv_hook)"
+        echo "prompt_command=$PROMPT_COMMAND"
         echo "alias=$(alias ls)"
         _comp_load find
         echo "loaded=$(complete -p find)"
+        # The hooks are armed by `PROMPT_COMMAND`, which `-c` never runs;
+        # calling one is what the prompt does before the next command.
+        cd $TMPDIR/proj
+        _direnv_hook
+        echo "envrc=''${BAASH_MODULE_DIRENV-unset}"
     ' > $TMPDIR/on.out 2>&1 || { cat $TMPDIR/on.out; exit 1; }
 
     grep -q '^library=.*/share/bash-completion/bash_completion$' $TMPDIR/on.out \
@@ -113,6 +144,16 @@ else
       || { echo "bash-completion did not load:"; cat $TMPDIR/on.out; exit 1; }
     grep -q '^zoxide=function$' $TMPDIR/on.out \
       || { echo "zoxide's hook was not installed:"; cat $TMPDIR/on.out; exit 1; }
+    grep -q '^direnv=function$' $TMPDIR/on.out \
+      || { echo "direnv's hook was not installed:"; cat $TMPDIR/on.out; exit 1; }
+    # Both hooks rewrite `PROMPT_COMMAND`, so the interesting thing is that the
+    # second one to run did not drop the first: each prepends itself.
+    grep -q '^prompt_command=.*_direnv_hook' $TMPDIR/on.out \
+      || { echo "direnv's hook was not put on PROMPT_COMMAND:"; cat $TMPDIR/on.out; exit 1; }
+    grep -q '^prompt_command=.*__zoxide_hook' $TMPDIR/on.out \
+      || { echo "direnv's hook dropped zoxide's:"; cat $TMPDIR/on.out; exit 1; }
+    grep -q '^envrc=loaded$' $TMPDIR/on.out \
+      || { echo "direnv's hook did not load the .envrc:"; cat $TMPDIR/on.out; exit 1; }
     # A system config replaces the built-in one, so this only survives because
     # the module sources the package's copy before adding anything.
     grep -q "^alias=alias ls=" $TMPDIR/on.out \
@@ -128,6 +169,7 @@ else
         echo "library=''${BAASH_BASH_COMPLETION-}"
         echo "framework=$(type -t _comp_initialize)"
         echo "zoxide=$(type -t __zoxide_hook)"
+        echo "direnv=$(type -t _direnv_hook)"
         echo "alias=$(alias ls)"
     ' > $TMPDIR/off.out 2>&1 || { cat $TMPDIR/off.out; exit 1; }
 
@@ -137,6 +179,8 @@ else
       || { echo "bashCompletion = false still loaded the library:"; cat $TMPDIR/off.out; exit 1; }
     grep -q '^zoxide=$' $TMPDIR/off.out \
       || { echo "zoxide's hook appeared without the option:"; cat $TMPDIR/off.out; exit 1; }
+    grep -q '^direnv=$' $TMPDIR/off.out \
+      || { echo "direnv's hook appeared without the option:"; cat $TMPDIR/off.out; exit 1; }
     grep -q "^alias=alias ls=" $TMPDIR/off.out \
       || { echo "the shell's own defaults were dropped:"; cat $TMPDIR/off.out; exit 1; }
 

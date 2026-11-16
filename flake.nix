@@ -513,7 +513,8 @@
 
       # A NixOS module: `programs.baash` installs the shell and carapace, lists
       # it in `/etc/shells`, writes the system startup file, and optionally points
-      # it at bash-completion and zoxide. `nix/check-module.nix` is its gate.
+      # it at bash-completion, zoxide and direnv. `nix/check-module.nix` is its
+      # gate.
       # `default` is the same module, so `imports = [ baash.nixosModules.default ]`
       # reads the way other flakes do.
       nixosModules = {

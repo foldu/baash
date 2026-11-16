@@ -555,7 +555,11 @@ directories visited, `z <keyword>` jumps, `z -` comes back — the dev shell
 installs `zoxide` for it, and the test reports the skip rather than failing when
 it is missing; `programs.baash.zoxide.enable` is the NixOS module's switch for
 the same integration) and `crates/baash-repl/tests/editor.rs` (scripted keystrokes
-against a fake terminal, including the search states).
+against a fake terminal, including the search states). Direnv needs no test of
+its own: `direnv hook bash` prints a `PROMPT_COMMAND` function, and baash runs
+`PROMPT_COMMAND` with bash's order and `$?` rules, so the hook works unchanged —
+`nix/check-module.nix` approves an `.envrc`, calls the hook and reads the
+variable back, and `programs.baash.direnv.enable` is the module's switch.
 
 ## 5. Builtin inventory
 

@@ -103,7 +103,8 @@ The flake exports a NixOS module, `nixosModules.default`:
 
   programs.baash = {
     enable = true;
-    zoxide.enable = true;
+    zoxide.enable = true;   # `z`/`zi`, and the directory hook behind them
+    direnv.enable = true;   # `direnv hook bash`: load `.envrc` on `cd`
   };
 
   # if you want it as a login shell
@@ -120,6 +121,8 @@ The flake exports a NixOS module, `nixosModules.default`:
 | `programs.baash.carapace.package` | `pkgs.carapace`      | the carapace to install                                                                                                                                                                                    |
 | `programs.baash.zoxide.enable`    | `false`              | install zoxide and run `eval "$(zoxide init bash)"` at startup                                                                                                                                             |
 | `programs.baash.zoxide.package`   | `pkgs.zoxide`        | the zoxide to install                                                                                                                                                                                      |
+| `programs.baash.direnv.enable`    | `false`              | install direnv and run `eval "$(direnv hook bash)"` at startup                                                                                                                                             |
+| `programs.baash.direnv.package`   | `pkgs.direnv`        | the direnv to install                                                                                                                                                                                      |
 | `programs.baash.extraConfig`      | `""`                 | shell code appended to the system file                                                                                                                                                                     |
 
 ## Implementation details
