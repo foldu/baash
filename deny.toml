@@ -30,7 +30,6 @@ allow = [
   "Unicode-3.0",
   "Unlicense",
   "CC0-1.0",
-  "BSL-1.0",
   # Weak copyleft, GPL-compatible; used only as a dependency, never modified.
   "MPL-2.0",
 ]
