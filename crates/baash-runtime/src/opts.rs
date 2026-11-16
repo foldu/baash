@@ -493,10 +493,8 @@ impl Opts {
         // `vi` and `emacs` are two names for one choice: enabling either turns
         // the other off. bash reports them as a pair, and leaving both on makes
         // `set -o` a lie.
-        if on {
-            if let Some(other) = flag.editor_opposite() {
-                self.set_flag(other, false);
-            }
+        if on && let Some(other) = flag.editor_opposite() {
+            self.set_flag(other, false);
         }
         Ok(())
     }

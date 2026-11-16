@@ -312,28 +312,31 @@ impl Parser<'_> {
             if p[i] == b']' && !first {
                 return Some((Bracket { negate, items }, i + 1));
             }
-            if p[i] == b'[' && p.get(i + 1) == Some(&b':') {
-                if let Some((class, end)) = class_at(p, i + 2) {
-                    items.push(match class {
-                        Some(class) => BracketItem::Class(class),
-                        None => BracketItem::Never,
-                    });
-                    i = end;
-                    first = false;
-                    continue;
-                }
+            if p[i] == b'['
+                && p.get(i + 1) == Some(&b':')
+                && let Some((class, end)) = class_at(p, i + 2)
+            {
+                items.push(match class {
+                    Some(class) => BracketItem::Class(class),
+                    None => BracketItem::Never,
+                });
+                i = end;
+                first = false;
+                continue;
             }
             let (ch, next) = bracket_char(p, i, self.utf8)?;
             i = next;
             // A `-` that is not last makes a range; `-` first or last is a
             // literal and is handled by simply parsing it as a character.
-            if i < p.len() && p[i] == b'-' && p.get(i + 1).is_some_and(|&b| b != b']') {
-                if let Some((end_ch, after)) = bracket_char(p, i + 1, self.utf8) {
-                    items.push(BracketItem::Range(ch, end_ch));
-                    i = after;
-                    first = false;
-                    continue;
-                }
+            if i < p.len()
+                && p[i] == b'-'
+                && p.get(i + 1).is_some_and(|&b| b != b']')
+                && let Some((end_ch, after)) = bracket_char(p, i + 1, self.utf8)
+            {
+                items.push(BracketItem::Range(ch, end_ch));
+                i = after;
+                first = false;
+                continue;
             }
             items.push(BracketItem::Char(ch));
             first = false;

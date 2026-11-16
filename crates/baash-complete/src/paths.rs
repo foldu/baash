@@ -148,10 +148,11 @@ impl PathProvider {
             .ok();
         {
             let cache = lock(&self.cache);
-            if let Some(cached) = cache.get(directory) {
-                if cached.mtime == mtime && mtime.is_some() {
-                    return Arc::clone(&cached.entries);
-                }
+            if let Some(cached) = cache.get(directory)
+                && cached.mtime == mtime
+                && mtime.is_some()
+            {
+                return Arc::clone(&cached.entries);
             }
         }
 

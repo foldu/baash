@@ -1321,10 +1321,10 @@ fn slice_positional<S: Shell>(
     let positionals = ctx.shell.positional().to_vec();
     if offset >= 0 {
         let mut values: Vec<Vec<u8>> = Vec::new();
-        if offset == 0 {
-            if let Some(name) = ctx.shell.get(b"0") {
-                values.push(name.to_vec());
-            }
+        if offset == 0
+            && let Some(name) = ctx.shell.get(b"0")
+        {
+            values.push(name.to_vec());
         }
         let skip = if offset == 0 {
             0
@@ -1609,10 +1609,10 @@ fn emit_values<S: Shell>(
     let join = |separator: Option<u8>| {
         let mut joined = Vec::new();
         for (index, value) in values.iter().enumerate() {
-            if index > 0 {
-                if let Some(separator) = separator {
-                    joined.push(separator);
-                }
+            if index > 0
+                && let Some(separator) = separator
+            {
+                joined.push(separator);
             }
             joined.extend_from_slice(value);
         }
@@ -1717,10 +1717,10 @@ fn emit_unquoted_list<S: Shell>(ctx: &Ctx<'_, S>, out: &mut Expanded) {
 fn join_positionals<S: Shell>(ctx: &Ctx<'_, S>, separator: Option<u8>) -> Vec<u8> {
     let mut out = Vec::new();
     for (index, param) in ctx.shell.positional().iter().enumerate() {
-        if index > 0 {
-            if let Some(separator) = separator {
-                out.push(separator);
-            }
+        if index > 0
+            && let Some(separator) = separator
+        {
+            out.push(separator);
         }
         out.extend_from_slice(param);
     }

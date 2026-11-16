@@ -184,13 +184,15 @@ pub fn context(line: &[u8], cursor: usize, opts: &ParseOpts) -> Ctx {
 
     // `FOO=/us<TAB>` completes the value, not the assignment name.
     let mut assign = false;
-    if !in_construct && !redirect && arg_index == 0 && command_name.is_none() {
-        if let Some(value) = assign_start {
-            if value <= cursor {
-                replace_start = value;
-                assign = value > word.start;
-            }
-        }
+    if !in_construct
+        && !redirect
+        && arg_index == 0
+        && command_name.is_none()
+        && let Some(value) = assign_start
+        && value <= cursor
+    {
+        replace_start = value;
+        assign = value > word.start;
     }
 
     let mut expect = expects.last().copied().unwrap_or(Expect::Command);

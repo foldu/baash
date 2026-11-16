@@ -517,28 +517,27 @@ fn sites_for_open(
     }
 
     // A substitution body is a fresh code region; answer for it directly.
-    if depth < lexer::MAX_NEST {
-        if let Some(code) = lexed.open.iter().find(|open| {
+    if depth < lexer::MAX_NEST
+        && let Some(code) = lexed.open.iter().find(|open| {
             matches!(
                 open.kind,
                 UnterminatedKind::CmdSub | UnterminatedKind::Backtick | UnterminatedKind::ProcSub
             )
-        }) {
-            if code.content_start <= offset {
-                let mut inner = sites_at(
-                    &src[code.content_start..offset],
-                    offset - code.content_start,
-                    opts,
-                    depth + 1,
-                );
-                for site in &mut inner {
-                    site.span = (site.span.start + code.content_start)
-                        ..(site.span.end + code.content_start);
-                }
-                sites.extend(inner);
-                return sites;
-            }
+        })
+        && code.content_start <= offset
+    {
+        let mut inner = sites_at(
+            &src[code.content_start..offset],
+            offset - code.content_start,
+            opts,
+            depth + 1,
+        );
+        for site in &mut inner {
+            site.span =
+                (site.span.start + code.content_start)..(site.span.end + code.content_start);
         }
+        sites.extend(inner);
+        return sites;
     }
 
     sites.push(ExpectSite {
@@ -918,14 +917,14 @@ impl<'a> Parser<'a, '_> {
 
     /// Remember that input ended inside the innermost construct still open.
     fn create_incomplete(&mut self) {
-        if self.sh.incomplete.is_none() {
-            if let Some(open) = self.open.last().cloned() {
-                self.sh.incomplete = Some(Incomplete {
-                    open,
-                    expected: self.sites_expects(),
-                });
-                self.sh.incomplete_local = true;
-            }
+        if self.sh.incomplete.is_none()
+            && let Some(open) = self.open.last().cloned()
+        {
+            self.sh.incomplete = Some(Incomplete {
+                open,
+                expected: self.sites_expects(),
+            });
+            self.sh.incomplete_local = true;
         }
     }
 
@@ -1310,16 +1309,17 @@ impl<'a> Parser<'a, '_> {
         self.skip_trivia();
         let start = self.toks.get(self.pos).map(|t| t.span.start)?;
         let mut negated = false;
-        if let Some(t) = self.peek_sig() {
-            if t.kind == TokenKind::Keyword && self.text_of(&t) == b"!" {
-                let bang = t.span.clone();
-                self.advance_exact();
-                self.skip_newlines();
-                negated = true;
-                if self.at_end() {
-                    self.incomplete_at_expect(bang, Expect::Command);
-                    return None;
-                }
+        if let Some(t) = self.peek_sig()
+            && t.kind == TokenKind::Keyword
+            && self.text_of(&t) == b"!"
+        {
+            let bang = t.span.clone();
+            self.advance_exact();
+            self.skip_newlines();
+            negated = true;
+            if self.at_end() {
+                self.incomplete_at_expect(bang, Expect::Command);
+                return None;
             }
         }
         let first = self.parse_command()?;
@@ -2211,11 +2211,13 @@ impl<'a> Parser<'a, '_> {
 
         // A word-initial unquoted tilde is the only place tilde expansion is
         // permitted (`~`, `~/x`, `~user`, `~user/x`).
-        if quote == Quote::Plain && i < end && src[i] == b'~' {
-            if let Some(after) = tilde_prefix_end(src, i, end) {
-                parts.push(Part::Tilde(TildeSpec::new(src[i + 1..after].to_vec())));
-                i = after;
-            }
+        if quote == Quote::Plain
+            && i < end
+            && src[i] == b'~'
+            && let Some(after) = tilde_prefix_end(src, i, end)
+        {
+            parts.push(Part::Tilde(TildeSpec::new(src[i + 1..after].to_vec())));
+            i = after;
         }
 
         let mut run: Vec<u8> = Vec::new();
@@ -2903,12 +2905,12 @@ impl<'a> Parser<'a, '_> {
         for d in std::mem::take(&mut inner_sh.errors) {
             self.push_error(d);
         }
-        if self.sh.incomplete.is_none() {
-            if let Some(inc) = inner_sh.incomplete.take() {
-                self.sh.incomplete = Some(inc);
-                // The body's slot is not the outer cursor's slot.
-                self.sh.incomplete_local = false;
-            }
+        if self.sh.incomplete.is_none()
+            && let Some(inc) = inner_sh.incomplete.take()
+        {
+            self.sh.incomplete = Some(inc);
+            // The body's slot is not the outer cursor's slot.
+            self.sh.incomplete_local = false;
         }
     }
 

@@ -138,11 +138,11 @@ impl Interp {
 
     /// `wait PID`: the child's status, or 127 when it is not this shell's child.
     fn wait_one(&mut self, pid: i32) -> Status {
-        if let Some(slot) = self.background.get_mut(&pid) {
-            if let Some(status) = slot.take() {
-                self.background.remove(&pid);
-                return status;
-            }
+        if let Some(slot) = self.background.get_mut(&pid)
+            && let Some(status) = slot.take()
+        {
+            self.background.remove(&pid);
+            return status;
         }
         let status = match baash_sys::wait_pid(pid) {
             Ok(outcome) => {

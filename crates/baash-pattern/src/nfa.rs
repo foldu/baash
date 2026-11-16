@@ -253,10 +253,10 @@ enum Epsilon {
 
 impl Runner<'_> {
     fn run_from(&mut self, prog: usize, start: usize) -> Ends {
-        if !self.cache.is_empty() {
-            if let Some(hit) = &self.cache[prog][start] {
-                return Rc::clone(hit);
-            }
+        if !self.cache.is_empty()
+            && let Some(hit) = &self.cache[prog][start]
+        {
+            return Rc::clone(hit);
         }
         let n = self.text.len();
         let m = self.program.insts.len();

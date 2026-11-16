@@ -376,26 +376,29 @@ fn s_bracket(p: &[Unit], start: usize) -> Option<(usize, SBracket)> {
         if is(&p[i], b']') && !first {
             return Some((i + 1, SBracket { negate, items }));
         }
-        if is(&p[i], b'[') && p.get(i + 1).is_some_and(|u| is(u, b':')) {
-            if let Some((class, end)) = s_class(p, i + 2) {
-                items.push(match class {
-                    Some(class) => SItem::Class(class),
-                    None => SItem::Never,
-                });
-                i = end;
-                first = false;
-                continue;
-            }
+        if is(&p[i], b'[')
+            && p.get(i + 1).is_some_and(|u| is(u, b':'))
+            && let Some((class, end)) = s_class(p, i + 2)
+        {
+            items.push(match class {
+                Some(class) => SItem::Class(class),
+                None => SItem::Never,
+            });
+            i = end;
+            first = false;
+            continue;
         }
         let (ch, next) = s_char(p, i)?;
         i = next;
-        if i < p.len() && is(&p[i], b'-') && p.get(i + 1).is_some_and(|u| !is(u, b']')) {
-            if let Some((end_ch, after)) = s_char(p, i + 1) {
-                items.push(SItem::Range(ch, end_ch));
-                i = after;
-                first = false;
-                continue;
-            }
+        if i < p.len()
+            && is(&p[i], b'-')
+            && p.get(i + 1).is_some_and(|u| !is(u, b']'))
+            && let Some((end_ch, after)) = s_char(p, i + 1)
+        {
+            items.push(SItem::Range(ch, end_ch));
+            i = after;
+            first = false;
+            continue;
         }
         items.push(SItem::Char(ch));
         first = false;

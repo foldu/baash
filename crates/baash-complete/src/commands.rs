@@ -122,10 +122,11 @@ impl CommandProvider {
         let path = self.current_path();
         {
             let state = lock(&self.state);
-            if let Some(index) = state.as_ref() {
-                if index.path == path && !mtimes_moved(&index.dirs) {
-                    return Arc::clone(&index.names);
-                }
+            if let Some(index) = state.as_ref()
+                && index.path == path
+                && !mtimes_moved(&index.dirs)
+            {
+                return Arc::clone(&index.names);
             }
         }
         let index = self.build(path);

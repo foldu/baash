@@ -386,12 +386,11 @@ impl Vars {
                 return Some(var);
             }
         }
-        if let Some(index) = self.global_hit.get() {
-            if let Some((candidate, var)) = self.global.get(index) {
-                if candidate.as_slice() == name {
-                    return Some(var);
-                }
-            }
+        if let Some(index) = self.global_hit.get()
+            && let Some((candidate, var)) = self.global.get(index)
+            && candidate.as_slice() == name
+        {
+            return Some(var);
         }
         let found = self
             .global
@@ -1695,12 +1694,11 @@ impl Vars {
                 return Some(Location::Frame { frame, index });
             }
         }
-        if let Some(index) = self.global_hit.get() {
-            if let Some((candidate, _)) = self.global.get(index) {
-                if candidate.as_slice() == name {
-                    return Some(Location::Global(index));
-                }
-            }
+        if let Some(index) = self.global_hit.get()
+            && let Some((candidate, _)) = self.global.get(index)
+            && candidate.as_slice() == name
+        {
+            return Some(Location::Global(index));
         }
         let found = self
             .global
@@ -2063,10 +2061,10 @@ fn expand_braced(vars: &Vars, inner: &[u8]) -> Vec<u8> {
         let subscript = &inner[open + 1..inner.len() - 1];
         if Vars::is_name(base) {
             let subscript = expand_reference_text(vars, subscript);
-            if let Some(index) = parse_integer(&subscript) {
-                if let Some(value) = vars.element_indexed(base, index) {
-                    return value.to_vec();
-                }
+            if let Some(index) = parse_integer(&subscript)
+                && let Some(value) = vars.element_indexed(base, index)
+            {
+                return value.to_vec();
             }
             if let Some(value) = vars.element_assoc(base, &subscript) {
                 return value.to_vec();

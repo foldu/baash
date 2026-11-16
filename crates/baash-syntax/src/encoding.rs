@@ -77,8 +77,10 @@ pub fn decode(bytes: &[u8]) -> Cow<'_, [u8]> {
 /// character, and the rest of the script is still worth running.
 fn utf16(bytes: &[u8], word: fn([u8; 2]) -> u16) -> Vec<u8> {
     let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| word([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| word(*pair))
         .collect();
     String::from_utf16_lossy(&units).into_bytes()
 }
@@ -88,8 +90,8 @@ fn utf16(bytes: &[u8], word: fn([u8; 2]) -> u16) -> Vec<u8> {
 /// A `u32` that is not a scalar value becomes `U+FFFD`, as in [`utf16`].
 fn utf32(bytes: &[u8], word: fn([u8; 4]) -> u32) -> Vec<u8> {
     let mut text = String::with_capacity(bytes.len() / 2);
-    for quad in bytes.chunks_exact(4) {
-        let scalar = word([quad[0], quad[1], quad[2], quad[3]]);
+    for quad in bytes.as_chunks::<4>().0 {
+        let scalar = word(*quad);
         text.push(char::from_u32(scalar).unwrap_or(char::REPLACEMENT_CHARACTER));
     }
     text.into_bytes()

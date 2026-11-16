@@ -346,12 +346,12 @@ fn expand_quoted(
                     pos += 2;
                     continue;
                 }
-                if let Some(&next) = src.get(pos + 1) {
-                    if matches!(next, b'$' | b'`' | b'"' | b'\\') {
-                        out.push(next);
-                        pos += 2;
-                        continue;
-                    }
+                if let Some(&next) = src.get(pos + 1)
+                    && matches!(next, b'$' | b'`' | b'"' | b'\\')
+                {
+                    out.push(next);
+                    pos += 2;
+                    continue;
                 }
                 out.push(b'\\');
                 pos += 1;
@@ -654,10 +654,11 @@ impl<'a, V: IntVars> Parser<'a, V> {
         // A non-numeric value is itself an expression: `a=(1+2+3);
         // $((a[0]))` is 6, and `i=0+1; $((i))` is 1. A broken expression is
         // an error, not a silent zero — `s='12 34'; $((s[0]))` fails.
-        if let Some(text) = text {
-            if !text.is_empty() && parse_int(&text).is_none() {
-                return eval_depth(&text, self.vars, self.depth + 1);
-            }
+        if let Some(text) = text
+            && !text.is_empty()
+            && parse_int(&text).is_none()
+        {
+            return eval_depth(&text, self.vars, self.depth + 1);
         }
         Ok(value)
     }

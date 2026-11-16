@@ -528,14 +528,14 @@ impl Interp {
             }
 
             let buffered = self.pipeline_buffer.take().and_then(|buffer| buffer.file);
-            if let Some(size) = buffered_size {
-                if size > MAX_BUFFERED_STAGE {
-                    let _ = baash_sys::close(0);
-                    let _ = baash_sys::close(1);
-                    return Err(format!(
-                        "pipeline stage buffered {size} bytes of output, more than the {MAX_BUFFERED_STAGE} byte limit for shell code in a pipeline"
-                    ));
-                }
+            if let Some(size) = buffered_size
+                && size > MAX_BUFFERED_STAGE
+            {
+                let _ = baash_sys::close(0);
+                let _ = baash_sys::close(1);
+                return Err(format!(
+                    "pipeline stage buffered {size} bytes of output, more than the {MAX_BUFFERED_STAGE} byte limit for shell code in a pipeline"
+                ));
             }
             if let Some(pipe) = pipe {
                 // The parent must not hold the write end, or the reader never

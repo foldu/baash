@@ -343,10 +343,10 @@ pub fn run(plans: &[FilePlan], options: &Options) -> Result<Report, String> {
     let mut skip_reasons = BTreeMap::new();
     for file in &files {
         for case in &file.cases {
-            if let Some(reason) = &case.reason {
-                if case.kind == OutcomeKind::Skip {
-                    *skip_reasons.entry(reason.clone()).or_insert(0) += 1;
-                }
+            if let Some(reason) = &case.reason
+                && case.kind == OutcomeKind::Skip
+            {
+                *skip_reasons.entry(reason.clone()).or_insert(0) += 1;
             }
         }
     }
@@ -656,13 +656,13 @@ fn judge(case: &Case, actual: &Actual, label: &str, primary: bool, timeout: Dura
         details.push(text);
     }
 
-    if let Some(expected) = case.stderr_for(label, primary) {
-        if expected != actual.stderr {
-            messages.push("stderr mismatch".to_string());
-            let mut text = String::from("stderr differs:\n");
-            text.push_str(&diff::unified_diff(expected, &actual.stderr, 40));
-            details.push(text);
-        }
+    if let Some(expected) = case.stderr_for(label, primary)
+        && expected != actual.stderr
+    {
+        messages.push("stderr mismatch".to_string());
+        let mut text = String::from("stderr differs:\n");
+        text.push_str(&diff::unified_diff(expected, &actual.stderr, 40));
+        details.push(text);
     }
 
     let expected_status = case.status_for(label, primary);

@@ -952,12 +952,12 @@ fn bi_readonly(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
             status = Status(1);
             continue;
         }
-        if indexed || associative {
-            if let Err(error) = declare_array_from_flag(&mut host.state().vars, name, associative) {
-                let _ = report_error(host, argv, &error);
-                status = Status(1);
-                continue;
-            }
+        if (indexed || associative)
+            && let Err(error) = declare_array_from_flag(&mut host.state().vars, name, associative)
+        {
+            let _ = report_error(host, argv, &error);
+            status = Status(1);
+            continue;
         }
         if let Some(value) = assignment.value {
             let result = if assignment.append {

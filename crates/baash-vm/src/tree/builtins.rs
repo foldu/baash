@@ -1148,17 +1148,17 @@ fn declare_operand(
         } else {
             interp.state.vars.shape(&variable)
         };
-        if scope == CreateScope::Local {
-            if let Err(error) = interp.state.vars.declare_local(&variable) {
-                diagnose(interp, format!("{name}: {}", error.message()));
-                return Err(DeclFailure::plain());
-            }
+        if scope == CreateScope::Local
+            && let Err(error) = interp.state.vars.declare_local(&variable)
+        {
+            diagnose(interp, format!("{name}: {}", error.message()));
+            return Err(DeclFailure::plain());
         }
-        if let Some(shape) = shape {
-            if let Err(error) = interp.state.vars.declare_shape(&variable, shape) {
-                diagnose(interp, format!("{name}: {}", error.message()));
-                return Err(DeclFailure::plain());
-            }
+        if let Some(shape) = shape
+            && let Err(error) = interp.state.vars.declare_shape(&variable, shape)
+        {
+            diagnose(interp, format!("{name}: {}", error.message()));
+            return Err(DeclFailure::plain());
         }
         if let Err(message) =
             interp.assign_array_literal(&variable, &literal.elements, literal.append, shape)
@@ -1183,11 +1183,11 @@ fn declare_operand(
             );
             return Err(DeclFailure::plain());
         }
-        if scope == CreateScope::Local {
-            if let Err(error) = interp.state.vars.declare_local(variable) {
-                diagnose(interp, format!("{name}: {}", error.message()));
-                return Err(DeclFailure::plain());
-            }
+        if scope == CreateScope::Local
+            && let Err(error) = interp.state.vars.declare_local(variable)
+        {
+            diagnose(interp, format!("{name}: {}", error.message()));
+            return Err(DeclFailure::plain());
         }
         // `declare a[]=x`: bash reports `a[]: bad array subscript`, but it has
         // already turned the name into an (empty) indexed array. The quoted
@@ -1227,11 +1227,11 @@ fn declare_operand(
         );
         return Err(DeclFailure::plain());
     }
-    if scope == CreateScope::Local {
-        if let Err(error) = interp.state.vars.declare_local(variable) {
-            diagnose(interp, format!("{name}: {}", error.message()));
-            return Err(DeclFailure::plain());
-        }
+    if scope == CreateScope::Local
+        && let Err(error) = interp.state.vars.declare_local(variable)
+    {
+        diagnose(interp, format!("{name}: {}", error.message()));
+        return Err(DeclFailure::plain());
     }
 
     // `declare -n ref=target` sets a reference; every other operation on a
@@ -1260,11 +1260,11 @@ fn declare_operand(
         apply_declaration_attrs(interp, variable, flags).map_err(|_| DeclFailure::plain())?;
         return Ok(());
     }
-    if flags.nameref == Some(false) {
-        if let Err(error) = interp.state.vars.unmark_nameref(variable) {
-            diagnose(interp, format!("{name}: {}", error.message()));
-            return Err(DeclFailure::plain());
-        }
+    if flags.nameref == Some(false)
+        && let Err(error) = interp.state.vars.unmark_nameref(variable)
+    {
+        diagnose(interp, format!("{name}: {}", error.message()));
+        return Err(DeclFailure::plain());
     }
 
     if flags.indexed == Some(true) || flags.associative == Some(true) {
@@ -1281,17 +1281,17 @@ fn declare_operand(
 
     // `typeset +r r=2` clears the attribute *before* the assignment, which is
     // the only reading under which the assignment can succeed.
-    if flags.readonly == Some(false) {
-        if let Err(error) = interp.state.vars.unmark_readonly(variable) {
-            diagnose(interp, format!("{name}: {}", error.message()));
-            return Err(DeclFailure::plain());
-        }
+    if flags.readonly == Some(false)
+        && let Err(error) = interp.state.vars.unmark_readonly(variable)
+    {
+        diagnose(interp, format!("{name}: {}", error.message()));
+        return Err(DeclFailure::plain());
     }
-    if flags.export == Some(false) {
-        if let Err(error) = interp.state.vars.unmark_exported(variable) {
-            diagnose(interp, format!("{name}: {}", error.message()));
-            return Err(DeclFailure::plain());
-        }
+    if flags.export == Some(false)
+        && let Err(error) = interp.state.vars.unmark_exported(variable)
+    {
+        diagnose(interp, format!("{name}: {}", error.message()));
+        return Err(DeclFailure::plain());
     }
 
     if let Some(value) = value {

@@ -431,15 +431,15 @@ impl baash_repl::ShellCompletion for ShellCompleter<'_> {
         // A new Tab abandons the previous lookup: its answer is for a word the
         // user has already replaced.
         self.pending = None;
-        if let Some(invocation) = self.invocation(line, cursor) {
-            if let Ok(carapace) = carapace_ext::Carapace::start(&invocation) {
-                self.pending = Some(PendingCarapace {
-                    carapace,
-                    line: line.to_vec(),
-                    cursor,
-                });
-                return baash_repl::ShellCompletionState::Pending;
-            }
+        if let Some(invocation) = self.invocation(line, cursor)
+            && let Ok(carapace) = carapace_ext::Carapace::start(&invocation)
+        {
+            self.pending = Some(PendingCarapace {
+                carapace,
+                line: line.to_vec(),
+                cursor,
+            });
+            return baash_repl::ShellCompletionState::Pending;
         }
         baash_repl::ShellCompletionState::Ready(self.finish(line, cursor))
     }

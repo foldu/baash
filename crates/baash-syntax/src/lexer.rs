@@ -1571,10 +1571,11 @@ impl<'a> Lexer<'a> {
             return;
         }
         let in_pattern = self.cases.last().is_some_and(|c| c.arms && c.pattern);
-        if self.stop.is_some() && !in_pattern {
-            if let Some(stop) = self.stop.as_mut() {
-                stop.depth += 1;
-            }
+        if self.stop.is_some()
+            && !in_pattern
+            && let Some(stop) = self.stop.as_mut()
+        {
+            stop.depth += 1;
         }
         self.i += 1;
         self.push(TokenKind::Operator, start, self.i);
@@ -1585,16 +1586,17 @@ impl<'a> Lexer<'a> {
 
     fn rparen(&mut self) {
         let start = self.i;
-        if let Some(top) = self.cases.last_mut() {
-            if top.arms && top.pattern {
-                top.pattern = false;
-                self.i += 1;
-                self.push(TokenKind::Operator, start, self.i);
-                self.observe_case(TokenKind::Operator, b")");
-                self.cmd_pos = true;
-                self.redirect_target = false;
-                return;
-            }
+        if let Some(top) = self.cases.last_mut()
+            && top.arms
+            && top.pattern
+        {
+            top.pattern = false;
+            self.i += 1;
+            self.push(TokenKind::Operator, start, self.i);
+            self.observe_case(TokenKind::Operator, b")");
+            self.cmd_pos = true;
+            self.redirect_target = false;
+            return;
         }
         if self.stop.is_some() {
             let depth = self.stop.as_ref().map_or(0, |s| s.depth);
@@ -1659,20 +1661,20 @@ impl<'a> Lexer<'a> {
         // left for `word` to scan (and report) in its own right.
         let mut end = op_end;
         let mut target: Option<Span> = None;
-        if let Some(&b) = self.src.get(op_end) {
-            if !is_meta(b) {
-                let scan = scan_word(
-                    self.src,
-                    op_end,
-                    self.depth,
-                    &mut Vec::new(),
-                    false,
-                    self.extglob,
-                );
-                if scan.unterminated.is_none() {
-                    end = scan.end;
-                    target = Some(op_end..end);
-                }
+        if let Some(&b) = self.src.get(op_end)
+            && !is_meta(b)
+        {
+            let scan = scan_word(
+                self.src,
+                op_end,
+                self.depth,
+                &mut Vec::new(),
+                false,
+                self.extglob,
+            );
+            if scan.unterminated.is_none() {
+                end = scan.end;
+                target = Some(op_end..end);
             }
         }
 

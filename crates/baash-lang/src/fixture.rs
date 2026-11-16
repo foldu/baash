@@ -754,10 +754,10 @@ fn parse_param(inner: &[u8]) -> Part {
     // `${#x}` is the length operator, `${#}` / `${##}` are ordinary expansions
     // of the special parameter `#`.
     if inner[0] == b'#' && inner.len() > 1 {
-        if let Some((name, rest)) = parse_name(&inner[1..]) {
-            if rest.is_empty() {
-                return Part::Param(ParamExp::new(name, ParamOp::Length, span));
-            }
+        if let Some((name, rest)) = parse_name(&inner[1..])
+            && rest.is_empty()
+        {
+            return Part::Param(ParamExp::new(name, ParamOp::Length, span));
         }
         return Part::Param(ParamExp::new(
             ParamName::Var(inner[1..].to_vec()),
@@ -897,10 +897,11 @@ fn parse_op(rest: &[u8]) -> ParamOp {
     if let Some(body) = rest.strip_prefix(b",") {
         return case_op(body, CaseHow::LowerFirst);
     }
-    if rest.len() == 2 && rest[0] == b'@' {
-        if let Some(transform) = Transform::from_letter(rest[1]) {
-            return ParamOp::Transform(transform);
-        }
+    if rest.len() == 2
+        && rest[0] == b'@'
+        && let Some(transform) = Transform::from_letter(rest[1])
+    {
+        return ParamOp::Transform(transform);
     }
     let unsupported = match rest[0] {
         b'@' => UnsupportedOp::Transform,

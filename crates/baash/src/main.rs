@@ -520,18 +520,16 @@ fn read_startup_file(shell: &mut Interp, flags: &ShellFlags) {
     // named for the startup files: a machine with none installed still gets
     // one, and `config/config.sh` prefers a copy the system has. A value
     // already in the environment is the user's and is left alone.
-    if shell
+    let embedded_completion_set = shell
         .state()
         .vars
         .scalar(b"BAASH_EMBEDDED_BASH_COMPLETION")
-        .is_none()
-    {
-        if let Some(path) = bash_completion::install(shell) {
-            let _ = shell
-                .state()
-                .vars
-                .assign_scalar(b"BAASH_EMBEDDED_BASH_COMPLETION", &path);
-        }
+        .is_some();
+    if !embedded_completion_set && let Some(path) = bash_completion::install(shell) {
+        let _ = shell
+            .state()
+            .vars
+            .assign_scalar(b"BAASH_EMBEDDED_BASH_COMPLETION", &path);
     }
     read_rc_files(shell, flags);
     read_rcdir(shell, flags);
