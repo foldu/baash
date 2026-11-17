@@ -286,15 +286,39 @@ fn dash_flags_lists_options_that_differ_from_the_profile() {
     // `$-` reports what differs from the profile, which is why a plain
     // `set -o nounset -c` is `u` and not the whole default bundle.
     assert!(opts.dash_flags().is_empty());
-    opts.errexit = true;
+    opts.set_flag(crate::Flag::Errexit, true);
     assert_eq!(opts.dash_flags().as_slice(), b"e");
-    opts.errexit = false;
-    opts.nounset = true;
+    opts.set_flag(crate::Flag::Errexit, false);
+    opts.set_flag(crate::Flag::Nounset, true);
     assert_eq!(opts.dash_flags().as_slice(), b"u");
     // A default option turned *off* is reported by its absence, and only
     // options with a single-letter spelling can appear at all.
-    opts.pipefail = true;
+    opts.set_flag(crate::Flag::Pipefail, true);
     assert_eq!(opts.dash_flags().as_slice(), b"u");
+}
+
+#[test]
+fn the_revision_moves_only_when_a_flag_changes() {
+    // `SHELLOPTS`, `BASHOPTS` and `$-` are rebuilt when the revision moves, so
+    // a write that changes nothing must not move it: `errexit` is already off
+    // in the bash profile, and a command that suppresses `errexit` (a `||`
+    // list, a `$( … )` body) writes it off again for every command it covers.
+    let mut opts = Opts::BASH;
+    let start = opts.rev();
+    opts.set_flag(Flag::Errexit, false);
+    assert_eq!(opts.rev(), start, "a no-op write looked like a change");
+
+    opts.set_flag(Flag::Errexit, true);
+    assert_ne!(opts.rev(), start, "a real change did not move the revision");
+
+    // Revisions come from one counter, so two bundles that reached the same
+    // flags separately are still distinct numbers: a subshell restores the
+    // bundle it cloned, and a per-bundle `+ 1` would let the parent land on a
+    // number that scope already used with *different* flags behind it.
+    let mut twice = Opts::BASH;
+    twice.set_flag(Flag::Errexit, true);
+    assert_eq!(opts, twice, "equality is about the flags");
+    assert_ne!(opts.rev(), twice.rev(), "revisions must never repeat");
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,7 +1161,7 @@ fn set_builtin_handles_positionals_and_printing() {
     assert_eq!(host.state.vars.arg_count(), 2);
     assert_eq!(host.state.vars.positional().get(1), Some(b"one".as_slice()));
 
-    host.state.opts.errexit = true;
+    host.state.opts.set_flag(crate::Flag::Errexit, true);
     assert_eq!(host.run(&[b"set", b"-o"]), Status::SUCCESS);
     let printed = String::from_utf8_lossy(&host.out).into_owned();
     assert!(printed.contains("errexit\ton"), "{printed}");
@@ -1159,8 +1183,8 @@ fn set_builtin_handles_positionals_and_printing() {
     assert!(listing.contains("u="), "{listing}");
 
     // Historical `set -` turns off -v and -x.
-    host.state.opts.verbose = true;
-    host.state.opts.xtrace = true;
+    host.state.opts.set_flag(crate::Flag::Verbose, true);
+    host.state.opts.set_flag(crate::Flag::Xtrace, true);
     assert_eq!(host.run(&[b"set", b"-"]), Status::SUCCESS);
     assert!(!host.state.opts.verbose);
     assert!(!host.state.opts.xtrace);

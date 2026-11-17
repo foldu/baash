@@ -868,6 +868,76 @@ dependencies are compiled by whichever `cc` is on `PATH`) and the startup
 number by 4% — with no source change. Build both sides with the same
 `CARGO_TARGET_DIR` and flags, or the comparison measures the C compiler.
 
+### 2026-11-17: the option table stops being compared as bytes
+
+After the two borrowing changes above, `memcmp` was still 9% of an interpreter
+loop, and 2% of that was the `SHELLOPTS`/`BASHOPTS`/`$-` refresh:
+`refresh_option_derived` runs before every command, and the guard for "did an
+option change" was a copy of the option bundle compared against the live one.
+`Opts` is 73 `bool`s, so that is 73 bytes of `memcmp` — and it happened twice per
+command, because `$-` kept a second copy of the same bundle beside its letters.
+
+`Opts` carries a revision now (`rev: u64`), which `Opts::set_flag` bumps only
+when a flag actually changes, and the shell caches one `Option<u64>` instead of
+two bundles: one 8-byte comparison per command, with the two lists and `$-`
+rebuilt together from it. The number comes from one process-wide counter,
+because a scope clones the bundle, bumps the clone, and its close reinstates the
+parent's number — a per-bundle `+ 1` repeats, which would make the guarantee depend
+on the caller refreshing the derived variables before every change (it happens to
+today) instead of on the type.
+
+| case, wall clock (shared-path ABBA, 16 runs each) | before | after | |
+| --- | ---: | ---: | ---: |
+| `colon loop 20k` (`scripts/bench.py`) | 13.57 ms | 12.97 ms | −4.5% |
+| `: plain` loop, 100k commands | 65.86 ms | 61.80 ms | **−6.2%** |
+| `[ 1 -lt 2 ]` loop, 100k | 119.03 ms | 117.94 ms | −0.9% |
+| assignment+expansion, 100k | 220.15 ms | 208.88 ms | −5.1% |
+| `set -o nounset; set +o nounset`, 20k | 55.85 ms | 50.58 ms | −9.4% |
+| `x=$SHELLOPTS`, 20k | 11.78 ms | 10.73 ms | −8.9% |
+| — control: two byte-identical copies of one build | 65.82 ms | 65.47 ms | −0.5% |
+
+A change this size is close to what a wall clock on this host can resolve (see
+the control, and the method note below), so the same scripts were counted as
+well. `valgrind --tool=callgrind` counts retired instructions, which does not
+depend on frequency, thermal state, code layout or a neighbour, and it agrees on
+the direction in every case — the work removed is 1–6%:
+
+| case, retired instructions | before | after | |
+| --- | ---: | ---: | ---: |
+| `: plain` loop, 10k commands | 143,708,686 | 140,496,818 | −2.2% |
+| `[ 1 -lt 2 ]` loop, 3k | 74,909,048 | 73,944,045 | −1.3% |
+| assignment+expansion, 3k | 134,096,900 | 132,168,674 | −1.4% |
+| `set -o nounset; set +o nounset`, 2k | 111,214,664 | 104,074,437 | −6.4% |
+| `x=$SHELLOPTS`, 3k | 40,726,185 | 39,761,308 | −2.4% |
+
+The wall clock moves further than the counts in most rows, which is what two
+compares that went through a `memcmp` call across two cache lines and a branch to
+the rebuild path cost beyond their instructions. The `[ 1 -lt 2 ]` row is the
+exception and sits at the floor — where a loop spends its time in the builtin, the
+count is the only measure that resolves the difference. The option-churn case
+moves most in both, because every `set` also rebuilt `$-` from the second copy of
+the bundle.
+
+**The A/B itself was the trap.** Two *byte-identical* copies of one build
+measured 3.5% apart, and with plain A,B,A,B alternation the second run of every
+pair was 1.5–3.5% slower — both larger than the effect above. The file a build
+lives in matters (one copy, written while the filesystem was busy, stayed slower
+for every run), and so does position. `scripts/ab.py` now copies each side over
+one shared path before running it, discards that copy's first run, and runs each
+block A,B,B,A; the same control reads −0.5% through it. The earlier tables on this
+page used plain alternation, so they were measured with a bias *against* the
+`after` side — if anything they understate their wins.
+
+**A direct field write is a stale `$SHELLOPTS`.** The flags stay `pub`, and the
+revision is what makes the rebuild cheap, so a write that bypasses `set_flag`
+changes an option without moving the revision: the three derived values go stale
+and nothing fails to compile. The seven writes outside tests that existed were
+converted, and so were the ones in tests. A `debug_assertions` build now compares
+a two-word mask of the flags the revision was rendered from with the live table
+(`Opts::mask`, with a `const` assertion that the table still fits in two words),
+so the test suite and the conformance ratchet fail on the next one; release builds
+pay nothing for it.
+
 ## The test suite: 37 s to 5 s
 
 `cargo test` has to hold `RUST_TEST_THREADS=1` (`.cargo/config.toml`): `$( … )`
@@ -943,7 +1013,7 @@ What the cases cover, so a change knows which one to watch:
 
 | group | cases | what moves them |
 | --- | --- | --- |
-| interpreted work | `arith loop 20k`, `expansion 20k ${s#*c}`, `expansion 20k ${s//d/e}`, `function call 20k`, `case 20k`, `builtin echo 20k`, `assignment+expansion 100k` | the evaluator, expansion, the pattern cache |
+| interpreted work | `colon loop 20k`, `arith loop 20k`, `expansion 20k ${s#*c}`, `expansion 20k ${s//d/e}`, `function call 20k`, `case 20k`, `builtin echo 20k`, `assignment+expansion 100k` | the evaluator, expansion, the pattern cache; `colon loop` is one command boundary and nothing else |
 | processes | `fork+exec 200 (env true)`, `pipeline 200 (echo \| cat)` | `posix_spawn`, the pipeline swap |
 | scopes | `subshell 20k ( : )`, `cmd subst 20k $(echo $i)`, `cmd subst 20k, body writes`, `cmd subst 20k empty $()`, `subshell 200, 20k-element array` | `open_scope`/`close_scope`: the journal, the signal set, the `getcwd`/`chdir` pair |
 | the variable table | `indirect 100\|400\|1000 vars, 200 passes` | lookup cost at three table sizes |
@@ -956,14 +1026,38 @@ release build in the tens of milliseconds. `source bash_completion x15` is
 skipped, with a note on stderr, when `vendor/bash-completion` is not there —
 `nix develop` and `nix build` put it there, a bare checkout does not.
 
-An A/B of *two baash builds* is not something one invocation can do: the harness
-measures one shell against bash. For the tables above, the two binaries were run
-alternately, in the same loop, each invocation taking the minimum — the same
-trick the Windows startup section uses to cancel a drifting machine. The `before`
-column is therefore a second checkout at the parent commit, not a number from
-memory: `--shell` points the harness at either build, and the alternating loop
-around it is a dozen lines of Python (there is a copy in the session log, not in
-the tree, because it is only worth keeping for the length of one change).
+An A/B of *two baash builds* is a different tool: the harness above measures one
+shell against bash.
+
+### A/B of two builds: `scripts/ab.py`
+
+    python3 scripts/ab.py --a /tmp/baash-before --b /tmp/baash-after \
+        --case 'colon loop 20k'
+    python3 scripts/ab.py --a old --b new --reps 8 --script 'i=0; while (( i < 100000 )); do :; (( i++ )); done'
+
+`--a` is the `before` column and `--b` the `after`, so the sign is always "did
+the change help". `--case` names a case from `scripts/bench.py` so the two tools
+share one list; `--script` takes anything else. Both sides must be built by the
+same toolchain (`--release`, same `CARGO_TARGET_DIR` and flags): a build made
+through the ambient toolchain and one made in `nix develop` differ by 455 KB of
+`.text`, because the C dependencies are compiled by whichever `cc` is on `PATH`.
+
+What the tool does, and why, is the 2026-11-17 section above: each run copies its
+side over **one shared path** and throws away that copy's first run (the file a
+binary lives in was worth 3.5% between byte-identical copies), and each block
+runs **A,B,B,A** (plain alternation made the second run of every pair 1.5–3.5%
+slower even for identical binaries). The minimum is kept per side. Run it with
+`--a` and `--b` pointing at the *same* build to measure that day's floor; on this
+host it lands within ±1%, which is why a change smaller than that wants the
+instruction counts too:
+
+    nix shell nixpkgs#valgrind -c valgrind --tool=callgrind --quiet \
+        --callgrind-out-file=/tmp/cg.out <binary> --norc -c '<script>'
+    rg -m1 '^summary:' /tmp/cg.out
+
+`callgrind` counts retired instructions, so it does not care about frequency,
+layout or a neighbour — but it also does not price cache misses or a branch, which
+is why it is a second opinion and not the headline.
 
 The release binary scores the same conformance as the debug one
 (1986/2787 total, 1931 strict), so the optimiser is not hiding a behavioural

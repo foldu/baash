@@ -25,7 +25,7 @@ mod history;
 mod meta;
 mod printf;
 mod test;
-use crate::opts::OptionKind;
+use crate::opts::{Flag, OptionKind};
 use crate::vars::{ArrayShape, CreateScope, Vars};
 use crate::{Opts, ShellHost, Status};
 use baash_diag::Diagnostic;
@@ -1323,8 +1323,8 @@ fn bi_set(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
             // With nothing after it the parameters are left alone.
             {
                 let opts = &mut host.state().opts;
-                opts.verbose = false;
-                opts.xtrace = false;
+                opts.set_flag(Flag::Verbose, false);
+                opts.set_flag(Flag::Xtrace, false);
             }
             index += 1;
             if index < argv.len() {

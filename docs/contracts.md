@@ -251,8 +251,20 @@ quoting rules itself.
 `baash-lang`/the VM *before* `assign`; the store does not parse numbers.
 
 **Construct `Opts` from the presets** (`Opts::POSIX`, `Opts::BASH`, `Default`).
-It carries ~70 flags now; an exhaustive struct literal outside this crate will
+It carries 73 flags now; an exhaustive struct literal outside this crate will
 break on the next flag.
+
+**`Opts::set_flag` is the only write path.** `SHELLOPTS`, `BASHOPTS` and `$-` are
+derived from the table, and the shell rebuilds them when `Opts::rev` moves: a
+`u64` that `set_flag` bumps only when a flag actually changes, drawn from one
+process-wide counter so that no two changes ever share a number — a scope clones
+the bundle, bumps the clone, and restores the parent's number when it closes, so
+a per-bundle `+ 1` would repeat. A field assigned directly changes an option
+without moving the revision, leaves the three derived values stale, and compiles;
+`debug_assertions` builds compare a two-word mask of the flags the revision was
+rendered from (`Opts::mask`) with the live table and fail loudly instead. The
+revision is not part of equality: `Opts` compares its flags, so two bundles with
+the same flags are equal however they got there.
 
 **`ShellState::command_number` is `\#`, and the REPL advances it.**
 `begin_command()` increments it when the interactive loop hands a line to the

@@ -58,6 +58,11 @@ BASH_COMPLETION = REPO / "vendor" / "bash-completion" / "bash_completion"
 # exception: bash needs ~3 s per 20k run, so they run once, and their counts
 # match the tables in `docs/performance.md`.
 CASES: list[tuple[str, str, int]] = [
+    # The cheapest possible command in a loop: what one command boundary costs,
+    # with no expansion, no builtin worth naming and no arithmetic but the
+    # `(( i++ ))` that keeps it running. The per-command work — `$?`/`$RANDOM`/
+    # `$SECONDS`, `$-`, the option bundle — is all that moves it.
+    ("colon loop 20k", "i=0; while (( i < 20000 )); do :; (( i++ )); done", 3),
     ("arith loop 20k ((i++))", "i=0; while (( i < 20000 )); do (( i++ )); done", 3),
     (
         "expansion 20k ${s#*c}",

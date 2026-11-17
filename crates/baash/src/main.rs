@@ -642,7 +642,10 @@ fn shell(interactive: bool, flags: &ShellFlags) -> Interp {
     // `$-` even for `-i -c`, which never consults it because a `-c` string is
     // not a history line. Command-line flags are applied below, so `baash +H -i`
     // still wins.
-    shell.state().opts.histexpand = interactive;
+    shell
+        .state()
+        .opts
+        .set_flag(baash_runtime::Flag::Histexpand, interactive);
     // The one place that knows it is running for a user rather than a test:
     // character widths come from the environment here and nowhere else.
     shell.detect_locale();

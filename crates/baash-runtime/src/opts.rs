@@ -69,19 +69,66 @@ macro_rules! option_table {
         /// [`Opts::default`] (the bash profile), then toggle through
         /// [`Opts::set_by_name`] / [`Opts::set_by_short`] so that parsing and
         /// printing go through one table.
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        ///
+        /// **Write flags through [`Opts::set_flag`], not through the fields.**
+        /// `SHELLOPTS`, `BASHOPTS` and `$-` are derived from this table, and the
+        /// shell decides whether to rebuild them from [`Opts::rev`]: a field
+        /// assigned directly changes an option without changing the revision,
+        /// which leaves the three derived values stale. A `debug_assertions`
+        /// build cross-checks the two and fails loudly instead (see
+        /// `Interp::refresh_option_derived`).
+        #[derive(Clone, Copy, Debug)]
         pub struct Opts {
             $(
                 $(#[$doc])*
                 pub $field: bool,
             )+
+            /// Bumped by [`Opts::set_flag`] when a flag actually changes.
+            ///
+            /// The derived variables used to be rebuilt after every command by
+            /// comparing the whole bundle against a copy — 73 bytes of `memcmp`
+            /// twice per command, 2% of an interpreter loop
+            /// (`docs/performance.md`) — so the comparison is on this number
+            /// instead.
+            ///
+            /// It comes from one process-wide counter, so no two changes ever
+            /// share it. A per-bundle `+ 1` would repeat: a scope clones the
+            /// bundle, bumps the clone, and the close reinstates the parent's
+            /// number, after which the parent's next change lands on a number
+            /// the body already used with different flags behind it. The shell
+            /// happens to refresh the derived variables again before it changes
+            /// anything, so today that would not be observable — which is a
+            /// property of the caller, not of this type, and exactly the kind of
+            /// invariant a later refactor removes. One counter makes it true by
+            /// construction, at one relaxed atomic add per option change.
+            ///
+            /// Deliberately outside equality: two bundles with the same flags
+            /// are equal however they got there.
+            rev: u64,
         }
+
+        /// Source of [`Opts`] revisions. Starts at 1 so that a bundle built by
+        /// the constants (`rev: 0`) is never the product of a change.
+        fn next_rev() -> u64 {
+            static NEXT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+            NEXT.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+        }
+
+        impl PartialEq for Opts {
+            /// Compares the flags: the revision is bookkeeping, not state.
+            fn eq(&self, other: &Self) -> bool {
+                $( self.$field == other.$field )&&+
+            }
+        }
+
+        impl Eq for Opts {}
 
         impl Opts {
             /// The POSIX profile: strict mode with the conservative POSIX
             /// defaults. Options that POSIX does not define are off.
             pub const POSIX: Opts = Opts {
                 $( $field: $posix_default, )+
+                rev: 0,
             };
 
             /// The bash compatibility profile (DESIGN.md §3.2). Interactive
@@ -89,6 +136,7 @@ macro_rules! option_table {
             /// startup path, not here; `histexpand` stays off deliberately.
             pub const BASH: Opts = Opts {
                 $( $field: $bash_default, )+
+                rev: 0,
             };
 
             /// Current value of `flag`.
@@ -98,11 +146,23 @@ macro_rules! option_table {
                 }
             }
 
-            /// Set `flag` to `on`.
+            /// Set `flag` to `on`, and bump [`Opts::rev`] if that changed
+            /// anything.
+            ///
+            /// The only way an option should ever change: the derived
+            /// variables are rebuilt when the revision moves.
             pub fn set_flag(&mut self, flag: Flag, on: bool) {
-                match flag {
-                    $( Flag::$flag => self.$field = on, )+
+                let was = match flag {
+                    $( Flag::$flag => core::mem::replace(&mut self.$field, on), )+
+                };
+                if was != on {
+                    self.rev = next_rev();
                 }
+            }
+
+            /// The revision of this bundle's flags; see the field docs.
+            pub fn rev(&self) -> u64 {
+                self.rev
             }
         }
 
@@ -204,6 +264,11 @@ macro_rules! option_table {
         /// Every option, in table order. Iterate this for printing and for
         /// completeness tests.
         pub const ALL_FLAGS: &[Flag] = &[ $( Flag::$flag, )+ ];
+
+        // `Opts::mask` is two words wide. A flag added past the 128th would
+        // have to widen it, and the shifted-out bit would otherwise be a
+        // silently missing debug cross-check rather than a compile error.
+        const _: () = assert!(ALL_FLAGS.len() <= 128);
     };
 }
 
@@ -651,6 +716,22 @@ impl Opts {
             .filter(|flag| self.get_flag(**flag))
             .filter_map(|flag| flag.short())
             .collect()
+    }
+
+    /// Every flag's value as two words, in [`ALL_FLAGS`] order.
+    ///
+    /// The flag order is defined here, so the mask lives here too, but its only
+    /// caller is the `debug_assertions` cross-check that the shell's derived
+    /// variables match the table (see [`Opts`]'s note on `set_flag`). Production
+    /// builds compare [`Opts::rev`] and never materialise this.
+    pub fn mask(&self) -> [u64; 2] {
+        let mut words = [0u64; 2];
+        for (index, flag) in ALL_FLAGS.iter().enumerate() {
+            if self.get_flag(*flag) {
+                words[index / 64] |= 1 << (index % 64);
+            }
+        }
+        words
     }
 }
 

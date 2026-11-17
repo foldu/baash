@@ -1156,6 +1156,35 @@ fn shellopts_and_bashopts_are_derived_from_the_live_options() {
 }
 
 #[test]
+fn the_derived_options_survive_a_scope_that_changed_them() {
+    // `SHELLOPTS`, `BASHOPTS` and `$-` are rebuilt when the option table's
+    // revision moves, and a subshell clones that revision, changes options and
+    // puts both back when it closes — so the number goes *backwards* while the
+    // variable journal restores the parent's text. The shell's cache has to
+    // notice that: the parent's next change and the parent's next read both
+    // have to describe the parent. This is the shape that skipped a rebuild
+    // while the derived variables were compared as a bundle.
+    assert_eq!(
+        out(r#"set -o errexit; ( set -o noglob ); set +o errexit; echo $SHELLOPTS; echo "$-""#),
+        "braceexpand:hashall:interactive-comments\n\n"
+    );
+    // The same shape in the other direction: the change the parent makes after
+    // the scope must be visible, and the scope's `noglob` must not be.
+    assert_eq!(
+        out(r#"( set -o noglob ); set -o nounset; echo $SHELLOPTS; echo "$-""#),
+        "braceexpand:hashall:interactive-comments:nounset\nu\n"
+    );
+    // `shopt` shares the revision: a scope that sets one must not leave the
+    // parent reporting it.
+    assert_eq!(
+        out(
+            r#"( shopt -s dotglob ); case $BASHOPTS in *dotglob*) echo leaked;; *) echo clean;; esac"#
+        ),
+        "clean\n"
+    );
+}
+
+#[test]
 fn an_exported_shellopts_turns_tracing_on_in_a_child() {
     let output = baash()
         .env("SHELLOPTS", "xtrace:braceexpand")

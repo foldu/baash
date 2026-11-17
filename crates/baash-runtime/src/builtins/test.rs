@@ -649,10 +649,10 @@ mod tests {
     fn dash_o_queries_the_set_o_table() {
         let mut host = TestHost::new();
         assert_eq!(run(&mut host, &[b"-o", b"emacs"]), FAILURE);
-        host.state.opts.emacs = true;
+        host.state.opts.set_flag(crate::Flag::Emacs, true);
         assert_eq!(run(&mut host, &[b"-o", b"emacs"]), SUCCESS);
         // A `shopt`-only name is not a `set -o` option.
-        host.state.opts.dotglob = true;
+        host.state.opts.set_flag(crate::Flag::Dotglob, true);
         assert_eq!(run(&mut host, &[b"-o", b"dotglob"]), FAILURE);
         assert_eq!(run(&mut host, &[b"-o", b"nosuchoption"]), FAILURE);
     }

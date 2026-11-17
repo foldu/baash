@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use baash_diag::Diagnostic;
 use baash_lang::Shell as _;
-use baash_runtime::{ShellHost, Status};
+use baash_runtime::{Flag, ShellHost, Status};
 use baash_syntax::{CaseTerm, NodeId, NodeKind, PipeOp, Separator};
 
 use super::{Ctx, Function, Interp, ParsedChunk, Unwind, traps};
@@ -1032,7 +1032,7 @@ impl Interp {
         let saved_line = self.line_number;
         let scope = self.open_scope();
         if !self.state.opts.inherit_errexit {
-            self.state.opts.errexit = false;
+            self.state.opts.set_flag(Flag::Errexit, false);
         }
         let saved = baash_sys::dup(target).ok();
         if let Err(error) = baash_sys::dup2(fd, target) {
@@ -1248,7 +1248,7 @@ impl Interp {
         // still runs. `shopt -s inherit_errexit` opts into the other behaviour,
         // and a `set -e` written by the body itself still applies.
         if !self.state.opts.inherit_errexit {
-            self.state.opts.errexit = false;
+            self.state.opts.set_flag(Flag::Errexit, false);
         }
         // The body writes to the file through descriptor 1, exactly as it would
         // through a pipe: built-ins write with `write_fd`, and an external

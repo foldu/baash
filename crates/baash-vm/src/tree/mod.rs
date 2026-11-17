@@ -114,7 +114,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use baash_diag::{Diagnostic, SourceFile};
-use baash_runtime::{History, Opts, ShellHost, ShellState, Status, consequence};
+use baash_runtime::{Flag, History, Opts, ShellHost, ShellState, Status, consequence};
 use baash_syntax::ArrayElement;
 use baash_syntax::{Ast, NodeId, ParseOpts, ParseOutcome, parse_with};
 
@@ -344,15 +344,32 @@ pub struct Interp {
     /// Status of the last command substitution performed while expanding:
     /// `x=$(false)` must leave `$?` at 1.
     last_cmdsub: Option<Status>,
-    /// The option set `SHELLOPTS` and `BASHOPTS` were last rendered from.
+    /// The option revision `SHELLOPTS`, `BASHOPTS` and `$-` were built from.
     ///
-    /// Both are derived variables, so they are rebuilt whenever an option
-    /// changes — but they were being rebuilt after *every* command, which put a
-    /// pair of sorted, allocated strings on the hot path of a loop
-    /// (`((i++))` 20k went from 15 ms to 40 ms, `docs/performance.md`). The
-    /// fingerprint makes "did anything change" one comparison over the option
-    /// bits.
-    option_lists: Option<baash_runtime::Opts>,
+    /// All three are derived from the option table, so they are rebuilt
+    /// whenever an option changes — but they were being rebuilt after *every*
+    /// command, which put a pair of sorted, allocated strings on the hot path
+    /// of a loop (`((i++))` 20k went from 15 ms to 40 ms, `docs/performance.md`).
+    /// The guard used to be a copy of the bundle compared against the live one;
+    /// `Opts` now carries a revision that only moves when a flag changes, so
+    /// "did anything change" is one `u64` comparison instead of 73 bytes of
+    /// `memcmp` twice per command.
+    ///
+    /// The comparison is only valid because a scope restoring the option bundle
+    /// it cloned also rewinds the revision: the body's rendered lists are put
+    /// back by the variable journal, and the parent's next `sync_specials` sees
+    /// the older number and rebuilds. That is why the cache is checked before
+    /// every command rather than only where options are set.
+    ///
+    /// `None` means nothing has been built yet, which is also what makes the
+    /// first `sync_specials` write the lists.
+    opts_rev: Option<u64>,
+    /// The flags `opts_rev` was rendered from, so a flag written without
+    /// `Opts::set_flag` is caught instead of silently leaving the derived
+    /// variables stale. Debug builds only: the release build compares the
+    /// revision and trusts it.
+    #[cfg(debug_assertions)]
+    opts_mask: [u64; 2],
     /// Set by a built-in that unwinds (`break`, `continue`, `return`), read by
     /// the command sequence after the built-in returns.
     pending: Option<Unwind>,
@@ -379,13 +396,6 @@ pub struct Interp {
     /// `$SECONDS`' counter. It ticks once per command rather than reading the
     /// clock, which is what it did when the value lived in the variable table.
     seconds: u64,
-    /// `$-` and the option set it was built from.
-    ///
-    /// Rebuilding `$-` walks the whole option table, and the option set changes
-    /// far more rarely than commands run. The set is compared as a value:
-    /// `Opts` is a plain `bool` bundle, so that is a memcmp rather than a walk
-    /// of the table computing a fingerprint.
-    dash: Option<(baash_runtime::Opts, Vec<u8>)>,
     /// Bytes a `read` pulled from a descriptor but could not give back.
     ///
     /// Only a descriptor that is not seekable can end up here; on a regular
@@ -651,7 +661,9 @@ impl Interp {
             functions: Vec::new(),
             specials: Specials::default(),
             last_cmdsub: None,
-            option_lists: None,
+            opts_rev: None,
+            #[cfg(debug_assertions)]
+            opts_mask: [0; 2],
             pending: None,
             depth: 0,
             calls: Vec::new(),
@@ -664,7 +676,6 @@ impl Interp {
             nameref_cycle: std::cell::Cell::new(false),
             random: std::cell::Cell::new(0x9E37_79B9_7F4A_7C15),
             seconds: 0,
-            dash: None,
             read_buffers: std::collections::BTreeMap::new(),
             signals: traps::SignalState::default(),
             run_depth: 0,
@@ -709,8 +720,8 @@ impl Interp {
         // read (`SHELLOPTS` is non-empty in every real shell).
         let _ = interp.state.vars.assign_scalar(b"IFS", b" \t\n");
         // Both option lists are derived from the table (`Opts::shellopts`),
-        // and both are readonly for scripts; `refresh_option_lists` keeps them
-        // current after every command.
+        // and both are readonly for scripts; `refresh_option_derived` keeps them
+        // current after every option change.
         let shellopts = interp.state.opts.shellopts();
         let _ = interp.state.vars.assign_scalar(b"SHELLOPTS", &shellopts);
         let bashopts = interp.state.opts.bashopts();
@@ -747,12 +758,12 @@ impl Interp {
         // `set -o history` option), before the startup file runs so that file
         // can turn it off. A non-interactive shell records nothing either way.
         if interactive {
-            interp.state.opts.history = true;
+            interp.state.opts.set_flag(Flag::History, true);
             // bash starts an interactive shell in emacs editing mode, and the
             // startup file can change it (`set -o vi`). The option is what
             // `test -o emacs` and `set -o` report, so it is set here rather
             // than implied by the line editor.
-            interp.state.opts.emacs = true;
+            interp.state.opts.set_flag(Flag::Emacs, true);
             // An interactive bash also has default prompt variables, before the
             // environment and the startup file can replace them: measured
             // against 5.3.20, `declare -p PS1` in `bash -i` is
@@ -763,7 +774,7 @@ impl Interp {
             let _ = interp.state.vars.assign_scalar(b"PS2", DEFAULT_PS2);
             // `emacs` and `history` were turned on just above; the option lists
             // must include them before the first prompt is drawn.
-            interp.refresh_option_lists();
+            interp.refresh_option_derived();
         }
         interp
     }
@@ -889,7 +900,7 @@ impl Interp {
                 };
             }
         }
-        self.refresh_option_lists();
+        self.refresh_option_derived();
     }
 
     /// Give an interactive shell its history database.
@@ -1167,27 +1178,58 @@ impl Interp {
         self.state.vars.set_last_status(status);
     }
 
-    /// Refresh the cached special parameters. Called before expansion, because
-    /// `Vars::get` cannot allocate and `$?` must be current.
-    /// Recompute `SHELLOPTS` and `BASHOPTS` from the live option table.
+    /// Rebuild `SHELLOPTS`, `BASHOPTS` and `$-` if an option changed.
     ///
-    /// Both are derived variables: bash recomputes them whenever an option
-    /// changes, and a script cannot assign them. The write has to bypass the
-    /// readonly attribute they carry, which is why it goes through
+    /// All three are derived: bash recomputes them whenever an option changes,
+    /// and a script cannot assign them. The write has to bypass the readonly
+    /// attribute the two variables carry, which is why it goes through
     /// [`baash_runtime::Vars::refresh_derived`].
-    fn refresh_option_lists(&mut self) {
-        if self.option_lists == Some(self.state.opts) {
+    ///
+    /// They share one revision check because they share one source. `$-` is
+    /// cheap to rebuild but the lists sort and allocate, and this runs once per
+    /// command, so the check has to be the cheap part.
+    fn refresh_option_derived(&mut self) {
+        let rev = self.state.opts.rev();
+        if self.opts_rev == Some(rev) {
+            // A flag assigned directly instead of through `Opts::set_flag`
+            // changes an option without moving the revision, so this branch
+            // would skip the rebuild and leave all three derived values stale —
+            // and it would compile. Compare the flags the revision was rendered
+            // from with the live table: the test suite and the conformance
+            // ratchet run debug builds, so the mistake fails there instead of
+            // shipping.
+            #[cfg(debug_assertions)]
+            debug_assert_eq!(
+                self.opts_mask,
+                self.state.opts.mask(),
+                "an option changed without going through Opts::set_flag: \
+                 SHELLOPTS, BASHOPTS and $- are stale"
+            );
             return;
         }
-        self.option_lists = Some(self.state.opts);
+        self.opts_rev = Some(rev);
+        #[cfg(debug_assertions)]
+        {
+            self.opts_mask = self.state.opts.mask();
+        }
         let shellopts = self.state.opts.shellopts();
         let _ = self.state.vars.refresh_derived(b"SHELLOPTS", &shellopts);
         let bashopts = self.state.opts.bashopts();
         let _ = self.state.vars.refresh_derived(b"BASHOPTS", &bashopts);
+        // `-i` has no `set -o` row (it is an invocation mode, not a toggle),
+        // so `$-` has to add it here.
+        let mut flags = self.state.opts.dash_flags();
+        if self.interactive && !flags.contains(&b'i') {
+            flags.push(b'i');
+        }
+        self.specials.dash.clear();
+        self.specials.dash.extend_from_slice(&flags);
     }
 
+    /// Refresh the cached special parameters. Called before expansion, because
+    /// `Vars::get` cannot allocate and `$?` must be current.
     pub(crate) fn sync_specials(&mut self) {
-        self.refresh_option_lists();
+        self.refresh_option_derived();
         write_decimal(
             &mut self.specials.status,
             i64::from(self.state.vars.last_status().exit_code()),
@@ -1216,19 +1258,6 @@ impl Interp {
             &mut self.specials.random,
             i64::from(((random >> 33) % 32768) as u32),
         );
-        // `-i` has no `set -o` row (it is an invocation mode, not a toggle),
-        // so `$-` has to add it here.
-        let stale = !matches!(&self.dash, Some((cached, _)) if *cached == self.state.opts);
-        if stale {
-            let mut flags = self.state.opts.dash_flags();
-            if self.interactive && !flags.contains(&b'i') {
-                flags.push(b'i');
-            }
-            self.dash = Some((self.state.opts, flags));
-        }
-        let (_, flags) = self.dash.as_ref().expect("just built");
-        self.specials.dash.clear();
-        self.specials.dash.extend_from_slice(flags);
         if self.specials.pid.is_empty() {
             write_decimal(
                 &mut self.specials.pid,
