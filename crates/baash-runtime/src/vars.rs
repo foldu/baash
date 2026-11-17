@@ -358,6 +358,33 @@ pub struct Vars {
     /// What the open scopes changed, oldest first; `end_scope` replays it
     /// backwards. Empty when no scope is open.
     journal: Vec<Undo>,
+    /// Where the last global lookup landed; see [`LastHit`].
+    hit: std::cell::Cell<Option<LastHit>>,
+}
+
+/// The last global lookup, for names that fit in a word.
+///
+/// `Vars::lookup` is on the path of every expansion and every arithmetic
+/// operation, and `IndexMap` answers it with a hash and then a `memcmp` call to
+/// compare names. A loop asks for the same one- or two-byte name repeatedly —
+/// `(( i++ ))` reads `i` and then writes it — so the answer is remembered.
+///
+/// A name of at most eight bytes packs into a `u64`, and then *is* the packed
+/// value: equal length and equal packing means equal name, with no call and no
+/// hash. Larger names are not cached (their first eight bytes would not decide
+/// it), which costs nothing: a shell's hot variables are `i`, `x`, `IFS`, `PATH`.
+///
+/// Nothing has to invalidate this. The entry at `index` is re-checked against
+/// the packed name, so a table that shifted under a stale index — an `unset`, a
+/// restored scope — is a miss that falls back to the map, never a wrong answer.
+#[derive(Clone, Copy, Debug)]
+struct LastHit {
+    /// The name's bytes, most significant first.
+    packed: u64,
+    /// The name's length, which is what makes the packing exact.
+    len: u32,
+    /// The index it was found at.
+    index: usize,
 }
 
 /// One recorded change a scope has to undo.
@@ -436,6 +463,7 @@ impl Default for Vars {
             optind_writes: 0,
             scopes: 0,
             journal: Vec::new(),
+            hit: std::cell::Cell::new(None),
         }
     }
 }
@@ -603,7 +631,30 @@ impl Vars {
                 return Some(var);
             }
         }
-        self.global.get(name)
+        self.global_var(name)
+    }
+
+    /// The global cell for `name`, through the last-hit cache.
+    ///
+    /// The hit is checked by packing the *stored key* rather than trusting the
+    /// cache: `LastHit` has the whole name in it when the name is short, so a
+    /// key that packs the same with the same length is the same name. That is
+    /// what makes a stale index a miss instead of a wrong variable.
+    #[inline]
+    fn global_var(&self, name: &[u8]) -> Option<&Var> {
+        let short = pack(name);
+        if let Some(hit) = self.hit.get()
+            && Some((hit.packed, hit.len)) == short
+            && let Some((key, var)) = self.global.get_index(hit.index)
+            && pack(key) == short
+        {
+            return Some(var);
+        }
+        let index = self.global.get_index_of(name)?;
+        if let Some((packed, len)) = short {
+            self.hit.set(Some(LastHit { packed, len, index }));
+        }
+        self.global.get_index(index).map(|(_, var)| var)
     }
 
     /// The cell for `name` when following namerefs cannot change the answer.
@@ -1605,7 +1656,7 @@ impl Vars {
 
     /// A global-scope cell by name, ignoring shadowing frames (`declare -g`).
     pub fn lookup_global(&self, name: &[u8]) -> Option<&Var> {
-        self.global.get(name)
+        self.global_var(name)
     }
 
     /// Whether the variable a write to `name` would reach has the integer
@@ -2083,6 +2134,22 @@ fn set_scalar(var: &mut Var, name: &[u8], value: Vec<u8>) -> Result<(), Error> {
             Ok(())
         }
     }
+}
+
+/// A name of at most eight bytes packed most-significant-first, with its length.
+///
+/// `None` for a longer name: `LastHit` compares packing plus length instead of
+/// the bytes, which is only sound when the packing holds every byte.
+#[inline]
+fn pack(name: &[u8]) -> Option<(u64, u32)> {
+    if name.len() > 8 {
+        return None;
+    }
+    let mut packed = 0u64;
+    for &byte in name {
+        packed = (packed << 8) | u64::from(byte);
+    }
+    Some((packed, name.len() as u32))
 }
 
 /// Resolve a subscript for a write: negative counts from `greatest index + 1`.
