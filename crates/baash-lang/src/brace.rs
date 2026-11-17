@@ -108,6 +108,13 @@ pub fn expand_braces_cow(word: &Word) -> Cow<'_, [Word]> {
 ///
 /// `None` means there is no such group in these parts.
 fn expand_once(parts: &[Part], span: &Span) -> Option<Vec<Word>> {
+    // Every command word goes through here, and most have no brace at all:
+    // `structural` copies one entry per unquoted byte into a `Vec` just to
+    // discover that, which was an allocation per word (`docs/performance.md`).
+    // A brace can only be found in an unquoted literal, so look for one first.
+    if !has_structural_brace(parts) {
+        return None;
+    }
     let group = find_group(parts)?;
     let prefix = slice(parts, Pos::START, group.open);
     let suffix = slice(parts, advance(parts, group.close), Pos::end(parts));
@@ -215,6 +222,15 @@ fn push_part(out: &mut Vec<Part>, part: &Part, from: usize, to: usize) {
 }
 
 /// Every byte of unquoted literal text, in word order, with its position.
+/// Whether any unquoted literal piece contains a `{`, i.e. whether
+/// [`structural`] could find a group opener at all.
+fn has_structural_brace(parts: &[Part]) -> bool {
+    parts.iter().any(|part| match part {
+        Part::Lit(lit) => lit.kind == LitKind::Unquoted && lit.bytes.contains(&b'{'),
+        _ => false,
+    })
+}
+
 fn structural(parts: &[Part]) -> Vec<(Pos, u8)> {
     let mut units = Vec::new();
     for (part, piece) in parts.iter().enumerate() {

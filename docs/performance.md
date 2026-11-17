@@ -982,6 +982,47 @@ created so that a `&[u8]` could be read out of it. Borrowing it, or writing into
 a buffer the caller already holds, removes the allocation without changing what
 the shell stores — which is why none of the three commits changes behaviour.
 
+**The next round: `smallvec` in that path does nothing, and a pre-check does.**
+The rest of the list is short-lived vectors in the per-word expansion, so the
+obvious move is to inline them — `Expanded::chunks`, `Field::quoted` and the
+splitter's three vectors as `SmallVec`. Measured (same A/B protocol):
+
+| per-word `SmallVec`s | before | after | |
+| --- | ---: | ---: | ---: |
+| allocations, 10k iterations of `:; (( i++ ))` | 130,716 | 90,715 | −30.6% |
+| retired instructions | 123,171,670 | 119,202,080 | −3.2% |
+| `: plain` loop, 100k commands (wall clock) | | | +0.5% |
+| `cmd subst 20k` | | | +1.6% |
+| `source bash_completion` ×15 | | | +0.5% |
+
+Thirty percent of the allocations and three percent of the instructions, and no
+time at all — the three wall-clock rows are inside the ±1% floor, and two of them
+are on the wrong side of it. That is what removing *this* kind of allocation is
+worth: glibc serves a one-to-eight-byte `Vec` from the tcache in a handful of
+instructions, while an inline vector makes `Chunk`, `Field` and `Expanded` bigger,
+so every move of one copies more bytes (and `memmove` was already 8.7% of the
+loop). Reverted.
+
+What did pay was a one-line pre-check in the same path. `expand_once`'s first act
+was `structural(parts)`, which builds a `Vec<(Pos, u8)>` holding one entry per
+unquoted byte of the word, and `find_group` then searches it for a `{` — for every
+command word, to conclude that `:` has no brace group. Only an unquoted literal can
+hold a group opener, so looking for the byte first skips the scan and its
+allocation:
+
+| case | before | after | |
+| --- | ---: | ---: | ---: |
+| `: plain` loop, 100k commands | 54.61 ms | 53.27 ms | **−2.4%** |
+| assignment+expansion, 100k | 196.56 ms | 186.40 ms | **−5.2%** |
+| allocations, 10k iterations | 130,716 | 120,716 | −7.6% |
+| retired instructions | 123,171,670 | 120,901,856 | −1.8% |
+
+Lowering one allocation per word bought five percent where lowering forty bought
+none, because it also removed the walk that filled it. That is the same lesson
+this page keeps arriving at from different directions: the win is in not doing the
+work, not in making the allocation cheaper — which is why the way out of the rest
+of this list is a buffer reused across commands, not a type with more room in it.
+
 What is left is `finish_grow` (35% of what remains), one allocation per command
 in `eval_node`, and the expansion path, which allocates once per word
 (`expand_one`, `expand_parts`) even for a word with nothing to expand. The value
