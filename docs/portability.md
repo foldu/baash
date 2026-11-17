@@ -9,9 +9,13 @@ protocol.
 
 The motivating facts: PowerShell 7 takes seconds to start and its completion
 times out; a native Rust shell starts in well under a millisecond (measured:
-`baash -c :` 0.40 ms in release) and completes a 59k-entry directory in ~4 ms
-in-process. The gap is worth closing on Windows, where "a fast shell with tab
-completion" is currently a niche filled by Git Bash and WSL.
+`baash -c :` 0.40 ms in release on Linux) and completes a 59k-entry directory in
+~4 ms in-process. The gap is worth closing on Windows, where "a fast shell with
+tab completion" is currently a niche filled by Git Bash and WSL. The Windows
+number is not that one: a start there is `CreateProcess` and the loader, measured
+at 12.3 ms for `baash -c exit` on the guest — of which the shell itself is
+0.2 ms, and it is faster than `cmd.exe` on the same machine
+(`performance.md`, 2026-11-17).
 
 ---
 

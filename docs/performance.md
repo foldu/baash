@@ -344,6 +344,137 @@ debug build spent 1.5 ms at p99.
 `cargo test -p baash-history --release --lib -- --ignored --nocapture` reproduces
 it; the harness is the ignored `insert_round_trip` in `store.rs`.
 
+### 2026-11-17: Windows startup is Windows' 12 ms, and 10 ms of library
+
+The Linux figure at the top of this file (0.40 ms for `-c ':'`) says nothing
+about Windows, where the clock starts with `CreateProcess`. Measured on the
+`winvm` guest (Windows 11 26300.9711, 12 vCPU, no GPU) at `a9b3a57`, with the
+shipping shape — `nix build .#windows`: opt-level 3, fat LTO, one codegen unit,
+symbols stripped, 11,910,144 bytes — Defender's real-time protection on,
+`wuauserv`/`TrustedInstaller` stopped and `MRT` finished, and `C:\baash` and
+`C:\bench` excluded from scanning. Without those three conditions the same case
+drifts by 30% between blocks, which is how a first attempt at this measured a
+13.6 ms floor on a freshly booted guest and 19.7 ms ten minutes later.
+
+The harness is one PowerShell process that starts each configuration with
+`System.Diagnostics.Process`, waits for exit, and **alternates the two
+configurations being compared sample by sample**, so a drifting VM cancels out
+of the difference. The first four to six runs of each case are discarded:
+Defender reads a newly copied binary once, and the virtio disk has not cached a
+page of it.
+
+```powershell
+$psi = [Diagnostics.ProcessStartInfo]::new($exe); $psi.Arguments = '-c exit'
+$psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+$sw = [Diagnostics.Stopwatch]::StartNew(); $p = [Diagnostics.Process]::Start($psi)
+$p.WaitForExit(); $sw.Stop()
+```
+
+| shape | median | min |
+|---|---:|---:|
+| `cmd /c exit` — what spawning *any* process costs here | 14.69 | 13.99 |
+| `hostname.exe`, 40 KB, copied into `C:\bench` | 15.87 | 15.09 |
+| `baash.exe --version` — image loaded, no shell built | 12.18 | 11.60 |
+| `baash.exe -c exit` | 12.33 | 11.62 |
+| `baash.exe -i --rcfile <empty> -c exit` | 12.47 | 11.96 |
+| `baash.exe -i -c exit` with `BAASH_NO_BASH_COMPLETION=1` | 13.61 | 12.11 |
+| `baash.exe -i -c exit` — the default interactive start | 22.42 | 21.40 |
+
+n = 50 per row, warm, milliseconds.
+
+Defender is not part of that number, and it was measured rather than assumed.
+Re-running the same cases with the exclusions removed — real-time protection on,
+the binary in a scanned directory — moves nothing:
+
+| shape | with exclusions | without |
+|---|---:|---:|
+| `cmd /c exit` | 14.49 | 14.71 |
+| `baash.exe -c exit` | 12.57 | 12.45 |
+| `baash.exe -i -c exit` | 23.07 | 22.84 |
+
+A binary that has been seen once is not rescanned on launch. What Defender does
+charge for is *writing* one: a newly copied `baash.exe` takes 117–178 ms on its
+first execution, and the same 117–178 ms for an identical copy in an excluded
+directory, so that is the file being read off the virtio disk once, not a scan —
+the Linux section's "a freshly copied exe costs another few hundred
+milliseconds on its own first execution, at any design". The scattered 12 MB
+copies this work made did keep `MsMpEng` busy in the background, which is what
+pushed one early batch's median from 12.4 to 31 ms; that is interference with
+the *measurement*, which is why every case discards its first runs and why the
+two configurations are alternated instead of run in blocks.
+
+Three things fall out of it.
+
+**A Windows `baash` is not slow to start; it is faster than `cmd`.** The
+non-interactive shell — argument parsing, `Interp::new`, `import_environment`,
+`detect_locale`, the regex-engine choice, the `$PWD`/`$HOME` respelling, parsing
+and running `exit` — costs **0.2 ms** over `--version` (12.33 against 12.18).
+The other 12 ms is `CreateProcess` and the loader, and a 40 KB `hostname.exe`
+pays the same 12 ms and ends up 3.5 ms *slower* than the 11.9 MB `baash.exe`, so
+image size buys nothing here either. There is nothing to optimise in `baash -c`:
+that number belongs to Windows.
+
+**Everything the interactive shell costs above it is the bash-completion library
+being interpreted.** `-i --rcfile <empty>` is the same number as `-c`, so the
+merely-interactive path is free; `BAASH_NO_BASH_COMPLETION=1`, which still mounts
+the tree and still runs the built-in `config.sh`, is 13.6 ms, so neither the
+1106-file in-memory mount (~0.1 ms) nor `config.sh` (~1 ms) is the cost.
+Sourcing `bash_completion` is **9.5 ms** (+9.50 min, +9.92 median, measured as
+`. /__baash__/bash-completion/bash_completion` against an empty `--rcfile`). It
+splits into **3.0 ms of parsing** — the same file wrapped in an uncalled
+function, so nothing executes — and **6.5 ms executing** ~3800 lines of
+top-level function definitions plus the 506-line `startup-core` file that its
+own init sources.
+
+**That is the Linux story, a fifth larger.** The section above measures 8 ms for
+the same library. Windows is not paying for a port here: both platforms pay for
+sourcing 139 KB of shell, which is what `bash` does too through a
+distribution's `/etc/bash_completion`.
+
+Ruled out by measurement rather than by reading:
+
+* per-command overhead — 350 trivial commands cost 0.33 ms and 20 000 cost
+  18.3 ms, so ~1 µs each and linear in the count; 96 function definitions cost
+  0.37 ms;
+* anything superlinear in state — a 700-entry associative array plus 250
+  defined functions leave the cost of 3000 unrelated commands unchanged
+  (2.89 ms against 2.94 ms without them), and 700 associative inserts cost
+  1.26 ms, so inserts are ~1.8 µs and the array is not copied per command;
+* `shopt` (6 µs each) and `complete` (30 µs each) at startup;
+* stat'ing the POSIX paths `config.sh` probes (`/usr/share/bash-completion/…`
+  do not exist on Windows): 10–20 µs each, 0.2–0.4 ms for twenty, so the path
+  translation is not doing anything expensive;
+* the block that a prefix bisection made look hot — `_comp__init_install_xspec`
+  and its `!*.@(zip|…)` table — is 0.49 ms run on its own, and its *parse* costs
+  nothing in any context; the 3.5 ms the prefixes suggested does not survive
+  being compared with its parse-only twin, so the prefix numbers above were
+  attribution error, not a cost.
+
+The remaining lever is interpreter throughput, not a startup change: 6.5 ms for
+a few thousand commands is the tree-walking evaluator doing what the sections
+above measure it doing, and the deferred bytecode VM (`DESIGN.md` §5) is the
+only thing that would move it. A shortcut that skips the source — deferring it
+to the first `Tab`, say — would leave `_filedir` and `_init_completion`
+undefined at the prompt, which is a behaviour change, not an optimisation.
+
+The one piece of that 6.5 ms with a named cause is the largest single block,
+the 700-entry `_comp_xspecs` table the library fills at startup:
+`VarValue::Assoc` is a `Vec<(Vec<u8>, Vec<u8>)>`
+(`crates/baash-runtime/src/vars.rs`), so an insert scans for the key and the
+fill is O(n²) — 1.26 ms of the 9.5, and every later lookup is a linear walk
+too. A hash table in place of the `Vec` would take that to ~0.1 ms, and would
+matter far more to a script with a large associative array than it does here;
+it is a separate change, because iteration order is observable in `declare -p`
+and `${!a[@]}`, so it is not a swap to make while measuring startup.
+
+Not measured: **time to the first prompt in a real console.** `ssh -tt` does
+give a ConPTY, and the REPL paints its prompt through it (`win@WINVM C:~ $`,
+with `OSC 0` titling the window and `OSC 133` marks around the prompt), but the
+round trip's own ~300 ms swamps a 10 ms difference. The `-i -c` rows are the
+reliable ones; they cover the mount and both startup files, and leave out the
+history database open, the editor and the completion engine, which only the REPL
+path pays for.
+
 ## The test suite: 37 s to 5 s
 
 `cargo test` has to hold `RUST_TEST_THREADS=1` (`.cargo/config.toml`): `$( … )`
@@ -376,7 +507,10 @@ sixteen of those at once spend the machine on context switches.
 * **Startup was not the problem.** A one-shot `baash -c ':'` costs 0.40 ms in
   release, slightly *faster* than bash: a small Rust binary with no rc file and
   no linker-loaded baggage. Interactive latency is dominated by the editor and
-  the terminal, not by process start.
+  the terminal, not by process start. On Windows the same conclusion holds one
+  order of magnitude up — 12.3 ms, which is `CreateProcess` and the loader, with
+  the shell's own share at 0.2 ms (the 2026-11-17 section) — and what an
+  interactive start adds there is the bash-completion library, not the port.
 * **The tree-walking evaluator costs 1–2× bash per interpreted statement in
   release**, and is *faster* where a process is spawned (posix_spawn instead of
   fork). That is the shape this design expects: interpretation is not the
