@@ -704,7 +704,8 @@ which is the right default for a network service and 10 µs of a 0.53 ms
 startup — 2% of the number this file's first section is about — for a defence
 with nothing to defend: a flood needs keys an attacker chose, and anything that
 can choose a variable name or an array subscript already runs inside this
-shell. Bash's own variable hash is fixed too. `baash-lang`'s `hasher::seeded`
+shell. `DESIGN.md` §4.6 has the blunt version of that rule. Bash's own variable
+hash is fixed too. `baash-lang`'s `hasher::seeded`
 is now the one place the seed is decided, and both tables use it:
 
 | case (minimum of 7, alternating, per spawn) | before | ahash default seed | fixed seed |

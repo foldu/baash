@@ -365,11 +365,15 @@ pub trait Shell: Vars {
 
 **One seed for every hash table.** `baash_lang::hasher::seeded()` returns the
 `ahash::RandomState` the shell's tables start from: fixed seeds, no read of the
-operating system. A hash flood needs keys an attacker chose, and anything that
-can choose a variable name or an array subscript already runs as this shell, so
-the per-process random seed bought nothing and cost a `getrandom` on the startup
-path (`docs/performance.md`). The variable table and `AssocArray` both build
-from it, so the two cannot drift apart.
+operating system. The variable table and `AssocArray` both build from it, so
+the two cannot drift apart, and a start pays no `getrandom`
+(`docs/performance.md`).
+
+This is a deliberate non-goal, not an oversight: the tables do **not** resist
+hash-flooding collision attacks. A shell evaluates the code it is handed, and
+if you are evaluating untrusted input with your shell you are fucked anyway —
+the script already runs arbitrary commands with your privileges. `DESIGN.md`
+§4.6 is where that decision is argued; bash's variable hash is fixed too.
 
 - `get` must serve the specials `?`, `-`, `$`, `!`, `0` as ordinary lookups;
   `$#` is computed from `positional()`. `None` (unset) and `Some(b"")` (null) are

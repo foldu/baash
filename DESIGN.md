@@ -387,6 +387,19 @@ pub struct Var { pub value: VarValue, pub attrs: Attrs }
 pub enum VarValue { Unset, Str(BStr), Indexed(Vec<BStr>), Assoc(IndexMap<BStr, BStr>) }
 ```
 
+The store is a hash table that keeps insertion order (`IndexMap` + `ahash`)
+rather than a vector of pairs, because a name lookup is the most frequent
+operation the evaluator performs and a scan is O(names) per read
+(`docs/performance.md`). Its hasher is **pre-seeded with fixed constants**: one
+place decides (`baash_lang::hasher::seeded`), and no shell start reads a random
+source. That is a deliberate decision to give up resistance to hash-flooding
+collision attacks. A shell evaluates the code it is handed; if you are
+evaluating untrusted input with your shell you are fucked anyway — the script
+already runs arbitrary commands with your privileges, so a quadratic hash table
+is not the vulnerability, and paying a `getrandom` on the startup path to
+defend against it buys nothing. Bash's own variable hash is fixed for the same
+reason.
+
 Global stack → function frames → `local`/`declare` frames. Exportedness is an
 attribute. Assignments preceding a simple command are temporary and exported
 into that command's environment; preceding a *special built-in* they persist

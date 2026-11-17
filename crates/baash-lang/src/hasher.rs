@@ -11,6 +11,13 @@
 //!
 //! One place decides, so the variable table and the associative array cannot
 //! drift apart.
+//!
+//! This gives up resistance to hash-flooding collision attacks, on purpose and
+//! in writing (`DESIGN.md` §4.6): a shell evaluates the code it is given, and
+//! if you are evaluating untrusted input with your shell you are fucked anyway
+//! — the script already runs arbitrary commands with your privileges, so a
+//! quadratic hash table is not the vulnerability. Bash's own variable hash is
+//! fixed for the same reason.
 
 use ahash::RandomState;
 
