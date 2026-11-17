@@ -581,7 +581,11 @@ wins**: the environment, an rc file or an assignment at the prompt replaces the
 value and the normal template path renders exactly those bytes. The REPL's
 legacy `[branch ~N]` suffix is appended only to user-defined prompts, because
 the stock prompt already contains the branch and the counters. `N` there is
-modified plus untracked.
+modified plus untracked. A user-defined prompt is never repainted from the stock
+one: the editor's idle backstop still asks, and `PromptState::refresh` answers
+nothing unless the stock prompt was armed (otherwise a `PS1` set by
+`PROMPT_COMMAND`, as starship's is, was replaced by an empty `$ ` one second
+after it appeared).
 
 `expand_with_variables(template, context, shell) -> ExpandedPrompt` is the
 two-pass form: it decodes the escapes, then — when `context.prompt_vars` is set

@@ -259,6 +259,16 @@ impl Default for PromptState {
 #[cfg(target_os = "linux")]
 impl LivePrompt for PromptState {
     fn refresh(&mut self) -> Option<Prompt> {
+        // Only the stock prompt is live. A user-defined `PS1` was rendered by
+        // `PROMPT_COMMAND` and is not ours to recompose: `compose` reads state
+        // nobody armed for it (`arm` is the stock branch), so answering would
+        // paint an empty `$ ` over the user's prompt. The editor's idle
+        // backstop asks once a second whatever the prompt is, which made this
+        // show up as "the prompt turns into `$ ` after a second, and comes back
+        // after the next command" with starship, whose prompt is a `PS1`.
+        if !self.adopted {
+            return None;
+        }
         // Draining is what re-arms the poll: readiness stays set until the
         // queue is empty, so a refresh that did not read would spin. The wake
         // channel is drained for the same reason, and the byte carries no news
@@ -293,6 +303,19 @@ impl LivePrompt for PromptState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_prompt_that_was_never_armed_answers_nothing() {
+        // Regression: the editor's idle backstop asks `refresh` once a second
+        // whatever the prompt is, and `compose` answered with state nobody had
+        // armed. With starship — a `PS1` set from `PROMPT_COMMAND`, so the
+        // prompt is the user's and `disarm` leaves `adopted` false — the
+        // editor painted `$ ` over the starship prompt one second after it
+        // appeared, and the next command brought it back.
+        let mut state = PromptState::new();
+        assert!(state.refresh().is_none());
+    }
 
     #[test]
     fn every_prompt_ticks_the_git_cache_not_only_a_cd() {
