@@ -59,7 +59,7 @@ portable-aarch64:
     nix build .#portable-aarch64 -o result-portable-aarch64
 
 # Cut a release: gate, bump, commit, tag `v<version>`, push; the tag publishes.
-release version: check test conformance
+release version: (_release-version version) check test conformance
     # `--no-confirm`: this recipe is the confirmation, and cargo-release's own
     # prompt is read from a stdin this sandboxed terminal does not give it —
     # the first 0.1.0-rc.1 attempt answered `y`, printed the plan, and changed
@@ -80,6 +80,13 @@ release version: check test conformance
 # result (`docs/releasing.md`, "Keeping the log").
 release-logged *args:
     scripts/release-log.sh {{args}}
+
+# Fail on a tag-shaped argument before the gate. `cargo release` parses its
+# version only after `check test conformance` have run, so `just release v0.1.2`
+# spent the whole gate before saying `unexpected character 'v'`. The argument is
+# the version; the tag is `v{{version}}` (`release.toml`).
+_release-version version:
+    @v='{{version}}'; case "$v" in v[0-9]*) printf 'release: the version, not the tag — %s, not %s\n' "${v#v}" "$v"; exit 2;; esac
 
 # Regenerate the embedded completion tables from the pinned carapace.
 carapace-data:

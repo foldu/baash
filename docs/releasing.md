@@ -9,6 +9,9 @@ just release 0.1.0-rc.1     # a prerelease: builds and publishes, marked
 just release 0.1.0          # the release
 ```
 
+The argument is the **version**, not the tag: `cargo release` makes the tag
+`v<version>` itself, and a leading `v` is refused before the gate runs.
+
 `baash` is a shell, not a library: no crate goes to crates.io, and the only
 artifact is the executable.
 
