@@ -109,6 +109,17 @@ of `SignalSet::set`, for a forked child that must not inherit the shell's
 blocked traps. `SIGALRM`, `SIGTERM`, `SIGINT`, `SIGQUIT` and `ECHILD` are
 re-exported so `baash-vm` needs no `libc`.
 
+**`SignalSet` is a `u64` bitmask, not a `sigset_t`.** Linux numbers signals 1 to
+64, so membership is a shift, iteration a bit scan and equality one compare; the
+`sigset_t` that `sigprocmask`, `signalfd` and `posix_spawn` want is built only at
+those calls (crate-private `to_libc`). It used to wrap `sigset_t` and ask
+`sigismember` everything, which cost 64 libc calls per iteration and up to 128
+per comparison — 10% of a subshell's CPU once the scope stopped copying the
+variable store (`docs/performance.md`). `current()` is the one place that still
+reads a mask through libc, once per mask change; numbers outside 1..=64 are
+ignored rather than an error, because they are not signals this process can
+block and every caller is a loop that would otherwise special-case them.
+
 **`notify::Notifier` is a wake-up pipe, not an event queue.** The prompt's git
 counters come from a worker, and a finished `spawn_blocking` task is not
 something a poll can see: without a descriptor of its own, a landed refresh only

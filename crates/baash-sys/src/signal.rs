@@ -15,24 +15,25 @@ use std::fmt;
 use std::io;
 use std::mem::MaybeUninit;
 
-/// A set of signals, wrapping `sigset_t`.
+/// A set of signals, as a bitmask.
 ///
-/// Signals are numbered from 1; the iterator covers the range Linux uses
-/// (`1..=64`). Signals that do not exist on the host are simply never present.
-#[derive(Clone, Copy)]
+/// Linux numbers signals 1 to 64, which is exactly a `u64`: membership is a
+/// shift, iteration a bit scan, and two sets compare as two words. The
+/// `sigset_t` that `sigprocmask` and `signalfd` want is built only at those
+/// calls — asking libc `sigismember` in a loop was 10% of a subshell's CPU
+/// after the scope stopped copying the variable table, because `sync_traps`
+/// walks both the wanted and the blocked set on every change and
+/// `PartialEq` used to walk all 64 entries too (`docs/performance.md`).
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct SignalSet {
-    set: libc::sigset_t,
+    /// Bit `n - 1` is signal `n`; signals are numbered from 1.
+    bits: u64,
 }
 
 impl SignalSet {
     /// The empty set.
     pub fn empty() -> Self {
-        // SAFETY: a zeroed `sigset_t` is a valid representation and
-        // `sigemptyset` initialises it for the host libc.
-        let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
-        // SAFETY: `set` is valid for writes.
-        unsafe { libc::sigemptyset(&mut set) };
-        Self { set }
+        Self { bits: 0 }
     }
 
     /// A set containing the given signals. Out-of-range entries are ignored.
@@ -46,32 +47,45 @@ impl SignalSet {
 
     /// Add `signal`; returns whether it was a valid signal number.
     pub fn insert(&mut self, signal: libc::c_int) -> bool {
-        // SAFETY: `self.set` is an initialised `sigset_t`.
-        unsafe { libc::sigaddset(&mut self.set, signal) == 0 }
+        let Some(bit) = bit_of(signal) else {
+            return false;
+        };
+        self.bits |= bit;
+        true
     }
 
     /// Remove `signal`; returns whether it was present.
     pub fn remove(&mut self, signal: libc::c_int) -> bool {
-        // SAFETY: `self.set` is an initialised `sigset_t`.
-        unsafe { libc::sigdelset(&mut self.set, signal) == 0 }
+        let Some(bit) = bit_of(signal) else {
+            return false;
+        };
+        let present = self.bits & bit != 0;
+        self.bits &= !bit;
+        present
     }
 
     /// Whether `signal` is a member of the set.
     pub fn contains(&self, signal: libc::c_int) -> bool {
-        // SAFETY: `self.set` is an initialised `sigset_t`.
-        unsafe { libc::sigismember(&self.set, signal) == 1 }
+        bit_of(signal).is_some_and(|bit| self.bits & bit != 0)
     }
 
     /// Whether the set contains no signals.
     pub fn is_empty(&self) -> bool {
-        self.iter().next().is_none()
+        self.bits == 0
     }
 
     /// Iterate the member signals in ascending order.
     pub fn iter(&self) -> impl Iterator<Item = libc::c_int> + '_ {
-        // libc does not export NSIG portably; 64 is Linux's `_NSIG - 1` and
-        // covers the BSDs. `contains` is false for numbers the host lacks.
-        (1..=64).filter(move |signal| self.contains(*signal))
+        let mut rest = self.bits;
+        std::iter::from_fn(move || {
+            if rest == 0 {
+                return None;
+            }
+            // Lowest set bit: its index is the signal number minus one.
+            let index = rest.trailing_zeros();
+            rest &= rest - 1;
+            Some(index as libc::c_int + 1)
+        })
     }
 
     /// Block these signals in the calling thread, returning a guard that
@@ -107,14 +121,23 @@ impl SignalSet {
         }
         // SAFETY: success means `set` was initialised.
         let set = unsafe { set.assume_init() };
-        Ok(Self { set })
+        let mut bits = 0u64;
+        for signal in 1..=64 {
+            // SAFETY: `set` is an initialised `sigset_t`, and every number in
+            // the range is one libc accepts.
+            if unsafe { libc::sigismember(&set, signal) } == 1 {
+                bits |= 1u64 << (signal - 1);
+            }
+        }
+        Ok(Self { bits })
     }
 
     fn apply(&self, how: libc::c_int) -> io::Result<MaskGuard> {
+        let raw = self.to_libc();
         let mut previous = MaybeUninit::<libc::sigset_t>::uninit();
-        // SAFETY: `&self.set` and `previous` are valid; `sigprocmask` writes
-        // the old mask on success and retains neither pointer.
-        let rc = unsafe { libc::sigprocmask(how, &self.set, previous.as_mut_ptr()) };
+        // SAFETY: `raw` and `previous` are valid; `sigprocmask` writes the old
+        // mask on success and retains neither pointer.
+        let rc = unsafe { libc::sigprocmask(how, &raw, previous.as_mut_ptr()) };
         if rc != 0 {
             return Err(io::Error::last_os_error());
         }
@@ -123,25 +146,29 @@ impl SignalSet {
         Ok(MaskGuard { previous })
     }
 
-    /// The underlying `sigset_t`, for the spawn and signal-fd entry points.
-    pub(crate) fn as_ptr(&self) -> *const libc::sigset_t {
-        &self.set
+    /// The libc representation, built only for the calls that take one.
+    pub(crate) fn to_libc(self) -> libc::sigset_t {
+        // SAFETY: a zeroed `sigset_t` is a valid representation and
+        // `sigemptyset` initialises it for the host libc.
+        let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `set` is valid for writes.
+        unsafe { libc::sigemptyset(&mut set) };
+        for signal in self.iter() {
+            // SAFETY: every signal here came from `bits`, which `insert` only
+            // sets for 1..=64 — the range Linux defines.
+            unsafe { libc::sigaddset(&mut set, signal) };
+        }
+        set
     }
 }
 
-impl Default for SignalSet {
-    fn default() -> Self {
-        Self::empty()
-    }
+/// The bit for a signal number, or `None` when the host has no such signal.
+///
+/// Linux numbers signals 1 to 64; asking for anything else is not an error a
+/// caller can act on, and every set operation ignores it.
+fn bit_of(signal: libc::c_int) -> Option<u64> {
+    (1..=64).contains(&signal).then(|| 1u64 << (signal - 1))
 }
-
-impl PartialEq for SignalSet {
-    fn eq(&self, other: &Self) -> bool {
-        self.iter().eq(other.iter())
-    }
-}
-
-impl Eq for SignalSet {}
 
 impl fmt::Debug for SignalSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -320,9 +347,10 @@ pub fn ignore_signals(signals: &[libc::c_int]) -> io::Result<SignalGuard> {
 /// child that must not inherit the shell's blocked trap signals needs the
 /// change to persist for its whole life, which is this function.
 pub fn replace_signal_mask(set: &SignalSet) -> io::Result<()> {
-    // SAFETY: `set` is an initialised `sigset_t`; `sigprocmask` retains no
+    let raw = set.to_libc();
+    // SAFETY: `raw` is an initialised `sigset_t`; `sigprocmask` retains no
     // pointer.
-    if unsafe { libc::sigprocmask(libc::SIG_SETMASK, set.as_ptr(), std::ptr::null_mut()) } != 0 {
+    if unsafe { libc::sigprocmask(libc::SIG_SETMASK, &raw, std::ptr::null_mut()) } != 0 {
         Err(io::Error::last_os_error())
     } else {
         Ok(())
@@ -369,11 +397,10 @@ mod platform {
         /// The descriptor is close-on-exec and non-blocking, so the event loop
         /// can poll it and drain it until [`SignalFd::read`] returns `Ok(None)`.
         pub fn new(mask: &SignalSet) -> io::Result<Self> {
-            // SAFETY: `-1` asks for a new descriptor; `mask.as_ptr()` is a
-            // valid `sigset_t`; the flags are valid signalfd flags.
-            let fd = unsafe {
-                libc::signalfd(-1, mask.as_ptr(), libc::SFD_CLOEXEC | libc::SFD_NONBLOCK)
-            };
+            let raw = mask.to_libc();
+            // SAFETY: `-1` asks for a new descriptor; `raw` is a valid
+            // `sigset_t`; the flags are valid signalfd flags.
+            let fd = unsafe { libc::signalfd(-1, &raw, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK) };
             if fd < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -384,8 +411,9 @@ mod platform {
 
         /// Replace the set of signals this reader reports.
         pub fn set_mask(&mut self, mask: &SignalSet) -> io::Result<()> {
-            // SAFETY: `self.fd` is a live signalfd and `mask` is a valid set.
-            let fd = unsafe { libc::signalfd(self.fd.as_raw_fd(), mask.as_ptr(), 0) };
+            let raw = mask.to_libc();
+            // SAFETY: `self.fd` is a live signalfd and `raw` is a valid set.
+            let fd = unsafe { libc::signalfd(self.fd.as_raw_fd(), &raw, 0) };
             if fd < 0 {
                 Err(io::Error::last_os_error())
             } else {
@@ -526,6 +554,30 @@ mod tests {
         assert!(set.remove(libc::SIGINT));
         assert_eq!(set.iter().collect::<Vec<_>>(), vec![libc::SIGTERM]);
         assert_eq!(SignalSet::of(&[libc::SIGTERM]), set);
+    }
+
+    #[test]
+    fn signals_outside_the_host_range_are_ignored() {
+        // The bitmask has room for exactly the 64 numbers Linux defines; a
+        // caller that passes something else (a BSD number, a zero) must not
+        // set a bit that would shift into the wrong signal.
+        let mut set = SignalSet::empty();
+        assert!(!set.insert(0));
+        assert!(!set.insert(-1));
+        assert!(!set.insert(65));
+        assert!(set.is_empty());
+        assert!(!set.contains(65));
+        assert!(!set.remove(0));
+        assert!(set.insert(64));
+        assert!(set.contains(64));
+        assert_eq!(set.iter().collect::<Vec<_>>(), vec![64]);
+        // The libc form is exercised by the block/signalfd tests below; the
+        // mask round-trip through `sigprocmask` is what proves it. The highest
+        // number has to survive that trip, so it is blocked and read back.
+        if let Ok(guard) = set.block() {
+            assert!(SignalSet::current().unwrap().contains(64));
+            drop(guard);
+        }
     }
 
     #[test]

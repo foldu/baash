@@ -770,10 +770,38 @@ path fails the test that exercises it; and the conformance ratchet runs the
 debug build over its 2787 cases. It is the same 2357 (+0), and the debug check
 in the ratchet's own loop costs nothing measurable (7.79 s against 7.74 s).
 
-What is left in a scope is the signal mask: `enter_scope_signals` and
-`leave_scope_signals` are 5–8% of the substitution loop (`sigismember` on the
-parent's set), and they are about dispositions rather than state, so they are a
-separate change.
+### 2026-11-17: the signal set stops asking libc about each signal
+
+The section above left one item in a scope: the signal mask. With the variable
+copy gone, `sigismember` was **10.7%** of the `( : )` loop, called from
+`sync_traps` (7.1%), `close_scope` (2.0%) and `exec_simple` (1.6%).
+
+The cause was the representation. `SignalSet` wrapped `sigset_t` and asked
+libc for everything: `iter()` tested all 64 numbers with `sigismember`, and
+`PartialEq` — which `sync_traps` runs to compare the wanted set with the
+blocked one — compared two sets by iterating both, so one comparison could be
+128 libc calls. `sync_traps` walks both sets on every change.
+
+It is a `u64` now. Linux numbers signals 1 to 64, which is exactly a word:
+membership is a shift, iteration a bit scan (`trailing_zeros`, clear the lowest
+bit), equality one compare, and the empty set is `0`. The `sigset_t` is built
+only where a syscall wants one — `sigprocmask`, `signalfd`, `posix_spawn` —
+and `current()` still reads the mask through libc, because it has to; that is
+once per mask change rather than once per signal examined.
+
+| case (minimum of 15, alternating runs) | before | after | |
+| --- | ---: | ---: | ---: |
+| `( : )` ×20k | 63.1 ms | 52.5 ms | **−17%** |
+| `x=$(echo $n)` ×20k | 111.7 ms | 103.5 ms | −7.3% |
+| `x=$(env true)` ×3k | 2611.6 ms | 2615.8 ms | — |
+| interpreter loop, 100k | 256.9 ms | 257.2 ms | — |
+| `env true` ×200 | 170.3 ms | 171.1 ms | — |
+| `baash -c exit` | 0.39 ms | 0.39 ms | — |
+
+`sigismember` is gone from the sampled profile of that loop; what is left there
+is the command itself (allocator, expansion, one `sigprocmask` per scope).
+Cumulatively, against the snapshot this page started from, `( : )` ×20k is
+102.8 → 52.5 ms, −49%.
 
 ## The test suite: 37 s to 5 s
 

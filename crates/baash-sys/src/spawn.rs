@@ -418,14 +418,16 @@ impl SpawnAttr {
     }
 
     fn set_sigdefault(&mut self, set: &SignalSet) -> io::Result<()> {
-        // SAFETY: `self.0` is initialised and `set` is a valid `sigset_t`.
-        let rc = unsafe { libc::posix_spawnattr_setsigdefault(&mut self.0, set.as_ptr()) };
+        let raw = set.to_libc();
+        // SAFETY: `self.0` is initialised and `raw` is a valid `sigset_t`.
+        let rc = unsafe { libc::posix_spawnattr_setsigdefault(&mut self.0, &raw) };
         spawn_result(rc)
     }
 
     fn set_sigmask(&mut self, set: &SignalSet) -> io::Result<()> {
-        // SAFETY: `self.0` is initialised and `set` is a valid `sigset_t`.
-        let rc = unsafe { libc::posix_spawnattr_setsigmask(&mut self.0, set.as_ptr()) };
+        let raw = set.to_libc();
+        // SAFETY: `self.0` is initialised and `raw` is a valid `sigset_t`.
+        let rc = unsafe { libc::posix_spawnattr_setsigmask(&mut self.0, &raw) };
         spawn_result(rc)
     }
 }
@@ -516,10 +518,10 @@ fn apply_process_attributes(reset_signals: &SignalSet, sigmask: Option<&SignalSe
     }
 
     if let Some(mask) = sigmask {
-        // SAFETY: `mask` is an initialised `sigset_t`; the call does not retain
+        let raw = mask.to_libc();
+        // SAFETY: `raw` is an initialised `sigset_t`; the call does not retain
         // the pointer.
-        if unsafe { libc::sigprocmask(libc::SIG_SETMASK, mask.as_ptr(), std::ptr::null_mut()) } != 0
-        {
+        if unsafe { libc::sigprocmask(libc::SIG_SETMASK, &raw, std::ptr::null_mut()) } != 0 {
             return last_errno();
         }
     }
