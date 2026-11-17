@@ -368,23 +368,64 @@ impl Field {
 
     /// [`Field::has_active_glob`], with the shell's `extglob` setting.
     pub fn has_active_glob_with(&self, extglob: bool) -> bool {
-        self.bytes
-            .iter()
-            .zip(&self.quoted)
-            .enumerate()
-            .any(|(i, (&b, &q))| {
-                if q {
-                    return false;
-                }
-                match b {
-                    b'*' | b'?' | b'[' => true,
-                    b'@' | b'+' | b'!' => {
-                        extglob && self.bytes.get(i + 1) == Some(&b'(') && !self.quoted[i + 1]
-                    }
-                    _ => false,
-                }
-            })
+        has_active_glob(&self.bytes, &self.quoted, extglob)
     }
+}
+
+/// Whether an unquoted glob metacharacter is active in these bytes.
+///
+/// `quoted` is the per-byte quoting mask; an index with no entry counts as
+/// quoted, which is what a caller without a mask wants. With `extglob` on, the
+/// group openers are metacharacters too: `@(a)` is a pattern even though it
+/// contains no `*`, and failing to say so leaves it unexpanded, which is a
+/// whole class of silently-wrong results rather than an error.
+///
+/// This is the one place the set is decided: [`Field::has_active_glob_with`]
+/// and the pathname expander ask it, so "is this a pattern?" cannot answer
+/// differently in the two halves of the shell.
+pub fn has_active_glob(bytes: &[u8], quoted: &[bool], extglob: bool) -> bool {
+    for (index, &byte) in bytes.iter().enumerate() {
+        if quoted.get(index).copied().unwrap_or(true) {
+            continue;
+        }
+        match byte {
+            b'*' | b'?' => return true,
+            b'[' if opens_bracket(bytes, index) => return true,
+            b'@' | b'+' | b'!'
+                if extglob
+                    && bytes.get(index + 1) == Some(&b'(')
+                    && !quoted.get(index + 1).copied().unwrap_or(true) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Whether the `[` at `at` opens a bracket expression rather than standing for
+/// itself.
+///
+/// A `]` has to follow, after an optional `!` or `^` and an optional `]` as the
+/// first member: glibc's `glob_pattern_p` asks the same question the same way,
+/// and POSIX treats a special character that cannot be used as itself as an
+/// ordinary one.
+///
+/// It matters more than it looks. `[` alone is the first word of
+/// `[ -f x ]`, the most-run word in a shell script; treating it as a pattern
+/// made every test read the working directory (`set -f` made `[` as cheap as
+/// `test`, which is how it was found), and it made `nullglob` delete the word
+/// and `failglob` fail on it.
+fn opens_bracket(bytes: &[u8], at: usize) -> bool {
+    let mut index = at + 1;
+    if matches!(bytes.get(index), Some(b'!') | Some(b'^')) {
+        index += 1;
+    }
+    if bytes.get(index) == Some(&b']') {
+        index += 1;
+    }
+    bytes[index..].contains(&b']')
 }
 
 /// Stage 1: tilde expansion (POSIX XCU 2.6.1).

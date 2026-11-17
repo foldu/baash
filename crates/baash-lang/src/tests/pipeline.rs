@@ -117,6 +117,24 @@ fn quoting_mask_controls_globbing() {
 }
 
 #[test]
+fn a_bracket_expression_needs_its_closing_bracket() {
+    // Regression: `[` was a pattern, so `[ 1 -lt 2 ]` — the most-run word in a
+    // shell script — made the shell read the working directory on every call
+    // (`set -f` made it as cheap as `test`), `nullglob` deleted the word, and
+    // `failglob` failed on it. glibc's `glob_pattern_p` asks the same question.
+    assert!(!Field::plain(b"[".to_vec()).has_active_glob());
+    assert!(!Field::plain(b"[ab".to_vec()).has_active_glob());
+    assert!(!Field::plain(b"[]".to_vec()).has_active_glob());
+    assert!(!Field::plain(b"[!]".to_vec()).has_active_glob());
+    // `]` as the first member is literal, so these are real expressions.
+    assert!(Field::plain(b"[]]".to_vec()).has_active_glob());
+    assert!(Field::plain(b"[!]]".to_vec()).has_active_glob());
+    assert!(Field::plain(b"[^a]".to_vec()).has_active_glob());
+    // Quoting still wins: `'['` is the character, mask and all.
+    assert!(!Field::plain(b"a[b".to_vec()).has_active_glob());
+}
+
+#[test]
 fn command_substitution_is_split_unless_quoted() {
     let mut shell = TestShell::new().cmdsub(b"echo hi", b"hi there");
     assert_argv(&one("$(echo hi)", &mut shell), &["hi", "there"], "unquoted");

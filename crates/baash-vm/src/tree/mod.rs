@@ -1722,6 +1722,15 @@ impl baash_lang::Shell for Interp {
         if self.state.opts.noglob {
             return Ok(None);
         }
+        // A field with no active metacharacter is its own pathname, so it is
+        // not a pattern: nothing matched, and `nullglob`/`failglob` have
+        // nothing to say about it. `expand_pathnames` already gates on this;
+        // the check is repeated because `pathname` is also an entry point of
+        // its own, and answering `None` from here is the difference between
+        // "leave the word alone" and "remove it".
+        if !crate::glob::has_meta(&pattern.bytes, &pattern.quoted, self.state.opts.extglob) {
+            return Ok(None);
+        }
         // `nocaseglob`, not `nocasematch`, folds case in pathnames; the rest
         // of the dialect (`extglob`) comes from the shared flags.
         //

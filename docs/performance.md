@@ -475,6 +475,33 @@ reliable ones; they cover the mount and both startup files, and leave out the
 history database open, the editor and the completion engine, which only the REPL
 path pays for.
 
+### 2026-11-17: `[` opened the working directory on every call
+
+`[` is the most-run word in a shell script, and it was being treated as a
+pattern: a lone `[` set the field's glob metacharacter, so `[ 1 -lt 2 ]` sent
+its first word to pathname expansion, which read the current directory and
+matched every entry against a bracket expression that could never close. `set
+-f` made `[` as cheap as `test`, which is how it surfaced while measuring the
+Windows start above; the cost is in every shell, not only Windows.
+
+The rule is glibc's: a `[` opens a bracket expression only when a `]` follows
+it, after an optional `!`/`^` and an optional `]` as the first member. The set
+now lives in one function (`baash_lang::has_active_glob`), asked by the language
+layer before it expands a field *and* by the expander's per-component check, and
+a field that is not a pattern is left alone — which also fixed two policy bugs:
+under `nullglob` the word `[` used to vanish, and under `failglob` the command
+used to refuse to run, where bash keeps it and runs.
+
+| 20 000 calls in one `while (( ))` loop, median of 7 | before | after |
+|---|---:|---:|
+| `[ 1 -lt 2 ]`, guest | 31.6 µs | **0.63 µs** |
+| `test 1 -lt 2`, guest | 0.44 µs | 0.54 µs |
+| `[[ 1 -lt 2 ]]`, guest | 0.02 µs | 0.06 µs |
+| `[ 1 -lt 2 ]`, Linux, debug build | 13.0 µs | **4.5 µs** |
+
+`[` now costs what `test` costs. The same binary pair measured in the same guest
+session: 664.8 ms against 43.6 ms for the whole 20 000-iteration loop.
+
 ## The test suite: 37 s to 5 s
 
 `cargo test` has to hold `RUST_TEST_THREADS=1` (`.cargo/config.toml`): `$( … )`

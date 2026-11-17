@@ -51,27 +51,16 @@ impl Default for Options {
     }
 }
 
-/// Whether the word contains an active glob metacharacter.
+/// Whether the component contains an active glob metacharacter.
 ///
-/// With `extglob`, the five operators (`?(`…`) also count, so a value that
-/// comes from a variable can be expanded as an extended glob.
+/// The set is `baash_lang::has_active_glob`'s — the same function the language
+/// layer asks before it calls into this module, so a word cannot be a pattern
+/// in one half of the shell and not in the other. With `extglob`, the group
+/// openers count; this is also where a `[` with no closing `]` is a literal,
+/// so the components of a real pattern do not read a directory to discover
+/// that a lone `[` matches nothing but itself.
 pub fn has_meta(bytes: &[u8], quoted: &[bool], extglob: bool) -> bool {
-    for (index, &byte) in bytes.iter().enumerate() {
-        if quoted.get(index).copied().unwrap_or(true) {
-            continue;
-        }
-        if matches!(byte, b'*' | b'?' | b'[') {
-            return true;
-        }
-        if extglob
-            && matches!(byte, b'?' | b'*' | b'+' | b'@' | b'!')
-            && bytes.get(index + 1) == Some(&b'(')
-            && !quoted.get(index + 1).copied().unwrap_or(true)
-        {
-            return true;
-        }
-    }
-    false
+    baash_lang::has_active_glob(bytes, quoted, extglob)
 }
 
 /// Pathname expansion: sorted matches, or `None` when nothing matched (POSIX's

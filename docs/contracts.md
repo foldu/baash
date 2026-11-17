@@ -361,6 +361,14 @@ pub trait Shell: Vars {
 - `pathname` returning `None` means *no match* — leave the word alone. Returning
   `Some(vec![])` would mean "matched nothing and vanished", which is `nullglob`
   behaviour and not the default.
+- A field with **no active metacharacter is not a pattern**: it is its own
+  pathname, so `expand_pathnames` passes it through without calling `pathname`,
+  and `nullglob`/`failglob` never see it. `[` is the case that matters — it is
+  the first word of every `[ -f x ]` — but the rule is general: a `[` opens a
+  bracket expression only when a `]` follows, after an optional `!`/`^` and an
+  optional `]` as the first member (glibc's `glob_pattern_p` asks the same
+  question), so `[`, `[ab`, `[]` and `[!]` are words. `baash_lang::has_active_glob`
+  is the one implementation; the expander's per-component check calls it too.
 - `expand_words` returns `Vec<Vec<u8>>`. If the VM wants `SmallVec` argv it
   collects into it; the expansion layer does not guess the allocation strategy.
 - `quote(bytes, ctx)` covers `Unquoted`, `DoubleQuoted` and `SingleQuoted`, and

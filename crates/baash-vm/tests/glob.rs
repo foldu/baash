@@ -34,6 +34,13 @@ fn has_meta_honours_the_quoting_mask() {
     assert!(!has_meta(b"a*c", &[false, true, false], false));
     assert!(!has_meta(b"abc", &[false; 3], false));
     assert!(has_meta(b"[ab]", &[false; 4], false));
+    // A `[` with no closing `]` is the character itself. This is also the
+    // expander's copy of the test, and it must agree with the language
+    // layer's: `[ 1 -lt 2 ]` is a word, not a pattern (`baash_lang`,
+    // `has_active_glob`).
+    assert!(!has_meta(b"[", &[false], false));
+    assert!(!has_meta(b"[ab", &[false; 3], false));
+    assert!(has_meta(b"[]]", &[false; 3], false));
     // Extglob operators only count when the dialect allows them.
     assert!(has_meta(b"@(a|b)", &[false; 6], true));
     assert!(!has_meta(b"@(a|b)", &[false; 6], false));

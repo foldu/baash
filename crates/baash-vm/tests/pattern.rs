@@ -108,6 +108,37 @@ fn nocasematch_folds_case_but_strips_do_not() {
     assert_eq!(interp.run_named("-c", b"[[ a == A ]]"), Status(1));
 }
 
+/// `[` is a word, so the word-level policies leave it alone.
+///
+/// Regression: it looked like a bracket expression, so `nullglob` removed it
+/// and `failglob` refused to run the command — where bash prints `[`. The same
+/// mistake made every `[ 1 -lt 2 ]` read the working directory.
+#[test]
+fn a_bare_bracket_is_a_word_not_a_pattern() {
+    let mut interp = interp();
+    assert_eq!(
+        interp.run_named("-c", b"shopt -s nullglob; set -- [; c=$#"),
+        Status(0)
+    );
+    assert_eq!(var(&interp, b"c").as_deref(), Some("1"));
+    // An unterminated expression is the same case: `[ab` names nothing.
+    assert_eq!(interp.run_named("-c", b"set -- [ab; c=$#"), Status(0));
+    assert_eq!(var(&interp, b"c").as_deref(), Some("1"));
+    // A real expression that matches nothing is still a pattern: `nullglob`
+    // removes it, which is the contrast that proves the gate is the bracket.
+    assert_eq!(interp.run_named("-c", b"set -- [ab]; c=$#"), Status(0));
+    assert_eq!(var(&interp, b"c").as_deref(), Some("0"));
+    // `failglob` has nothing to complain about, and the command still runs.
+    assert_eq!(
+        interp.run_named(
+            "-c",
+            b"shopt -u nullglob; shopt -s failglob; set -- [; c=$?"
+        ),
+        Status(0)
+    );
+    assert_eq!(var(&interp, b"c").as_deref(), Some("0"));
+}
+
 #[test]
 fn an_unmatched_glob_leaves_the_word_alone() {
     let mut interp = interp();
