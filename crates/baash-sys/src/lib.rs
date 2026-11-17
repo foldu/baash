@@ -43,6 +43,9 @@
 //! * [`paths`] — the lexical path grammar: what a *root* is here, so a logical
 //!   `cd`, `PWD` and the directory stack agree on both platforms without the
 //!   kernel canonicalising anything.
+//! * [`program`] — which file a command *name* names: the `PATHEXT` suffixes
+//!   Windows appends (and the order that makes `code` find `code.cmd`), plus
+//!   the `cmd.exe /s /c` line a batch file has to be started with.
 //! * [`osc::cwd_report`] — the working-directory announcement (OSC 7) that
 //!   terminals use for new tabs, splits and panes. It is a file URI, so the
 //!   path is percent-encoded and the host is not `localhost`; Windows also
@@ -81,6 +84,7 @@ pub mod notify;
 pub mod osc;
 pub mod outcome;
 pub mod paths;
+pub mod program;
 #[cfg(unix)]
 pub mod pty;
 pub mod regex;

@@ -350,6 +350,11 @@ Known gaps, stated so they are not mistaken for behaviour:
   "Built-in gaps").
 * **`printf '%(…)T'`** formats in UTC and ignores `TZ`, because the Windows C
   library has no IANA database behind it.
+* **A batch-file argument is parsed twice.** A `.cmd`/`.bat` runs through
+  `cmd.exe /d /s /c`, so an argument containing `%NAME%` is expanded by the
+  interpreter (which has no escape for `%`), and an embedded `"` can end
+  `cmd`'s quoted run early. `.exe` targets take the direct path and are
+  unaffected; §9, "The name is `code.cmd`", has the measurements.
 * **`coproc` is not in the grammar.** `coproc NAME { … }` is a parse error
   (`E0003`) and `coproc cmd` is looked up as a command, so it is the one
   construct in the "up to and including `coproc`" ceiling
@@ -614,6 +619,119 @@ are things that only exist on this platform:
 | bare names get `PATHEXT` | `whoami` is `whoami.exe`; the machine's own list is used |
 | `C:\…` is a path | the "contains a separator" test only knew `/`, so a backslash path was searched for in `PATH` |
 | entries join with `\` | a `PATH` hit became `C:\WINDOWS\system32/cmd.EXE`, and `cmd.exe` refuses to *start* from that mixed path while the same file with backslashes runs (`baash_sys::PATH_JOIN`) |
+
+### The name is `code.cmd`, not `code` (2026-11-17)
+
+The suffix search above was in the wrong order, and a `.cmd` could not have
+been started even if it had been found. Reported against VS Code, which is where
+it shows up: `code` is in `PATH`, so it should run.
+
+**Symptom, measured on the guest with the build before this change**, with VS
+Code 1.146.0 installed by `winget --scope user`:
+
+```
+$ baash -c 'command -v code'
+C:\Users\win\AppData\Local\Programs\Microsoft VS Code\bin\code
+$ baash -c 'code --version'
+baash:1:1: error[BAASH-E0205]: C:\Users\win\AppData\Local\Programs\Microsoft VS Code\bin\code: %1 is not a valid Win32 application. (os error 193)
+$ cmd /c code --version
+1.146.0
+```
+
+`…\Microsoft VS Code\bin` holds `code` (a 2 KB `#!/usr/bin/env sh` script),
+`code.cmd` (the batch file that runs the real `Code.exe`) and `code-tunnel.exe`.
+Windows has no execute bit, so `baash`'s `PATH` walk asked "is `dir\code` a
+regular file?" — the shell script is — and stopped there; `CreateProcess` then
+refuses a script that is not a PE image (193). The suffix search existed, but it
+ran *after* the bare name, which is precisely the candidate that must not win.
+
+**What Windows does**, measured on Windows 11 26300 with `cmd.exe`, in a
+hand-built directory (a bare `zz` and `zz.cmd`; a copy of `whoami.exe` named
+`barefile`; `yy.foo` beside `yy.foo.cmd`; `cc.qzx` beside `cc.qzx.cmd`):
+
+| case | `cmd /c` | why |
+|---|---|---|
+| `zz` with bare `zz` and `zz.cmd` | runs `zz.cmd` | the `PATHEXT` suffixes are the candidates; the bare name is not one |
+| `barefile` (a PE image, no extension) | `'barefile' is not recognized` | even by full path: a name with no `PATHEXT` extension is not a program |
+| `cc.qzx` with only `cc.qzx.cmd` present | runs `cc.qzx.cmd` | suffixes are appended even when the name already has an extension that is *not* in `PATHEXT` |
+| `yy.foo` with bare `yy.foo` **and** `yy.foo.cmd` | opens `yy.foo` through its file association (a modal dialog in session 0) | a dotted name that exists as a file is handed to `ShellExecute`, not to the suffix search |
+| `dd.cmd` typed in full | runs it directly | a name that already carries a known suffix is the file |
+| `PATHEXT=` cleared, and `PATHEXT` unset | `zz` still runs `zz.cmd` | empty and unset both mean the platform's default list |
+
+So the order is: `PATHEXT`'s suffixes, in `PATHEXT`'s order, and nothing else;
+a name that already ends in a known suffix is used as written; the literal file
+is a candidate only for a name the user spelled as a path, and then it is last
+(a path names a file, and `CreateProcess` will load a PE image of any name,
+which `cmd` refuses). `where zz` lists the bare file as well — `where` reports
+*files*, `cmd` executes *names* — which is why `command -v` must not be built by
+listing directories.
+
+**The fix** is `baash_sys::program` (`docs/contracts.md`): one parameterised
+walk produces the candidate files for a name, in this platform's order, and
+every VM resolution path calls it — `path_hits` (which is what `type`,
+`command -v`, `hash` and execution share) and the spelled-path branch of
+`resolve` — so what runs, what is reported, what is cached and what a subshell
+sees are one answer by construction. `PATH` entries are still tried in order,
+and within an entry only the suffix forms count: a directory holding just the
+extensionless script is not a hit, so a later directory can still supply the
+program (`cmd` refuses such a file even by full path, measured above).
+
+**Starting it** is the other half: a `.cmd`/`.bat` is text, so
+`CreateProcess` cannot load it. `baash-sys` now starts one as
+`%ComSpec% /d /s /c "<path>" <args…>`. `/s` is what makes an outer quote pair
+mean "this whole line is the command", so a path with spaces — "Microsoft VS
+Code" has one — stays one word; every argument is quoted even without a space
+because `/s` strips the line's first and last quote; inside a token the
+backslash/quote rules are the C runtime's, which is what the batch file's `%1`
+… `%9` end up being parsed with. `/d` skips a machine's `AutoRun` commands.
+
+**Verified on the `winvm` guest (2026-11-17)**, VS Code 1.146.0 from `winget`,
+cross-built `baash.exe` (`nix build .#windows-fast`), scripts run as
+`baash.exe C:/build/verify.sh`:
+
+| case | result |
+|---|---|
+| `command -v code` | `…\Microsoft VS Code\bin\code.CMD` |
+| `type code` | `code is …\Microsoft VS Code\bin\code.CMD` |
+| `code --version` | `1.146.0` / commit / `x64`, status 0 |
+| `code.cmd --version` | same, status 0 (a full name with a known suffix is used as written) |
+| `whoami.exe` typed in full | `winvm\win`, status 0 (a PE image keeps the direct path) |
+| `hash` after both | the two entries above, i.e. what was cached is what ran |
+| `echo "$(command -v code)"` and `x=$(code --version)` | the same path, and the captured output |
+| a spelled path with no suffix (`"C:/…/bin/code" --version`) and `./code` in that directory | `code.CMD`, status 0; `command -v ./code` agrees |
+| a name in a directory with spaces, arguments `'C:\temp\'`, `""`, `"a b"`, `'say "hi"'` | the child's CRTs saw `C:\temp\`, ``, `a b`, `say "hi"` — exact |
+| `PATH` without the VS Code directory, then with it | 127, then 0 (a miss is not cached) |
+| `PATHEXT=".CMD"` | `code --version` runs |
+| a directory holding only the extensionless script | `code: command not found`, 127 — and `cmd` says `'…\code' is not recognized` |
+| `cmd.exe /c echo hi`, `echo hi \| cmd.exe /c more` | unchanged: the interpreter is a PE image |
+
+Two details worth knowing. The resolved spelling carries `PATHEXT`'s case
+(`code.CMD`) rather than the file's (`code.cmd`), because the suffix is
+appended as the machine wrote it; NTFS folds the case and `cmd` does the same.
+And `exec code` still fails with `BAASH-E0205` ("there is no exec on Windows"),
+now naming `code.CMD`; that is the Windows `exec` gap in §8, not this one.
+
+**Still open**, all measured or reasoned above and none of them this bug:
+
+* An argument containing `%NAME%` is expanded by `cmd.exe` before the batch
+  file sees it (measured: `%USERNAME%` arrived as `win`), and `cmd` has no
+  escape for `%`. An embedded `"` is written `\"` for the program's parser but
+  `cmd`'s own quote scan does not treat backslash as an escape, so it can end
+  the quoted run early.
+* The hash table is not invalidated when `PATH` or `PATHEXT` is assigned —
+  pre-existing, and bash flushes its table on a `PATH` assignment. Measured:
+  after `PATHEXT=".EXE"` a previously hashed `code` still ran; `hash -r` made
+  the next lookup honour the new list (127). Nothing caches a *failure*, so a
+  directory that appears later in the same shell is found (measured above), and
+  a path resolved by this change is the one cached, so the new answer cannot be
+  defeated by an old entry.
+* `./code` in a directory holding only the extensionless script is still tried
+  as that file (the spelled-path fallback) and fails 193. `cmd` refuses it with
+  "not recognized" instead. Keeping the attempt is deliberate: it is how an
+  extensionless PE the user named explicitly still runs.
+* A batch file's pid is the interpreter's: `$!` and `kill` name `cmd.exe`, and
+  `kill` ends the interpreter, not necessarily the program the batch file
+  started.
 
 ### The Windows path model: `cd`, `PWD` and the drive roots (2026-11-07)
 

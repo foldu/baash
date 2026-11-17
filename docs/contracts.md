@@ -148,6 +148,24 @@ continue after a failed `exec` (bash does) would have to restore descriptors and
 signal dispositions itself. Also: keep the owned fds referenced by
 `FdAction::Dup2 { from }` alive across the call, or the actions fail `EBADF`.
 
+**`program` answers "which file does this command name name?"** A name is a
+name: `code` is not a file until this platform says which one it is.
+`program::suffixes(flavour, pathext)` is the suffix list to search (POSIX has
+none; Windows uses `PATHEXT`, and an unset *or empty* value means
+`program::DEFAULT_PATHEXT`, which is what `cmd.exe` does); `program::candidates`
+is the ordered list of files a name may name; `program::first` is that list
+filtered by the caller's `exists` test — the VM passes its own `executable`, so
+the rule for "which file" and the rule for "may it run" cannot drift. The order
+matters and is the Windows one (`docs/portability.md` §9): the suffixes in
+`PATHEXT`'s order first, a name that already ends in a known suffix as written,
+and the literal file only for a name spelled as a path (last). `is_batch_script`
+and `interpreter_line` are the second half: a `.cmd`/`.bat` is text for
+`cmd.exe`, and `interpreter_line` builds the `/s`-shaped line (outer quote pair,
+every token quoted, C-runtime backslash rules) that `spawn` hands to
+`%ComSpec%`. The whole module takes a `Flavour` and an `exists` predicate
+instead of touching the file system, so the Windows order and the quoting are
+tested on Linux; `spawn` applies them on Windows only.
+
 Terminal code is now tested on a real pty. `open_pty` opens the slave
 `O_NOCTTY` so a test can never steal the harness's controlling terminal; the
 tests install a known canonical `termios` state first, assert every flag raw

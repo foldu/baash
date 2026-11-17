@@ -90,6 +90,20 @@ console, so the interactive path only exists on Windows. The guest is the
 `winvm` Windows 11 domain — `winvm reset` first — and the exe goes to
 `C:\build`.
 
+The `base` image has no VS Code, and that matters for one class of bug: a
+`PATH` name that is a POSIX script rather than a program. Install the layout the
+report is about with
+
+```sh
+winvm ssh -- cmd /c "winget install --id Microsoft.VisualStudioCode --silent --accept-package-agreements --accept-source-agreements --scope user"
+```
+
+which puts `…\AppData\Local\Programs\Microsoft VS Code\bin` — holding `code`
+(an extensionless `#!/usr/bin/env sh` script), `code.cmd` and
+`code-tunnel.exe` — on the *user* `PATH`. It disappears at the next `reset`, so
+install it per run or snapshot it. `docs/portability.md` §9, "The name is
+`code.cmd`", is what it is there to test.
+
 The exe cannot be replaced while it runs: end the task and kill the session-1
 `cmd`/`conhost` first, or the copy fails with a sharing violation.
 

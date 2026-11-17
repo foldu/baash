@@ -1735,10 +1735,21 @@ impl Interp {
         // is not executable the shell has to *try* it, because the failure is
         // EACCES (status 126) rather than "command not found" (127). The
         // permission check `type`/`command -v` do still applies to them.
-        if baash_sys::paths::has_separator(name)
-            && std::fs::metadata(baash_sys::os::path_from_bytes(name)).is_ok()
-        {
-            return Some(Resolution::External(name.to_vec()));
+        //
+        // The path still goes through the same name rule the walk uses, so what
+        // runs and what `command -v` reports cannot disagree: `./code` on
+        // Windows resolves next to a `code.cmd` the way `code` does, and the
+        // literal file is the last candidate rather than the first.
+        if baash_sys::paths::has_separator(name) {
+            let flavour = baash_sys::paths::Flavour::host();
+            let suffixes =
+                baash_sys::program::suffixes(flavour, self.state.vars.scalar(b"PATHEXT"));
+            if let Some(found) = executable_form(flavour, name, &suffixes, true) {
+                return Some(Resolution::External(found));
+            }
+            if std::fs::metadata(baash_sys::os::path_from_bytes(name)).is_ok() {
+                return Some(Resolution::External(name.to_vec()));
+            }
         }
         let mut found = None;
         self.each_candidate(
@@ -1775,8 +1786,16 @@ impl Interp {
     /// The hash table answers first unless the caller asked for a fresh search
     /// (`type -P`) or for every hit (`-a`).
     fn path_hits(&self, name: &[u8], query: baash_runtime::ResolveQuery) -> Vec<Vec<u8>> {
+        // `PATHEXT` is read once per search: on Windows it decides which file a
+        // name means, and a `PATH` of forty entries would otherwise split the
+        // same string forty times. On POSIX the list is empty and this is the
+        // one-name search it always was.
+        let flavour = baash_sys::paths::Flavour::host();
+        let suffixes = baash_sys::program::suffixes(flavour, self.state.vars.scalar(b"PATHEXT"));
         if baash_sys::paths::has_separator(name) {
-            return self.executable_form(name).into_iter().collect();
+            return executable_form(flavour, name, &suffixes, true)
+                .into_iter()
+                .collect();
         }
         if !query.fresh
             && !query.all
@@ -1802,7 +1821,7 @@ impl Interp {
             };
             candidate.push(baash_sys::PATH_JOIN);
             candidate.extend_from_slice(name);
-            if let Some(found) = self.executable_form(&candidate) {
+            if let Some(found) = executable_form(flavour, &candidate, &suffixes, false) {
                 hits.push(found);
                 if !query.all {
                     break;
@@ -1810,47 +1829,6 @@ impl Interp {
             }
         }
         hits
-    }
-
-    /// The file `candidate` names, trying the `PATHEXT` suffixes when it is not
-    /// itself executable.
-    ///
-    /// On Unix this is exactly [`executable`]: there is no suffix list and the
-    /// cost is one `stat`. On Windows `whoami` has to find `whoami.exe`, which
-    /// is what every Windows shell does and what the name means to the people
-    /// typing it.
-    fn executable_form(&self, candidate: &[u8]) -> Option<Vec<u8>> {
-        if executable(candidate) {
-            return Some(candidate.to_vec());
-        }
-        for extension in self.extensions() {
-            let mut with = candidate.to_vec();
-            with.extend_from_slice(&extension);
-            if executable(&with) {
-                return Some(with);
-            }
-        }
-        None
-    }
-
-    /// The suffixes a bare command name may have, in the order to try them.
-    ///
-    /// `PATHEXT` is the platform's own list, so a machine that added `.PY` or
-    /// removed `.BAT` is honoured; the fallback is what a default install sets.
-    fn extensions(&self) -> Vec<Vec<u8>> {
-        if !cfg!(windows) {
-            return Vec::new();
-        }
-        let list = self
-            .state
-            .vars
-            .scalar(b"PATHEXT")
-            .map(<[u8]>::to_vec)
-            .unwrap_or_else(|| b".COM;.EXE;.BAT;.CMD".to_vec());
-        list.split(|&byte| byte == b';')
-            .filter(|extension| !extension.is_empty())
-            .map(<[u8]>::to_vec)
-            .collect()
     }
 
     /// `PATH` search for one program, as `exec`, `.`/`source` and pipelines
@@ -2022,8 +2000,28 @@ pub(crate) fn executable(path: &[u8]) -> bool {
     }
     #[cfg(not(unix))]
     {
-        // There is no execute bit; a regular file is the test. PATHEXT-based
-        // resolution is the gap `docs/portability.md` §9 records.
+        // There is no execute bit; a regular file is the test. Which *name*
+        // that file has is `baash_sys::program`'s question — a `PATHEXT`
+        // suffix, not the file's existence, is what makes it a program.
         path.metadata().map(|meta| meta.is_file()).unwrap_or(false)
     }
+}
+
+/// The file `candidate` names under this platform's rule for an executable
+/// name.
+///
+/// On Unix that is the name itself, and the cost is one `stat`. On Windows a
+/// name is not a program until a `PATHEXT` suffix names one, and the suffix
+/// order is what makes `code` find `code.cmd` rather than the POSIX shell
+/// script the same directory also holds; [`baash_sys::program`] carries the
+/// rule and the measurement behind it. `spelled` says whether the name came in
+/// as a path, which is the only case where the literal file is a candidate at
+/// all (and then it is the last one).
+pub(crate) fn executable_form(
+    flavour: baash_sys::paths::Flavour,
+    candidate: &[u8],
+    suffixes: &[Vec<u8>],
+    spelled: bool,
+) -> Option<Vec<u8>> {
+    baash_sys::program::first(flavour, candidate, suffixes, spelled, executable)
 }

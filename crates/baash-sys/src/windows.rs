@@ -1087,12 +1087,7 @@ fn children() -> &'static Mutex<std::collections::BTreeMap<i32, std::process::Ch
 pub fn spawn(plan: SpawnPlan) -> io::Result<Child> {
     use std::os::windows::process::CommandExt;
 
-    let program = os_path(&plan.program);
-    let mut command = std::process::Command::new(program);
-    if let Some((first, rest)) = plan.argv.split_first() {
-        let _ = first;
-        command.args(rest.iter().map(|arg| os_path(arg)));
-    }
+    let mut command = command_for(&plan.program, plan.argv.get(1..).unwrap_or_default());
     command.env_clear();
     for entry in &plan.env {
         if let Some((name, value)) = split_env(entry) {
@@ -1163,6 +1158,51 @@ pub fn spawn(plan: SpawnPlan) -> io::Result<Child> {
     let pid = i32::try_from(child.id()).unwrap_or(-1);
     children().lock().ok().map(|mut map| map.insert(pid, child));
     Ok(Child { pid })
+}
+
+/// The `Command` that starts `program`, which is not always `program` itself.
+///
+/// A `.cmd`/`.bat` file is text for the command interpreter, not a PE image:
+/// `CreateProcess` refuses it outright with `ERROR_BAD_EXE_FORMAT` (193), which
+/// is exactly how `code --version` used to fail — VS Code puts a POSIX shell
+/// script called `code` and the batch file `code.cmd` in the same `PATH`
+/// directory, and only the batch file is a program. [`crate::program`] resolves
+/// the *name* to the batch file; this turns that file into the `cmd.exe /s /c`
+/// line only its interpreter can run.
+///
+/// A `.exe`/`.com` (or any PE image) keeps the direct path, which is what the
+/// loader wants.
+fn command_for(program: &[u8], args: &[Vec<u8>]) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+
+    if crate::program::is_batch_script(program) {
+        let line = crate::program::interpreter_line(program, args);
+        let mut command = std::process::Command::new(command_interpreter());
+        // `/d` skips the machine's `AutoRun` commands, which would otherwise run
+        // first and in this shell's name. `/s` makes the line's own outer quotes
+        // mean what they say, so a path with spaces stays one word — and
+        // "Microsoft VS Code" has one.
+        command.arg("/d").arg("/s").arg("/c");
+        // `raw_arg`, not `arg`: `cmd.exe` parses the rest of the line itself, so
+        // letting `std` quote the whole thing would hand it a `\"`-escaped
+        // string that cmd's own scanner does not read as an escape.
+        command.raw_arg(crate::os::os_from_bytes(&line));
+        return command;
+    }
+    let mut command = std::process::Command::new(os_path(program));
+    command.args(args.iter().map(|arg| os_path(arg)));
+    command
+}
+
+/// The interpreter `%ComSpec%` names, which is the one `cmd` itself would use.
+///
+/// Read from the environment rather than hard-coded to `C:\Windows\system32`: a
+/// machine whose system drive is not `C:`, or one that replaced its command
+/// processor, still has to start its own batch files.
+fn command_interpreter() -> std::ffi::OsString {
+    std::env::var_os("ComSpec")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| std::ffi::OsString::from("cmd.exe"))
 }
 
 /// A `Stdio` for an existing CRT descriptor.
