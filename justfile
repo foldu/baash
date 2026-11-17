@@ -58,9 +58,7 @@ portable:
 portable-aarch64:
     nix build .#portable-aarch64 -o result-portable-aarch64
 
-# Cut a release: gate, bump by `<target>`, commit, tag `v<version>`, push; the
-# tag publishes. `<target>` is `patch`, `minor`, a pre-release level, or an
-# explicit 0.x version (`docs/releasing.md`).
+# Cut a release: gate, bump by `<target>` (`patch`|`minor`|`0.2.0`|`rc`…), commit, tag, push.
 release target: (_release-target target) check test conformance
     # `--no-confirm`: this recipe is the confirmation, and cargo-release's own
     # prompt is read from a stdin this sandboxed terminal does not give it —
@@ -77,14 +75,11 @@ release target: (_release-target target) check test conformance
     # name a wrapper that can (`docs/releasing.md`, "When the push is refused").
     git push shithub master --follow-tags
 
-# `just release <version>`, with the whole session kept under
-# `dist/release-logs/`: the transcript, a plain-text copy, the metadata and the
-# result (`docs/releasing.md`, "Keeping the log").
+# `just release <target>`, with the whole session kept under `dist/release-logs/`.
 release-logged *args:
     scripts/release-log.sh {{args}}
 
-# Cut a release without changing anything: what `cargo release` would do for a
-# target, and which version it would land on. No gate, no commit, no tag.
+# Show what `just release <target>` would do: the bump, no gate, no commit, no tag.
 release-plan target: (_release-target target)
     cargo release {{target}}
 
