@@ -510,6 +510,57 @@ fn the_global_table_keeps_insertion_order_for_the_environment() {
 }
 
 #[test]
+fn a_scope_undoes_writes_without_reordering_the_environment() {
+    // The journal restores a removed name to the position it had, not to the
+    // end: a child's `env` order is the table's order, and a subshell that
+    // unsets and re-adds a variable must not shuffle its parent's.
+    let mut vars = Vars::default();
+    for (name, value) in [
+        (b"a".as_slice(), "1"),
+        (b"b".as_slice(), "2"),
+        (b"c".as_slice(), "3"),
+    ] {
+        vars.assign_scalar(name, value.as_bytes()).expect("assign");
+        vars.mark_exported(name).expect("export");
+    }
+    let names = |vars: &Vars| -> Vec<Vec<u8>> {
+        vars.envp()
+            .into_iter()
+            .map(|entry| {
+                entry[..entry.iter().position(|&b| b == b'=').expect("NAME=VALUE")].to_vec()
+            })
+            .collect()
+    };
+
+    let saved = vars.begin_scope();
+    vars.assign_scalar(b"a", b"9").expect("assign"); // update in place
+    vars.unset(b"b").expect("unset");
+    vars.assign_scalar(b"b", b"22").expect("assign"); // back, at the end
+    vars.assign_scalar(b"d", b"4").expect("assign"); // new
+    vars.end_scope(saved);
+
+    assert_eq!(
+        names(&vars),
+        vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+    );
+    assert_eq!(vars.scalar(b"a"), Some(b"1".as_slice()));
+    assert_eq!(vars.scalar(b"b"), Some(b"2".as_slice()));
+    assert_eq!(vars.scalar(b"d"), None);
+
+    // Scopes nest: the inner one undoes only its own writes.
+    let outer = vars.begin_scope();
+    vars.assign_scalar(b"a", b"outer").expect("assign");
+    let inner = vars.begin_scope();
+    vars.assign_scalar(b"a", b"inner").expect("assign");
+    vars.unset(b"c").expect("unset");
+    vars.end_scope(inner);
+    assert_eq!(vars.scalar(b"a"), Some(b"outer".as_slice()));
+    assert_eq!(vars.scalar(b"c"), Some(b"3".as_slice()));
+    vars.end_scope(outer);
+    assert_eq!(vars.scalar(b"a"), Some(b"1".as_slice()));
+}
+
+#[test]
 fn unsetting_a_local_reveals_the_outer_variable() {
     let mut vars = Vars::default();
     vars.assign_scalar(b"x", b"global").unwrap();

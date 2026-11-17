@@ -7,10 +7,19 @@
 //!
 //! # What a scope covers
 //!
-//! * [`ShellState`] — options, variables (globals, arrays, namerefs,
-//!   attributes), positional parameters, traps, aliases, completion specs and
-//!   the `getopts` cursor. Cloned on entry, restored on exit, so a `cd`
-//!   followed by a variable assignment inside `( … )` changes nothing outside.
+//! * The variable store — consciously *not* copied. A scope opens a journal on
+//!   it ([`baash_runtime::Vars::begin_scope`]) and the close replays it
+//!   backwards, so a body that writes one variable costs one record instead of
+//!   a copy of every name. Every command writes `_`, so a copy-on-open made
+//!   every `$()` pay for the whole table: 15% of the work in a substitution
+//!   loop, and 34% together with the snapshot's drop
+//!   (`docs/performance.md`). Debug builds compare the restored store with a
+//!   copy taken at open, so a write path that forgets to journal fails a test
+//!   instead of leaking state.
+//! * The rest of [`ShellState`] — options, traps, aliases, completion specs,
+//!   the directory stack and the `getopts` cursor. Cloned on entry and restored
+//!   on exit, which measures under 1% of the same loop: they are small, and a
+//!   journal for each would be bookkeeping worth more than the copy.
 //! * The working directory — the process has one, so it is saved as bytes and
 //!   `chdir`-ed back.
 //! * Committed descriptors — `exec 3>file` with no command. Ordinary
@@ -36,11 +45,13 @@
 //!
 //! # Why this is sound without `fork`
 //!
-//! A subshell in bash is a copy-on-write clone of the shell process. Here the
-//! body runs on the same thread with the same process id, so `$$` is the
-//! parent's (bash keeps `$$` too, and gives the subshell's own pid in
-//! `$BASHPID`), signals are delivered once rather than twice, and a trap set
-//! inside the body is undone by the restore instead of dying with a process.
+//! A subshell in bash is a copy-on-write clone of the shell process: the
+//! kernel shares every page and copies the ones written. Here the body runs on
+//! the same thread with the same process id — `$$` is the parent's, `$BASHPID`
+//! the shell's — signals are delivered once rather than twice, and a trap set
+//! inside the body is undone by the closing instead of dying with a process.
+//! For the variable store the two are now the same shape: a write copies the
+//! one thing written, never the table.
 
 use baash_sys::RawFd;
 use std::collections::BTreeMap;
@@ -56,6 +67,15 @@ use super::Interp;
 /// leaves the snapshot behind, so the two calls are always paired.
 pub(crate) struct Scope {
     state: ShellState,
+    /// The variable store's journal: what the body wrote, to replay backwards.
+    vars: baash_runtime::SavedScope,
+    /// A copy of the store taken before the body ran.
+    ///
+    /// Debug builds compare it with what `end_scope` restored: a write path
+    /// that forgets to journal leaks state into the parent, and a leak is
+    /// silent until a script trips over it.
+    #[cfg(debug_assertions)]
+    before: baash_runtime::Vars,
     /// The parent's blocked mask, reader and `SIG_IGN` bookkeeping.
     ///
     /// The body runs with its own (empty, then rebuilt) state; this is what
@@ -75,8 +95,17 @@ impl Interp {
     pub(crate) fn open_scope(&mut self) -> Scope {
         // The ring is left behind rather than cloned: see the module docs.
         let history = std::mem::take(&mut self.state.history);
+        // The variable store is the expensive part of the state and the only
+        // one a body usually touches, so it is *not* copied: the scope records
+        // its writes and undoes them (`Vars::begin_scope`). A stand-in keeps
+        // the clone below from copying the 71 names the body may never touch.
+        let vars = std::mem::take(&mut self.state.vars);
         let state = self.state.clone();
         self.state.history = history;
+        self.state.vars = vars;
+        #[cfg(debug_assertions)]
+        let before = self.state.vars.clone();
+        let vars = self.state.vars.begin_scope();
 
         // POSIX: a subshell starts with every trap at its default action
         // (`trap` inside `( … )` prints nothing, as in dash). Ignored signals
@@ -94,6 +123,9 @@ impl Interp {
 
         Scope {
             state,
+            vars,
+            #[cfg(debug_assertions)]
+            before,
             signals,
             read_buffers: std::mem::take(&mut self.read_buffers),
             path_cache: self.path_cache.clone(),
@@ -117,8 +149,19 @@ impl Interp {
         // History stays with the shell: the snapshot does not carry it (see
         // `open_scope`), so putting the state back must not take the ring away.
         let history = std::mem::take(&mut self.state.history);
+        // Undo the body's variable writes *before* the state goes back: the
+        // snapshot holds an empty stand-in where the live store is, so the
+        // journal edits the live one and the state swap keeps it.
+        let mut vars = std::mem::take(&mut self.state.vars);
+        vars.end_scope(scope.vars);
+        #[cfg(debug_assertions)]
+        assert!(
+            vars == scope.before,
+            "a subshell scope left variable state behind: a write path is not journalled"
+        );
         self.state = scope.state;
         self.state.history = history;
+        self.state.vars = vars;
         self.read_buffers = scope.read_buffers;
         self.path_cache = scope.path_cache;
         self.pipeline_status = scope.pipeline_status;

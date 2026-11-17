@@ -695,12 +695,13 @@ Where the waves stand:
   the directory changed). `read -t` keeps `poll(2)` on purpose: no runtime on the `-c` path.
   Measured with `scripts/bench.py` (release): startup 0.47 ms per spawn,
   `$(echo hi)` 7.5 ms per 1000 against bash's 170 ms, `( : )` 4.5 ms against
-  149 ms — a scope costs ~2.3 µs and the snapshot model is *ahead* of bash.
-  The clone only bites when the state is large: 200 subshells with a
-  20 000-element array in scope are 69 ms against bash's 52 ms, which the
-  bench now records as its own case. Copy-on-write (`Var.value` as
-  `Arc<VarValue>`) was considered and deferred by decision on 2026-10-30;
-  `direction.md` §9 records the trigger to revisit.
+  149 ms. The scope no longer snapshots the variable store: it journals the
+  writes and undoes them (`Vars::begin_scope`), which took `( : )` ×20k from
+  102.8 ms to 62.2 ms and `$(echo $n)` ×20k from 162.4 to 112.5 ms
+  (`docs/performance.md`, 2026-11-17). Copy-on-write was tried and rejected on
+  measurement the same day; `direction.md` §9 has the numbers, and the risk it
+  leaves — a write path that forgets to journal — is guarded by a
+  `debug_assertions` comparison of the restored store.
 * **W2 (no-fork subshells)** is in progress. `( … )` and `$( … )` now run in
   a scope (`crates/baash-vm/src/tree/scope.rs`) instead of a child; conformance is
   unchanged to the case. What is left, in order:

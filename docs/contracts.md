@@ -186,6 +186,20 @@ Skipping `finish_prefix_assignments` leaks a temporary local frame into every
 later command; running it before the builtin makes `FOO=1 export FOO` behave as
 if the assignment were discarded.
 
+**A scope journals the variable store; it does not copy it.** `Vars::begin_scope`
+starts recording and returns a `SavedScope`; `Vars::end_scope` replays the
+records backwards and restores the scalars it snapshotted (positional
+parameters, `$0`, `$?`, `$$`, `$!`, the `getopt` cursor). A write records what
+the name held, or that it did not exist; `unset` records the slot it came from,
+because a name put back must go back **where it was** — `env` order is the
+table's order, and a subshell must not shuffle its parent's. The frame stack is
+truncated to the depth at open, and a write to an existing frame local restores
+that cell, so a body cannot leak a change into an enclosing function's `local`.
+There is deliberately no "clone for a subshell" entry point: copying the store
+was 15% of a substitution loop (`docs/performance.md`), and `debug_assertions`
+builds compare the restored store (`Vars: PartialEq`) so a write path that
+forgets to record fails a test instead of leaking state.
+
 **Prefix assignments persist for special built-ins in both profiles.** POSIX
 requires it; bash (non-posix) drops them and `bash --posix` persists them. We
 follow POSIX unconditionally — a deliberate deviation recorded in DESIGN §3.3

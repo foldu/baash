@@ -841,6 +841,54 @@ fn subshells_are_isolated() {
 }
 
 #[test]
+fn a_subshell_undoes_every_kind_of_variable_write() {
+    // A scope records what it wrote instead of copying the store
+    // (`Vars::begin_scope`), so every write path has to be recorded: a missing
+    // one leaks state into the parent, and the debug build compares the whole
+    // store on close to catch exactly that. These are the paths, and bash's
+    // answers for them.
+    assert_eq!(
+        out("x=1; ( x=2; y=3; unset x; echo \"in:$x${y}\" ); echo \"x=$x y=${y-unset}\""),
+        "in:3\nx=1 y=unset\n"
+    );
+    // Arrays, both kinds, including the append that reallocates.
+    assert_eq!(
+        out("a=(1 2); declare -A m; m[k]=v\n\
+             ( a[0]=9; m[k]=w; a+=(3); echo \"in:${a[*]} ${m[k]}\" )\n\
+             echo \"a=${a[*]} m=${m[k]}\""),
+        "in:9 2 3 w\na=1 2 m=v\n"
+    );
+    // Attributes and a nameref write: `n=5` writes `x` through the reference,
+    // inside the body only.
+    assert_eq!(
+        out("( export E=1; readonly R=1; declare -n n=x; n=5 ); \
+             echo \"E=${E-unset} R=${R-unset} x=${x-unset}\""),
+        "E=unset R=unset x=unset\n"
+    );
+    // A body that writes an *enclosing* function's local: restored, because
+    // the write is undone rather than shadowed.
+    assert_eq!(
+        out("g() { local w=1; ( w=2; echo \"in:$w\" ); echo \"out:$w\"; }\ng"),
+        "in:2\nout:1\n"
+    );
+    // Locals of a function that only ran inside the body are gone with it.
+    assert_eq!(
+        out("f() { local v=7; echo \"f:$v\"; }\n( f ); echo \"after=${v-unset}\""),
+        "f:7\nafter=unset\n"
+    );
+    // `declare -g` inside the body targets the body's global scope.
+    assert_eq!(
+        out("g=1; ( declare -g g=2; echo \"in:$g\" ); echo \"out:$g\""),
+        "in:2\nout:1\n"
+    );
+    // The positional parameters come back with them.
+    assert_eq!(
+        out("set -- a b; ( shift; set -- c; echo \"in:$#:$1\" ); echo \"out:$#:$1\""),
+        "in:1:c\nout:2:a\n"
+    );
+}
+
+#[test]
 fn background_jobs_set_the_last_pid() {
     assert_eq!(
         out("sleep 0.05 & echo \"$!\" | grep -qE '^[0-9]+$' && echo numeric"),

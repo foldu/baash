@@ -172,18 +172,19 @@ was needed. The one place this does not carry over is Windows console input
 * **Scope leaks.** Every field of shell state that a subshell may mutate must be
   in the scope. Missing one is a silent bug that only the conformance suite (or
   a user) will find; this is the main correctness risk of W2.
-* **Clone cost — measured, and bounded by state size.** A scope deep-clones
-  `ShellState`, so the per-iteration cost is O(state) where fork was
-  copy-on-write. In the common case that is cheap and *faster* than bash: the
-  release bench has `$(echo hi)` at 7.5 ms per 1000 against bash's 170 ms, and
-  `( : )` at 4.3 ms against 145 ms; a scope costs about 2.3 µs on top of the
-  command. The cost is real only when the state is large — 200 subshells take
-  66.6 ms with a 20 000-element array in scope against bash's 52.2 ms (and
-  1.1 ms with no array). Measured 2026-10-30, and copy-on-write was considered
-  and deferred: `Var.value` as an `Arc<VarValue>` would make the snapshot a
-  pointer bump per variable, at the price of `Arc::make_mut` on every write.
-  The trigger to revisit is a workload where large arrays and subshells mix;
-  scalar-heavy scripts are already ahead of bash.
+* **Clone cost — measured, and no longer O(state).** A scope used to deep-clone
+  `ShellState`, so a subshell cost O(state) where fork was copy-on-write. It
+  now journals the variable store (`Vars::begin_scope`, `docs/contracts.md`)
+  and copies only the small part of the state beside it, so the cost is
+  O(writes) — and every command writes `_`, which is the point: a record is
+  cheaper than 71 names. `( : )` ×20k went 102.8 → 62.2 ms and
+  `$(echo $n)` ×20k 162.4 → 112.5 ms (`docs/performance.md`, 2026-11-17).
+  Copy-on-write was tried on 2026-11-17 and rejected on measurement: sharing
+  the table made `$()` with an empty body 40% faster and every body that
+  writes 4–8% *slower*, because the first write copied the 71 keys anyway and
+  paid for an `Arc` besides. The risk that remains is a write path that
+  forgets to journal — the debug build compares the restored store against a
+  copy, so that fails a test rather than leaking.
 * **Conformance drop.** W1 and W2 will both lower the Oils number. The baseline
   is re-recorded each time, and the *quality* metric (silent divergence) is what
   matters.

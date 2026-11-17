@@ -57,8 +57,8 @@ pub use traps::{
     SIGNALS, TrapAction, TrapKey, TrapTable, signal_number, signal_short_name, signal_table,
 };
 pub use vars::{
-    ArrayShape, Attrs, CreateScope, FrameId, FrameKind, Positional, PrefixAssignments, Var,
-    VarValue, Vars,
+    ArrayShape, Attrs, CreateScope, FrameId, FrameKind, Positional, PrefixAssignments, SavedScope,
+    Var, VarValue, Vars,
 };
 
 /// An exit status. Only the low 8 bits reach `$?`.

@@ -255,7 +255,7 @@ impl FrameId {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Frame {
     kind: FrameKind,
     locals: Vec<(Vec<u8>, Var)>,
@@ -350,7 +350,78 @@ pub struct Vars {
     /// because `OPTIND=1` written twice must re-parse the same argument, so
     /// the counter is what makes a reset observable.
     optind_writes: u64,
+    /// How many subshell scopes are open (`begin_scope`).
+    ///
+    /// Writes are only journalled while one is: an ordinary assignment in the
+    /// top-level shell has nothing to undo.
+    scopes: usize,
+    /// What the open scopes changed, oldest first; `end_scope` replays it
+    /// backwards. Empty when no scope is open.
+    journal: Vec<Undo>,
 }
+
+/// One recorded change a scope has to undo.
+///
+/// A subshell does not copy the store (`docs/performance.md`): a body that
+/// assigns one variable — and every command assigns `_` — would copy 71 names
+/// and their keys to change one. Recording the old value costs what the change
+/// costs.
+#[derive(Clone, Debug)]
+enum Undo {
+    /// A global name: `index` is where it lived, `old` what it held, or `None`
+    /// when the scope created it.
+    Global {
+        index: usize,
+        name: Vec<u8>,
+        old: Option<Var>,
+    },
+    /// A function frame's local, by frame position and the slot it lived in.
+    Local {
+        frame: usize,
+        index: usize,
+        name: Vec<u8>,
+        old: Option<Var>,
+    },
+    /// The frame stack had `len` entries; anything above goes away.
+    Frames { len: usize },
+}
+
+/// The state a scope restores wholesale, because it is small.
+///
+/// The variable table is journalled (see [`Undo`]); positional parameters, `$0`
+/// and the scalars beside the table are a handful of bytes, so a copy is
+/// cheaper than a record per write.
+#[derive(Clone, Debug)]
+pub struct SavedScope {
+    journal: usize,
+    frames: usize,
+    positional: Positional,
+    arg0: Vec<u8>,
+    last_status: Status,
+    shell_pid: u32,
+    last_bg_pid: Option<i32>,
+    optind_writes: u64,
+}
+
+impl PartialEq for Vars {
+    /// Two stores hold the same state.
+    ///
+    /// The journal and the scope counter are bookkeeping, not state: a store
+    /// restored by `end_scope` must compare equal to the one that was
+    /// snapshotted, which is what the VM asserts in debug builds.
+    fn eq(&self, other: &Self) -> bool {
+        self.global == other.global
+            && self.frames == other.frames
+            && self.positional == other.positional
+            && self.arg0 == other.arg0
+            && self.last_status == other.last_status
+            && self.shell_pid == other.shell_pid
+            && self.last_bg_pid == other.last_bg_pid
+            && self.optind_writes == other.optind_writes
+    }
+}
+
+impl Eq for Vars {}
 
 impl Default for Vars {
     fn default() -> Self {
@@ -363,6 +434,8 @@ impl Default for Vars {
             shell_pid: std::process::id(),
             last_bg_pid: None,
             optind_writes: 0,
+            scopes: 0,
+            journal: Vec::new(),
         }
     }
 }
@@ -380,6 +453,143 @@ impl Vars {
             _ => return false,
         }
         bytes.all(|b| *b == b'_' || b.is_ascii_alphanumeric())
+    }
+
+    /// Start recording writes: the caller is running a subshell body.
+    ///
+    /// Paired with [`Vars::end_scope`], which undoes everything the body wrote
+    /// in O(writes). Scopes nest: each returns its own [`SavedScope`].
+    pub fn begin_scope(&mut self) -> SavedScope {
+        self.scopes += 1;
+        SavedScope {
+            journal: self.journal.len(),
+            frames: self.frames.len(),
+            positional: self.positional.clone(),
+            arg0: self.arg0.clone(),
+            last_status: self.last_status,
+            shell_pid: self.shell_pid,
+            last_bg_pid: self.last_bg_pid,
+            optind_writes: self.optind_writes,
+        }
+    }
+
+    /// Undo every write since [`Vars::begin_scope`] and restore the scalars.
+    pub fn end_scope(&mut self, saved: SavedScope) {
+        self.scopes = self.scopes.saturating_sub(1);
+        while self.journal.len() > saved.journal {
+            match self.journal.pop().expect("just checked the length") {
+                Undo::Global { index, name, old } => match old {
+                    Some(var) => {
+                        if self.global.contains_key(name.as_slice()) {
+                            // `insert` on a present key keeps its position,
+                            // which is what an in-place write needs.
+                            self.global.insert(name, var);
+                        } else {
+                            // Removed and re-added by the body: put it back
+                            // where it was, not at the end.
+                            self.global.shift_insert(index, name, var);
+                        }
+                    }
+                    None => {
+                        self.global.shift_remove_entry(name.as_slice());
+                    }
+                },
+                Undo::Local {
+                    frame,
+                    index,
+                    name,
+                    old,
+                } => {
+                    // A frame the body popped is already gone; its writes do
+                    // not outlive it.
+                    let Some(scope) = self.frames.get_mut(frame) else {
+                        continue;
+                    };
+                    match old {
+                        Some(var) => {
+                            if let Some(slot) = scope
+                                .locals
+                                .iter_mut()
+                                .find(|(c, _)| c.as_slice() == name.as_slice())
+                            {
+                                slot.1 = var;
+                            } else if index <= scope.locals.len() {
+                                scope.locals.insert(index, (name, var));
+                            } else {
+                                scope.locals.push((name, var));
+                            }
+                        }
+                        None => scope
+                            .locals
+                            .retain(|(c, _)| c.as_slice() != name.as_slice()),
+                    }
+                }
+                Undo::Frames { len } => self.frames.truncate(len),
+            }
+        }
+        self.frames.truncate(saved.frames);
+        self.positional = saved.positional;
+        self.arg0 = saved.arg0;
+        self.last_status = saved.last_status;
+        self.shell_pid = saved.shell_pid;
+        self.last_bg_pid = saved.last_bg_pid;
+        self.optind_writes = saved.optind_writes;
+    }
+
+    /// Record what `location` holds now, before the caller writes it.
+    fn record(&mut self, location: Location) {
+        if self.scopes == 0 {
+            return;
+        }
+        match location {
+            Location::Global(index) => {
+                let (name, old) = self
+                    .global
+                    .get_index(index)
+                    .map(|(name, var)| (name.clone(), var.clone()))
+                    .expect("a location names an entry of this table");
+                self.journal.push(Undo::Global {
+                    index,
+                    name,
+                    old: Some(old),
+                });
+            }
+            Location::Frame { frame, index } => {
+                let (name, old) = &self.frames[frame].locals[index];
+                let (name, old) = (name.clone(), old.clone());
+                self.journal.push(Undo::Local {
+                    frame,
+                    index,
+                    name,
+                    old: Some(old),
+                });
+            }
+        }
+    }
+
+    /// A global the caller is about to create (nothing to save but the place).
+    fn record_created_global(&mut self, name: &[u8]) {
+        if self.scopes == 0 {
+            return;
+        }
+        self.journal.push(Undo::Global {
+            index: self.global.len(),
+            name: name.to_vec(),
+            old: None,
+        });
+    }
+
+    /// A frame local the caller is about to create.
+    fn record_created_local(&mut self, frame: usize, name: &[u8]) {
+        if self.scopes == 0 {
+            return;
+        }
+        self.journal.push(Undo::Local {
+            frame,
+            index: self.frames[frame].locals.len(),
+            name: name.to_vec(),
+            old: None,
+        });
     }
 
     /// Read a variable, walking frames inward-out.
@@ -527,6 +737,11 @@ impl Vars {
     }
 
     fn push_kind(&mut self, kind: FrameKind) -> FrameId {
+        if self.scopes > 0 {
+            self.journal.push(Undo::Frames {
+                len: self.frames.len(),
+            });
+        }
         self.frames.push(Frame {
             kind,
             locals: Vec::new(),
@@ -805,6 +1020,7 @@ impl Vars {
                 name: name.to_vec(),
             });
         }
+        self.record_created_local(index, name);
         self.frames[index].locals.push((
             name.to_vec(),
             Var {
@@ -1030,10 +1246,28 @@ impl Vars {
             Location::Global(index) => {
                 // Shift, not swap: `unset` must not reorder the rest (the same
                 // rule the associative array keeps).
-                self.global.shift_remove_index(index);
+                let (name, var) = self
+                    .global
+                    .shift_remove_index(index)
+                    .expect("a location names an entry of this table");
+                if self.scopes > 0 {
+                    self.journal.push(Undo::Global {
+                        index,
+                        name,
+                        old: Some(var),
+                    });
+                }
             }
             Location::Frame { frame, index } => {
-                self.frames[frame].locals.remove(index);
+                let (name, var) = self.frames[frame].locals.remove(index);
+                if self.scopes > 0 {
+                    self.journal.push(Undo::Local {
+                        frame,
+                        index,
+                        name,
+                        old: Some(var),
+                    });
+                }
             }
         }
         Ok(())
@@ -1296,7 +1530,7 @@ impl Vars {
                 }
             }
         }
-        for (name, var) in &self.global {
+        for (name, var) in self.global.iter() {
             if !out
                 .iter()
                 .any(|(candidate, _)| candidate.eq(&name.as_slice()))
@@ -1387,7 +1621,7 @@ impl Vars {
     /// [`Vars::envp`] without the allocation, for the spawn path.
     pub fn envp_into(&self, out: &mut Vec<Vec<u8>>) {
         let mut pairs: Vec<(&[u8], Option<&[u8]>)> = Vec::new();
-        for (name, var) in &self.global {
+        for (name, var) in self.global.iter() {
             record_export(&mut pairs, name, var);
         }
         for frame in &self.frames {
@@ -1417,20 +1651,21 @@ impl Vars {
         if !Self::is_name(name) {
             return false;
         }
-        if let Some(var) = self.global.get_mut(name) {
-            var.value = VarValue::Str(value.to_vec());
+        let imported = Var {
+            value: VarValue::Str(value.to_vec()),
+            attrs: Attrs {
+                exported: true,
+                ..Attrs::default()
+            },
+        };
+        if let Some(index) = self.global.get_index_of(name) {
+            self.record(Location::Global(index));
+            let var = &mut self.global[index];
+            var.value = imported.value;
             var.attrs.exported = true;
         } else {
-            self.global.insert(
-                name.to_vec(),
-                Var {
-                    value: VarValue::Str(value.to_vec()),
-                    attrs: Attrs {
-                        exported: true,
-                        ..Attrs::default()
-                    },
-                },
-            );
+            self.record_created_global(name);
+            self.global.insert(name.to_vec(), imported);
         }
         true
     }
@@ -1721,32 +1956,33 @@ impl Vars {
         match scope {
             CreateScope::Default => {
                 if let Some(location) = self.location(name) {
-                    let var = self.var_at_mut(location);
-                    if refuse_readonly && var.attrs.readonly {
+                    if refuse_readonly && self.var_at(location).attrs.readonly {
                         return Err(Error::Readonly {
                             name: name.to_vec(),
                         });
                     }
-                    return Ok(var);
+                    // Recorded before the caller can write through the borrow.
+                    self.record(location);
+                    return Ok(self.var_at_mut(location));
                 }
+                self.record_created_global(name);
                 Ok(self.global.entry(name.to_vec()).or_default())
             }
             CreateScope::Global => {
-                // The entry API: one hash, and no borrow held across the two
-                // cases (`declare -g` creates the global even when a local
-                // shadows the name).
-                match self.global.entry(name.to_vec()) {
-                    indexmap::map::Entry::Occupied(entry) => {
-                        let var = entry.into_mut();
-                        if refuse_readonly && var.attrs.readonly {
-                            return Err(Error::Readonly {
-                                name: name.to_vec(),
-                            });
-                        }
-                        Ok(var)
+                // `declare -g` creates the global even when a local shadows the
+                // name, so this is a lookup in the global table and not
+                // `location`.
+                if let Some(index) = self.global.get_index_of(name) {
+                    if refuse_readonly && self.global[index].attrs.readonly {
+                        return Err(Error::Readonly {
+                            name: name.to_vec(),
+                        });
                     }
-                    indexmap::map::Entry::Vacant(entry) => Ok(entry.insert(Var::default())),
+                    self.record(Location::Global(index));
+                    return Ok(&mut self.global[index]);
                 }
+                self.record_created_global(name);
+                Ok(self.global.entry(name.to_vec()).or_default())
             }
             CreateScope::Local => {
                 let frame = self
@@ -1759,14 +1995,16 @@ impl Vars {
                     .iter()
                     .position(|(candidate, _)| candidate.as_slice() == name)
                 {
-                    let var = &mut locals[index].1;
-                    if refuse_readonly && var.attrs.readonly {
+                    if refuse_readonly && locals[index].1.attrs.readonly {
                         return Err(Error::Readonly {
                             name: name.to_vec(),
                         });
                     }
-                    return Ok(var);
+                    self.record(Location::Frame { frame, index });
+                    return Ok(&mut self.frames[frame].locals[index].1);
                 }
+                self.record_created_local(frame, name);
+                let locals = &mut self.frames[frame].locals;
                 locals.push((name.to_vec(), Var::default()));
                 Ok(&mut locals.last_mut().expect("just pushed a local variable").1)
             }

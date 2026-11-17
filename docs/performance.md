@@ -718,6 +718,63 @@ microseconds *faster* than the vector, which grew its buffer six times to hold
 71 names. The associative array takes the same seed; its first array no longer
 pays a `getrandom` either.
 
+### 2026-11-17: a subshell stops copying the variable table
+
+The section above left one number on the table: the table's index clones with
+the table, so 20k command substitutions went from 157.9 to 161.8 ms. Copy on
+write was the obvious answer and it does not work. A snapshot that shares the
+table made `$()` with an empty body 40% faster and made every body that writes
+— which is every body, because a command writes `_` — *slower*, because the
+first write copied the 71 keys anyway and paid for an `Arc` besides. The
+measurement:
+
+| case | eager snapshot | copy-on-write |
+| --- | ---: | ---: |
+| `x=$()` ×20k (no commands) | 125.4 ms | 74.7 ms |
+| `( : )` ×20k | 102.6 ms | 111.6 ms |
+| `x=$(echo $n)` ×20k | 162.4 ms | 168.6 ms |
+
+So the scope now does what fork does without the copy: it **journals**. A write
+records what the name held (or that it did not exist) and `close_scope` replays
+the records backwards — O(writes) at open and close instead of O(names).
+
+What the record has to carry to be exact: a statement that did not exist before
+is removed; one that was removed is put back **at its old index**, not at the
+end, because `env` order is the table's order and a subshell must not shuffle
+its parent's; a frame the body pushed is truncated; a write to a frame local
+(the enclosing function's `local`) restores that cell. Positional parameters,
+`$0`, `$?`, `$$`, `$!` and the `getopt` cursor are a handful of bytes, so they
+are snapshotted instead — a copy cheaper than a record per write. `ShellState`
+beyond the store (options, traps, aliases, completion specs) is still cloned:
+it measured under 1% of the same loop.
+
+| case (minimum of 15, alternating runs) | before | after | |
+| --- | ---: | ---: | ---: |
+| `x=$()` ×20k | 124.4 ms | 75.7 ms | **−39%** |
+| `( : )` ×20k | 102.8 ms | 62.2 ms | **−40%** |
+| `x=$(echo $n)` ×20k | 162.4 ms | 112.5 ms | −31% |
+| `x=$(y=$n; echo $y)` ×20k | 173.7 ms | 122.0 ms | −30% |
+| `( f )` with a `local` ×10k | 74.7 ms | 53.0 ms | −29% |
+| `x=$(env true)` ×3k | 2624.4 ms | 2616.1 ms | — |
+| `source bash_completion` ×15 | 41.8 ms | 42.0 ms | — |
+| interpreter loop, 100k | 259.3 ms | 257.0 ms | −0.9% |
+| `baash -c exit` | 0.41 ms | 0.41 ms | — |
+
+A substitution that spawns (`$(env true)`) does not move: the process is 800 µs
+of its 875, and the scope was never what it waited for.
+
+The risk in a journal is a write path that forgets to record, which leaks state
+into the parent silently. Two things guard it: `debug_assertions` builds copy
+the store at open and compare the restored one (`Vars: PartialEq`), so a missed
+path fails the test that exercises it; and the conformance ratchet runs the
+debug build over its 2787 cases. It is the same 2357 (+0), and the debug check
+in the ratchet's own loop costs nothing measurable (7.79 s against 7.74 s).
+
+What is left in a scope is the signal mask: `enter_scope_signals` and
+`leave_scope_signals` are 5–8% of the substitution loop (`sigismember` on the
+parent's set), and they are about dispositions rather than state, so they are a
+separate change.
+
 ## The test suite: 37 s to 5 s
 
 `cargo test` has to hold `RUST_TEST_THREADS=1` (`.cargo/config.toml`): `$( … )`
