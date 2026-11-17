@@ -271,16 +271,52 @@ struct Function {
 /// `Vars::arg0` and `$#` is computed from `positional()`, as the contract says.
 #[derive(Clone, Debug, Default)]
 struct Specials {
-    status: Vec<u8>,
+    status: Decimal,
     dash: Vec<u8>,
-    pid: Vec<u8>,
-    bang: Vec<u8>,
+    pid: Decimal,
+    bang: Decimal,
     /// `$SECONDS`, materialised once per command. A dynamic variable: the
     /// value exists only to be read, so it is not written into the variable
     /// table (`Vars::get` falls through to here).
-    seconds: Vec<u8>,
+    seconds: Decimal,
     /// `$RANDOM`, same treatment.
-    random: Vec<u8>,
+    random: Decimal,
+}
+
+/// A decimal number in a fixed buffer: what the per-command specials are.
+///
+/// `$?`, `$$`, `$!`, `$SECONDS` and `$RANDOM` are rewritten after every command
+/// and are at most twenty characters, so a `Vec<u8>` each bought nothing but a
+/// `memmove` call per command to copy one to six bytes into it — 2.5% of an
+/// interpreter loop — on top of the formatting.
+#[derive(Clone, Copy, Debug, Default)]
+struct Decimal {
+    bytes: [u8; 20],
+    len: u8,
+}
+
+impl Decimal {
+    /// The number one, for `$LINENO`'s initial value.
+    fn one() -> Self {
+        let mut decimal = Self::default();
+        decimal.set(1);
+        decimal
+    }
+
+    /// Replace the value, formatting straight into the buffer.
+    fn set(&mut self, value: i64) {
+        self.len = format_decimal(&mut self.bytes, value) as u8;
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len as usize]
+    }
+}
+
+impl PartialEq for Decimal {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_bytes() == other.as_bytes()
+    }
 }
 
 /// Write `value` in decimal into `dest`, reusing its buffer.
@@ -288,12 +324,31 @@ struct Specials {
 /// `to_string()` allocates and the per-command specials are on the hot path of
 /// every loop, so the number is formatted into a stack buffer and copied: two
 /// digits on average, no allocation after the first command.
+/// Write `value` in decimal into `dest`, reusing its buffer.
+///
+/// For destinations that are not a [`Decimal`] — `$PIPESTATUS` keeps a slot per
+/// stage. The copy is a byte loop for the same reason `format_decimal`'s is:
+/// one to six bytes through a `memcpy` call is slower than writing them.
 fn write_decimal(dest: &mut Vec<u8>, value: i64) {
     let mut digits = [0u8; 20];
     let len = format_decimal(&mut digits, value);
     dest.clear();
-    dest.extend_from_slice(&digits[..len]);
+    for &byte in &digits[..len] {
+        dest.push(byte);
+    }
 }
+
+/// `00` to `99`, two digits per entry.
+static DIGIT_PAIRS: &[u8; 200] = b"00010203040506070809\
+10111213141516171819\
+20212223242526272829\
+30313233343536373839\
+40414243444546474849\
+50515253545556575859\
+60616263646566676869\
+70717273747576777879\
+80818283848586878889\
+90919293949596979899";
 
 /// Write `value` in decimal at the start of `buffer`, returning how many bytes
 /// it used.
@@ -302,27 +357,44 @@ fn write_decimal(dest: &mut Vec<u8>, value: i64) {
 /// into this stack array and hands the bytes to the store, so `(( i++ ))` in a
 /// loop allocates nothing at all. `to_string()` was two allocations per
 /// assignment (the `String`, then the `Vec` the store kept).
+///
+/// Two things keep it cheap for the values a shell actually formats — a status,
+/// a counter, a number under a thousand. The digits come two at a time from
+/// [`DIGIT_PAIRS`], because a division costs twenty cycles and a two-digit
+/// number needs one; and the result is moved to the front with a loop rather
+/// than `copy_within`, which is a `memmove` call for a one-to-six-byte move.
 fn format_decimal(buffer: &mut [u8; 20], value: i64) -> usize {
-    let mut at = buffer.len();
     let negative = value < 0;
     let mut magnitude = value.unsigned_abs();
-    loop {
+    let mut at = buffer.len();
+    while magnitude >= 100 {
+        let pair = (magnitude % 100) as usize * 2;
+        magnitude /= 100;
+        at -= 2;
+        buffer[at] = DIGIT_PAIRS[pair];
+        buffer[at + 1] = DIGIT_PAIRS[pair + 1];
+    }
+    if magnitude >= 10 {
+        let pair = magnitude as usize * 2;
+        at -= 2;
+        buffer[at] = DIGIT_PAIRS[pair];
+        buffer[at + 1] = DIGIT_PAIRS[pair + 1];
+    } else {
         at -= 1;
-        buffer[at] = b'0' + (magnitude % 10) as u8;
-        magnitude /= 10;
-        if magnitude == 0 {
-            break;
-        }
+        buffer[at] = b'0' + magnitude as u8;
     }
     if negative {
         at -= 1;
         buffer[at] = b'-';
     }
     let len = buffer.len() - at;
-    // Move the digits to the front so the caller can take `[..len]`: the
-    // buffer is 20 bytes and a `i64` needs at most 20, so this is a short copy
-    // rather than a second buffer.
-    buffer.copy_within(at.., 0);
+    // A `i64` needs at most twenty bytes and the buffer is twenty, so the digits
+    // never wrap; moving them forward cannot overwrite what is not yet read.
+    let mut index = 0;
+    while index < len {
+        buffer[index] = buffer[at + index];
+        index += 1;
+    }
     len
 }
 
@@ -568,7 +640,8 @@ pub struct Interp {
     /// out-of-order span (a loop body, a function called twice) costs no more
     /// than an in-order one.
     line_number: u32,
-    lineno: Vec<u8>,
+    /// `$LINENO` as text, reformatted only when the number moves.
+    lineno: Decimal,
     /// The span of the node being evaluated, so a diagnostic raised by a
     /// builtin points at the command rather than at the start of the file.
     ///
@@ -718,7 +791,7 @@ impl Interp {
             pipeline_status: std::collections::BTreeMap::new(),
             utf8_locale: false,
             line_number: 1,
-            lineno: b"1".to_vec(),
+            lineno: Decimal::one(),
             current_span: 0..0,
             interrupt_pending: false,
         };
@@ -1247,10 +1320,9 @@ impl Interp {
     /// `Vars::get` cannot allocate and `$?` must be current.
     pub(crate) fn sync_specials(&mut self) {
         self.refresh_option_derived();
-        write_decimal(
-            &mut self.specials.status,
-            i64::from(self.state.vars.last_status().exit_code()),
-        );
+        self.specials
+            .status
+            .set(i64::from(self.state.vars.last_status().exit_code()));
         // `$RANDOM` is a fresh value per command: bash gives a new one on
         // every read, but one per command is enough for `$RANDOM` to look
         // random. `$SECONDS` counts from shell start; a per-command tick is
@@ -1261,29 +1333,26 @@ impl Interp {
         // the variable table instead cost a name lookup and a copy per
         // command, and nothing but a read ever wanted the value.
         self.seconds = self.seconds.saturating_add(1);
-        write_decimal(
-            &mut self.specials.seconds,
-            i64::try_from(self.seconds).unwrap_or(i64::MAX),
-        );
+        self.specials
+            .seconds
+            .set(i64::try_from(self.seconds).unwrap_or(i64::MAX));
         let random = self
             .random
             .get()
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
         self.random.set(random);
-        write_decimal(
-            &mut self.specials.random,
-            i64::from(((random >> 33) % 32768) as u32),
-        );
-        if self.specials.pid.is_empty() {
-            write_decimal(
-                &mut self.specials.pid,
-                i64::from(self.state.vars.shell_pid()),
-            );
+        self.specials
+            .random
+            .set(i64::from(((random >> 33) % 32768) as u32));
+        if self.specials.pid.len == 0 {
+            self.specials
+                .pid
+                .set(i64::from(self.state.vars.shell_pid()));
         }
-        self.specials.bang.clear();
+        self.specials.bang.len = 0;
         if let Some(pid) = self.state.vars.last_bg_pid() {
-            write_decimal(&mut self.specials.bang, i64::from(pid));
+            self.specials.bang.set(i64::from(pid));
         }
     }
 
@@ -1304,7 +1373,7 @@ impl Interp {
         let line = base.saturating_add(source.line_at(offset).saturating_sub(1));
         if line != self.line_number {
             self.line_number = line;
-            write_decimal(&mut self.lineno, i64::from(line));
+            self.lineno.set(i64::from(line));
         }
     }
 
@@ -1316,7 +1385,7 @@ impl Interp {
     /// for `x=$(false)` reported line 1, the substitution's line, not line 3.
     fn restore_line(&mut self, saved: u32) {
         self.line_number = saved;
-        write_decimal(&mut self.lineno, i64::from(saved));
+        self.lineno.set(i64::from(saved));
     }
 
     /// `$LINENO` as an integer, for arithmetic.
@@ -1488,17 +1557,17 @@ impl Interp {
 impl baash_lang::Vars for Interp {
     fn get(&self, name: &[u8]) -> Option<&[u8]> {
         if name == b"LINENO" {
-            return Some(&self.lineno);
+            return Some(self.lineno.as_bytes());
         }
         // `$SECONDS`, `$RANDOM` and `$_` are dynamic: their bytes are refreshed
         // once per command and live beside the other special parameters, unless
         // the script assigned the name itself, in which case the variable table
         // wins (it is what `unset` and `declare` act on).
         if name == b"SECONDS" && self.state.vars.scalar(name).is_none() {
-            return Some(&self.specials.seconds);
+            return Some(self.specials.seconds.as_bytes());
         }
         if name == b"RANDOM" && self.state.vars.scalar(name).is_none() {
-            return Some(&self.specials.random);
+            return Some(self.specials.random.as_bytes());
         }
         // `$PIPESTATUS` is its element zero, like any array's scalar form.
         if name == b"PIPESTATUS" {
@@ -1506,10 +1575,10 @@ impl baash_lang::Vars for Interp {
         }
         if let [special] = name {
             match *special {
-                b'?' => return Some(&self.specials.status),
+                b'?' => return Some(self.specials.status.as_bytes()),
                 b'-' => return Some(&self.specials.dash),
-                b'$' => return Some(&self.specials.pid),
-                b'!' => return Some(&self.specials.bang),
+                b'$' => return Some(self.specials.pid.as_bytes()),
+                b'!' => return Some(self.specials.bang.as_bytes()),
                 b'0' => return Some(self.state.vars.arg0()),
                 // `$#` is computed from `positional()`, per the contract.
                 _ => {}
@@ -1933,10 +2002,10 @@ impl crate::arith::IntVars for Interp {
         // the variable table; arithmetic reads them from the same place
         // `Vars::get` does.
         if name == b"SECONDS" && self.state.vars.value(name).is_none() {
-            return crate::arith::parse_int(&self.specials.seconds).unwrap_or(0);
+            return crate::arith::parse_int(self.specials.seconds.as_bytes()).unwrap_or(0);
         }
         if name == b"RANDOM" && self.state.vars.value(name).is_none() {
-            return crate::arith::parse_int(&self.specials.random).unwrap_or(0);
+            return crate::arith::parse_int(self.specials.random.as_bytes()).unwrap_or(0);
         }
         // An array decays to element zero in arithmetic, just as `${a}` does.
         let bytes = match self.state.vars.value(name) {

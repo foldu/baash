@@ -1034,6 +1034,52 @@ candidate that would pay is a bytes type with short values inline (a path, `1`,
 `pre-3-post` all fit in 22 bytes) behind `Deref<Target = [u8]>`, so that no match
 arm and no call site changes.
 
+### 2026-11-17: the variable table's hot path, and the per-command specials
+
+With the allocation churn down, the profile of `:; (( i++ ))` stopped being
+about `malloc` at all: `eval_node` 12.9% of samples, `memmove` 8.7%,
+`IndexMap::get_index_of` 8.4%, `memcmp` 7.5%. The `memcmp` call graph named one
+thing. `(( i++ ))` looks `i` up **twice** — once in `IntVars::get`, once in `set`
+→ `assign_scalar` → `resolve_chain` — and each lookup hashed a one-byte name and
+then compared keys through a `bcmp` call that costs about twenty cycles to
+compare one byte.
+
+Two changes came out of that.
+
+**The last global lookup is remembered** (`crates/baash-runtime/src/vars.rs`). A
+name of at most eight bytes packs into a `u64`, and then the packing *is* the
+name: equal packing and equal length means equal name, with no hash and no call.
+`Vars` keeps the packing, the length and the index of the last hit, and a hit is
+two integer comparisons and a bounds check. Nothing has to be invalidated,
+because the entry at the cached index is re-packed and compared: a table that
+shifted under the cache (an `unset`, a restored scope) is a *miss*, never a wrong
+variable. Longer names are not cached — their first eight bytes would not decide
+it — which costs nothing, since a shell's hot variables are `i`, `x`, `IFS`,
+`PATH`.
+
+**The per-command specials are fixed buffers.** `$?`, `$$`, `$!`, `$SECONDS`,
+`$RANDOM` and `$LINENO` were `Vec<u8>`s rewritten after every command, so every
+command paid a `memmove` call per value to copy one to six bytes into a heap
+buffer. They are a twenty-byte array and a length now, formatted in place; the
+formatter takes digits two at a time from a static table (a division costs twenty
+cycles, and a status is two digits) and moves the result to the front with a loop
+rather than `copy_within`, which is another call at that size.
+
+| `: plain` loop, 100k commands | before | after | |
+| --- | ---: | ---: | ---: |
+| remembered lookup | 53.01 ms | 50.69 ms | −4.4% |
+| fixed specials (on top of it) | 51.34 ms | 45.62 ms | **−11.1%** |
+| the two together | 52.91 ms | 45.90 ms | **−13.3%** |
+| assignment+expansion, 100k, together | | | −3.9% |
+| `source bash_completion` ×15 | | | — |
+| retired instructions, 10k iterations | 120,901,856 | 109,982,314 | −9.0% |
+
+Ten percent of that loop was five one-to-six-byte `memmove` calls and a pair of
+hash lookups *per command* — which is the same lesson as the allocation round
+seen from the other side: what costs is the call and the cache line, not the
+bytes. A fixed buffer and a packed name remove both without changing a byte of
+what the shell stores.
+
 ## The test suite: 37 s to 5 s
 
 `cargo test` has to hold `RUST_TEST_THREADS=1` (`.cargo/config.toml`): `$( … )`

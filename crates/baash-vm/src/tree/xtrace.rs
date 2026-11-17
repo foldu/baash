@@ -56,10 +56,10 @@ fn prefix(interp: &Interp) -> Vec<u8> {
         }
         let rest = &template[position + 1..];
         let (value, width) = match rest.first() {
-            Some(b'?') => (Some(interp.specials.status.clone()), 2),
+            Some(b'?') => (Some(interp.specials.status.as_bytes().to_vec()), 2),
             Some(b'-') => (Some(interp.specials.dash.clone()), 2),
-            Some(b'$') => (Some(interp.specials.pid.clone()), 2),
-            Some(b'!') => (Some(interp.specials.bang.clone()), 2),
+            Some(b'$') => (Some(interp.specials.pid.as_bytes().to_vec()), 2),
+            Some(b'!') => (Some(interp.specials.bang.as_bytes().to_vec()), 2),
             Some(b'{') => match rest.iter().position(|&byte| byte == b'}') {
                 Some(close) => {
                     let name = &rest[1..close];
