@@ -1794,11 +1794,7 @@ impl Vars {
     /// whole target, which is bash's wording for `r[0]=x` over such a target.
     fn deref_name<'a>(&self, name: &'a [u8]) -> Result<Cow<'a, [u8]>, Error> {
         match self.resolve_chain(name)? {
-            Resolved::Var(target) => Ok(if target == name {
-                Cow::Borrowed(name)
-            } else {
-                Cow::Owned(target)
-            }),
+            Resolved::Var(target) => Ok(target),
             Resolved::Indexed(base, index) => Err(Error::InvalidName {
                 name: format!("{}[{index}]", display(&base)).into_bytes(),
             }),
@@ -1835,8 +1831,12 @@ impl Vars {
     /// [`Error::NamerefCycle`]. An empty nameref value is *not* a reference —
     /// it names nothing, so a write creates the target on demand and a read is
     /// empty, exactly like an unset nameref in bash.
-    fn resolve_chain(&self, name: &[u8]) -> Result<Resolved, Error> {
-        let mut current = name.to_vec();
+    fn resolve_chain<'a>(&self, name: &'a [u8]) -> Result<Resolved<'a>, Error> {
+        // Borrowed until a reference moves the chain: the copy this used to
+        // start with was one allocation per resolved name, and every read of an
+        // *unset* variable took it too (`plain` misses, then `resolve_chain`
+        // copies the name to discover nothing is there).
+        let mut current: Cow<'a, [u8]> = Cow::Borrowed(name);
         for _ in 0..NAMEREF_MAX_DEPTH {
             let Some(var) = self.lookup(&current) else {
                 return Ok(Resolved::Var(current));
@@ -1852,10 +1852,12 @@ impl Vars {
             }
             match parse_reference(target) {
                 Some(Reference::Plain(base)) => {
-                    if base == current {
-                        return Err(Error::NamerefCycle { name: current });
+                    if current.as_ref() == base.as_slice() {
+                        return Err(Error::NamerefCycle {
+                            name: current.into_owned(),
+                        });
                     }
-                    current = base;
+                    current = Cow::Owned(base);
                 }
                 Some(Reference::Element { base, subscript }) => {
                     return self.resolve_element(&base, &subscript).map_err(|error| {
@@ -1886,7 +1888,7 @@ impl Vars {
     /// Resolve `base[subscript]` for a reference, using the base's current
     /// shape: an associative array treats the expanded subscript as a key, an
     /// indexed array (or a scalar) evaluates it arithmetically.
-    fn resolve_element(&self, base: &[u8], subscript: &[u8]) -> Result<Resolved, Error> {
+    fn resolve_element(&self, base: &[u8], subscript: &[u8]) -> Result<Resolved<'static>, Error> {
         let text = expand_reference_text(self, subscript);
         if text.is_empty() {
             return Err(Error::BadSubscript {
@@ -2118,10 +2120,15 @@ fn record_export<'a>(pairs: &mut Vec<(&'a [u8], Option<&'a [u8]>)>, name: &'a [u
 }
 
 /// Where a nameref chain ends: the operation's real target.
+///
+/// `Var` borrows the name when the chain never moved — which is every name that
+/// is not a nameref, i.e. almost all of them. The other variants are owned
+/// because they only appear *after* following a reference, where the name came
+/// out of the cell that was read.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Resolved {
+enum Resolved<'a> {
     /// An ordinary variable cell.
-    Var(Vec<u8>),
+    Var(Cow<'a, [u8]>),
     /// One element of an indexed array (`-n r='a[3]'`).
     Indexed(Vec<u8>, i64),
     /// One element of an associative array (`-n r='m[key]'`).
