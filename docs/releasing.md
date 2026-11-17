@@ -12,6 +12,32 @@ just release 0.1.0          # the release
 `baash` is a shell, not a library: no crate goes to crates.io, and the only
 artifact is the executable.
 
+## Keeping the log
+
+A release is the one command whose output is worth keeping: the gate prints
+pages of cargo and nix output, `cargo release` prints the plan, and the two
+pushes each have their own. `just release-logged <version>` runs the same
+recipe with the whole session written down:
+
+```sh
+just release-logged 0.1.2
+```
+
+```text
+dist/release-logs/0.1.2-20261117T124000Z/
+    transcript.log   what the terminal saw, in order: ANSI, prompts, everything
+    output.txt       the same, colour stripped and CR turned into line breaks
+    meta.txt         HEAD, branch, remotes, dirty files, tool versions
+    result.txt       exit status, duration, and what to check next
+dist/release-logs/latest -> that directory
+```
+
+It is `script(1)` around `just release`, so the shell keeps its terminal: a
+push that asks for a passphrase asks *you* from the same pty, and `Ctrl-C`
+stops where it would have stopped anyway. `transcript.log` is flushed as it
+goes, so a dropped ssh connection or a killed run still leaves the record. The
+directory is under `dist/`, which is ignored, so nothing lands in the tree.
+
 ## What each file decides
 
 | file | says |

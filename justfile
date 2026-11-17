@@ -75,6 +75,12 @@ release version: check test conformance
     # name a wrapper that can (`docs/releasing.md`, "When the push is refused").
     git push shithub master --follow-tags
 
+# `just release <version>`, with the whole session kept under
+# `dist/release-logs/`: the transcript, a plain-text copy, the metadata and the
+# result (`docs/releasing.md`, "Keeping the log").
+release-logged *args:
+    scripts/release-log.sh {{args}}
+
 # Regenerate the embedded completion tables from the pinned carapace.
 carapace-data:
     python3 scripts/carapace-data.py --carapace "${CARAPACE_BIN:-$(nix build --no-link --print-out-paths nixpkgs#carapace)/bin/carapace}"
