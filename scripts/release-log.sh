@@ -86,16 +86,19 @@ first_line() {
 
 # What the terminal wrote, in a file that survives `grep`: `script`'s own
 # banner, CSI sequences (colour, cursor, erase), OSC sequences (titles, the cwd
-# report) and the pty's CRLF. A bare CR is a progress update that overwrote its
-# line on screen, so it becomes a line break here rather than gluing two updates
-# together. `transcript.log` keeps all of it: that file is the record.
+# report), the older two-byte escapes a program still sends (`ESC ( B` is a
+# charset designation; `ESC 7`/`ESC 8` save and restore the cursor) and the pty's
+# CRLF. A bare CR is a progress update that overwrote its line on screen, so it
+# becomes a line break here rather than gluing two updates together.
+# `transcript.log` keeps all of it: that file is the record.
 strip_ansi() {
     local esc=$'\033' bel=$'\007'
     sed -E \
         -e '/^Script (started|done) on /d' \
-        -e "s/${esc}\[[0-9;?]*[a-zA-Z]//g" \
         -e "s/${esc}\][^${bel}]*${bel}//g" \
-        -e "s/${esc}\][^${esc}]*${esc}\\\\//g" \
+        -e "s/${esc}\][^${esc}]*${esc}\\\//g" \
+        -e "s/${esc}\[[0-9;?]*[a-zA-Z]//g" \
+        -e "s/${esc}([()*+][0-9A-Za-z]|[=><]|[0-9A-Za-z])//g" \
         -e 's/\r$//' \
         -e 's/\r/\n/g'
 }
