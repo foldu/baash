@@ -54,12 +54,20 @@ first_line() {
     "$@" 2>/dev/null | head -1 || true
 }
 
+# The workspace version, the only place it is written (`docs/releasing.md`).
+# Empty outside a cargo workspace, which is what the scratch repositories the
+# logger is tested with are.
+workspace_version() {
+    sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml 2>/dev/null | head -1
+}
+
 {
     printf 'command: just release %s\n' "$*"
     printf 'started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'directory: %s\n' "$root"
     printf 'branch: %s\n' "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
     printf 'head: %s\n' "$(git log -1 --format='%H %s' 2>/dev/null || echo '?')"
+    printf 'version: %s\n' "$(workspace_version)"
     printf 'remotes:\n'
     git remote -v 2>/dev/null | sed 's/^/  /'
     printf 'tools:\n'
@@ -117,6 +125,13 @@ finish() {
     {
         printf 'finished: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         printf 'status: %d\n' "$code"
+        # What the run produced, or what it left behind after a failure: the
+        # version the workspace is at now, and the tag at HEAD when one exists.
+        printf 'version: %s\n' "$(workspace_version)"
+        tags=$(git tag --points-at HEAD 2>/dev/null | tr '\n' ' ')
+        if [ -n "$tags" ]; then
+            printf 'tag: %s\n' "${tags% }"
+        fi
         printf 'duration: %dm%02ds\n' "$((elapsed / 60))" "$((elapsed % 60))"
         printf 'logs: %s\n' "$root/$dir"
         if [ "$code" -eq 0 ]; then
