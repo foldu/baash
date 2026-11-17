@@ -179,10 +179,10 @@ was needed. The one place this does not carry over is Windows console input
   O(writes) — and every command writes `_`, which is the point: a record is
   cheaper than 71 names. `( : )` ×20k went 102.8 → 62.2 ms and
   `$(echo $n)` ×20k 162.4 → 112.5 ms (`docs/performance.md`, 2026-11-17).
-  Copy-on-write was tried on 2026-11-17 and rejected on measurement: sharing
-  the table made `$()` with an empty body 40% faster and every body that
-  writes 4–8% *slower*, because the first write copied the 71 keys anyway and
-  paid for an `Arc` besides. The risk that remains is a write path that
+  Copy-on-write was tried on 2026-11-17 and rejected on measurement: a shared
+  snapshot helped only a body that does nothing, and every body that writes was
+  4–8% *slower*, because the first write copied the 71 keys anyway and paid for
+  an `Arc` besides. The risk that remains is a write path that
   forgets to journal — the debug build compares the restored store against a
   copy, so that fails a test rather than leaking.
 * **Conformance drop.** W1 and W2 will both lower the Oils number. The baseline

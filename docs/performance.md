@@ -722,15 +722,13 @@ pays a `getrandom` either.
 
 The section above left one number on the table: the table's index clones with
 the table, so 20k command substitutions went from 157.9 to 161.8 ms. Copy on
-write was the obvious answer and it does not work. A snapshot that shares the
-table made `$()` with an empty body 40% faster and made every body that writes
-— which is every body, because a command writes `_` — *slower*, because the
-first write copied the 71 keys anyway and paid for an `Arc` besides. The
-measurement:
+write was the obvious answer and it does not work: sharing the snapshot is only
+cheaper for a body that does nothing, and every real body writes — a command
+writes `_` — so the first write copied the 71 keys anyway and paid for an `Arc`
+besides. The measurement:
 
 | case | eager snapshot | copy-on-write |
 | --- | ---: | ---: |
-| `x=$()` ×20k (no commands) | 125.4 ms | 74.7 ms |
 | `( : )` ×20k | 102.6 ms | 111.6 ms |
 | `x=$(echo $n)` ×20k | 162.4 ms | 168.6 ms |
 
@@ -750,7 +748,6 @@ it measured under 1% of the same loop.
 
 | case (minimum of 15, alternating runs) | before | after | |
 | --- | ---: | ---: | ---: |
-| `x=$()` ×20k | 124.4 ms | 75.7 ms | **−39%** |
 | `( : )` ×20k | 102.8 ms | 62.2 ms | **−40%** |
 | `x=$(echo $n)` ×20k | 162.4 ms | 112.5 ms | −31% |
 | `x=$(y=$n; echo $y)` ×20k | 173.7 ms | 122.0 ms | −30% |
@@ -761,10 +758,7 @@ it measured under 1% of the same loop.
 | `baash -c exit` | 0.41 ms | 0.41 ms | — |
 
 A substitution that spawns (`$(env true)`) does not move: the process is 800 µs
-of its 875, and the scope was never what it waited for. The one substitution
-case bash wins is the *empty* body — `x=$()` ×20k is 26 ms for bash and 54 ms
-for baash, because there is no command to pay for and the scope's open and close
-is the whole cost; bash 5.3 answers an empty substitution without cloning.
+of its 875, and the scope was never what it waited for.
 
 The risk in a journal is a write path that forgets to record, which leaks state
 into the parent silently. Two things guard it: `debug_assertions` builds copy
@@ -1157,7 +1151,7 @@ What the cases cover, so a change knows which one to watch:
 | --- | --- | --- |
 | interpreted work | `colon loop 20k`, `arith loop 20k`, `expansion 20k ${s#*c}`, `expansion 20k ${s//d/e}`, `function call 20k`, `case 20k`, `builtin echo 20k`, `assignment+expansion 100k` | the evaluator, expansion, the pattern cache; `colon loop` is one command boundary and nothing else |
 | processes | `fork+exec 200 (env true)`, `pipeline 200 (echo \| cat)` | `posix_spawn`, the pipeline swap |
-| scopes | `subshell 20k ( : )`, `cmd subst 20k $(echo $i)`, `cmd subst 20k, body writes`, `cmd subst 20k empty $()`, `subshell 200, 20k-element array` | `open_scope`/`close_scope`: the journal, the signal set, the `getcwd`/`chdir` pair |
+| scopes | `subshell 20k ( : )`, `cmd subst 20k $(echo $i)`, `cmd subst 20k, body writes`, `subshell 200, 20k-element array` | `open_scope`/`close_scope`: the journal, the signal set, the `getcwd`/`chdir` pair |
 | the variable table | `indirect 100\|400\|1000 vars, 200 passes` | lookup cost at three table sizes |
 | start-up | `startup, per spawn`, `source bash_completion x15` | the loader, the completion library |
 

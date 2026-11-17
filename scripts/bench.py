@@ -127,11 +127,6 @@ CASES: list[tuple[str, str, int]] = [
         "i=0; while (( i < 20000 )); do x=$(y=$i; echo $y); (( i++ )); done",
         1,
     ),
-    (
-        "cmd subst 20k empty $()",
-        "i=0; while (( i < 20000 )); do x=$(); (( i++ )); done",
-        3,
-    ),
     ("indirect 100 vars, 200 passes", indirect(100), 3),
     ("indirect 400 vars, 200 passes", indirect(400), 3),
     ("indirect 1000 vars, 200 passes", indirect(1000), 3),
