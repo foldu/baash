@@ -24,6 +24,15 @@ test:
 test-serial:
     cargo test --workspace --all-features
 
+# A sampled CPU profile of one baash command line (scripts/perf.sh).
+prof *ARGS:
+    ./scripts/perf.sh {{ARGS}}
+
+# Wall-clock cases against bash: evaluator, scopes, variables, start-up.
+microbench:
+    cargo build --release -p baash
+    python3 scripts/bench.py
+
 # The `=~` benchmarks: the engine, and the shell's loop against bash.
 bench:
     cargo build --release -p baash

@@ -761,7 +761,10 @@ it measured under 1% of the same loop.
 | `baash -c exit` | 0.41 ms | 0.41 ms | — |
 
 A substitution that spawns (`$(env true)`) does not move: the process is 800 µs
-of its 875, and the scope was never what it waited for.
+of its 875, and the scope was never what it waited for. The one substitution
+case bash wins is the *empty* body — `x=$()` ×20k is 26 ms for bash and 54 ms
+for baash, because there is no command to pay for and the scope's open and close
+is the whole cost; bash 5.3 answers an empty substitution without cloning.
 
 The risk in a journal is a write path that forgets to record, which leaks state
 into the parent silently. Two things guard it: `debug_assertions` builds copy
@@ -802,6 +805,14 @@ once per mask change rather than once per signal examined.
 is the command itself (allocator, expansion, one `sigprocmask` per scope).
 Cumulatively, against the snapshot this page started from, `( : )` ×20k is
 102.8 → 52.5 ms, −49%.
+
+The profile now points at the next cost in a scope: `open_scope` calls
+`getcwd` and `close_scope` calls `chdir` back to it on every `$( … )` and
+`( … )`, whether or not the body changed directory — `link_path_walk` and
+`__getcwd` are a few percent of the loop, and a path walk is not free. A scope
+only needs the restore when something inside it moved the process, so the fix
+is to record that it did (the `cd`/`pushd` path is one place) and skip both
+calls otherwise. Not done here.
 
 ## The test suite: 37 s to 5 s
 
@@ -861,7 +872,9 @@ sixteen of those at once spend the machine on context switches.
 
 ## Method
 
-`scripts/bench.py` — `python3 scripts/bench.py`, optionally
+### Wall clock: `scripts/bench.py`
+
+`python3 scripts/bench.py`, optionally
 `--shell target/debug/baash --bash /bin/bash --reps 5 --filter expansion --json`.
 It prefers a release build over a debug one and honours `CARGO_TARGET_DIR`, and
 it says so on stderr when the binary it found looks like a debug build.
@@ -872,6 +885,50 @@ inside one `/bin/sh` loop and divides, because one Python `subprocess.run` costs
 more than either shell's startup. `/bin/true` does not exist on NixOS, so the
 fork+exec case uses `env true`.
 
+What the cases cover, so a change knows which one to watch:
+
+| group | cases | what moves them |
+| --- | --- | --- |
+| interpreted work | `arith loop 20k`, `expansion 20k ${s#*c}`, `expansion 20k ${s//d/e}`, `function call 20k`, `case 20k`, `builtin echo 20k`, `assignment+expansion 100k` | the evaluator, expansion, the pattern cache |
+| processes | `fork+exec 200 (env true)`, `pipeline 200 (echo \| cat)` | `posix_spawn`, the pipeline swap |
+| scopes | `subshell 20k ( : )`, `cmd subst 20k $(echo $i)`, `cmd subst 20k, body writes`, `cmd subst 20k empty $()`, `subshell 200, 20k-element array` | `open_scope`/`close_scope`: the journal, the signal set, the `getcwd`/`chdir` pair |
+| the variable table | `indirect 100\|400\|1000 vars, 200 passes` | lookup cost at three table sizes |
+| start-up | `startup, per spawn`, `source bash_completion x15` | the loader, the completion library |
+
+The substitution cases run **once** per case and at ×20k, because bash needs
+about 3 s for one run; the counts match the tables above, so a re-run reproduces
+them rather than approximating them. The rest are 3–5 runs at counts that keep a
+release build in the tens of milliseconds. `source bash_completion x15` is
+skipped, with a note on stderr, when `vendor/bash-completion` is not there —
+`nix develop` and `nix build` put it there, a bare checkout does not.
+
+An A/B of *two baash builds* is not something one invocation can do: the harness
+measures one shell against bash. For the tables above, the two binaries were run
+alternately, in the same loop, each invocation taking the minimum — the same
+trick the Windows startup section uses to cancel a drifting machine. The `before`
+column is therefore a second checkout at the parent commit, not a number from
+memory: `--shell` points the harness at either build, and the alternating loop
+around it is a dozen lines of Python (there is a copy in the session log, not in
+the tree, because it is only worth keeping for the length of one change).
+
 The release binary scores the same conformance as the debug one
 (1986/2787 total, 1931 strict), so the optimiser is not hiding a behavioural
 difference.
+
+### Sampled: `scripts/perf.sh`, or `just prof`
+
+`./scripts/perf.sh --norc -c 'i=0; while (( i < 20000 )); do ( : ); (( i++ )); done'`
+builds a release binary with frame pointers and debuginfo *in `target/perf`*
+(the shipped build has neither, and a profile of it is a list of addresses),
+records it, and prints self time by symbol. All arguments go to baash.
+
+The clock is `task-clock`, not a hardware counter: this host has no PMU
+(`perf record -e cpu/cycles` fails with "No such file"), and a container or VM
+usually is the same. `task-clock` counts CPU time, so a blocked or waiting
+process samples as nothing — which is why no wall-clock claim here comes from a
+profile. `-F 4000 -g --call-graph fp` is 4 kHz with frame-pointer stacks;
+`perf report -i target/perf/record.data --children -g graph` answers "who
+called this", which is how the `set_line` rescan was found.
+
+Both are worth re-running on the commit that last touched the area, not on a
+memory of the number: the sections above name the commit they measured.

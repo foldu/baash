@@ -31,9 +31,32 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
+
+def indirect(names: int) -> str:
+    """`${!n}` over a generated table of `names` variables, 200 passes.
+
+    The variable table is a hash index over an insertion-ordered vector, so this
+    is the case that moves when a lookup changes: 100, 400 and 1000 names are
+    the sizes in `docs/performance.md`'s scaling table.
+    """
+    return (
+        f'i=0; while (( i < {names} )); do i=$((i+1)); eval "v$i=x"; done; '
+        f'i=0; names=; while (( i < {names} )); do i=$((i+1)); '
+        'names="$names v$i"; done; '
+        'set -- $names; r=0; while (( r < 200 )); do r=$((r+1)); '
+        'for n; do : "${!n}"; done; done'
+    )
+
+
+# The bash-completion library is not in git: `nix develop` (or a `nix build`)
+# puts it in `vendor/`, and an interactive start is what pays for sourcing it.
+BASH_COMPLETION = REPO / "vendor" / "bash-completion" / "bash_completion"
+
 # (name, script, repetitions). Loop counts are chosen so a release build takes
 # a few tens of milliseconds per run: larger and the table takes minutes,
-# smaller and process-start noise dominates.
+# smaller and process-start noise dominates. The substitution cases are the
+# exception: bash needs ~3 s per 20k run, so they run once, and their counts
+# match the tables in `docs/performance.md`.
 CASES: list[tuple[str, str, int]] = [
     ("arith loop 20k ((i++))", "i=0; while (( i < 20000 )); do (( i++ )); done", 3),
     (
@@ -75,14 +98,55 @@ CASES: list[tuple[str, str, int]] = [
         5,
     ),
     ("subshell 1000 ( : )", "i=0; while (( i < 1000 )); do ( : ); (( i++ )); done", 5),
-    # A scope clones the shell state, so a large array in scope is the one case
-    # where the clone is visible (`docs/direction.md` §9).
+    # A scope journals its writes instead of cloning the shell state, so a large
+    # array in scope costs what the journal records and nothing else; before
+    # that change this was the one case a subshell lost to bash
+    # (`docs/direction.md` §9).
     (
         "subshell 200, 20k-element array",
         "arr=( $(seq 20000) ); i=0; while (( i < 200 )); do ( : ); (( i++ )); done",
         3,
     ),
+    (
+        "subshell 20k ( : )",
+        "i=0; while (( i < 20000 )); do ( : ); (( i++ )); done",
+        1,
+    ),
+    (
+        "cmd subst 20k $(echo $i)",
+        "i=0; while (( i < 20000 )); do x=$(echo $i); (( i++ )); done",
+        1,
+    ),
+    (
+        "cmd subst 20k, body writes",
+        "i=0; while (( i < 20000 )); do x=$(y=$i; echo $y); (( i++ )); done",
+        1,
+    ),
+    (
+        "cmd subst 20k empty $()",
+        "i=0; while (( i < 20000 )); do x=$(); (( i++ )); done",
+        3,
+    ),
+    ("indirect 100 vars, 200 passes", indirect(100), 3),
+    ("indirect 400 vars, 200 passes", indirect(400), 3),
+    ("indirect 1000 vars, 200 passes", indirect(1000), 3),
+    # The library an interactive start pays for; skipped when it is not
+    # vendored (`nix develop` puts it there).
+    (
+        "source bash_completion x15",
+        f'i=0; while (( i < 15 )); do . {BASH_COMPLETION}; (( i++ )); done',
+        3,
+    ),
+    (
+        "assignment+expansion 100k",
+        "n=0; while [ \"$n\" -lt 100000 ]; do n=$((n+1)); s=\"pre-${n}-post\"; "
+        "t=${s#pre-}; u=${t%-post}; x=${#u}; done",
+        3,
+    ),
 ]
+
+# Cases that need something outside the checkout.
+REQUIRES: dict[str, Path] = {"source bash_completion x15": BASH_COMPLETION}
 
 ENV = dict(os.environ, LC_ALL="C", LANG="C")
 
@@ -184,6 +248,10 @@ def main() -> int:
     )
     for name, script, reps in CASES:
         if args.filter and args.filter not in name:
+            continue
+        missing = REQUIRES.get(name)
+        if missing is not None and not missing.is_file():
+            print(f"note: skipping {name}: {missing} is not there", file=sys.stderr)
             continue
         reps = args.reps or reps
         rows.append(
