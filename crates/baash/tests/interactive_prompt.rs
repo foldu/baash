@@ -50,10 +50,11 @@ const SCRUBBED: &[&[u8]] = &[
     b"SSH_CLIENT",
     b"LC_ALL",
     b"NO_COLOR",
-    // The stock prompt's glyphs and the duration's floor are options; the
-    // tests set them themselves.
+    // The stock prompt's glyphs, the duration's floor and the legacy branch
+    // suffix are options; the tests set them themselves.
     b"PROMPT_ICONS",
     b"PROMPT_DURATION",
+    b"PROMPT_GIT",
     // A notification is opted into, so an inherited value would make the
     // "no notification" test measure the environment.
     b"BAASH_NOTIFY",
@@ -521,6 +522,50 @@ fn the_prompt_counts_ahead_behind_modified_and_untracked() {
     session.send(b"\x15"); // Ctrl-U: discard the long line
     session.send(b"echo ok\n");
     session.prompt("ok\r\n");
+    session.send(b"exit\n");
+    session.wait_child();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A prompt that paints its own branch can turn baash's suffix off.
+///
+/// The legacy `[branch ~N]` suffix is for a `PS1` that says nothing about git;
+/// starship and oh-my-posh say it themselves, and the suffix then duplicates
+/// it. `PROMPT_GIT` is read at each prompt like `PROMPT_ICONS`, so one line in
+/// an rc file is the whole opt-out. The branch needs no worker — it is an exact
+/// `.git/HEAD` read — so it is on the first prompt either way.
+#[test]
+fn a_user_prompt_can_turn_the_legacy_branch_off() {
+    let home = temp_dir("prompt-git-home");
+    let work = home.join("repo");
+    std::fs::create_dir_all(&work).expect("create work tree");
+    git(&work, &["init", "-q", "-b", "main"]);
+    std::fs::write(work.join("tracked.txt"), "one\n").expect("write tracked file");
+    git(&work, &["add", "tracked.txt"]);
+    git(&work, &["commit", "-q", "-m", "one"]);
+
+    // The default: a user's prompt keeps the suffix it has always had.
+    let mut session = Session::spawn(&home, &work, &["--norc", "-i"], &[("PS1", "MINE> ")]);
+    session.prompt("MINE>  [main]");
+    session.send(b"exit\n");
+    session.wait_child();
+
+    // Off: the prompt is exactly what the user wrote. `echo` is the barrier —
+    // by the time its output appears, anything the prompt was going to append
+    // has been written too.
+    let mut session = Session::spawn(
+        &home,
+        &work,
+        &["--norc", "-i"],
+        &[("PS1", "MINE> "), ("PROMPT_GIT", "off")],
+    );
+    session.prompt("MINE> ");
+    session.line("echo probe", "probe\r\n");
+    assert!(
+        !session.saw(b"[main]"),
+        "the suffix must be gone: {}",
+        String::from_utf8_lossy(&session.output)
+    );
     session.send(b"exit\n");
     session.wait_child();
     let _ = std::fs::remove_dir_all(&home);

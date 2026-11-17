@@ -138,7 +138,8 @@ repaint or the prompt.
 
 A user-defined `PS1` is not live: re-rendering it while the user types would run
 shell code between keystrokes. It keeps the legacy `[branch ~N]` suffix, fed by
-the same worker cache. The idle backstop still asks the prompt state once a
+the same worker cache — unless `PROMPT_GIT` turns it off, and then the cache is
+neither painted nor ticked. The idle backstop still asks the prompt state once a
 second, so `PromptState::refresh` answers `None` unless the stock prompt was
 armed; composing an unarmed state painted an empty `$ ` over the user's prompt
 (starship's `PS1`, one second after the prompt appeared).

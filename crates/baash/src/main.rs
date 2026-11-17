@@ -1031,6 +1031,26 @@ fn prompt_icons(shell: &mut Interp) -> bool {
         .is_some_and(|value| ON.iter().any(|word| value.eq_ignore_ascii_case(word)))
 }
 
+/// Whether a user-defined `PS1` still gets the legacy `[branch ~N]` suffix.
+///
+/// On unless `PROMPT_GIT` says otherwise. The stock prompt paints its own
+/// branch and counters, so the suffix exists for a `PS1` the user wrote that
+/// says nothing about git; a prompt that already says it (starship, oh-my-posh)
+/// does not want it twice, and `PROMPT_GIT=0` in an rc file is the opt-out.
+/// Like `PROMPT_ICONS` it is a shell variable read at each prompt, so an
+/// assignment at the prompt takes effect at the next one; `0`, `off`, `false`
+/// and `no` in any ASCII case turn it off, and anything else — including unset —
+/// leaves it on. Off also means no `git status` walk: the suffix is the only
+/// consumer of that cache on this path.
+fn prompt_git(shell: &mut Interp) -> bool {
+    const OFF: [&[u8]; 4] = [b"0", b"off", b"false", b"no"];
+    shell
+        .state()
+        .vars
+        .scalar(b"PROMPT_GIT")
+        .is_none_or(|value| !OFF.iter().any(|word| value.eq_ignore_ascii_case(word)))
+}
+
 /// How long the last command took, as the stock prompt should paint it.
 ///
 /// `PROMPT_DURATION` picks the policy: `0`/`off`/`false`/`no` never paints, a
@@ -1160,19 +1180,22 @@ fn refresh_prompt(
         prompt.primary()
     } else {
         // The legacy `[branch ~N]` suffix is fed by the same worker cache, so
-        // it needs the directory even when the stock prompt is not in use.
-        prompt.tick(&baash_sys::os::path_from_bytes(&context.cwd));
+        // it needs the directory even when the stock prompt is not in use —
+        // unless `PROMPT_GIT` turns it off, and then the walk is pointless too.
+        let legacy = prompt_git(shell);
+        if legacy {
+            prompt.tick(&baash_sys::os::path_from_bytes(&context.cwd));
+        }
         let template = prompt_template(shell, b"PS1").unwrap_or_default();
         let primary = shell.render_prompt(&template);
         // The stock prompt carries the branch inline; the legacy bracketed
         // suffix is for a user-defined `PS1` only.
-        match prompt.legacy_segment() {
-            Some(segment) => {
-                let mut bytes = primary.into_bytes();
-                bytes.extend_from_slice(&segment);
-                baash_repl::ExpandedPrompt::from_bytes(bytes)
-            }
-            None => primary,
+        if let Some(segment) = legacy.then(|| prompt.legacy_segment()).flatten() {
+            let mut bytes = primary.into_bytes();
+            bytes.extend_from_slice(&segment);
+            baash_repl::ExpandedPrompt::from_bytes(bytes)
+        } else {
+            primary
         }
     };
     // The completion engine reads the same state the prompt does, so it is

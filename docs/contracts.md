@@ -581,8 +581,12 @@ wins**: the environment, an rc file or an assignment at the prompt replaces the
 value and the normal template path renders exactly those bytes. The REPL's
 legacy `[branch ~N]` suffix is appended only to user-defined prompts, because
 the stock prompt already contains the branch and the counters. `N` there is
-modified plus untracked. A user-defined prompt is never repainted from the stock
-one: the editor's idle backstop still asks, and `PromptState::refresh` answers
+modified plus untracked. `PROMPT_GIT` turns the suffix off — `0`, `off`,
+`false` or `no` in any ASCII case, read at each prompt like `PROMPT_ICONS` —
+for a prompt that paints its own branch (starship, oh-my-posh); off also skips
+the `git status` walk the suffix would have asked for. The stock prompt's own
+branch is unaffected either way. A user-defined prompt is never repainted from
+the stock one: the editor's idle backstop still asks, and `PromptState::refresh` answers
 nothing unless the stock prompt was armed (otherwise a `PS1` set by
 `PROMPT_COMMAND`, as starship's is, was replaced by an empty `$ ` one second
 after it appeared).
