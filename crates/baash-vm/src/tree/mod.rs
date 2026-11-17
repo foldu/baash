@@ -535,11 +535,11 @@ pub struct Interp {
     /// of the last simple command (which is a one-stage pipeline). Empty at
     /// startup, as in bash.
     pipeline_status: std::collections::BTreeMap<i64, Vec<u8>>,
-    /// `$LINENO`: the 1-based line of the command being evaluated, and the
-    /// source file it belongs to. The offset cursor makes advancing through a
-    /// chunk amortized O(1) instead of a scan from byte zero per node.
-    line_source: Arc<SourceFile>,
-    line_offset: usize,
+    /// `$LINENO`: the 1-based line of the command being evaluated.
+    ///
+    /// The line is recomputed per node from the source's newline index, so an
+    /// out-of-order span (a loop body, a function called twice) costs no more
+    /// than an in-order one.
     line_number: u32,
     lineno: Vec<u8>,
     /// The span of the node being evaluated, so a diagnostic raised by a
@@ -689,8 +689,6 @@ impl Interp {
             alias_eval_depth: 0,
             pipeline_status: std::collections::BTreeMap::new(),
             utf8_locale: false,
-            line_source: Arc::new(SourceFile::new("<none>", &b""[..])),
-            line_offset: 0,
             line_number: 1,
             lineno: b"1".to_vec(),
             current_span: 0..0,
@@ -1245,50 +1243,34 @@ impl Interp {
 
     /// Point `$LINENO` at `offset` in `source`, the chunk being evaluated.
     ///
-    /// Node spans arrive mostly in source order, so the line counter advances
-    /// from the previous offset; a jump backwards (a loop body, a function
-    /// called twice) rescans from the top rather than reporting a stale line.
+    /// The line comes from the source's newline index, so every span costs the
+    /// same however it is ordered. Keeping a cursor instead and rescanning from
+    /// byte zero on a backwards jump (a loop body, a function called twice) was
+    /// half the CPU of sourcing `bash_completion` — 3.5 ms of its 6.6 ms, and
+    /// the library is what an interactive start pays for (`docs/performance.md`).
     pub(crate) fn set_line(&mut self, source: &Arc<SourceFile>, offset: usize) {
-        if let Some(base) = self.line_base {
-            // A trap handler is a chunk of its own, but bash reports the line
-            // of the command it is running *for*: `trap 'echo $LINENO' DEBUG`
-            // sees the next command's line, not line 1 of the handler text.
-            let end = offset.min(source.bytes().len());
-            let newlines = source.bytes()[..end]
-                .iter()
-                .filter(|&&byte| byte == b'\n')
-                .count();
-            self.line_number = base.saturating_add(newlines as u32);
-            self.line_offset = end;
-            let text = self.line_number.to_string();
-            if self.lineno != text.as_bytes() {
-                self.lineno = text.into_bytes();
-            }
-            return;
+        // A trap handler is a chunk of its own, but bash reports the line of
+        // the command it is running *for*: `trap 'echo $LINENO' DEBUG` sees the
+        // next command's line, not line 1 of the handler text. So a handler's
+        // first line is the trapped command's line, and anything else starts
+        // its own count at 1.
+        let base = self.line_base.unwrap_or(1);
+        let line = base.saturating_add(source.line_at(offset).saturating_sub(1));
+        if line != self.line_number {
+            self.line_number = line;
+            write_decimal(&mut self.lineno, i64::from(line));
         }
-        if !Arc::ptr_eq(&self.line_source, source) {
-            self.line_source = source.clone();
-            self.line_offset = 0;
-            self.line_number = 1;
-        }
-        if offset < self.line_offset {
-            self.line_offset = 0;
-            self.line_number = 1;
-        }
-        let bytes = source.bytes();
-        let end = offset.min(bytes.len());
-        if end > self.line_offset {
-            let newlines = bytes[self.line_offset..end]
-                .iter()
-                .filter(|&&byte| byte == b'\n')
-                .count() as u32;
-            self.line_number += newlines;
-            self.line_offset = end;
-        }
-        let text = self.line_number.to_string();
-        if self.lineno != text.as_bytes() {
-            self.lineno = text.into_bytes();
-        }
+    }
+
+    /// Put `$LINENO` back to a value saved before a scope, trap or function ran.
+    ///
+    /// The number and its text move together: `$LINENO` reads the bytes, so a
+    /// restore that only assigned the number left the last line the inner chunk
+    /// reached on show until the next node overwrote it — an `ERR` trap fired
+    /// for `x=$(false)` reported line 1, the substitution's line, not line 3.
+    fn restore_line(&mut self, saved: u32) {
+        self.line_number = saved;
+        write_decimal(&mut self.lineno, i64::from(saved));
     }
 
     /// `$LINENO` as an integer, for arithmetic.

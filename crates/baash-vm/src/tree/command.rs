@@ -1190,7 +1190,7 @@ impl Interp {
         // `$LINENO` belongs to the *call site* again once the body returns:
         // an `ERR` trap that fires for the call reports the caller's line, not
         // the function's last one (`line=14` for a call on line 14).
-        let saved_line = (self.line_source.clone(), self.line_offset, self.line_number);
+        let saved_line = self.line_number;
         // The body's spans are offsets into its *definition* file, so the
         // diagnostics raised inside it have to be rendered against that file.
         // Without the swap a function defined by `source` blames the call site
@@ -1204,7 +1204,7 @@ impl Interp {
         if let Some(exit) = self.run_return_trap() {
             self.depth -= 1;
             self.pop_call();
-            (self.line_source, self.line_offset, self.line_number) = saved_line;
+            self.restore_line(saved_line);
             let _ = self.state.vars.pop_frame();
             self.restore_function_traps(inherited);
             let _ = self.state.vars.finish_prefix_assignments(applied);
@@ -1213,7 +1213,7 @@ impl Interp {
         }
         self.depth -= 1;
         self.pop_call();
-        (self.line_source, self.line_offset, self.line_number) = saved_line;
+        self.restore_line(saved_line);
         let frame = self.state.vars.pop_frame();
         self.restore_function_traps(inherited);
         let _ = self.state.vars.finish_prefix_assignments(applied);

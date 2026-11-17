@@ -564,6 +564,100 @@ library run from the fill alone; the shipped `bash_completion` fills 138 keys,
 not 700, so sourcing the whole library on Linux went 7.49 ms to 7.81 ms, which
 is noise. The prediction was about per-insert cost, and that is what moved.
 
+### 2026-11-17: where the CPU goes, sampled
+
+Everything above is a wall-clock A/B. This is the other view: what the CPU was
+doing, sampled. `perf record -e task-clock -F 4000 -g --call-graph fp` over the
+release profile with `-Cforce-frame-pointers=yes` and debuginfo — the optimiser
+left on, symbols added, in `/tmp/baash-perf-target` so the shipped build is not
+touched. `task-clock` charges running time only, and on this host there is no
+PMU (`cpu/cycles` opens as "No such file"), so instruction counts and
+`perf stat` are not available: the clock and the stack are. Machine: Ryzen 9
+9950X3D, 32 threads, Linux, perf 7.3.4, 4 kHz.
+
+Self time by crate, percent of samples. `libc` is `malloc`/`free`/`memcmp`/
+`memmove` — the allocator and the byte comparisons, not shell code:
+
+| workload | `libc` | kernel | `lang` | `vm` | `runtime` | `syntax` | `pattern` | `alloc`/`core` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| interpreter loop, 100k iterations | 39.3 | 0.3 | 22.6 | 19.7 | 12.8 | – | 0.8 | 4.2 |
+| 20k `[[ $s =~ … ]]` | 45.8 | 0.3 | 14.6 | 17.9 | 13.0 | 3.3 | – | 4.3 |
+| 20k `x=$(echo $n)` | 44.0 | 24.1 | 8.6 | 8.2 | 9.5 | 1.4 | – | 1.8 |
+| `source bash_completion`, before | 12.4 | 3.9 | 3.9 | 56.6 | 2.0 | 16.1 | 2.8 | 2.2 |
+| `source bash_completion`, after | 28.5 | 6.4 | 10.5 | 12.2 | 4.6 | 27.3 | 2.9 | 4.1 |
+
+Five things fell out of it.
+
+**`$LINENO` was quadratic, and sourcing the completion library paid for it.**
+`set_line` is called for every node the evaluator reaches, and it used a cursor
+over the source: a span that arrived backwards (a loop body, a function called
+twice) rescanned the file from byte zero. That is a byte-by-byte `filter` over
+100 KB of `bash_completion`, per jump — **53.6% of the CPU of sourcing it**.
+`SourceFile` (`crates/baash-diag/src/lib.rs`) now indexes the newline offsets
+on the first query — `line_at`, a `partition_point` — and `set_line` in
+`crates/baash-vm/src/tree/mod.rs` reads the line instead of counting it.
+Sources never change, so the scan happens once:
+
+| case (minimum of 15, alternating runs) | before | after | |
+| --- | ---: | ---: | ---: |
+| `source bash_completion` ×15 | 91.1 ms | 42.2 ms | **−54%** |
+| — per source | 6.07 ms | 2.81 ms | |
+| interpreter loop, 100k iterations | 280 ms | 267 ms | −4.9% |
+| 3-line file sourced 2000× | 8.55 ms | 8.55 ms | noise |
+| `baash -c exit` | 0.40 ms | 0.40 ms | noise |
+
+A small file pays the one scan it already paid on its first pass, so nothing
+regresses; a large one stops paying it thousands of times.
+
+Two bugs on the way there are worth recording, because both were invisible to
+the unit tests and visible to the shell. The first attempt reported line *zero*
+for a command on line one: the base a chunk is counted from is 1, not 0. The
+`$LINENO` buffer is a cache of the number, and five places restore the number
+after a scope, a function or a trap without touching the text — so an `ERR`
+trap fired for `x=$(false)` printed the substitution's line 1 instead of line
+2, where the command sits. Three conformance cases (`builtin-trap-err` and
+`builtin-trap-bash`, −3 on the ratchet) caught it; the restores now go through
+one `restore_line`, which writes both. The new cases
+`lineno_follows_a_loop_body_and_a_function_called_twice` and the substitution
+line in `the_err_trap_sees_the_failing_line_and_its_status` pin them.
+
+**The variable table is a scan, and that is visible.** In a loop that
+alternates four names, 6.0% of samples are in `Vars::lookup` and 9.9% in
+`memcmp` comparing the names it walks past. `Vars` is a `Vec<(Vec<u8>, Var)>`
+with a one-entry "last hit" cache (`vars.rs`, and the 2026-11-01 section above),
+which covers the same variable read twice but not four read in turn. A two- or
+four-entry cache would cover the loop; a hash index is the other answer, and the
+same trade the associative array just took. Not changed.
+
+**`$( … )` copies the shell.** `open_scope` clones `ShellState` — the global
+table, every frame, every `Vec<u8>` key — once per command substitution: 5.5% in
+the clone plus its allocations, and `sigismember`/`SignalSet::eq` another 7% for
+the disposition save. 8 µs per substitution. That is the price of no `fork()`
+done the simple way, and the way out is a persistent scope stack (a frame per
+depth, not a clone), not a micro-optimisation. Not changed.
+
+**A Tab press is mostly the completion backend, not the ranker.** With
+`carapace` on `PATH`, 60.5% of the CPU of typing `ec<Tab>` and `echo
+$PA<Tab>` in a loop is the `carapace` child, 31.8% is baash, 6.4% is the pty
+driver. Of baash's share, the top entries are `baash_complete::rank::Ranker`'s
+`nucleo` fuzzy matcher, a `RandomState` hash per candidate (`to_lowercase` and
+`Utf8Chunks` per candidate beside it), and the allocator. `ahash` is already a
+dependency and `DefaultHasher` is SipHash-1-3 for four-byte keys; the lowercase
+fold is recomputed per keystroke for the same list.
+
+**Startup has nothing left to win.** Of the CPU a one-shot `baash -c exit`
+accrues (300 spawns), 2.4% is baash's own code: 47.6% is the kernel (page
+faults, `execve`, `mmap`) and 47.3% is the dynamic loader (`do_lookup_x`,
+`_dl_relocate_object_no_relro`, `strcmp`). The wall-clock section says the same
+thing from 0.40 ms; this says it at instruction granularity.
+
+What this does not show: samples are CPU time, so a blocked or waiting process
+samples as nothing and terminal latency is invisible; the pty harness shows
+what a keystroke costs the shell, not what it costs the terminal; the profiling
+build carries frame pointers the shipped build does not, so a tail call can
+attribute differently; and a 0.4 ms process is 1–2 samples, which is why the
+startup row is an aggregate of 300 spawns.
+
 ## The test suite: 37 s to 5 s
 
 `cargo test` has to hold `RUST_TEST_THREADS=1` (`.cargo/config.toml`): `$( … )`

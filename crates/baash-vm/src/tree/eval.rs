@@ -958,12 +958,12 @@ impl Interp {
         if suppress_traps {
             self.err_trap_suppressed += 1;
         }
-        let saved_line = (self.line_source.clone(), self.line_offset, self.line_number);
+        let saved_line = self.line_number;
         let status = self.run_in_scope(chunk, body, ctx);
         if suppress_traps {
             self.err_trap_suppressed -= 1;
         }
-        (self.line_source, self.line_offset, self.line_number) = saved_line;
+        self.restore_line(saved_line);
         self.set_status(status);
         self.sync_specials();
         if let Some(exit) = self.after_foreground_wait() {
@@ -1029,7 +1029,7 @@ impl Interp {
         if suppress_traps {
             self.err_trap_suppressed += 1;
         }
-        let saved_line = (self.line_source.clone(), self.line_offset, self.line_number);
+        let saved_line = self.line_number;
         let scope = self.open_scope();
         if !self.state.opts.inherit_errexit {
             self.state.opts.errexit = false;
@@ -1045,7 +1045,7 @@ impl Interp {
             if suppress_traps {
                 self.err_trap_suppressed -= 1;
             }
-            (self.line_source, self.line_offset, self.line_number) = saved_line;
+            self.restore_line(saved_line);
             return Err(format!("cannot redirect a process substitution: {error}"));
         }
         let unwind = self.eval_node(chunk, chunk.ast.root, Ctx::default());
@@ -1055,7 +1055,7 @@ impl Interp {
         if suppress_traps {
             self.err_trap_suppressed -= 1;
         }
-        (self.line_source, self.line_offset, self.line_number) = saved_line;
+        self.restore_line(saved_line);
         match saved {
             Some(saved) => {
                 let _ = baash_sys::dup2(saved.as_raw_fd(), target);
@@ -1241,7 +1241,7 @@ impl Interp {
         if suppress_traps {
             self.err_trap_suppressed += 1;
         }
-        let saved_line = (self.line_source.clone(), self.line_offset, self.line_number);
+        let saved_line = self.line_number;
         let scope = self.open_scope();
         // bash resets `errexit` inside a command substitution: a failure in the
         // body contributes to the substitution's status and the rest of the body
@@ -1267,7 +1267,7 @@ impl Interp {
         if suppress_traps {
             self.err_trap_suppressed -= 1;
         }
-        (self.line_source, self.line_offset, self.line_number) = saved_line;
+        self.restore_line(saved_line);
         match saved_stdout {
             Some(saved) => {
                 let _ = baash_sys::dup2(saved.as_raw_fd(), 1);

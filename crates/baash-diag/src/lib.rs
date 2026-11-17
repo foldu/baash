@@ -17,7 +17,7 @@
 
 use std::fmt;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 mod compact;
 mod json;
@@ -41,10 +41,32 @@ pub type Span = Range<usize>;
 /// functions; a diagnostic therefore may not borrow a parse arena that has
 /// already moved on. `Arc` keeps cloning cheap when many diagnostics share one
 /// file.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct SourceFile {
     name: String,
     bytes: Arc<[u8]>,
+    /// Byte offsets of every `\n`, built on the first line query.
+    ///
+    /// A line number is "how many newlines before this offset", and both the
+    /// evaluator (`$LINENO`, once per node it reaches) and every diagnostic ask
+    /// that question. Walking the bytes from zero each time made sourcing
+    /// `bash_completion` quadratic: half its CPU was this rescan, measured with
+    /// `perf` (`docs/performance.md`). Sources never change after
+    /// construction, so the scan happens once.
+    newlines: OnceLock<Arc<[usize]>>,
+}
+
+impl Clone for SourceFile {
+    /// Clones the text, not the index: a copy that is edited later (the editor
+    /// re-parses its buffer into a new file) starts without a stale table,
+    /// and the rebuild costs one scan of the text it already copies.
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            bytes: self.bytes.clone(),
+            newlines: OnceLock::new(),
+        }
+    }
 }
 
 impl SourceFile {
@@ -53,6 +75,7 @@ impl SourceFile {
         Self {
             name: name.into(),
             bytes: bytes.into(),
+            newlines: OnceLock::new(),
         }
     }
 
@@ -76,33 +99,38 @@ impl SourceFile {
         self.bytes.is_empty()
     }
 
+    /// Byte offsets of every newline in the file, in order.
+    fn newlines(&self) -> &[usize] {
+        self.newlines.get_or_init(|| {
+            self.bytes
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &byte)| (byte == b'\n').then_some(i))
+                .collect::<Vec<usize>>()
+                .into()
+        })
+    }
+
+    /// 1-based line number containing `offset`.
+    ///
+    /// O(log lines) after the first call; `offset` past the end reports the
+    /// last line, as [`line_col`](Self::line_col) does.
+    pub fn line_at(&self, offset: usize) -> u32 {
+        let end = offset.min(self.bytes.len());
+        (self.newlines().partition_point(|&newline| newline < end) as u32) + 1
+    }
+
     /// 1-based line and 1-based byte column for a byte offset.
     pub fn line_col(&self, offset: usize) -> (u32, u32) {
         let end = offset.min(self.bytes.len());
-        let mut line = 1u32;
-        let mut line_start = 0usize;
-        for (i, &b) in self.bytes[..end].iter().enumerate() {
-            if b == b'\n' {
-                line += 1;
-                line_start = i + 1;
-            }
-        }
+        let line = self.line_at(end);
+        let line_start = self.line_start(line);
         (line, (end - line_start) as u32 + 1)
     }
 
     /// The text of a 1-based `line`, without its trailing newline.
     pub fn line(&self, line: u32) -> &[u8] {
-        let mut current = 1u32;
-        let mut start = 0usize;
-        while current < line {
-            match self.bytes[start..].iter().position(|&b| b == b'\n') {
-                Some(nl) => {
-                    start += nl + 1;
-                    current += 1;
-                }
-                None => return &[],
-            }
-        }
+        let start = self.line_start(line);
         let rest = &self.bytes[start..];
         let end = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
         &rest[..end]
@@ -116,18 +144,10 @@ impl SourceFile {
         if line <= 1 {
             return 0;
         }
-        let mut current = 1u32;
-        let mut start = 0usize;
-        while current < line {
-            match self.bytes[start..].iter().position(|&b| b == b'\n') {
-                Some(newline) => {
-                    start += newline + 1;
-                    current += 1;
-                }
-                None => return self.bytes.len(),
-            }
+        match self.newlines().get(line as usize - 2) {
+            Some(&newline) => newline + 1,
+            None => self.bytes.len(),
         }
-        start
     }
 
     /// Number of logical lines, counting a trailing newline as the start of an
@@ -136,13 +156,7 @@ impl SourceFile {
     /// This matches [`line_col`](Self::line_col): for `b"a\n"` the count is 2
     /// and `line_col(2)` is `(2, 1)`. An empty file still has one (empty) line.
     pub fn line_count(&self) -> u32 {
-        let mut count = 1u32;
-        for &byte in self.bytes.iter() {
-            if byte == b'\n' {
-                count += 1;
-            }
-        }
-        count
+        (self.newlines().len() as u32) + 1
     }
 }
 
@@ -311,6 +325,34 @@ mod tests {
         assert_eq!(src().line_col(0), (1, 1));
         assert_eq!(src().line_col(4), (2, 1));
         assert_eq!(src().line_col(9), (3, 2)); // after the tab
+    }
+
+    #[test]
+    fn line_at_counts_the_newlines_before_the_offset() {
+        // The offset of a `\n` still belongs to the line it ends; the byte
+        // after it starts the next one. `line_col` agrees with `line_at`.
+        assert_eq!(src().line_at(0), 1);
+        assert_eq!(src().line_at(3), 1);
+        assert_eq!(src().line_at(4), 2);
+        assert_eq!(src().line_at(8), 3);
+        assert_eq!(src().line_at(15), 4); // the trailing newline starts an empty line
+        assert_eq!(src().line_at(999), 4); // past the end clamps to the last line
+        assert_eq!(src().line_col(15), (4, 1));
+        // A file with no newline is one line, and an empty file is still one.
+        assert_eq!(SourceFile::new("-", &b"x"[..]).line_at(1), 1);
+        assert_eq!(SourceFile::new("-", &b""[..]).line_at(0), 1);
+        assert_eq!(SourceFile::new("-", &b""[..]).line_count(), 1);
+    }
+
+    #[test]
+    fn a_cloned_source_still_answers_line_queries() {
+        // The index is not cloned, only the text: a clone built before the
+        // first query must still be correct after it.
+        let original = src();
+        let copy = original.clone();
+        assert_eq!(original.line_at(8), 3);
+        assert_eq!(copy.line_at(8), 3);
+        assert_eq!(copy.line_count(), 4);
     }
 
     #[test]

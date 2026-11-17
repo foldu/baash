@@ -2082,9 +2082,34 @@ fn trap_handlers_run_with_the_line_of_the_command_they_serve() {
 }
 
 #[test]
+fn lineno_follows_a_loop_body_and_a_function_called_twice() {
+    // A span arrives out of source order when a loop body repeats or a
+    // function is called again; the line must be the one the first pass
+    // reported. Deriving it from a cursor that only moves forwards (and
+    // rescanning the file on a backwards jump) gave the same answer and cost
+    // a scan per jump, which is what made sourcing `bash_completion` quadratic.
+    let script =
+        "for i in 1 2; do\n  echo \"loop:$LINENO\"\ndone\nf() { echo \"f:$LINENO\"; }\nf\nf\n";
+    assert_eq!(out(script), "loop:2\nloop:2\nf:4\nf:4\n");
+    // The first command is on line 1, not line 0, and a sourced file's line
+    // numbers are its own.
+    assert_eq!(
+        out("echo one:$LINENO\necho two:$LINENO\n"),
+        "one:1\ntwo:2\n"
+    );
+}
+
+#[test]
 fn the_err_trap_sees_the_failing_line_and_its_status() {
     let script = "trap 'echo \"err:$?:$LINENO\"' ERR\nfalse\necho done\n";
     assert_eq!(out(script), "err:1:2\ndone\n");
+    // A command substitution is a scope, but the trap that fires for its
+    // status reports the line of the command it belongs to, not the
+    // substitution's own line 1.
+    assert_eq!(
+        out("trap 'echo line=$LINENO' ERR\nx=$(false)\necho ok\n"),
+        "line=2\nok\n"
+    );
     // `errexit` still exits afterwards, with the failing command's status.
     let output = run("trap 'echo trap' ERR\nset -e\nfalse\necho unreached");
     assert_eq!(code(&output), 1);
