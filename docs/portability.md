@@ -62,6 +62,17 @@ there is no terminal handover, `WUNTRACED` wait or per-job process group to port
 code in this process with fd 1 on a seekable temporary file. The subshell scope
 is that pattern generalised, plus the state snapshot.
 
+**Those temporary files are unlinked on both platforms, by different means.**
+Unix gets one from `memfd` or `tmpfile`; Windows has neither, so
+`create_unlinked_temp` opens a `std::fs` file — whose share mode includes
+`FILE_SHARE_DELETE` — hands the handle to `_open_osfhandle`, and removes the
+name before returning: the descriptor keeps the bytes and the file goes away
+with the last handle, so `%TEMP%` does not collect one file per substitution.
+It used to `_wopen` a name that `remove_file` could not delete (the CRT asks for
+no share-delete) and use `…-0.tmp` for every call, so two live captures were
+one file — a command substitution inside `PROMPT_COMMAND` wrote into the
+prompt-command capture as well. The name now carries a process-wide counter.
+
 ## 3. Construct by construct
 
 The authoritative list of what is rejected, and why, is `docs/direction.md` §4.

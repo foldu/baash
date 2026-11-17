@@ -71,6 +71,7 @@ unsafe extern "C" {
     fn _lseek(fd: c_int, offset: i64, origin: c_int) -> i64;
     fn _pipe(fds: *mut c_int, size: u32, mode: c_int) -> c_int;
     fn _get_osfhandle(fd: c_int) -> isize;
+    fn _open_osfhandle(osfhandle: isize, flags: c_int) -> c_int;
 }
 
 /// `_O_*` flags. These are the CRT's values, not the shell's (`flags::*` maps
@@ -416,39 +417,60 @@ pub fn fd_path(_fd: RawFd) -> Option<Vec<u8>> {
 }
 
 pub fn create_unlinked_temp(_size_hint: usize) -> io::Result<OwnedFd> {
-    let mut file = tempfile_path();
-    if file.is_empty() {
-        file = b"baash-temp".to_vec();
-    }
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    // Each call gets its own file, and the name is gone before the call
+    // returns. Both halves matter:
+    //
+    // * two captures are alive at the same time in ordinary use — a command
+    //   substitution inside another, or inside `PROMPT_COMMAND` — and a
+    //   counter that started at zero for every call put them all on the same
+    //   `…-0.tmp`, so the inner writer's bytes also landed in the outer
+    //   capture. `PROMPT_COMMAND='x=$(printf RAW)'` printed `RAW` above every
+    //   prompt, and starship's `PS1` was printed verbatim, markers and all,
+    //   before every prompt;
+    // * `_wopen` gives no `FILE_SHARE_DELETE`, so `remove_file` on the open
+    //   handle always failed and `%TEMP%` kept the file. `std::fs` opens with
+    //   `FILE_SHARE_DELETE`, so the name can be removed while the descriptor
+    //   stays valid — the closest Windows has to an unlinked file, and what
+    //   stops one file per command substitution from accumulating.
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let file = tempfile_path();
     let base = std::env::temp_dir();
-    let mut counter = 0u32;
-    loop {
+    for _ in 0..1_000 {
+        let counter = NEXT.fetch_add(1, Ordering::Relaxed);
         let candidate = base.join(format!(
             "baash-{}-{}-{counter}.tmp",
             std::process::id(),
             String::from_utf8_lossy(&file)
         ));
-        counter += 1;
-        if counter > 1_000 {
-            return Err(io::Error::other("cannot create a temporary file"));
-        }
-        let bytes = candidate.to_string_lossy().into_owned().into_bytes();
-        let created = open_cloexec(
-            &bytes,
-            crate::flags::RDWR | crate::flags::CREAT | crate::flags::TRUNC,
-            0o600,
-        );
-        match created {
-            Ok(fd) => {
-                // The name goes away immediately; the handle keeps the bytes
-                // alive, which is what an unlinked temporary file means here.
-                let _ = std::fs::remove_file(&candidate);
-                return Ok(fd);
-            }
+        let opened = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&candidate);
+        let std_file = match opened {
+            Ok(std_file) => std_file,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
+        };
+        // SAFETY: `std_file` owns the handle, which stays open until the
+        // descriptor is closed; `_open_osfhandle` takes ownership of it, so the
+        // `File` is forgotten below rather than closing it twice.
+        let fd = unsafe { _open_osfhandle(std_file.as_raw_handle() as isize, O_BINARY) };
+        if fd < 0 {
+            return Err(io::Error::other(
+                "cannot attach a descriptor to a temporary file",
+            ));
         }
+        std::mem::forget(std_file);
+        // The name goes away; the descriptor keeps the bytes, and the file is
+        // deleted when the last handle closes.
+        let _ = std::fs::remove_file(&candidate);
+        return Fd::from_raw(fd);
     }
+    Err(io::Error::other("cannot create a temporary file"))
 }
 
 fn tempfile_path() -> Vec<u8> {
@@ -1348,3 +1370,28 @@ pub fn become_session_leader() -> io::Result<()> {
 
 /// Keep `AsRawHandle` in the import list for the console work ahead.
 const _: fn(&std::io::Stdin) -> RawHandle = |stdin| stdin.as_raw_handle();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two live captures are two files.
+    ///
+    /// Regression: both opened `…-0.tmp` — the second `CREAT|TRUNC` shared the
+    /// first — so a command substitution inside `PROMPT_COMMAND` wrote into the
+    /// prompt-command capture too, and starship's `PS1` was printed verbatim
+    /// above every prompt.
+    #[test]
+    fn every_capture_gets_its_own_file() {
+        let first = create_unlinked_temp(0).expect("first temp");
+        let second = create_unlinked_temp(0).expect("second temp");
+        write_all(first.as_raw_fd(), b"first").expect("write");
+        // `SEEK_SET`, which this module names only as the raw `whence`.
+        let _ = lseek(second.as_raw_fd(), 0, 0).expect("rewind second");
+        let mut buffer = [0u8; 8];
+        assert_eq!(read_fd(second.as_raw_fd(), &mut buffer).unwrap(), 0);
+        let _ = lseek(first.as_raw_fd(), 0, 0).expect("rewind first");
+        assert_eq!(read_fd(first.as_raw_fd(), &mut buffer).unwrap(), 5);
+        assert_eq!(&buffer[..5], b"first");
+    }
+}
