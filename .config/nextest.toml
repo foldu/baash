@@ -18,6 +18,16 @@ fail-fast = false
 # No retries: a flaky test is a finding, and hiding it is how a release ships
 # with a broken pty or a racy completion.
 retries = 0
+# A hung case must be a *named failure*, not a stuck job. The pty suites read a
+# terminal and one of those reads really does block sometimes: a `waitpid` with
+# no drain behind it, a completion that never answers. Nothing in the harness
+# bounds it, so left alone it holds the runner until the job deadline — six
+# hours that name nothing. 10 s warns, three periods kill at 30 s: the whole
+# suite takes five seconds and the slowest case a second, so nothing healthy
+# comes near either number, and a stalled case is reported with its name in
+# half a minute. This hides nothing — `retries` stays 0 and a case that runs
+# past the ceiling still fails the run.
+slow-timeout = { period = "10s", terminate-after = 3 }
 # Only what a person reads after a run.
 status-level = "fail"
 final-status-level = "fail"
