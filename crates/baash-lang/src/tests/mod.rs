@@ -20,6 +20,7 @@ mod pattern_strip;
 mod pipeline;
 mod quoting;
 mod splitting;
+mod tilde;
 
 /// Expand one word of source and return argv.
 fn expand_one(src: &str, shell: &mut TestShell) -> Vec<Vec<u8>> {

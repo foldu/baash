@@ -13,7 +13,7 @@
 //!
 //! Instrumentation is byte-oriented throughout: nothing decodes to `str`.
 
-use baash_lang::{Field, Mode, Word, expand_parameters, expand_tilde, expand_word_with};
+use baash_lang::{Field, Mode, Word, expand_parameters, expand_tilde_cow, expand_word_with};
 use baash_runtime::ShellHost;
 
 use super::Interp;
@@ -171,7 +171,7 @@ impl Interp {
     /// Expand a [`Word`] to one [`Field`]: stages 1, 2 and 5 of the expansion
     /// pipeline, with no splitting and no globbing.
     pub(crate) fn expand_operand(&mut self, word: &Word) -> Result<Field, baash_lang::Error> {
-        let word = expand_tilde(word, self)?;
+        let word = expand_tilde_cow(word, self, Mode::Assignment)?;
         let expanded = expand_parameters(&word, self, Mode::Assignment)?;
         let mut bytes = Vec::new();
         let mut quoted = Vec::new();

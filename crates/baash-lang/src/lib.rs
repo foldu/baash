@@ -93,9 +93,9 @@ pub use assoc::AssocArray;
 pub use baash_diag::Span;
 pub use brace::expand_braces;
 pub use expand::{
-    Chunk, Error, ErrorKind, Expanded, Field, Mode, codes, expand_assignment, expand_parameters,
-    expand_pathnames, expand_tilde, expand_word, expand_word_with, expand_words, has_active_glob,
-    remove_quotes, split_fields,
+    Chunk, Error, ErrorKind, Expanded, Field, Mode, codes, expand_assignment,
+    expand_assignment_tilde, expand_parameters, expand_pathnames, expand_tilde, expand_tilde_cow,
+    expand_word, expand_word_with, expand_words, has_active_glob, remove_quotes, split_fields,
 };
 pub use host::{EmptyVars, Passthrough, Shell};
 pub use ifs::Ifs;

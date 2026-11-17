@@ -33,6 +33,7 @@
 //! the walk while [`crate::Part::Lit`] at the top of a command word is never
 //! splittable.
 
+use std::borrow::Cow;
 use std::fmt;
 
 use baash_diag::{Diagnostic, ErrCode, Span};
@@ -460,6 +461,86 @@ pub fn expand_assignment_tilde<S: Shell>(word: &Word, shell: &mut S) -> Result<W
     let mut word = word.clone();
     expand_tilde_word(&mut word, false, true, shell);
     Ok(word)
+}
+
+/// Whether tilde expansion could change `word` in `mode`.
+///
+/// Deliberately an over-approximation: a word that *might* hold a tilde is
+/// copied and expanded exactly as before, and only one that certainly holds
+/// none is borrowed. Saying "no" when the expander would rewrite something
+/// would leave a `~` unexpanded, so the answer must never be a false negative —
+/// `tilde_expansion_never_changes_a_word_it_is_not_asked_about` checks that
+/// against the expander itself.
+fn has_tilde(word: &Word, mode: Mode) -> bool {
+    parts_have_tilde(&word.parts, false, mode == Mode::Assignment)
+}
+
+fn parts_have_tilde(parts: &[Part], quoted: bool, assignment: bool) -> bool {
+    for (index, part) in parts.iter().enumerate() {
+        match part {
+            Part::Tilde(_) => return true,
+            Part::Lit(lit) => {
+                if quoted || lit.kind != LitKind::Unquoted {
+                    continue;
+                }
+                if assignment {
+                    // `PATH=~:~/bin` expands after every `:`, so any `~` in an
+                    // unquoted literal is worth the copy.
+                    if lit.bytes.contains(&b'~') {
+                        return true;
+                    }
+                } else if index == 0 && lit.bytes.first() == Some(&b'~') {
+                    return true;
+                }
+            }
+            Part::DoubleQ(inner) => {
+                if parts_have_tilde(&inner.parts, true, assignment) {
+                    return true;
+                }
+            }
+            Part::Param(exp) => {
+                if exp
+                    .op
+                    .word()
+                    .is_some_and(|word| parts_have_tilde(&word.parts, quoted, assignment))
+                {
+                    return true;
+                }
+                let mut found = false;
+                exp.op.visit_pattern_words(&mut |word| {
+                    if !found && parts_have_tilde(&word.parts, false, assignment) {
+                        found = true;
+                    }
+                });
+                if found {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Stage 1 for one word, borrowing it when there is no tilde to expand.
+///
+/// The owned form below copies the word — `Vec<Part>` and every literal's
+/// bytes — which was 4.6% of an interpreter loop for words that mostly hold no
+/// `~` at all (`docs/performance.md`). Callers that need a `Word` still get
+/// one; callers that only read it get the borrow.
+pub fn expand_tilde_cow<'a, S: Shell>(
+    word: &'a Word,
+    shell: &mut S,
+    mode: Mode,
+) -> Result<Cow<'a, Word>, Error> {
+    if !has_tilde(word, mode) {
+        return Ok(Cow::Borrowed(word));
+    }
+    let expanded = match mode {
+        Mode::Command => expand_tilde(word, shell)?,
+        Mode::Assignment => expand_assignment_tilde(word, shell)?,
+    };
+    Ok(Cow::Owned(expanded))
 }
 
 fn expand_tilde_word<S: Shell>(word: &mut Word, quoted: bool, assignment: bool, shell: &mut S) {
@@ -2356,10 +2437,7 @@ pub fn expand_word_with<S: Shell>(
 
 /// Stages 1–5 for one word, after any brace expansion has happened.
 fn expand_one<S: Shell>(word: &Word, shell: &mut S, mode: Mode) -> Result<Vec<Vec<u8>>, Error> {
-    let word = match mode {
-        Mode::Command => expand_tilde(word, shell)?,
-        Mode::Assignment => expand_assignment_tilde(word, shell)?,
-    };
+    let word = expand_tilde_cow(word, shell, mode)?;
     let expanded = expand_parameters(&word, shell, mode)?;
     match mode {
         Mode::Command => {

@@ -814,6 +814,47 @@ only needs the restore when something inside it moved the process, so the fix
 is to record that it did (the `cd`/`pushd` path is one place) and skip both
 calls otherwise. Not done here.
 
+### 2026-11-17: a command word is not copied to look for a tilde
+
+`expand_one` runs stage 1 (tilde expansion) for every word of every command,
+and the owned form started with `let mut word = word.clone()`: a `Vec<Part>`
+plus a copy of every literal's bytes, for words that mostly have no `~` in them
+at all. In an interpreter loop that clone was 4.6% of the profile on its own,
+and the literal copies were part of the 24% the allocator had.
+
+Stage 1 now looks first and borrows when there is nothing to expand.
+`expand_tilde_cow` returns `Cow<Word>`; `has_tilde` walks the parts it would
+have to rewrite — the `Tilde` parts, an unquoted literal starting with `~` (a
+command word), an unquoted literal containing `~` (an assignment, where `:` is
+a separator too), and the replacement and pattern words inside `${…}` — and
+says "no" only when it is certain. The check itself is 2.5% of the same loop.
+
+| case (minimum of 15, alternating runs) | before | after | |
+| --- | ---: | ---: | ---: |
+| interpreter loop, 100k | 259.2 ms | 226.0 ms | **−12.8%** |
+| `expansion 20k ${s#*c}` | 18.80 ms | 17.51 ms | −6.9% |
+| `arith loop 20k` | 7.03 ms | 6.96 ms | — |
+| `subshell 20k ( : )` | 31.03 ms | 30.74 ms | — |
+| `cmd subst 20k $(echo i)` | 80.34 ms | 79.51 ms | — |
+| `baash -c exit` | 528.6 µs | 533.9 µs | — |
+| `source bash_completion` ×15 | unchanged | unchanged | — |
+
+The predicate is an over-approximation on purpose: saying "no" when the
+expander would have rewritten something would leave a `~` unexpanded, and
+saying "yes" only costs the copy that was there before. The direction that
+matters is checked against the expander itself —
+`the_borrowing_path_agrees_with_the_owned_expander` runs a corpus of quoting
+and `${…}` shapes through both and fails if a borrowed word is one the owned
+path changes — and the ratchet is the same 2357 (+0), which is what says the
+`~`/`~user`/`${x#~}`/`PATH=~:~/bin` behaviours are intact.
+
+One measurement trap this section had to get around: the two binaries must come
+from the same build environment. Building one side through the ambient
+toolchain and the other inside `nix develop` moved `.text` by 455 KB (the C
+dependencies are compiled by whichever `cc` is on `PATH`) and the startup
+number by 4% — with no source change. Build both sides with the same
+`CARGO_TARGET_DIR` and flags, or the comparison measures the C compiler.
+
 ## The test suite: 37 s to 5 s
 
 `cargo test` has to hold `RUST_TEST_THREADS=1` (`.cargo/config.toml`): `$( … )`

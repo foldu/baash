@@ -612,6 +612,29 @@ impl ParamOp {
         }
     }
 
+    /// Read-only [`ParamOp::visit_pattern_words_mut`], for asking whether a
+    /// tilde is there before deciding to own a copy of the word.
+    pub fn visit_pattern_words(&self, visit: &mut impl FnMut(&Word)) {
+        match self {
+            ParamOp::RemovePrefix { pattern, .. } | ParamOp::RemoveSuffix { pattern, .. } => {
+                visit(pattern);
+            }
+            ParamOp::Replace {
+                pattern,
+                replacement,
+                ..
+            } => {
+                visit(pattern);
+                visit(replacement);
+            }
+            ParamOp::Case {
+                pattern: Some(pattern),
+                ..
+            } => visit(pattern),
+            _ => {}
+        }
+    }
+
     /// Visit the pattern and replacement words of the pattern operators, in
     /// source order.
     ///
