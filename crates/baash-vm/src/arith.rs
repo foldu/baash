@@ -65,6 +65,7 @@
 //! when it is unset — bash's "empty cell is zero" rule, which is what makes
 //! `(( a[99] += 1 ))` a sparse increment rather than an error.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// The variable view arithmetic needs.
@@ -95,14 +96,20 @@ pub trait IntVars {
     ///
     /// `None` (the default) means the source cannot supply them; a shell that
     /// can should override it. An unset variable splices as the empty string.
-    fn get_text(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+    ///
+    /// Borrowed from the store: every arithmetic lvalue read asks for this
+    /// text, and returning an owned copy made `(( i++ ))` allocate once per
+    /// command for bytes that were parsed and dropped.
+    fn get_text(&mut self, name: &[u8]) -> Option<Cow<'_, [u8]>> {
         let _ = name;
         None
     }
 
     /// The raw bytes of one indexed element.
-    fn get_index_text(&mut self, name: &[u8], index: i64) -> Option<Vec<u8>> {
+    fn get_index_text(&mut self, name: &[u8], index: i64) -> Option<Cow<'_, [u8]>> {
+        // The default builds the element's name, so it cannot borrow either.
         self.get_text(&element_key(name, index))
+            .map(|text| Cow::Owned(text.into_owned()))
     }
 }
 
@@ -280,9 +287,20 @@ fn digit_value(byte: u8, base: u32) -> Option<u32> {
 /// Word-expand arithmetic source: splice `$name`/`${name}` text, evaluate
 /// `${a[expr]}` subscripts, and remove double quotes. Single quotes and
 /// escapes are left for the parser to reject, as bash does.
-fn expand(src: &[u8], vars: &mut impl IntVars, depth: usize) -> Result<Vec<u8>, String> {
+fn expand<'a>(
+    src: &'a [u8],
+    vars: &mut impl IntVars,
+    depth: usize,
+) -> Result<Cow<'a, [u8]>, String> {
     if depth > MAX_RECURSION {
         return Err("expression recursion level exceeded".to_owned());
+    }
+    // Only these three bytes can make the output differ from the input: `'` is
+    // copied through verbatim (the parser rejects it later, as bash does).
+    // Scanning is worth it because the alternative is a copy per arithmetic
+    // command for an expression like `i++` that splices nothing at all.
+    if !src.iter().any(|byte| matches!(byte, b'"' | b'\\' | b'$')) {
+        return Ok(Cow::Borrowed(src));
     }
     let mut out = Vec::with_capacity(src.len());
     let mut pos = 0;
@@ -326,7 +344,7 @@ fn expand(src: &[u8], vars: &mut impl IntVars, depth: usize) -> Result<Vec<u8>, 
             }
         }
     }
-    Ok(out)
+    Ok(Cow::Owned(out))
 }
 
 /// Expand the body of a double-quoted run; `pos` is just past the opening
@@ -424,7 +442,7 @@ fn braced_expansion(
     let name = &src[start..start + length];
     let mut pos = start + length;
     if src.get(pos) == Some(&b'}') {
-        return Ok(Some((variable_text(vars, name), pos + 1)));
+        return Ok(Some((variable_text(vars, name).into_owned(), pos + 1)));
     }
     if src.get(pos) != Some(&b'[') {
         return Ok(None);
@@ -439,7 +457,9 @@ fn braced_expansion(
     let index = eval_depth(&subscript, vars, depth + 1)?;
     pos = close + 2;
     Ok(Some((
-        vars.get_index_text(name, index).unwrap_or_default(),
+        vars.get_index_text(name, index)
+            .map(|text| text.into_owned())
+            .unwrap_or_default(),
         pos,
     )))
 }
@@ -465,12 +485,11 @@ fn matching_bracket(src: &[u8], open: usize) -> Option<usize> {
 /// The text a `$name` reference splices into the expression. An unset
 /// variable splices as empty; `LINENO` has no stored text but arithmetic can
 /// read its number, and `$LINENO` must keep working in `for ((…))` headers.
-fn variable_text(vars: &mut impl IntVars, name: &[u8]) -> Vec<u8> {
-    match vars.get_text(name) {
-        Some(text) => text,
-        None if name == b"LINENO" => vars.get(name).to_string().into_bytes(),
-        None => Vec::new(),
-    }
+fn variable_text<'a>(vars: &'a mut impl IntVars, name: &[u8]) -> Cow<'a, [u8]> {
+    // An unset variable splices as empty. `LINENO` has a number but no stored
+    // bytes, so the sources that can answer for it do so in `get_text` (its
+    // value is a property of the evaluator, not of the store).
+    vars.get_text(name).unwrap_or(Cow::Borrowed(b""))
 }
 
 fn push_variable_text(out: &mut Vec<u8>, vars: &mut impl IntVars, name: &[u8]) {
@@ -644,12 +663,18 @@ impl<'a, V: IntVars> Parser<'a, V> {
         if self.dead {
             return Ok(0);
         }
+        // The two calls borrow `vars` one at a time: the text is only needed to
+        // decide whether the value was a number at all, and it is borrowed
+        // rather than copied so the common case allocates nothing.
         let (value, text) = match subscript {
-            Some(index) => (
-                self.vars.get_index(name, index),
-                self.vars.get_index_text(name, index),
-            ),
-            None => (self.vars.get(name), self.vars.get_text(name)),
+            Some(index) => {
+                let value = self.vars.get_index(name, index);
+                (value, self.vars.get_index_text(name, index))
+            }
+            None => {
+                let value = self.vars.get(name);
+                (value, self.vars.get_text(name))
+            }
         };
         // A non-numeric value is itself an expression: `a=(1+2+3);
         // $((a[0]))` is 6, and `i=0+1; $((i))` is 1. A broken expression is
@@ -658,7 +683,8 @@ impl<'a, V: IntVars> Parser<'a, V> {
             && !text.is_empty()
             && parse_int(&text).is_none()
         {
-            return eval_depth(&text, self.vars, self.depth + 1);
+            let owned = text.into_owned();
+            return eval_depth(&owned, self.vars, self.depth + 1);
         }
         Ok(value)
     }
@@ -1014,12 +1040,15 @@ impl IntVars for MapVars {
         Ok(())
     }
 
-    fn get_text(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        self.texts.get(name).cloned().or_else(|| {
-            self.values
-                .get(name)
-                .map(|value| value.to_string().into_bytes())
-        })
+    fn get_text(&mut self, name: &[u8]) -> Option<Cow<'_, [u8]>> {
+        self.texts
+            .get(name)
+            .map(|text| Cow::Borrowed(text.as_slice()))
+            .or_else(|| {
+                self.values
+                    .get(name)
+                    .map(|value| Cow::Owned(value.to_string().into_bytes()))
+            })
     }
 }
 
@@ -1423,7 +1452,12 @@ mod tests {
             self.vars.set(name, value)
         }
 
-        fn get_text(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        fn get_text(&mut self, name: &[u8]) -> Option<Cow<'_, [u8]>> {
+            // `LINENO` has a number but no stored bytes; the source that knows
+            // about it answers here rather than in a fallback elsewhere.
+            if name == b"LINENO" {
+                return Some(Cow::Owned(self.line.to_string().into_bytes()));
+            }
             self.vars.get_text(name)
         }
     }

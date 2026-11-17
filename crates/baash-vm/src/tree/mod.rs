@@ -290,12 +290,25 @@ struct Specials {
 /// digits on average, no allocation after the first command.
 fn write_decimal(dest: &mut Vec<u8>, value: i64) {
     let mut digits = [0u8; 20];
-    let mut at = digits.len();
+    let len = format_decimal(&mut digits, value);
+    dest.clear();
+    dest.extend_from_slice(&digits[..len]);
+}
+
+/// Write `value` in decimal at the start of `buffer`, returning how many bytes
+/// it used.
+///
+/// The whole point is the buffer: an arithmetic assignment formats a number
+/// into this stack array and hands the bytes to the store, so `(( i++ ))` in a
+/// loop allocates nothing at all. `to_string()` was two allocations per
+/// assignment (the `String`, then the `Vec` the store kept).
+fn format_decimal(buffer: &mut [u8; 20], value: i64) -> usize {
+    let mut at = buffer.len();
     let negative = value < 0;
     let mut magnitude = value.unsigned_abs();
     loop {
         at -= 1;
-        digits[at] = b'0' + (magnitude % 10) as u8;
+        buffer[at] = b'0' + (magnitude % 10) as u8;
         magnitude /= 10;
         if magnitude == 0 {
             break;
@@ -303,10 +316,14 @@ fn write_decimal(dest: &mut Vec<u8>, value: i64) {
     }
     if negative {
         at -= 1;
-        digits[at] = b'-';
+        buffer[at] = b'-';
     }
-    dest.clear();
-    dest.extend_from_slice(&digits[at..]);
+    let len = buffer.len() - at;
+    // Move the digits to the front so the caller can take `[..len]`: the
+    // buffer is 20 bytes and a `i64` needs at most 20, so this is a short copy
+    // rather than a second buffer.
+    buffer.copy_within(at.., 0);
+    len
 }
 
 /// Where an `errexit` check is allowed to fire.
@@ -1937,28 +1954,52 @@ impl crate::arith::IntVars for Interp {
     }
 
     fn set(&mut self, name: &[u8], value: i64) -> Result<(), String> {
+        // Formatted on the stack and copied into the cell: `to_string()` plus
+        // the `Vec` the store used to keep was two allocations per arithmetic
+        // assignment, and an integer-variable loop is nothing but assignments.
+        let mut text = [0u8; 20];
+        let len = format_decimal(&mut text, value);
         self.state
             .vars
-            .assign_scalar(name, value.to_string().as_bytes())
+            .assign_scalar(name, &text[..len])
             .map_err(|error| error.message())
     }
 
-    fn get_text(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+    fn get_text(&mut self, name: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
+        // `LINENO` has a number but no stored bytes, so the answer comes from
+        // the evaluator rather than the store — and it comes from here, not
+        // from a fallback in the arithmetic module, because this is the layer
+        // that knows what `LINENO` is.
+        if name == b"LINENO" {
+            return Some(std::borrow::Cow::Owned(
+                self.line_number().to_string().into_bytes(),
+            ));
+        }
         if !name.is_empty() && name.iter().all(u8::is_ascii_digit) && name[0] != b'0' {
             let index: usize = std::str::from_utf8(name)
                 .ok()
                 .and_then(|text| text.parse().ok())
                 .unwrap_or(0);
-            return self.state.vars.positional().get(index).map(<[u8]>::to_vec);
+            return self
+                .state
+                .vars
+                .positional()
+                .get(index)
+                .map(std::borrow::Cow::Borrowed);
         }
         match self.state.vars.value(name) {
-            Some(baash_runtime::VarValue::Indexed(elements)) => elements.get(&0).cloned(),
-            Some(baash_runtime::VarValue::Assoc(pairs)) => pairs.get(b"0").map(<[u8]>::to_vec),
-            _ => self.state.vars.scalar(name).map(<[u8]>::to_vec),
+            Some(baash_runtime::VarValue::Indexed(elements)) => elements
+                .get(&0)
+                .map(|text| std::borrow::Cow::Borrowed(text.as_slice())),
+            // `AssocArray::get` already answers with bytes, not a `Vec`.
+            Some(baash_runtime::VarValue::Assoc(pairs)) => {
+                pairs.get(b"0").map(std::borrow::Cow::Borrowed)
+            }
+            _ => self.state.vars.scalar(name).map(std::borrow::Cow::Borrowed),
         }
     }
 
-    fn get_index_text(&mut self, name: &[u8], index: i64) -> Option<Vec<u8>> {
+    fn get_index_text(&mut self, name: &[u8], index: i64) -> Option<std::borrow::Cow<'_, [u8]>> {
         let value = match self.state.vars.shape(name) {
             Some(baash_runtime::ArrayShape::Associative) => self
                 .state
@@ -1966,7 +2007,7 @@ impl crate::arith::IntVars for Interp {
                 .element_assoc(name, index.to_string().as_bytes()),
             _ => self.state.vars.element_indexed(name, index),
         };
-        value.map(<[u8]>::to_vec)
+        value.map(std::borrow::Cow::Borrowed)
     }
 
     fn get_index(&mut self, name: &[u8], index: i64) -> i64 {

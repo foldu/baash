@@ -913,8 +913,32 @@ impl Vars {
     }
 
     /// Assign a scalar, with the array rules of [`Vars::assign`].
+    ///
+    /// The bytes are copied into the cell rather than handed over as a fresh
+    /// `Vec`, so a cell that already holds a string keeps its buffer: a loop
+    /// body like `(( i++ ))` rewrites the same two bytes a hundred thousand
+    /// times and does not need a hundred thousand allocations to do it. The
+    /// rules are [`Vars::assign`]'s exactly — an array target still writes key
+    /// `0`, and an element target still writes the element.
     pub fn assign_scalar(&mut self, name: &[u8], value: &[u8]) -> Result<(), Error> {
-        self.assign(name, VarValue::Str(value.to_vec()))
+        match self.resolve_chain(name)? {
+            Resolved::Var(target) => {
+                let var = self.cell_mut(&target, CreateScope::Default, true)?;
+                match &mut var.value {
+                    VarValue::Str(bytes) => {
+                        bytes.clear();
+                        bytes.extend_from_slice(value);
+                        Ok(())
+                    }
+                    _ => set_scalar(var, name, value.to_vec()),
+                }
+            }
+            Resolved::Indexed(base, index) => self.set_indexed(&base, index, value),
+            Resolved::Assoc(base, key) => self.set_assoc(&base, &key, value),
+            Resolved::Elements(base) => Err(Error::InvalidName {
+                name: whole_array_name(base),
+            }),
+        }
     }
 
     /// Assign an indexed array from elements in index order, starting at 0.

@@ -938,6 +938,61 @@ a two-word mask of the flags the revision was rendered from with the live table
 so the test suite and the conformance ratchet fail on the next one; release builds
 pay nothing for it.
 
+### 2026-11-17: the per-command allocations
+
+With the option bundle no longer compared and expansion borrowing instead of
+copying, 18% of an interpreter loop was `malloc`/`free`/`memmove`. `callgrind
+--tree=calling` answers *who* allocates, which is the only view in which this is
+a list of culprits rather than a percentage: `while (( i++ )); do :; done` made
+**280,739 heap allocations for 10,000 iterations** — 20,000 commands, fourteen
+each — and the per-caller counts named them:
+
+| site | per 10k iterations | what it was |
+| --- | ---: | --- |
+| `BTreeMap::insert` + `SpecToString` | 30,002 + 30,002 | `$PIPESTATUS` rebuilt with `clear()` and `to_string()` after every command |
+| `Vars::resolve_chain` | 20,017 | `name.to_vec()` before knowing whether a nameref was involved |
+| `IntVars::get_text` | 20,001 | a clone of the variable's bytes for the "is this a number" check |
+| `arith::expand` | 20,001 | a `Vec` for an expression that splices nothing |
+| `IntVars::set` + `SpecToString` | 10,000 + 10,000 | `to_string()`, then another copy into the store |
+| `finish_grow` | 70,028 | `Vec` growth, across argv, expansion output and the rest |
+
+Three commits answered them — `vm:` for the `PIPESTATUS` slots, `runtime:` for the
+borrowed name, `vm:` for the borrowed arithmetic text — each carrying its own
+numbers; together:
+
+| `while (( i++ )); do :; done`, 10k iterations | before | after | |
+| --- | ---: | ---: | ---: |
+| heap allocations | 280,739 | 130,716 | **−53.4%** |
+| retired instructions | 140,496,805 | 123,171,670 | −12.3% |
+
+On the harness's `assignment+expansion 100k` — assignments, `[`, `${s#pre-}`,
+`${t%-post}`, `${#u}` — the same three take 342,865 → 249,849 allocations
+(−27.1%) and 132.2 M → 121.6 M instructions (−8.0%).
+
+Two things fell out of it.
+
+**Allocation counts find this class of waste; instruction counts do not.** A
+`Vec` that is allocated and freed costs a handful of instructions, so the clock
+and the count of retired instructions barely move; what it costs is the
+allocator's bookkeeping and the cache traffic, which is why this section's two
+numbers disagree more than anywhere else on this page.
+
+**Everything except `finish_grow` was the same shape:** something owned was
+created so that a `&[u8]` could be read out of it. Borrowing it, or writing into
+a buffer the caller already holds, removes the allocation without changing what
+the shell stores — which is why none of the three commits changes behaviour.
+
+What is left is `finish_grow` (35% of what remains), one allocation per command
+in `eval_node`, and the expansion path, which allocates once per word
+(`expand_one`, `expand_parts`) even for a word with nothing to expand. The value
+type is where that ends, but not with a tagged `Int`/`Float`: a shell variable's
+value *is* text — `x=010; echo $x` is `010`, while `declare -i y=010; echo $y` is
+`8`, which is exactly why bash carries an *attribute* rather than a type — and
+`Float` does not exist in bash's arithmetic at all (`DESIGN.md` §3.3). The
+candidate that would pay is a bytes type with short values inline (a path, `1`,
+`pre-3-post` all fit in 22 bytes) behind `Deref<Target = [u8]>`, so that no match
+arm and no call site changes.
+
 ## The test suite: 37 s to 5 s
 
 `cargo test` has to hold `RUST_TEST_THREADS=1` (`.cargo/config.toml`): `$( … )`
@@ -1058,6 +1113,24 @@ instruction counts too:
 `callgrind` counts retired instructions, so it does not care about frequency,
 layout or a neighbour — but it also does not price cache misses or a branch, which
 is why it is a second opinion and not the headline.
+
+### Allocations: `callgrind --tree=calling`
+
+The allocation counts above come from the same recording as the instruction
+counts, read differently: `callgrind_annotate --tree=calling` prints, for every
+function, the calls it makes, so `malloc`'s block lists who allocated and how
+many times. That is the view that turns "fourteen allocations per command" into a
+list of culprits — a flamegraph shows the time but not the count, and `massif`
+shows bytes, which is the less useful dimension here (a hundred 8-byte `Vec`s
+cost more than one 2 KB one).
+
+    nix shell nixpkgs#valgrind -c valgrind --tool=callgrind --quiet \
+        --callgrind-out-file=/tmp/cg.out <binary> --norc -c '<script>'
+    nix shell nixpkgs#valgrind -c callgrind_annotate --tree=calling /tmp/cg.out \
+        | rg -A2 ':malloc'
+
+Read the `free` list beside it: the totals should be within a few calls of each
+other, and a gap is something retained rather than churn.
 
 The release binary scores the same conformance as the debug one
 (1986/2787 total, 1931 strict), so the optimiser is not hiding a behavioural
