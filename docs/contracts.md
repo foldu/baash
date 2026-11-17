@@ -198,9 +198,18 @@ subscripts are non-negative after resolution, because bash subscripts are
 machine integers (the suite exercises `a[0x7FFFFFFFFFFFFFFF]`). Reading it is
 `Vars::element_indexed`/`element_assoc`; writing is `set_indexed`/`set_assoc`
 or `append_indexed`/`append_assoc`; `unset_element_indexed`/`unset_element_assoc`
-remove one element. `VarValue::Assoc` remains an insertion-ordered
-`Vec<(Vec<u8>, Vec<u8>)>`. A scalar converts to either shape with the old value
-at element/key zero; indexed↔associative conversion is
+remove one element. `VarValue::Assoc` is a `baash_lang::AssocArray`: the
+pairs in insertion order plus a hash index, so neither `set_assoc` nor
+`element_assoc` scans the other keys. That order is *this shell's* promise, not
+bash's — bash leaves an associative array's order to its hash table, measured
+on 5.3.20 as `four two three one` for a table inserted `one two three four` —
+and it is what makes `${a[@]}`, `unset` and a round trip through `set_assoc`
+deterministic; on top of it `declare -p` sorts by key. A new key joins the
+end, an existing one keeps its position, and `unset` keeps the order of the
+rest, which is why removal is O(n): keeping the order means shifting, where
+bash's unordered table can swap. A scalar converts to either shape with the
+old value at element/key zero — a scalar assignment to an associative array
+writes key `0` and keeps the others; indexed↔associative conversion is
 `Error::ArrayShapeMismatch` (bash refuses it).
 
 **Array element removal needs word work, so the VM supplies it.** `unset
@@ -395,8 +404,13 @@ first; for an indexed array the result is then evaluated with
 and `ParamOp::ArraySlice` carries the two bounds as words. `Vars::array(name)
 -> Option<ArrayValue<'_>>` is how expansion sees the storage: an
 `ArrayValue::Indexed(&BTreeMap<i64, Vec<u8>>)` in index order or
-`ArrayValue::Assoc(&[(Vec<u8>, Vec<u8>)])` in insertion order. A scalar is a
-one-element array for reads, and a bare `${a}` decays to element/key zero.
+`ArrayValue::Assoc(&AssocArray)` in insertion order. `AssocArray` is
+`baash-lang`'s (`crates/baash-lang/src/assoc.rs`): pairs plus a hash index, so
+`${a[k]}` is a lookup rather than a scan of the other keys. That is why the
+view is the container and not a pair slice — a `[(Vec<u8>, Vec<u8>)]` borrow
+cannot carry the index, and `${a[k]}` would keep the linear walk the type
+exists to remove. A scalar is a one-element array for reads, and a bare `${a}`
+decays to element/key zero.
 
 **Quoted and splittable, also for arrays.** `"${a[@]}"` uses the same
 `Expanded::break_field` boundaries as `"$@"` — one field per element, zero

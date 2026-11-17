@@ -21,6 +21,8 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use baash_lang::AssocArray;
+
 /// Variable attributes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Attrs {
@@ -128,8 +130,11 @@ impl<const N: usize> From<[(i64, Vec<u8>); N]> for IndexedArray {
 
 /// A variable's value. Bash arrays are extensions, hence the extra shapes.
 ///
-/// [`VarValue::Assoc`] preserves insertion order (bash does too), so iterating
-/// it is deterministic and a round-trip through `set_assoc` does not reorder.
+/// [`VarValue::Assoc`] is a [`AssocArray`]: the pairs in insertion order plus
+/// a hash index, so reading or writing one element does not scan the others.
+/// That order is `baash`'s promise and not bash's — bash leaves an associative
+/// array's order to its hash table — and it is what makes `${a[@]}`, `unset`
+/// and a round-trip through `set_assoc` deterministic.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum VarValue {
     /// Declared but unset.
@@ -149,8 +154,8 @@ pub enum VarValue {
     /// integers, and the conformance suite exercises `a[0x7FFFFFFFFFFFFFFF]`.
     /// Negative subscripts are resolved against the array before storage.
     Indexed(IndexedArray),
-    /// An associative array, kept as insertion-ordered pairs.
-    Assoc(Vec<(Vec<u8>, Vec<u8>)>),
+    /// An associative array: insertion-ordered pairs plus a key index.
+    Assoc(AssocArray),
 }
 
 impl VarValue {
@@ -206,7 +211,7 @@ impl ArrayShape {
     fn empty(self) -> VarValue {
         match self {
             ArrayShape::Indexed => VarValue::Indexed(IndexedArray::new()),
-            ArrayShape::Associative => VarValue::Assoc(Vec::new()),
+            ArrayShape::Associative => VarValue::Assoc(AssocArray::new()),
         }
     }
 }
@@ -849,7 +854,9 @@ impl Vars {
                 let bytes = bytes.clone();
                 var.value = match shape {
                     ArrayShape::Indexed => VarValue::Indexed(IndexedArray::from([(0, bytes)])),
-                    ArrayShape::Associative => VarValue::Assoc(vec![(b"0".to_vec(), bytes)]),
+                    ArrayShape::Associative => {
+                        VarValue::Assoc(AssocArray::from_pairs([(b"0".to_vec(), bytes)]))
+                    }
                 };
                 Ok(())
             }
@@ -1091,7 +1098,10 @@ impl Vars {
         self.set_indexed(name, index, &joined)
     }
 
-    /// `a[key]=value`: set an associative element, inserting in order.
+    /// `a[key]=value`: set an associative element.
+    ///
+    /// A new key joins the end; an existing key keeps its position (that is
+    /// [`AssocArray::insert`], the whole of the order rule).
     ///
     /// An empty key is refused: bash reports `name[]: bad array subscript`
     /// for `declare -A a; a[""]=x`, and accepting it would make `a[$unset]`
@@ -1106,17 +1116,12 @@ impl Vars {
         let old = std::mem::replace(&mut var.value, VarValue::Unset);
         var.value = match old {
             VarValue::Assoc(mut pairs) => {
-                if let Some((_, existing)) = pairs
-                    .iter_mut()
-                    .find(|(candidate, _)| candidate.as_slice() == key)
-                {
-                    *existing = value.to_vec();
-                } else {
-                    pairs.push((key.to_vec(), value.to_vec()));
-                }
+                pairs.insert(key.to_vec(), value.to_vec());
                 VarValue::Assoc(pairs)
             }
-            VarValue::Unset => VarValue::Assoc(vec![(key.to_vec(), value.to_vec())]),
+            VarValue::Unset => {
+                VarValue::Assoc(AssocArray::from_pairs([(key.to_vec(), value.to_vec())]))
+            }
             VarValue::Indexed(elements) => {
                 // Put the array back before failing so the value is unchanged.
                 var.value = VarValue::Indexed(elements);
@@ -1181,10 +1186,7 @@ impl Vars {
     pub fn element_assoc(&self, name: &[u8], key: &[u8]) -> Option<&[u8]> {
         let name = self.deref_name(name).ok()?;
         match &self.lookup(&name)?.value {
-            VarValue::Assoc(pairs) => pairs
-                .iter()
-                .find(|(candidate, _)| candidate.as_slice() == key)
-                .map(|(_, value)| value.as_slice()),
+            VarValue::Assoc(pairs) => pairs.get(key),
             _ => None,
         }
     }
@@ -1277,7 +1279,7 @@ impl Vars {
         let var = self.resolve(name)?;
         match &mut var.value {
             VarValue::Assoc(pairs) => {
-                pairs.retain(|(candidate, _)| candidate.as_slice() != key);
+                pairs.remove(key);
                 Ok(())
             }
             VarValue::Indexed(_) => Err(Error::NotAssociative {
@@ -1813,14 +1815,10 @@ fn set_scalar(var: &mut Var, name: &[u8], value: Vec<u8>) -> Result<(), Error> {
         // `A=text` on an associative array writes key `0`; bash keeps the
         // other keys, so a scalar assignment is not a conversion.
         VarValue::Assoc(pairs) => {
-            if let Some((_, existing)) = pairs
-                .iter_mut()
-                .find(|(candidate, _)| candidate.as_slice() == b"0")
-            {
-                *existing = value;
-            } else {
-                pairs.insert(0, (b"0".to_vec(), value));
-            }
+            // The key is new only when the array had no `0`, and a new key
+            // joins the end like any other: `AssocArray` has one order rule,
+            // and a scalar write is not special enough to break it.
+            pairs.insert(b"0".to_vec(), value);
             Ok(())
         }
         // A scalar assignment to an indexed array writes element 0 and keeps

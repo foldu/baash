@@ -19,10 +19,10 @@ use crate::word::{
     Arithmetic, CaseHow, CmdSubStyle, CommandSub, DoubleQ, Lit, ParamExp, ParamName, ParamOp, Part,
     ReplaceMode, TildeSpec, Transform, UnsupportedOp, Word,
 };
-use crate::{Error, ErrorKind, Field};
+use crate::{AssocArray, Error, ErrorKind, Field};
 
 /// Test-shell associative storage: key/value pairs in insertion order.
-type AssocMap = HashMap<Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>>;
+type AssocMap = HashMap<Vec<u8>, AssocArray>;
 
 /// An in-memory shell: variables, positional parameters, and map-backed
 /// command substitution, arithmetic, globbing and home directories.
@@ -209,9 +209,7 @@ impl Vars for TestShell {
         if let Some(elements) = self.indexed.get(name) {
             return Some(ArrayValue::Indexed(elements));
         }
-        self.assoc
-            .get(name)
-            .map(|pairs| ArrayValue::Assoc(pairs.as_slice()))
+        self.assoc.get(name).map(ArrayValue::Assoc)
     }
 }
 

@@ -66,6 +66,14 @@ rustix = { version = "1.1", default-features = false, features = [
     "pty",
 ] }
 memchr = "2"
+# The associative array (`baash-lang`'s `AssocArray`): insertion order in the
+# entries vector, O(1) lookup in the hash index. `indexmap` is already in the
+# tree through `sqlx` and `toml_edit`, so it adds no compiled crate; `ahash` is
+# new, and it is here because `std`'s SipHash costs 1.8x on a lookup hit and
+# 2.8x on a miss at 1024 keys (`docs/performance.md`). Both are
+# `MIT OR Apache-2.0`, allowed by `deny.toml`.
+indexmap = "2"
+ahash = "0.8"
 # The portable POSIX ERE engine: Windows' only engine, and an opt-in one on
 # Unix next to the platform `regcomp` (docs/performance.md).
 minrx-sys = "0.2.1"

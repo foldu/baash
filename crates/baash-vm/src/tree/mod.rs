@@ -1545,9 +1545,7 @@ impl baash_lang::Vars for Interp {
             baash_runtime::VarValue::Indexed(elements) => {
                 Some(baash_lang::ArrayValue::Indexed(elements))
             }
-            baash_runtime::VarValue::Assoc(pairs) => {
-                Some(baash_lang::ArrayValue::Assoc(pairs.as_slice()))
-            }
+            baash_runtime::VarValue::Assoc(pairs) => Some(baash_lang::ArrayValue::Assoc(pairs)),
             _ => None,
         }
     }
@@ -1903,10 +1901,7 @@ impl crate::arith::IntVars for Interp {
         // An array decays to element zero in arithmetic, just as `${a}` does.
         let bytes = match self.state.vars.value(name) {
             Some(baash_runtime::VarValue::Indexed(elements)) => elements.get(&0).map(Vec::as_slice),
-            Some(baash_runtime::VarValue::Assoc(pairs)) => pairs
-                .iter()
-                .find(|(key, _)| key.as_slice() == b"0")
-                .map(|(_, value)| value.as_slice()),
+            Some(baash_runtime::VarValue::Assoc(pairs)) => pairs.get(b"0"),
             _ => self.state.vars.scalar(name),
         };
         match bytes {
@@ -1935,10 +1930,7 @@ impl crate::arith::IntVars for Interp {
         }
         match self.state.vars.value(name) {
             Some(baash_runtime::VarValue::Indexed(elements)) => elements.get(&0).cloned(),
-            Some(baash_runtime::VarValue::Assoc(pairs)) => pairs
-                .iter()
-                .find(|(key, _)| key.as_slice() == b"0")
-                .map(|(_, value)| value.clone()),
+            Some(baash_runtime::VarValue::Assoc(pairs)) => pairs.get(b"0").map(<[u8]>::to_vec),
             _ => self.state.vars.scalar(name).map(<[u8]>::to_vec),
         }
     }

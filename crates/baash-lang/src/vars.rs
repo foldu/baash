@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::AssocArray;
+
 /// Everything expansion needs to know about shell variables.
 ///
 /// `baash-runtime` implements this over its scope stack. Keeping it this small
@@ -121,8 +123,13 @@ pub enum SetError {
 pub enum ArrayValue<'a> {
     /// An indexed array: subscript → element, in subscript order.
     Indexed(&'a BTreeMap<i64, Vec<u8>>),
-    /// An associative array, in insertion order (bash's order).
-    Assoc(&'a [(Vec<u8>, Vec<u8>)]),
+    /// An associative array, in insertion order.
+    ///
+    /// Not a pair slice: the storage carries a hash index so an element read
+    /// is a lookup rather than a scan, and a slice cannot carry it. The order
+    /// is `baash`'s promise, not bash's — bash leaves it to the hash table
+    /// (`crate::AssocArray` has the measurement).
+    Assoc(&'a AssocArray),
 }
 
 impl<'a> ArrayValue<'a> {
@@ -177,10 +184,7 @@ impl<'a> ArrayValue<'a> {
                 let index = resolve_index(elements, subscript)?;
                 elements.get(&index).map(Vec::as_slice)
             }
-            ArrayValue::Assoc(pairs) => pairs
-                .iter()
-                .find(|(key, _)| key.as_slice() == subscript)
-                .map(|(_, value)| value.as_slice()),
+            ArrayValue::Assoc(pairs) => pairs.get(subscript),
         }
     }
 }

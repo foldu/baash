@@ -1,6 +1,8 @@
 //! Cross-cutting tests: the tier table, option round-tripping, scope
 //! behavior, environment construction and the builtins that are implemented.
 
+use baash_lang::AssocArray;
+
 use crate::vars::IndexedArray;
 use crate::*;
 use baash_diag::Diagnostic;
@@ -1394,7 +1396,10 @@ fn associative_arrays_refuse_an_empty_key() {
     ));
     assert_eq!(
         vars.value(b"m"),
-        Some(&VarValue::Assoc(vec![(b"k".to_vec(), b"v".to_vec())]))
+        Some(&VarValue::Assoc(AssocArray::from_pairs([(
+            b"k".to_vec(),
+            b"v".to_vec()
+        )])))
     );
 }
 

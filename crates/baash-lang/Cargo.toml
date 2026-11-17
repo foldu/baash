@@ -11,4 +11,7 @@ description = "Words, quoting and expansion"
 baash-diag.workspace = true
 baash-pattern.workspace = true
 smallvec.workspace = true
+# The associative array (`assoc.rs`): order plus a hash index.
+indexmap.workspace = true
+ahash.workspace = true
 

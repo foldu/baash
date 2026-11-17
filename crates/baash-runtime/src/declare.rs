@@ -111,8 +111,8 @@ fn render_value(out: &mut Vec<u8>, value: &VarValue) {
             // Associative arrays have no stable iteration order in bash (it is
             // the hash table's). Sorting by key makes the output deterministic
             // and matches the order the suite pins.
-            let mut sorted: Vec<&(Vec<u8>, Vec<u8>)> = pairs.iter().collect();
-            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut sorted: Vec<(&Vec<u8>, &Vec<u8>)> = pairs.iter().collect();
+            sorted.sort_by(|a, b| a.0.cmp(b.0));
             let sorted_index = sorted.len();
             for (position, (key, value)) in sorted.into_iter().enumerate() {
                 if position > 0 {
@@ -285,6 +285,7 @@ fn utf8_char_len(bytes: &[u8]) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::vars::{Attrs, IndexedArray};
+    use baash_lang::AssocArray;
 
     fn render(var: &Var, name: &[u8]) -> String {
         let mut out = Vec::new();
@@ -355,18 +356,18 @@ mod tests {
     #[test]
     fn assoc_keys_and_values_match_bash() {
         let var = Var {
-            value: VarValue::Assoc(vec![
+            value: VarValue::Assoc(AssocArray::from_pairs([
                 (b"a".to_vec(), b"1".to_vec()),
                 (b"b".to_vec(), b"2".to_vec()),
-            ]),
+            ])),
             attrs: Attrs::default(),
         };
         assert_eq!(render(&var, b"m"), "declare -A m=([a]=\"1\" [b]=\"2\" )\n");
         let control = Var {
-            value: VarValue::Assoc(vec![
+            value: VarValue::Assoc(AssocArray::from_pairs([
                 (b"foo".to_vec(), b"foo bar".to_vec()),
                 (vec![0x1f], vec![0xfe, 0xff]),
-            ]),
+            ])),
             attrs: Attrs::default(),
         };
         assert_eq!(
@@ -374,7 +375,7 @@ mod tests {
             "declare -A A=([$'\\u001f']=$'\\xfe\\xff' [foo]=\"foo bar\" )\n"
         );
         let empty = Var {
-            value: VarValue::Assoc(Vec::new()),
+            value: VarValue::Assoc(AssocArray::new()),
             attrs: Attrs::default(),
         };
         assert_eq!(render(&empty, b"m"), "declare -A m=()\n");

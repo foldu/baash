@@ -129,6 +129,39 @@ fn associative_literals_lookup_and_order() {
 }
 
 #[test]
+fn an_associative_update_keeps_its_position_and_unset_keeps_the_order() {
+    // The order is `baash`'s promise rather than bash's (`docs/contracts.md`),
+    // so it is pinned here: an update must not move the key to the end, and a
+    // removal must not disturb the keys around it.
+    let mut interp = shell();
+    run(
+        &mut interp,
+        "declare -A m
+         m[b]=1
+         m[a]=2
+         m[c]=3
+         m[b]=10
+         keys=\"${!m[@]}\"
+         got=${m[b]}
+         unset 'm[a]'
+         after=\"${!m[@]}\"
+         vals=\"${m[*]}\"",
+    );
+    assert_eq!(
+        text(&interp, b"keys"),
+        "b a c",
+        "an update keeps its position"
+    );
+    assert_eq!(text(&interp, b"got"), "10");
+    assert_eq!(
+        text(&interp, b"after"),
+        "b c",
+        "removal keeps the order of the rest"
+    );
+    assert_eq!(text(&interp, b"vals"), "10 3");
+}
+
+#[test]
 fn local_arrays_are_scope_local() {
     let mut interp = shell();
     run(

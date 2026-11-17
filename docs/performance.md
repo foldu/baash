@@ -457,15 +457,15 @@ only thing that would move it. A shortcut that skips the source — deferring it
 to the first `Tab`, say — would leave `_filedir` and `_init_completion`
 undefined at the prompt, which is a behaviour change, not an optimisation.
 
-The one piece of that 6.5 ms with a named cause is the largest single block,
-the 700-entry `_comp_xspecs` table the library fills at startup:
-`VarValue::Assoc` is a `Vec<(Vec<u8>, Vec<u8>)>`
-(`crates/baash-runtime/src/vars.rs`), so an insert scans for the key and the
-fill is O(n²) — 1.26 ms of the 9.5, and every later lookup is a linear walk
-too. A hash table in place of the `Vec` would take that to ~0.1 ms, and would
-matter far more to a script with a large associative array than it does here;
-it is a separate change, because iteration order is observable in `declare -p`
-and `${!a[@]}`, so it is not a swap to make while measuring startup.
+The one piece of that 6.5 ms with a named cause was the largest single block,
+the `_comp_xspecs` table the library fills at startup: `VarValue::Assoc` was a
+`Vec<(Vec<u8>, Vec<u8>)>` (`crates/baash-runtime/src/vars.rs`), so an insert
+scanned for the key and the fill was O(n²) — 1.26 ms of the 9.5 for the
+700-insert loop measured then, with every later lookup a linear walk too. The
+hash index landed later the same day ("the associative array gets a hash
+index", below). The shipped library turns out to fill 138 keys, so sourcing it
+did not move measurably; the cost that *was* there is a per-key cost, and that
+is what the new section measures.
 
 Not measured: **time to the first prompt in a real console.** `ssh -tt` does
 give a ConPTY, and the REPL paints its prompt through it (`win@WINVM C:~ $`,
@@ -501,6 +501,68 @@ used to refuse to run, where bash keeps it and runs.
 
 `[` now costs what `test` costs. The same binary pair measured in the same guest
 session: 664.8 ms against 43.6 ms for the whole 20 000-iteration loop.
+
+### 2026-11-17: the associative array gets a hash index
+
+`VarValue::Assoc` was a `Vec<(Vec<u8>, Vec<u8>)>`: `a[k]=v` scanned for the key
+and `${a[k]}` scanned again, so an *n*-key array cost O(n) per element and a
+fill loop O(n²). The Windows section above put a number on it and left the
+change for later; this is that change.
+
+The order had to survive: `docs/contracts.md` promises insertion order, which
+bash does not promise (its order is the hash table's). Five representations,
+all order-preserving, 1024 keys of 6 bytes holding 7-byte values, whole
+operation, minimum of 11 runs:
+
+| representation | `a[k]=v` | `${a[k]}` hit | miss | `unset` | B/entry |
+|---|---:|---:|---:|---:|---:|
+| `Vec` scan (before) | 650 ns | 582 ns | 1.14 µs | 1.52 µs | 60 |
+| `Vec` + `HashMap` (std) | 89 ns | 9.4 ns | 6.8 ns | 2.26 µs | 131 |
+| `Vec` + `HashMap` (ahash) | 72 ns | 5.1 ns | 2.7 ns | 2.18 µs | 131 |
+| `IndexMap` (std) | 57 ns | 12.1 ns | 8.2 ns | 0.77 µs | 128 |
+| `IndexMap` + ahash | **49 ns** | 6.8 ns | 3.4 ns | **0.75 µs** | 128 |
+
+`IndexMap` over `ahash` wins the write, the removal and the memory, and loses
+only the hit, to the `Vec`+index pair (6.8 against 5.1 ns). The `Vec`+index
+designs lose exactly where a shell spends its time: a new key costs an extra
+allocation for the index's copy of it, and `unset` has to renumber positions
+where `IndexMap` moves entries. Walking every pair is 0.4 µs for all five (one
+pass either way), which is what `${a[@]}` and `declare -p` do.
+
+The container is `baash_lang::AssocArray` and not a runtime type because
+expansion reads arrays through a borrowed `ArrayValue`: a pair slice cannot
+carry an index, so `${a[k]}` in the expansion path — where most element reads
+happen — would have kept the scan. `indexmap` is already in the tree through
+`sqlx` and `toml_edit`; `ahash` is new (`MIT OR Apache-2.0`, `deny.toml`).
+
+Shell level, release build, 2000 keys in one script, minimum of 7 runs:
+
+| script | bash 5.3.20 | before | after |
+|---|---:|---:|---:|
+| 2000 `a[k$i]=v$i` | 4.9 ms | 5.8 ms | 4.7 ms |
+| + 2000 `${a[k$i]}` | 8.7 | 10.8 | 8.8 |
+| + 2000 misses | 8.6 | 10.6 | 8.5 |
+| + `${!a[@]}` over the keys | 6.6 | 6.7 | 5.8 |
+| + 2000 `unset`, oldest key first | 9.4 | 12.8 | 12.3 |
+| 16 keys, rebuilt 120 times | 5.1 | 4.9 | 4.9 |
+| 4000 iterations, no array (what a run costs) | 7.3 | 8.2 | 8.4 |
+
+Subtracting that no-array loop, a write to a 2000-key array was 0.85 µs and is
+0.25 µs; a read was ~0.45 µs and is ~0.05. Writing and reading now cost what
+bash's own table costs. Two things did *not* improve: `unset` is 4% slower,
+because keeping the order means shifting the entries where bash's unordered
+table swaps the last one into the hole — the price of the order contract, on
+the operation a script does least — and a 16-key array is unchanged, because at
+that size a hash costs what a scan of seven keys costs.
+
+On the Windows guest, the same writes inside one process against the same loop
+with a scalar (2000 iterations, 21 interleaved rounds, minimum): 2.24 ms before
+and 0.61 ms after, 1.12 µs against 0.31 µs per key.
+
+What this does not show is a startup win. The prediction above was ~1 ms off the
+library run from the fill alone; the shipped `bash_completion` fills 138 keys,
+not 700, so sourcing the whole library on Linux went 7.49 ms to 7.81 ms, which
+is noise. The prediction was about per-insert cost, and that is what moved.
 
 ## The test suite: 37 s to 5 s
 

@@ -626,7 +626,7 @@ fn push_assignment(
             // Associative arrays keep the `[key]=value` shape; values are
             // double-quoted so a value with spaces re-reads as one word.
             out.extend_from_slice(b"=(");
-            for (key, value) in pairs {
+            for (key, value) in pairs.iter() {
                 out.push(b'[');
                 quote_double_if_needed(out, key);
                 out.extend_from_slice(b"]=");

@@ -716,10 +716,7 @@ impl<S: Shell> Ctx<'_, S> {
                 Some(value) => Some(value.to_vec()),
                 None => self.shell.array(name).and_then(|array| match array {
                     ArrayValue::Indexed(elements) => elements.get(&0).cloned(),
-                    ArrayValue::Assoc(pairs) => pairs
-                        .iter()
-                        .find(|(key, _)| key.as_slice() == b"0")
-                        .map(|(_, value)| value.clone()),
+                    ArrayValue::Assoc(pairs) => pairs.get(b"0").map(<[u8]>::to_vec),
                 }),
             },
             ParamName::Positional(n) => {

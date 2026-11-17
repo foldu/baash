@@ -77,6 +77,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod assoc;
 mod brace;
 mod expand;
 pub mod histexpand;
@@ -87,6 +88,7 @@ mod quote;
 mod vars;
 mod word;
 
+pub use assoc::AssocArray;
 pub use baash_diag::Span;
 pub use brace::expand_braces;
 pub use expand::{
