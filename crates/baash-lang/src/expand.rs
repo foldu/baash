@@ -2429,8 +2429,8 @@ pub fn expand_word_with<S: Shell>(
         return expand_one(word, shell, mode);
     }
     let mut argv = Vec::new();
-    for word in crate::expand_braces(word) {
-        argv.extend(expand_one(&word, shell, mode)?);
+    for word in crate::expand_braces_cow(word).iter() {
+        argv.extend(expand_one(word, shell, mode)?);
     }
     Ok(argv)
 }

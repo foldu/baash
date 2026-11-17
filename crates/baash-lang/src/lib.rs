@@ -91,7 +91,7 @@ mod word;
 
 pub use assoc::AssocArray;
 pub use baash_diag::Span;
-pub use brace::expand_braces;
+pub use brace::{expand_braces, expand_braces_cow};
 pub use expand::{
     Chunk, Error, ErrorKind, Expanded, Field, Mode, codes, expand_assignment,
     expand_assignment_tilde, expand_parameters, expand_pathnames, expand_tilde, expand_tilde_cow,

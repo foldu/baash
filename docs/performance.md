@@ -848,6 +848,19 @@ and `${…}` shapes through both and fails if a borrowed word is one the owned
 path changes — and the ratchet is the same 2357 (+0), which is what says the
 `~`/`~user`/`${x#~}`/`PATH=~:~/bin` behaviours are intact.
 
+The same waste was one stage earlier: `expand_word_with` called
+`expand_braces`, which handed back `vec![word.clone()]` when the word held no
+`{` — another copy of the parts and their literals for every command word. It
+returns `Cow<[Word]>` now (`expand_braces_cow`), borrowing the one word when
+there is no brace group to expand:
+
+| case (minimum of 21, alternating runs) | before | after | |
+| --- | ---: | ---: | ---: |
+| interpreter loop, 100k | 227.0 ms | 212.9 ms | −6.2% |
+| `builtin echo 20k` | 19.59 ms | 18.55 ms | −5.3% |
+| `: plain` ×20k | 17.73 ms | 17.28 ms | −2.5% |
+| `: p{a,b}q` ×20k (real braces) | 25.86 ms | 25.92 ms | — |
+
 One measurement trap this section had to get around: the two binaries must come
 from the same build environment. Building one side through the ambient
 toolchain and the other inside `nix develop` moved `.text` by 455 KB (the C

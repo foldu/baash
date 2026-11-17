@@ -75,6 +75,8 @@
 
 use baash_diag::Span;
 
+use std::borrow::Cow;
+
 use crate::word::{Lit, LitKind, Part, Word};
 
 /// Stage 0: expand one word's brace groups, producing one or more words.
@@ -87,9 +89,18 @@ use crate::word::{Lit, LitKind, Part, Word};
 /// The stage is pure: it touches no [`crate::Shell`] callback, so it can run
 /// (and be tested) before any runtime state exists.
 pub fn expand_braces(word: &Word) -> Vec<Word> {
+    expand_braces_cow(word).into_owned()
+}
+
+/// Brace expansion, borrowing the word when it holds no brace group.
+///
+/// Most words have no `{` in them, and the owned form cloned the `Vec<Part>`
+/// and every literal's bytes just to hand the word back: one copy per command
+/// word, and `docs/performance.md` measures it.
+pub fn expand_braces_cow(word: &Word) -> Cow<'_, [Word]> {
     match expand_once(&word.parts, &word.span) {
-        Some(words) => words,
-        None => vec![word.clone()],
+        Some(words) => Cow::Owned(words),
+        None => Cow::Borrowed(std::slice::from_ref(word)),
     }
 }
 
