@@ -293,21 +293,25 @@ fn cleanup(session: &mut Session, home: &Path, work: &Path) {
 #[test]
 fn tab_completes_a_variable_name() {
     let (mut session, home, work) = session("variable");
-    // `HOSTNAME`/`HOSTTYPE` would make `$HO` ambiguous; the menu is sorted, so
-    // `$HOME` would still be first, but the test is about the insertion.
-    session.line("unset HOSTNAME HOSTTYPE");
+    // A variable of the test's own, so the completion is *unique* whatever the
+    // ambient environment holds. Completing `$HO` was the original spelling, and
+    // it made the test a conversation with a menu: a runner whose environment
+    // holds `JAVA_HOME`/`ANT_HOME`/`HOMEBREW_*` completes `$HOME` and opens a
+    // menu, so the line then needs an `Enter` to accept the selection and
+    // another to run it. That is a race with the paint, not a property of the
+    // shell — it failed on a runner while passing everywhere else — so what is
+    // asserted here is the insertion and the expansion, with one `Enter` doing
+    // the submit.
+    session.line("BAASH_TAB_PROBE=expanded-by-tab");
 
-    session.send(b"echo $HO\t");
-    session.expect(b"$HOME", Duration::from_secs(10));
-    // Enter accepts the selected menu entry; the next one submits the line.
-    session.send(b"\n");
+    session.send(b"echo $BAASH_TAB_PRO\t");
+    session.expect(b"$BAASH_TAB_PROBE", Duration::from_secs(10));
     session.send(b"\n");
     session.prompt();
-    // The line ran with the expanded value: `echo $HOME` printed the path.
-    let home_text = home.as_os_str().as_encoded_bytes();
+    // The line ran with the expanded value, not with the word as typed.
     assert!(
-        find(&session.output, home_text).is_some(),
-        "the completed line must expand to HOME: {:?}",
+        find(&session.output, b"expanded-by-tab").is_some(),
+        "the completed line must expand to the variable's value: {:?}",
         String::from_utf8_lossy(&session.output)
     );
     cleanup(&mut session, &home, &work);
