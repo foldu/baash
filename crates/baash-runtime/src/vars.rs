@@ -17,6 +17,7 @@
 use crate::Status;
 use crate::builtins::{AssignPersistence, Tier};
 use crate::errors::{Error, display};
+use indexmap::IndexMap;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -325,7 +326,16 @@ const NAMEREF_MAX_DEPTH: usize = 16;
 /// and the special parameters' state.
 #[derive(Clone, Debug)]
 pub struct Vars {
-    global: Vec<(Vec<u8>, Var)>,
+    /// The global scope: insertion order in the entries, O(1) lookup by name.
+    ///
+    /// This is where nearly every read lands — the environment alone is 71
+    /// names here and a dev shell has hundreds — and as a vector of pairs every
+    /// miss compared the name against all of them: 7% of a tight interpreter
+    /// loop was `memcmp` walking past variables nobody asked for, and `lookup`
+    /// 6% more (`docs/performance.md`). The order is unchanged: a new name
+    /// appends, an existing one keeps its place, `unset` shifts the rest, so
+    /// `envp` and `set` show what they showed before.
+    global: IndexMap<Vec<u8>, Var, ahash::RandomState>,
     frames: Vec<Frame>,
     positional: Positional,
     arg0: Vec<u8>,
@@ -340,19 +350,12 @@ pub struct Vars {
     /// because `OPTIND=1` written twice must re-parse the same argument, so
     /// the counter is what makes a reset observable.
     optind_writes: u64,
-    /// The global index the last successful lookup hit, validated by name.
-    ///
-    /// A loop reads the same handful of variables thousands of times, and every
-    /// miss walks the whole table comparing names — on a 20k loop that walk was
-    /// the largest single cost in the profile. A stale index is harmless: the
-    /// name comparison fails and the walk happens anyway.
-    global_hit: std::cell::Cell<Option<usize>>,
 }
 
 impl Default for Vars {
     fn default() -> Self {
         Self {
-            global: Vec::new(),
+            global: IndexMap::with_hasher(baash_lang::hasher::seeded()),
             frames: Vec::new(),
             positional: Positional::default(),
             arg0: Vec::new(),
@@ -360,7 +363,6 @@ impl Default for Vars {
             shell_pid: std::process::id(),
             last_bg_pid: None,
             optind_writes: 0,
-            global_hit: std::cell::Cell::new(None),
         }
     }
 }
@@ -391,18 +393,7 @@ impl Vars {
                 return Some(var);
             }
         }
-        if let Some(index) = self.global_hit.get()
-            && let Some((candidate, var)) = self.global.get(index)
-            && candidate.as_slice() == name
-        {
-            return Some(var);
-        }
-        let found = self
-            .global
-            .iter()
-            .position(|(candidate, _)| candidate.as_slice() == name);
-        self.global_hit.set(found);
-        found.map(|index| &self.global[index].1)
+        self.global.get(name)
     }
 
     /// The cell for `name` when following namerefs cannot change the answer.
@@ -1037,7 +1028,9 @@ impl Vars {
         }
         match location {
             Location::Global(index) => {
-                self.global.remove(index);
+                // Shift, not swap: `unset` must not reorder the rest (the same
+                // rule the associative array keeps).
+                self.global.shift_remove_index(index);
             }
             Location::Frame { frame, index } => {
                 self.frames[frame].locals.remove(index);
@@ -1354,10 +1347,7 @@ impl Vars {
 
     /// A global-scope cell by name, ignoring shadowing frames (`declare -g`).
     pub fn lookup_global(&self, name: &[u8]) -> Option<&Var> {
-        self.global
-            .iter()
-            .find(|(candidate, _)| candidate.as_slice() == name)
-            .map(|(_, var)| var)
+        self.global.get(name)
     }
 
     /// Whether the variable a write to `name` would reach has the integer
@@ -1427,16 +1417,11 @@ impl Vars {
         if !Self::is_name(name) {
             return false;
         }
-        match self
-            .global
-            .iter_mut()
-            .find(|(candidate, _)| candidate.as_slice() == name)
-        {
-            Some((_, var)) => {
-                var.value = VarValue::Str(value.to_vec());
-                var.attrs.exported = true;
-            }
-            None => self.global.push((
+        if let Some(var) = self.global.get_mut(name) {
+            var.value = VarValue::Str(value.to_vec());
+            var.attrs.exported = true;
+        } else {
+            self.global.insert(
                 name.to_vec(),
                 Var {
                     value: VarValue::Str(value.to_vec()),
@@ -1445,13 +1430,16 @@ impl Vars {
                         ..Attrs::default()
                     },
                 },
-            )),
+            );
         }
         true
     }
 
     /// Import an `environ`-style vector. Returns how many entries were valid.
     pub fn import_envp(&mut self, envp: &[Vec<u8>]) -> usize {
+        // One resize for the whole environment: entry by entry, a 71-variable
+        // table rehashes about six times as it grows.
+        self.global.reserve(envp.len());
         envp.iter()
             .filter(|entry| self.import_env_entry(entry))
             .count()
@@ -1696,30 +1684,29 @@ impl Vars {
                 return Some(Location::Frame { frame, index });
             }
         }
-        if let Some(index) = self.global_hit.get()
-            && let Some((candidate, _)) = self.global.get(index)
-            && candidate.as_slice() == name
-        {
-            return Some(Location::Global(index));
-        }
-        let found = self
-            .global
-            .iter()
-            .position(|(candidate, _)| candidate.as_slice() == name);
-        self.global_hit.set(found);
-        found.map(Location::Global)
+        self.global.get_index_of(name).map(Location::Global)
     }
 
     fn var_at(&self, location: Location) -> &Var {
         match location {
-            Location::Global(index) => &self.global[index].1,
+            Location::Global(index) => {
+                self.global
+                    .get_index(index)
+                    .expect("a location names an entry of this table")
+                    .1
+            }
             Location::Frame { frame, index } => &self.frames[frame].locals[index].1,
         }
     }
 
     fn var_at_mut(&mut self, location: Location) -> &mut Var {
         match location {
-            Location::Global(index) => &mut self.global[index].1,
+            Location::Global(index) => {
+                self.global
+                    .get_index_mut(index)
+                    .expect("a location names an entry of this table")
+                    .1
+            }
             Location::Frame { frame, index } => &mut self.frames[frame].locals[index].1,
         }
     }
@@ -1742,25 +1729,24 @@ impl Vars {
                     }
                     return Ok(var);
                 }
-                self.global.push((name.to_vec(), Var::default()));
-                Ok(&mut self.global.last_mut().expect("just pushed a variable").1)
+                Ok(self.global.entry(name.to_vec()).or_default())
             }
             CreateScope::Global => {
-                if let Some(index) = self
-                    .global
-                    .iter()
-                    .position(|(candidate, _)| candidate.as_slice() == name)
-                {
-                    let var = &mut self.global[index].1;
-                    if refuse_readonly && var.attrs.readonly {
-                        return Err(Error::Readonly {
-                            name: name.to_vec(),
-                        });
+                // The entry API: one hash, and no borrow held across the two
+                // cases (`declare -g` creates the global even when a local
+                // shadows the name).
+                match self.global.entry(name.to_vec()) {
+                    indexmap::map::Entry::Occupied(entry) => {
+                        let var = entry.into_mut();
+                        if refuse_readonly && var.attrs.readonly {
+                            return Err(Error::Readonly {
+                                name: name.to_vec(),
+                            });
+                        }
+                        Ok(var)
                     }
-                    return Ok(var);
+                    indexmap::map::Entry::Vacant(entry) => Ok(entry.insert(Var::default())),
                 }
-                self.global.push((name.to_vec(), Var::default()));
-                Ok(&mut self.global.last_mut().expect("just pushed a variable").1)
             }
             CreateScope::Local => {
                 let frame = self

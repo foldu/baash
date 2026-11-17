@@ -475,6 +475,41 @@ fn scope_shadowing_and_restoration() {
 }
 
 #[test]
+fn the_global_table_keeps_insertion_order_for_the_environment() {
+    // The table is a hash index over an entries vector: a new name appends, an
+    // update keeps its place, `unset` shifts the rest. `envp` is where the
+    // order is observable, and children have always seen insertion order.
+    let mut vars = Vars::default();
+    for (name, value) in [
+        (b"b".as_slice(), "1"),
+        (b"a".as_slice(), "2"),
+        (b"c".as_slice(), "3"),
+    ] {
+        vars.assign_scalar(name, value.as_bytes()).expect("assign");
+        vars.mark_exported(name).expect("export");
+    }
+    let names = |vars: &Vars| -> Vec<Vec<u8>> {
+        vars.envp()
+            .into_iter()
+            .map(|entry| {
+                entry[..entry.iter().position(|&b| b == b'=').expect("NAME=VALUE")].to_vec()
+            })
+            .collect()
+    };
+    assert_eq!(
+        names(&vars),
+        vec![b"b".to_vec(), b"a".to_vec(), b"c".to_vec()]
+    );
+    vars.assign_scalar(b"b", b"9").expect("assign");
+    assert_eq!(
+        names(&vars),
+        vec![b"b".to_vec(), b"a".to_vec(), b"c".to_vec()]
+    );
+    vars.unset(b"b").expect("unset");
+    assert_eq!(names(&vars), vec![b"a".to_vec(), b"c".to_vec()]);
+}
+
+#[test]
 fn unsetting_a_local_reveals_the_outer_variable() {
     let mut vars = Vars::default();
     vars.assign_scalar(b"x", b"global").unwrap();

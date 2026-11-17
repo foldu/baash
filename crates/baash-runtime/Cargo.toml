@@ -21,3 +21,9 @@ baash-picker.workspace = true
 # needs `access(2)` and the effective ids; both are syscall questions, so they
 # stay behind this crate's boundary rather than pulling `libc` in here.
 baash-sys.workspace = true
+# The global variable table: insertion order in the entries, O(1) lookup by
+# name. The same pair `baash-lang`'s associative array uses, for the same
+# reason — a name is a short byte key and there are ~150 of them from the
+# environment alone (`docs/performance.md`).
+indexmap.workspace = true
+ahash.workspace = true

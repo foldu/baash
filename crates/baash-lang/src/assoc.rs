@@ -28,12 +28,22 @@
 use ahash::RandomState;
 use indexmap::IndexMap;
 
+use crate::hasher;
+
 /// An associative array, in insertion order.
 ///
 /// The key is `Vec<u8>` and not `String`: shell text is bytes (`DESIGN.md`
 /// §4.2), and `a[$'\xff']=x` is a legal assignment.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AssocArray(IndexMap<Vec<u8>, Vec<u8>, RandomState>);
+
+impl Default for AssocArray {
+    /// Fresh and table-less: constructing one costs no allocation and no OS
+    /// read, because the seed is fixed (`crate::hasher`).
+    fn default() -> Self {
+        Self(IndexMap::with_hasher(hasher::seeded()))
+    }
+}
 
 impl AssocArray {
     /// An empty array.

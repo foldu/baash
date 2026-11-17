@@ -80,6 +80,7 @@
 mod assoc;
 mod brace;
 mod expand;
+pub mod hasher;
 pub mod histexpand;
 mod host;
 mod ifs;

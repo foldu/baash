@@ -363,6 +363,14 @@ pub trait Shell: Vars {
 }
 ```
 
+**One seed for every hash table.** `baash_lang::hasher::seeded()` returns the
+`ahash::RandomState` the shell's tables start from: fixed seeds, no read of the
+operating system. A hash flood needs keys an attacker chose, and anything that
+can choose a variable name or an array subscript already runs as this shell, so
+the per-process random seed bought nothing and cost a `getrandom` on the startup
+path (`docs/performance.md`). The variable table and `AssocArray` both build
+from it, so the two cannot drift apart.
+
 - `get` must serve the specials `?`, `-`, `$`, `!`, `0` as ordinary lookups;
   `$#` is computed from `positional()`. `None` (unset) and `Some(b"")` (null) are
   different values and the difference is observable under `${x-}`, `${x:-}` and

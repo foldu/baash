@@ -658,6 +658,65 @@ build carries frame pointers the shipped build does not, so a tail call can
 attribute differently; and a 0.4 ms process is 1–2 samples, which is why the
 startup row is an aggregate of 300 spawns.
 
+### 2026-11-17: the variable table gets an index, and the hasher stops reading the OS
+
+The sampled profile above ended with "the variable table is a scan": the global
+scope was a `Vec<(Vec<u8>, Var)>` with a one-entry last-hit cache (the
+2026-11-01 section), so any read that was not a repeat compared the name
+against every entry before it. With a 71-variable environment that is 7.3% of
+an interpreter loop in `memcmp` plus 6.2% in `Vars::lookup`.
+
+The table is now an `IndexMap<Vec<u8>, Var, ahash::RandomState>`, the same pair
+`AssocArray` uses: insertion order in the entries, O(1) lookup in the index.
+The order the shell promises does not change — a new name appends, an update
+keeps its place, `unset` shifts the rest — which is what `envp` shows a child
+and what `set` lists. Frames keep their `Vec`: a frame holds a handful of
+locals, and comparing two of them is cheaper than hashing one.
+
+| indirect expansion (200 passes over the names) | before | after | |
+| --- | ---: | ---: | ---: |
+| 20 variables | 3.82 ms | 3.51 ms | −8.2% |
+| 100 variables | 17.31 ms | 13.80 ms | −20.3% |
+| 400 variables | 93.93 ms | 52.23 ms | −44.4% |
+| 1000 variables | 364.14 ms | 129.61 ms | −64.4% |
+
+The quadratic shape is gone, and it was the point: a scan is O(names) per read,
+so a script that keeps its working set in variables — `${!name}` loops, a
+generated table of a few hundred, a dev shell with 200 exported names — paid for
+the table size on every one. A 71-variable loop that reads four names, the
+profile's own workload, moves +0.4% (in the noise): at that size the scan was
+cheap and the win is elsewhere.
+
+What the hash costs is the copy. A subshell clones the variable table — that is
+how `$( … )` gets its isolation without `fork()` — and `IndexMap`'s clone
+copies the index as well as the entries: 20k command substitutions went from
+157.9 ms to 161.8 ms (+2.4%, ~190 ns per clone). Frames, `env true`, and a 20k
+`local` loop do not move.
+
+That copy is the same one the profile above already names as the thing to
+remove — `open_scope` clones `ShellState` once per substitution, and the way out
+is a persistent scope stack, not a cheaper clone — so the index adds 190 ns to a
+path that is scheduled to stop copying the table at all.
+
+**The hasher was reading the OS on every start.** `ahash`'s default
+`RandomState` mixes in a seed read from the operating system once per process,
+which is the right default for a network service and 10 µs of a 0.53 ms
+startup — 2% of the number this file's first section is about — for a defence
+with nothing to defend: a flood needs keys an attacker chose, and anything that
+can choose a variable name or an array subscript already runs inside this
+shell. Bash's own variable hash is fixed too. `baash-lang`'s `hasher::seeded`
+is now the one place the seed is decided, and both tables use it:
+
+| case (minimum of 7, alternating, per spawn) | before | ahash default seed | fixed seed |
+| --- | ---: | ---: | ---: |
+| `baash -c exit` | 533.7 µs | 543.6 µs | 526.8 µs |
+| `declare -A a; a[k]=1` | 544.8 µs | 543.6 µs | 539.7 µs |
+
+So the table does not cost a startup: with the seed fixed it is a few
+microseconds *faster* than the vector, which grew its buffer six times to hold
+71 names. The associative array takes the same seed; its first array no longer
+pays a `getrandom` either.
+
 ## The test suite: 37 s to 5 s
 
 `cargo test` has to hold `RUST_TEST_THREADS=1` (`.cargo/config.toml`): `$( … )`
