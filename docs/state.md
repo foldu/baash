@@ -212,7 +212,10 @@ delegates everything else: line editing to `baash-repl`, execution to the
   (blue directory, bright cyan last component, green branch, yellow `↑`/`!`,
   red `↓`/`?`/`#`); `NO_COLOR` gives the same text uncoloured. The glyphs,
   when `PROMPT_ICONS` asks for them, are width 1, and the editor measures the
-  prompt with `unicode-width`, so the cursor column survives them. It is built from bytes in one pass, so non-UTF-8
+  prompt with `unicode-width`, so the cursor column survives them. The
+  directory segment keeps the root it is under, drive included (`C:~/sr/gith/fo`,
+  `C:/Windows`, `E:/`, `//srv/share/Projects`), because on Windows the same
+  abbreviated path can name a directory on any drive. It is built from bytes in one pass, so non-UTF-8
   paths render exactly and nothing in the prompt is expanded twice. The `PS1`
   *variable* keeps bash's value, so `${PS1@P}` and the conformance
   `default PS1` case are unchanged. An explicit `PS1` wins and is rendered by

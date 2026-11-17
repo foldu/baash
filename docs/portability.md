@@ -606,8 +606,8 @@ lives in `baash_sys::paths` now and knows what a *root* is:
 
 | | POSIX | Windows |
 |---|---|---|
-| root | `/` | `C:\`, `\\server\share\` |
-| separator | `/` | `\`, and `/` everywhere |
+| root | `/` | `C:/`, `//server/share/` |
+| separator | `/` | `\` to the kernel; the shell writes `/` |
 | `..` at a root | stays at `/` | stays at the drive or share root |
 | `\foo` | not absolute | rooted on the current *drive* |
 | `C:foo` | — | drive-relative: only the kernel can place it |
@@ -617,14 +617,29 @@ Everything else is unchanged on purpose. The walk is still lexical — no
 `canonicalize` — so `cd symlink` keeps the link's name and `pwd -P` is still the
 only way to ask the kernel. Three consequences are worth stating:
 
-* A typed `/` is recorded as `\` in `PWD`: the shell normalises the separators
-  it already collapsed, so `cd C:/Windows` then `pwd` prints `C:\Windows`.
-  This is the only rewriting it does; it never rewrites a name.
+* **The shell spells every path it prints with `/`.** `PWD`, `pwd`, `dirs`,
+  the prompt, the window title and the `OSC 7` cwd report all say
+  `C:/Users/win`, whatever the user typed and whatever the parent process
+  exported. A name the *kernel* chose — `getcwd`, after a drive-relative
+  `cd C:foo` — goes through `baash_sys::paths::respell`, which rewrites the
+  separators and leaves a device namespace (`\\?\C:\…`) exactly as it came,
+  because that is the spelling the kernel requires. Windows accepts `/`
+  wherever it accepts `\`, and no Windows file name can contain either, so this
+  names the same directory and never a different one: `cd C:/Windows` and
+  `cd 'C:\Windows'` alike print `C:/Windows`.
 * `C:foo` and `\\?\…` are handed to `chdir` as written and `PWD` becomes
   `getcwd()`'s answer, which is what `cmd` does too.
 * `\` is still an escape character, as it is in every POSIX shell: a Windows
   path is written `C:/Users/...` or quoted (`cd 'C:\Users'`). That is the
   msys convention and it is in the list below.
+
+**Switching drives** is a root change and needs no extra verb: `cd D:/`,
+`cd 'D:\'` and `cd D:` all enter that drive's root, `pwd` then says `D:/`, `..`
+stops there, a bare `cd` goes home (on another drive if that is where `HOME`
+is), and `cd -` comes back. Two spellings that do *not* work are worth knowing:
+`/d/` is not a drive — `/` is the *current* drive's root, so `cd /e/` looks for
+`C:\e` — and after `cd E:/`, a rooted name such as `cd /Windows` means
+`E:/Windows`, not the C: drive's, exactly as it does in `cmd`.
 
 `cd ""` changed too, on both platforms: bash reports it as "null directory"
 rather than as a failed `chdir`, does not search `CDPATH` for it, and `pushd`
@@ -649,6 +664,18 @@ directory", status 1; `cd 'nowhere\..'` → error; `pwd -L`/`-P`;
 with the shell. Interactively, in a console window: `pwd` → `C:\Users\win`
 with the prompt abbreviated to `~`, then `cd C:/Windows` and the prompt showing
 `C:\Windows` — the path segment and the `$` are correct in both.
+
+**Re-verified on the guest** (2026-11-17) after the `/` spelling and the drive
+in the prompt, with the release build: `pwd` at home → `C:/Users/win` (the
+inherited `PWD` is rewritten, not just one the shell worked out); `cd C:/Windows`
+→ `C:/Windows` and `pwd -P` → `C:/Windows/System32` from inside it; `cd E:/` and
+`cd E:` → `E:/`, `cd ..` there → `E:/`; `echo $PWD` → `C:/Windows`; a UNC share
+→ `//localhost/C$/Users` whether typed with `\` or `/`; `cd C:` (drive-relative,
+the kernel's) → `C:/Users/win`; `pushd`/`popd`/`dirs` print `/`. Interactively at
+a real prompt: `C:~` at home, `C:~/p/a/beta` in `C:\Users\win\probe\alpha\beta`,
+`E:/` after `cd E:/`, `C:/Windows` outside home, and `PS1='[\w] $ '` → `[C:~/probe]`
+— `\w` carries the drive too. The window title was `[win@WINVM] C:~/probe/alpha/beta`
+and the cwd report `file://WINVM/C:/Users/win/probe/alpha/beta`.
 
 ### The history database on Windows: SQLite through sqlx
 

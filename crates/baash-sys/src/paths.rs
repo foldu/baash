@@ -22,6 +22,17 @@
 //! a name resolves to through a symlink, are questions for [`std::fs`]; this
 //! module only decides what the shell should *say* and which name it should
 //! hand to `chdir`.
+//!
+//! # The shell spells paths with `/`, on both platforms
+//!
+//! A name Windows hands back — `getcwd`, an error message from the CRT — is
+//! spelled `C:\Users\ada`. The shell says `C:/Users/ada` instead, wherever it
+//! spells a path itself: `PWD`, `pwd`, `dirs`, the prompt and the window title.
+//! Windows accepts `/` in every API that takes a path, and no Windows file name
+//! can contain a backslash, so this is a spelling of the same file and never a
+//! different one; [`respell`] is the same rewrite for a name the kernel chose.
+//! A device namespace (`\\?\C:\…`) is the exception: it is the kernel's
+//! spelling and the only form the kernel accepts.
 
 /// Which platform's path grammar to apply.
 ///
@@ -47,11 +58,25 @@ impl Flavour {
     }
 
     /// The separator this grammar spells paths with.
+    ///
+    /// The *native* one, for a name handed to something that has its own idea
+    /// of a path: `PATH` entries, a completion candidate, the kernel.
     pub const fn separator(self) -> u8 {
         match self {
             Self::Posix => b'/',
             Self::Windows => b'\\',
         }
+    }
+
+    /// The separator a path the shell *prints* uses.
+    ///
+    /// `/` on both platforms: Windows accepts it wherever it accepts `\\`, and
+    /// no Windows file name can contain either, so `C:/Users/ada` and
+    /// `C:\\Users\\ada` name the same directory. Spelling the shell's own output
+    /// one way means `pwd`, `$PWD`, the prompt and the title agree, and a path
+    /// pasted out of any of them works.
+    pub const fn display_separator(self) -> u8 {
+        b'/'
     }
 
     /// The host's name for a device the shell spells with a POSIX path.
@@ -152,16 +177,19 @@ fn windows_start(path: &[u8]) -> (Start, usize) {
         if server.is_empty() || share.is_empty() {
             return (Start::Kernel, 0);
         }
-        let mut root = vec![b'\\', b'\\'];
+        // `//server/share/`: the share is its own root, and the forward
+        // slashes are what the shell prints. The kernel takes this spelling
+        // too (measured on the guest, `cd //localhost/C$/Users`).
+        let mut root = vec![b'/', b'/'];
         root.extend_from_slice(server);
-        root.push(b'\\');
+        root.push(b'/');
         root.extend_from_slice(share);
-        root.push(b'\\');
+        root.push(b'/');
         return (Start::Root(root), index);
     }
     if path.len() >= 2 && path[0].is_ascii_alphabetic() && path[1] == b':' {
         if path.get(2).is_some_and(|&byte| separator(byte)) {
-            return (Start::Root(vec![path[0], b':', b'\\']), 3);
+            return (Start::Root(vec![path[0], b':', b'/']), 3);
         }
         return (Start::Kernel, 0);
     }
@@ -218,7 +246,7 @@ impl Lexical {
         let mut out = self.root.clone();
         for (index, component) in self.components.iter().enumerate() {
             if index > 0 {
-                out.push(self.flavour.separator());
+                out.push(self.flavour.display_separator());
             }
             out.extend_from_slice(component);
         }
@@ -304,6 +332,36 @@ pub fn prefixes(cwd: &[u8], path: &[u8]) -> Option<Vec<Vec<u8>>> {
     Some(prefixes)
 }
 
+/// `path` spelled the way the shell prints paths.
+///
+/// For a name the shell worked out itself this is already the case —
+/// [`resolve`] returns one — so this is the pass that makes a name the *kernel*
+/// chose agree with it: `getcwd`, `pwd -P`, a path recovered after a
+/// kernel-only `cd`. Windows accepts `/` wherever it accepts `\\`, and a
+/// Windows file name cannot contain a backslash, so the rewrite names the same
+/// directory. A device namespace (`\\?\C:\…`, `\\.\PIPE\…`) is left exactly as it
+/// arrived: that is the kernel's spelling, and the only one the kernel takes.
+pub fn respell(path: &[u8]) -> Vec<u8> {
+    respell_for(Flavour::host(), path)
+}
+
+fn respell_for(flavour: Flavour, path: &[u8]) -> Vec<u8> {
+    if flavour == Flavour::Posix {
+        return path.to_vec();
+    }
+    let device_namespace = path.len() >= 4
+        && flavour.is_separator(path[0])
+        && flavour.is_separator(path[1])
+        && matches!(path[2], b'?' | b'.')
+        && flavour.is_separator(path[3]);
+    if device_namespace {
+        return path.to_vec();
+    }
+    path.iter()
+        .map(|&byte| if byte == b'\\' { b'/' } else { byte })
+        .collect()
+}
+
 /// Whether `path` starts at a root, without reference to the current
 /// directory.
 ///
@@ -349,7 +407,7 @@ pub fn root() -> Vec<u8> {
                 .filter(|value| value.len() == 2 && value[1] == b':')
                 .unwrap_or_else(|| b"C:".to_vec());
             let mut out = drive;
-            out.push(b'\\');
+            out.push(b'/');
             out
         }
     }
@@ -461,15 +519,15 @@ mod tests {
     fn windows_walks_up_to_the_root_it_started_in() {
         assert_eq!(
             resolve(Windows, br"C:\Users\win", b"..").as_deref(),
-            Some(&br"C:\Users"[..])
+            Some(&b"C:/Users"[..])
         );
         assert_eq!(
             resolve(Windows, br"C:\Users\win", br"..\..\..").as_deref(),
-            Some(&br"C:\"[..])
+            Some(&b"C:/"[..])
         );
         assert_eq!(
             resolve(Windows, br"C:\", b"..").as_deref(),
-            Some(&br"C:\"[..])
+            Some(&b"C:/"[..])
         );
     }
 
@@ -477,17 +535,17 @@ mod tests {
     fn windows_appends_relative_components() {
         assert_eq!(
             resolve(Windows, br"C:\Users\win", b"Windows").as_deref(),
-            Some(&br"C:\Users\win\Windows"[..])
+            Some(&b"C:/Users/win/Windows"[..])
         );
         // The separator the user typed is not the one the shell records: a
         // name is a name, and `\` is how this platform spells it.
         assert_eq!(
             resolve(Windows, br"C:\Users\win", b"AppData/Local/Temp").as_deref(),
-            Some(&br"C:\Users\win\AppData\Local\Temp"[..])
+            Some(&b"C:/Users/win/AppData/Local/Temp"[..])
         );
         assert_eq!(
             resolve(Windows, br"C:\Users\win", br".\..\Public").as_deref(),
-            Some(&br"C:\Users\Public"[..])
+            Some(&b"C:/Users/Public"[..])
         );
     }
 
@@ -496,40 +554,59 @@ mod tests {
         // A drive-rooted name replaces the whole path, including the drive.
         assert_eq!(
             resolve(Windows, br"C:\Users\win", br"D:\Data").as_deref(),
-            Some(&br"D:\Data"[..])
+            Some(&b"D:/Data"[..])
         );
         assert_eq!(
             resolve(Windows, br"C:\Users\win", b"C:/Windows").as_deref(),
-            Some(&br"C:\Windows"[..])
+            Some(&b"C:/Windows"[..])
         );
         // A rooted name without a drive keeps the *current drive* and drops
         // everything below it.
         assert_eq!(
             resolve(Windows, br"C:\Users\win", br"\Windows\System32").as_deref(),
-            Some(&br"C:\Windows\System32"[..])
+            Some(&b"C:/Windows/System32"[..])
         );
         // A network share is its own root, so `..` stops there.
         assert_eq!(
             resolve(Windows, br"\\srv\share\dir", b"..").as_deref(),
-            Some(&br"\\srv\share\"[..])
+            Some(&b"//srv/share/"[..])
         );
         assert_eq!(
             resolve(Windows, br"\\srv\share\dir", br"..\..\..").as_deref(),
-            Some(&br"\\srv\share\"[..])
+            Some(&b"//srv/share/"[..])
         );
         assert_eq!(
             resolve(Windows, br"\\srv\share\dir", br"\other").as_deref(),
-            Some(&br"\\srv\share\other"[..])
+            Some(&b"//srv/share/other"[..])
         );
         assert_eq!(
             resolve(Windows, br"C:\Users", br"\\srv\share\x").as_deref(),
-            Some(&br"\\srv\share\x"[..])
+            Some(&b"//srv/share/x"[..])
         );
         // Forward slashes are a spelling of the same share.
         assert_eq!(
             resolve(Windows, br"C:\Users", b"//srv/share/x").as_deref(),
-            Some(&br"\\srv\share\x"[..])
+            Some(&b"//srv/share/x"[..])
         );
+    }
+
+    #[test]
+    fn the_shell_spells_kernel_paths_with_forward_slashes() {
+        // `getcwd` and the CRT spell a Windows path with `\`; the shell prints
+        // `/`, and the rewrite cannot change which file is named.
+        assert_eq!(
+            super::respell_for(Windows, br"C:\Users\ada"),
+            b"C:/Users/ada"
+        );
+        assert_eq!(
+            super::respell_for(Windows, br"\\srv\share\x"),
+            b"//srv/share/x"
+        );
+        // A device namespace is the kernel's spelling and the only one it takes.
+        assert_eq!(super::respell_for(Windows, br"\\?\C:\x"), br"\\?\C:\x");
+        assert_eq!(super::respell_for(Windows, br"\\.\PIPE\x"), br"\\.\PIPE\x");
+        // POSIX has one separator, and a backslash there is part of a name.
+        assert_eq!(super::respell_for(Posix, br"/a\b"), br"/a\b");
     }
 
     #[test]
@@ -546,15 +623,15 @@ mod tests {
     fn windows_ignores_empty_components() {
         assert_eq!(
             resolve(Windows, br"C:\Users", br"C:\\a\\\b\").as_deref(),
-            Some(&br"C:\a\b"[..])
+            Some(&b"C:/a/b"[..])
         );
         assert_eq!(
             resolve(Windows, br"C:\Users\", b"").as_deref(),
-            Some(&br"C:\Users"[..])
+            Some(&b"C:/Users"[..])
         );
         assert_eq!(
             resolve(Windows, br"C:\", b"x").as_deref(),
-            Some(&br"C:\x"[..])
+            Some(&b"C:/x"[..])
         );
     }
 
@@ -608,7 +685,7 @@ mod tests {
         );
         assert_eq!(
             prefixes(Windows, br"C:\a", br"b\..\c").unwrap(),
-            [br"C:\a\b".to_vec(), br"C:\a\c".to_vec()]
+            [b"C:/a/b".to_vec(), b"C:/a/c".to_vec()]
         );
     }
 

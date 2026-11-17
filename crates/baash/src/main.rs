@@ -695,18 +695,35 @@ fn shell(interactive: bool, flags: &ShellFlags) -> Interp {
     // directory) is kept, which is why the comparison is by device and inode
     // rather than by string.
     if let Ok(directory) = std::env::current_dir() {
-        let names_cwd = shell
-            .state()
-            .vars
-            .scalar(b"PWD")
-            .is_some_and(|pwd| same_directory(pwd, &directory));
-        if !names_cwd {
+        let inherited = shell.state().vars.scalar(b"PWD").map(<[u8]>::to_vec);
+        // Either answer is then put in the shell's spelling: the parent may
+        // have handed us `C:\\Users\\win`, and everything this shell prints —
+        // `pwd`, the prompt, a child's `$PWD` — says `C:/Users/win`
+        // (`baash_sys::paths`, "The shell spells paths with `/`").
+        let current = match inherited {
+            Some(pwd) if same_directory(&pwd, &directory) => baash_sys::paths::respell(&pwd),
+            _ => baash_sys::paths::respell(&baash_sys::os::bytes_from_os(&directory)),
+        };
+        let _ = shell.state().vars.assign_scalar(b"PWD", &current);
+        let _ = shell.state().vars.mark_exported(b"PWD");
+        // `cd -` prints `OLDPWD`, so it is spelled the same way. It names no
+        // directory this shell has to be in, so it is not checked, only
+        // rewritten.
+        if let Some(previous) = shell.state().vars.scalar(b"OLDPWD").map(<[u8]>::to_vec) {
             let _ = shell
                 .state()
                 .vars
-                .assign_scalar(b"PWD", &baash_sys::os::bytes_from_os(&directory));
-            let _ = shell.state().vars.mark_exported(b"PWD");
+                .assign_scalar(b"OLDPWD", &baash_sys::paths::respell(&previous));
         }
+    }
+    // `HOME` too: it is a path, `~` expands to it, and a `$HOME` spelled one way
+    // while `PWD` is spelled the other would put `C:\\Users\\win/probe` in a
+    // script's output. A value the user assigns later is their own.
+    if let Some(home) = shell.state().vars.scalar(b"HOME").map(<[u8]>::to_vec) {
+        let _ = shell
+            .state()
+            .vars
+            .assign_scalar(b"HOME", &baash_sys::paths::respell(&home));
     }
     shell
 }

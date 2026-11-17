@@ -1285,52 +1285,150 @@ pub fn format_duration(duration: Duration) -> Vec<u8> {
 /// reference prompt's `~/sr/gith/fo/nixos-config` shows. One `read_dir` per
 /// component supplies the sibling names.
 ///
+/// The root is kept, and so is the drive that a root names: `HOME` is on one
+/// drive while the shell can be in a directory on another, so `~/src` alone
+/// would not say which, and the prompt draws `C:~/src`. Outside `HOME` the
+/// root is the path's own (`/`, `C:/`, `//server/share/`).
+///
 /// A directory whose siblings cannot be read is shortened to two characters:
 /// one character is legal but unreadably terse, and guessing uniqueness from a
-/// failed `read_dir` would be worse. A relative `PWD` is returned unchanged,
-/// because shortening it against the shell's starting directory could name a
-/// different tree.
+/// failed `read_dir` would be worse. A relative `PWD`, and a Windows device
+/// namespace (`\\?\C:\…`), are returned unchanged: nothing here can place
+/// them.
 ///
-/// The operation is on bytes. UTF-8 names are cut on character boundaries; a
-/// name that is not UTF-8 is cut on byte boundaries, which can leave a partial
-/// sequence in the prompt, but the prompt is bytes by contract and the renderer
-/// is the only thing that decodes it (lossily, for display).
+/// The input is the shell's spelling of a path, with `/` separators
+/// (`baash_sys::paths`, "The shell spells paths with `/`"). The operation is on
+/// bytes. UTF-8 names are cut on character boundaries; a name that is not UTF-8
+/// is cut on byte boundaries, which can leave a partial sequence in the prompt,
+/// but the prompt is bytes by contract and the renderer is the only thing that
+/// decodes it (lossily, for display).
+#[must_use]
 pub fn shorten_path(cwd: &[u8], home: &[u8]) -> Vec<u8> {
     if cwd.is_empty() {
         return Vec::new();
     }
-    if !home.is_empty() && cwd == home {
-        return b"~".to_vec();
-    }
-    let under_home = !home.is_empty()
-        && cwd.len() > home.len()
-        && cwd.starts_with(home)
-        && cwd[home.len()] == b'/';
-    let (rest, mut parent, mut out): (&[u8], std::path::PathBuf, Vec<u8>) = if under_home {
-        (&cwd[home.len() + 1..], os_path(home), b"~".to_vec())
-    } else if cwd.starts_with(b"/") {
-        (cwd, std::path::PathBuf::from("/"), Vec::new())
-    } else {
+    let Some((root, rest)) = root_of(cwd) else {
         return cwd.to_vec();
     };
-    let components: Vec<&[u8]> = rest
-        .split(|&byte| byte == b'/')
+    let (below, parent, tilde) = match under_home(cwd, home) {
+        Some(tail) => (tail, trim_separators(&cwd[..cwd.len() - tail.len()]), true),
+        None => (rest, root, false),
+    };
+    let mut out = root_head(root).to_vec();
+    if tilde {
+        out.push(b'~');
+    }
+    let components: Vec<&[u8]> = below
+        .split(|&byte| is_separator(byte))
         .filter(|part| !part.is_empty())
         .collect();
-    if components.is_empty() {
-        return if out.is_empty() { cwd.to_vec() } else { out };
+    if components.is_empty() && !tilde {
+        // The root is the whole path, so it keeps its own separator: `E:/`,
+        // and POSIX `/`. `E:` alone would be drive-relative.
+        return root.to_vec();
     }
+    let mut parent = os_path(parent);
     for (index, name) in components.iter().enumerate() {
+        out.push(b'/');
         if index + 1 == components.len() {
-            out.push(b'/');
             out.extend_from_slice(name);
             break;
         }
-        out.push(b'/');
         out.extend_from_slice(&shortest_unique_prefix(&parent, name));
         parent = parent.join(os_path(name));
     }
     out
+}
+
+/// Where `cwd` sits below `home`, or `None` when it does not.
+///
+/// `Some(b"")` means `cwd` is `home` itself. A trailing separator on `home` is
+/// not part of the comparison, so `HOME=C:/` — a whole drive — abbreviates
+/// everything on that drive; the components are compared with the platform's
+/// case rule ([`same_path`]), because `PWD` and `%USERPROFILE%` are not obliged
+/// to agree on the case of the drive letter.
+fn under_home<'a>(cwd: &'a [u8], home: &[u8]) -> Option<&'a [u8]> {
+    let home = trim_separators(home);
+    // A bare root is not a tree to live in: bash leaves `/tmp` as `/tmp` when
+    // `HOME=/`, and so does this.
+    if home.len() <= 1 || cwd.len() < home.len() || !same_path(&cwd[..home.len()], home) {
+        return None;
+    }
+    let rest = &cwd[home.len()..];
+    if rest.is_empty() {
+        return Some(b"");
+    }
+    if !is_separator(rest[0]) {
+        return None;
+    }
+    // `C:/Users` below `HOME=C:/`, and `home/` as the same directory.
+    Some(&rest[1..])
+}
+
+/// `path` without trailing separators, keeping a bare root as it is.
+fn trim_separators(path: &[u8]) -> &[u8] {
+    let mut end = path.len();
+    while end > 1 && is_separator(path[end - 1]) {
+        end -= 1;
+    }
+    &path[..end]
+}
+
+/// Where a path starts, and what follows the root.
+///
+/// The roots are `/`, a drive (`C:/`) and a share (`//server/share/`). `None`
+/// means nothing here can place it: a relative name, a drive-relative `C:foo`,
+/// or a device namespace (`\\?\C:\…`), which is the kernel's spelling and is
+/// left exactly as it came.
+fn root_of(path: &[u8]) -> Option<(&[u8], &[u8])> {
+    if path.len() >= 2 && path[0].is_ascii_alphabetic() && path[1] == b':' {
+        return path
+            .get(2)
+            .is_some_and(|&byte| is_separator(byte))
+            .then_some((&path[..3], &path[3..]));
+    }
+    if !path.first().is_some_and(|&byte| is_separator(byte)) {
+        return None;
+    }
+    if path.get(1).is_some_and(|&byte| is_separator(byte)) {
+        // `\\?\` and `\\.\` are device namespaces, not shares.
+        if matches!(path.get(2), Some(b'?' | b'.')) {
+            return None;
+        }
+        // `//server/share/`: the share is the root, and what follows is below
+        // it. A share without a trailing separator is the whole path.
+        let mut seen = 0;
+        for (index, &byte) in path.iter().enumerate().skip(2) {
+            if is_separator(byte) {
+                seen += 1;
+                if seen == 2 {
+                    return Some((&path[..=index], &path[index + 1..]));
+                }
+            }
+        }
+        return Some((path, b""));
+    }
+    Some((&path[..1], &path[1..]))
+}
+
+/// A root without its trailing separator: `""` for `/`, `C:` for a drive,
+/// `//server/share` for a share.
+///
+/// This is the part of the directory segment that says *which* file tree you
+/// are in, so it stays in front of `~`.
+fn root_head(root: &[u8]) -> &[u8] {
+    root.strip_suffix(&b"/"[..]).unwrap_or(root)
+}
+
+/// `tail`'s components with a `/` before each.
+fn push_components(out: &mut Vec<u8>, tail: &[u8]) {
+    for component in tail
+        .split(|&byte| is_separator(byte))
+        .filter(|part| !part.is_empty())
+    {
+        out.push(b'/');
+        out.extend_from_slice(component);
+    }
 }
 
 /// The shortest prefix of `name` that no sibling in `parent` shares.
@@ -1458,17 +1556,15 @@ pub fn window_title(cwd: &[u8], home: &[u8], ssh: Option<(&[u8], &[u8])>) -> Vec
         title.extend_from_slice(b"baash");
         return title;
     }
-    let under_home = !home.is_empty()
-        && cwd.len() > home.len()
-        && cwd.starts_with(home)
-        && cwd[home.len()] == b'/';
-    if !home.is_empty() && cwd == home {
-        title.push(b'~');
-    } else if under_home {
-        title.push(b'~');
-        title.extend_from_slice(&cwd[home.len()..]);
-    } else {
-        title.extend_from_slice(cwd);
+    match under_home(cwd, home) {
+        Some(tail) => {
+            if let Some((root, _)) = root_of(cwd) {
+                title.extend_from_slice(root_head(root));
+            }
+            title.push(b'~');
+            push_components(&mut title, tail);
+        }
+        None => title.extend_from_slice(cwd),
     }
     title
 }
@@ -1668,23 +1764,16 @@ fn same_path(left: &[u8], right: &[u8]) -> bool {
 }
 
 fn abbreviate_home(cwd: &[u8], home: &[u8]) -> Vec<u8> {
-    if home.len() <= 1 || cwd.len() < home.len() {
+    let Some(tail) = under_home(cwd, home) else {
         return cwd.to_vec();
+    };
+    let mut out = Vec::with_capacity(cwd.len());
+    if let Some((root, _)) = root_of(cwd) {
+        out.extend_from_slice(root_head(root));
     }
-    if !same_path(&cwd[..home.len()], home) {
-        return cwd.to_vec();
-    }
-    let rest = &cwd[home.len()..];
-    if rest.is_empty() {
-        return b"~".to_vec();
-    }
-    if is_separator(rest[0]) {
-        let mut out = Vec::with_capacity(rest.len() + 1);
-        out.push(b'~');
-        out.extend_from_slice(rest);
-        return out;
-    }
-    cwd.to_vec()
+    out.push(b'~');
+    push_components(&mut out, tail);
+    out
 }
 
 /// `\W`: bash abbreviates a working directory that *is* `$HOME` to `~` before
@@ -3000,6 +3089,49 @@ mod tests {
         // Shortening against the process's starting directory would name a
         // different tree from the one `PWD` describes.
         assert_eq!(shorten_path(b"src/bshell", b"/home/ada"), b"src/bshell");
+    }
+
+    #[test]
+    fn a_windows_path_keeps_the_drive_it_is_on() {
+        // The shell spells `PWD` with `/`, and `HOME` is on one drive while the
+        // shell can be in a directory on another, so `~` alone would not say
+        // which. None of these directories exist, so a shortened component gets
+        // the two-character fallback.
+        assert_eq!(
+            shorten_path(b"C:/Users/ada/src/github/foo", b"C:/Users/ada"),
+            b"C:~/sr/gi/foo".to_vec()
+        );
+        assert_eq!(shorten_path(b"C:/Users/ada", b"C:/Users/ada"), b"C:~");
+        // Outside home the path's own root already names the drive.
+        assert_eq!(
+            shorten_path(b"C:/Windows/System32", b"C:/Users/ada"),
+            b"C:/Wi/System32".to_vec()
+        );
+        // A drive root is its own answer, and a share's server and share are
+        // not shortened: they are the root.
+        assert_eq!(shorten_path(b"E:/", b"C:/Users/ada"), b"E:/");
+        assert_eq!(
+            shorten_path(b"//srv/share/Projects/thing", b"C:/Users/ada"),
+            b"//srv/share/Pr/thing".to_vec()
+        );
+        // A device namespace is the kernel's spelling, left alone.
+        assert_eq!(
+            shorten_path(br"\\?\C:\x\y", b"C:/Users/ada"),
+            br"\\?\C:\x\y".to_vec()
+        );
+    }
+
+    #[test]
+    fn a_windows_title_keeps_the_drive_too() {
+        assert_eq!(
+            window_title(b"C:/Users/ada/src", b"C:/Users/ada", None),
+            b"C:~/src"
+        );
+        assert_eq!(window_title(b"C:/Users/ada", b"C:/Users/ada", None), b"C:~");
+        assert_eq!(
+            window_title(b"C:/Windows", b"C:/Users/ada", None),
+            b"C:/Windows"
+        );
     }
 
     #[test]

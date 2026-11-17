@@ -514,11 +514,14 @@ one ANSI colour (yellow), and it is captured when the prompt is armed.
 Segments, in order:
 
 * **cwd**, with a leading `$HOME` abbreviated to `~` and, with `PROMPT_ICONS`
-  on, a Nerd Font folder icon (U+F115) in front. Every component but the last is shortened to the shortest
-  prefix that is unique among its siblings in one `read_dir`, at least one
-  character (`src` beside `swap` becomes `sr`, `github` beside `gitlab` becomes
-  `gith`, `foo` beside `fzf` becomes `fo`); the last component is kept whole
-  because it names where you are. A directory whose siblings cannot be read is
+  on, a Nerd Font folder icon (U+F115) in front. The root is kept, and so is the
+  drive or share it names, because `HOME` is on one drive while the shell can be
+  in a directory on another: `C:~/sr/gith/fo`, `C:/Wi/System32`, `E:/`,
+  `//srv/share/Projects`. Every component but the last is shortened to the
+  shortest prefix that is unique among its siblings in one `read_dir`, at least
+  one character (`src` beside `swap` becomes `sr`, `github` beside `gitlab`
+  becomes `gith`, `foo` beside `fzf` becomes `fo`); the last component is kept
+  whole because it names where you are. A directory whose siblings cannot be read is
   shortened to two characters. `baash_lang::prompt::shorten_path` implements the
   rule and `PathAbbreviator` caches the answer per `(cwd, HOME)`, so the
   `read_dir`s run once per `cd`, not once per repaint. The last component is

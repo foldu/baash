@@ -51,9 +51,12 @@ pub fn fallback_home() -> Option<Vec<u8>> {
 }
 
 /// `%USERPROFILE%`, which is what a shell should use when `HOME` is unset.
+///
+/// Spelled the way the shell prints paths (`C:/Users/ada`), because this is what
+/// `~` expands to and what `dirs` abbreviates against.
 #[cfg(windows)]
 pub fn fallback_home() -> Option<Vec<u8>> {
-    crate::os::own_home()
+    crate::os::own_home().map(|home| crate::paths::respell(&home))
 }
 
 /// `$XDG_CONFIG_HOME`, or `~/.config`.

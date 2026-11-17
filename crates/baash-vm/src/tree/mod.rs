@@ -1580,7 +1580,10 @@ impl baash_lang::Shell for Interp {
         // the same database for the user running the shell — not for the
         // empty login name. An unknown login stays literal.
         if user.is_empty() {
-            return baash_sys::os::own_home();
+            // The same directory `fallback_home` answers, and spelled the same
+            // way: `~` expands to `C:/Users/ada`, not to the kernel's
+            // backslashes.
+            return baash_sys::os::own_home().map(|home| baash_sys::paths::respell(&home));
         }
         baash_sys::os::user_home(user)
     }
@@ -1601,18 +1604,22 @@ impl baash_lang::Shell for Interp {
     fn prompt_context(&self) -> baash_lang::prompt::PromptContext {
         let mut context = baash_lang::prompt::PromptContext::from_env();
         let vars = &self.state.vars;
+        // The prompt abbreviates `HOME` against `PWD`, and a Windows `$HOME`
+        // arrives spelled `C:\\Users\\ada` from the environment while `PWD` is
+        // `/`-spelled, so both are put in the shell's spelling here. The
+        // variables themselves keep what the user set.
         if let Some(value) = vars.scalar(b"PWD") {
-            context.cwd = value.to_vec();
+            context.cwd = baash_sys::paths::respell(value);
         }
         if let Some(value) = vars.scalar(b"OLDPWD") {
-            context.previous_cwd = value.to_vec();
+            context.previous_cwd = baash_sys::paths::respell(value);
         }
         if let Some(value) = vars.scalar(b"HOME") {
-            context.home = value.to_vec();
+            context.home = baash_sys::paths::respell(value);
         } else if let Some(home) = baash_sys::dirs::fallback_home() {
             // A native Windows process starts without `HOME`; the profile
             // directory is what `\w` and `~` should abbreviate to there.
-            context.home = home;
+            context.home = baash_sys::paths::respell(&home);
         }
         if let Some(value) = vars.scalar(b"USER") {
             context.user = value.to_vec();

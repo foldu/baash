@@ -90,6 +90,9 @@ pub(super) fn check_components(interp: &Interp, target: &[u8]) -> std::io::Resul
 fn cwd_bytes(target: &[u8]) -> Vec<u8> {
     std::env::current_dir()
         .map(baash_sys::os::bytes_from_os)
+        // The kernel spells a Windows path with `\\`; the shell prints `/`
+        // (`baash_sys::paths`, "The shell spells paths with `/`").
+        .map(|path| baash_sys::paths::respell(&path))
         .unwrap_or_else(|_| target.to_vec())
 }
 
@@ -103,7 +106,7 @@ fn current(interp: &Interp) -> Vec<u8> {
         .or_else(|| {
             std::env::current_dir()
                 .ok()
-                .map(baash_sys::os::bytes_from_os)
+                .map(|path| baash_sys::paths::respell(&baash_sys::os::bytes_from_os(path)))
         })
         .unwrap_or_else(baash_sys::paths::root)
 }
@@ -159,6 +162,7 @@ pub(crate) fn bi_pwd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
     } else {
         std::env::current_dir()
             .map(baash_sys::os::bytes_from_os)
+            .map(|path| baash_sys::paths::respell(&path))
             .unwrap_or_else(|_| current(interp))
     };
     out.push(b'\n');
