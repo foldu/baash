@@ -5,12 +5,39 @@ conformance`), the bump, the commit, the tag, and the push. The tag is what
 publishes; nothing is uploaded from this machine.
 
 ```sh
-just release 0.1.0-rc.1     # a prerelease: builds and publishes, marked
-just release 0.1.0          # the release
+just release patch          # 0.1.2 -> 0.1.3: a fix
+just release minor          # 0.1.3 -> 0.2.0: a breaking change
+just release 0.2.0-rc.1     # a prerelease of 0.2.0: built and published, marked
+just release release        # 0.2.0-rc.1 -> 0.2.0: the release
 ```
 
-The argument is the **version**, not the tag: `cargo release` makes the tag
-`v<version>` itself, and a leading `v` is refused before the gate runs.
+The target is a **level**, or an explicit 0.x version:
+
+| target | `0.1.2` becomes | when |
+|---|---|---|
+| `patch` | `0.1.3` | a fix; nothing that breaks a script |
+| `minor` | `0.2.0` | a breaking change — this is the "major" here |
+| `rc`, `beta`, `alpha` | `0.1.2-rc.1`, … | a pre-release of the version so far |
+| `release` | `0.1.2`, dropping `-rc.1` | promote a pre-release |
+| `0.3.0` | `0.3.0` | an explicit version inside 0.x |
+
+**`major` does not exist here.** The shell is 0ver on purpose: the surface can
+still change, so a breaking change goes in `minor` and there is no 1.0 to jump
+to by accident. `major` is refused, and so is an explicit version whose major is
+non-zero — before the gate runs, next to the two other things that are refused
+there: a tag (`v0.2.0`, when `cargo release` wants the version) and an unknown
+word. The tag is `v<version>`, and `cargo release` makes it from the version.
+
+`just release-plan <target>` prints what `cargo release` would do, and which
+version it would land on, without the gate and without changing anything:
+
+```sh
+$ just release-plan minor
+   Upgrading workspace to version 0.2.0
+   …
+```
+
+A plan needs a clean tree, like the release itself.
 
 `baash` is a shell, not a library: no crate goes to crates.io, and the only
 artifact is the executable.
@@ -31,7 +58,8 @@ dist/release-logs/0.1.2-20261117T124000Z/
     transcript.log   what the terminal saw, in order: ANSI, prompts, everything
     output.txt       the same, colour stripped and CR turned into line breaks
     meta.txt         HEAD, branch, remotes, dirty files, tool versions
-    result.txt       exit status, duration, and what to check next
+    result.txt       exit status, the version and tag it produced, duration,
+                     and what to check next
 dist/release-logs/latest -> that directory
 ```
 

@@ -58,13 +58,15 @@ portable:
 portable-aarch64:
     nix build .#portable-aarch64 -o result-portable-aarch64
 
-# Cut a release: gate, bump, commit, tag `v<version>`, push; the tag publishes.
-release version: (_release-version version) check test conformance
+# Cut a release: gate, bump by `<target>`, commit, tag `v<version>`, push; the
+# tag publishes. `<target>` is `patch`, `minor`, a pre-release level, or an
+# explicit 0.x version (`docs/releasing.md`).
+release target: (_release-target target) check test conformance
     # `--no-confirm`: this recipe is the confirmation, and cargo-release's own
     # prompt is read from a stdin this sandboxed terminal does not give it —
     # the first 0.1.0-rc.1 attempt answered `y`, printed the plan, and changed
     # nothing while reporting success.
-    cargo release --execute --no-confirm {{version}}
+    cargo release --execute --no-confirm {{target}}
     git push --follow-tags
     # `.github/workflows/release.yml` is what publishes, and it runs on GitHub,
     # so the same tag has to reach that remote too. GitLab is the source of
@@ -81,12 +83,26 @@ release version: (_release-version version) check test conformance
 release-logged *args:
     scripts/release-log.sh {{args}}
 
-# Fail on a tag-shaped argument before the gate. `cargo release` parses its
-# version only after `check test conformance` have run, so `just release v0.1.2`
-# spent the whole gate before saying `unexpected character 'v'`. The argument is
-# the version; the tag is `v{{version}}` (`release.toml`).
-_release-version version:
-    @v='{{version}}'; case "$v" in v[0-9]*) printf 'release: the version, not the tag — %s, not %s\n' "${v#v}" "$v"; exit 2;; esac
+# Cut a release without changing anything: what `cargo release` would do for a
+# target, and which version it would land on. No gate, no commit, no tag.
+release-plan target: (_release-target target)
+    cargo release {{target}}
+
+# Check a release target before the gate runs. Two reasons: `cargo release`
+# parses its argument only after `check test conformance` have finished, so a
+# typo used to cost the whole gate; and baash is **0ver** — `minor` carries the
+# breaking changes, `major` would leave 0.x, so `major` and any explicit
+# version whose major is non-zero are refused here, not by a release that
+# already bumped something.
+_release-target target:
+    @t='{{target}}'; case "$t" in \
+        major) printf 'release: baash is 0ver — `minor` is the breaking bump, and `major` would leave 0.x\n' >&2; exit 2 ;; \
+        v[0-9]*) printf 'release: the version, not the tag — %s, not %s\n' "${t#v}" "$t" >&2; exit 2 ;; \
+        [1-9].*) printf 'release: baash is 0ver — %s would leave 0.x\n' "$t" >&2; exit 2 ;; \
+        patch|minor|release|rc|beta|alpha) ;; \
+        [0-9]*.[0-9]*) ;; \
+        *) printf 'release: unknown target %s — a version (0.2.0) or a level (%s)\n' "$t" 'patch minor release rc beta alpha' >&2; exit 2 ;; \
+    esac
 
 # Regenerate the embedded completion tables from the pinned carapace.
 carapace-data:
