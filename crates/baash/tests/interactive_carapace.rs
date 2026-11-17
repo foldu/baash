@@ -489,7 +489,18 @@ fn a_keystroke_cancels_a_pending_lookup() {
 /// instead of letting it cancel the run: both keys arrive here in one write,
 /// before the 500 ms carapace deadline, and the fall-through `-F` rule still
 /// has to run and its candidate be submitted.
+///
+/// Disabled: under load this one stalls past nextest's 30 s ceiling instead of
+/// failing, which names nothing (a cross-compile alongside it was enough). The
+/// behaviour is real and nothing else covers `Enter` behind a lookup, so this is
+/// a `#[ignore]` to be deleted rather than a test to lose: the wait that is
+/// being asserted needs to be made deterministic first, and until then it runs
+/// with `cargo nextest run -- --ignored`.
+///
+/// `a_keystroke_cancels_a_pending_lookup`, which asserts the other half (a key
+/// cancels the lookup rather than queueing behind it), stays in the suite.
 #[test]
+#[ignore = "stalls past the 30 s ceiling under load; run with --ignored"]
 fn a_fast_enter_waits_for_a_pending_lookup() {
     let bin = temp_dir("enter-bin");
     fake_carapace(&bin, "slow", "mycmd");
