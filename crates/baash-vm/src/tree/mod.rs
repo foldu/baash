@@ -1327,11 +1327,23 @@ impl Interp {
     }
 
     /// Record one pipeline's per-stage statuses for `$PIPESTATUS`.
+    ///
+    /// The map is rewritten after *every* command — a simple command is a
+    /// one-stage pipeline — so its slots are kept and refilled in place. Doing
+    /// it with `clear()` and `to_string()` dropped a `BTreeMap` node and a
+    /// formatted string per command, for a variable that a loop like
+    /// `while (( i++ )); do :; done` never reads: 1.6% of that loop in
+    /// `BTreeMap::insert` and 2.4% in `<i32 as SpecToString>::spec_to_string`
+    /// (`docs/performance.md`). `write_decimal` is the same helper the
+    /// per-command specials use, and it reuses the slot's buffer.
     pub(crate) fn set_pipeline_status(&mut self, statuses: &[Status]) {
-        self.pipeline_status.clear();
+        let keep = statuses.len() as i64;
+        if self.pipeline_status.len() > statuses.len() {
+            self.pipeline_status.retain(|index, _| *index < keep);
+        }
         for (index, status) in statuses.iter().enumerate() {
-            self.pipeline_status
-                .insert(index as i64, status.exit_code().to_string().into_bytes());
+            let text = self.pipeline_status.entry(index as i64).or_default();
+            write_decimal(text, i64::from(status.exit_code()));
         }
     }
 
