@@ -114,7 +114,7 @@ static VM_BUILTINS: &[VmBuiltin] = &[
     },
     VmBuiltin {
         name: b"jobs",
-        run: super::Interp::bi_job_control_unavailable,
+        run: super::Interp::bi_jobs,
     },
     VmBuiltin {
         name: b"fg",

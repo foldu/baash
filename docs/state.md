@@ -322,9 +322,11 @@ delegates everything else: line editing to `baash-repl`, execution to the
 * **no job control** (W1, `docs/direction.md`): the shell and its children
   share one process group, so `Ctrl-Z` stops the child and the shell together,
   as bash does with `set +m`. There is no job table, no `%` specifications and
-  no terminal handover. `jobs`, `fg`, `bg` and `disown` remain known names but
-  report `BAASH-E0302` (`CAPABILITY`) with status 1; `%1` operands to `wait`/`kill`
-  do the same. `set -m`/`set -o monitor` is accepted and inert. The `Ctrl-C`
+  no terminal handover. `fg`, `bg` and `disown` remain known names but report
+  `BAASH-E0302` (`CAPABILITY`) with status 1; `%1` operands to `wait`/`kill` do
+  the same, and so does a job operand to `jobs`. A bare `jobs` lists nothing and
+  returns 0, as bash does with an empty table — `starship_precmd` calls
+  `jobs -p` on every prompt. `set -m`/`set -o monitor` is accepted and inert. The `Ctrl-C`
   path is unchanged: the child dies, the shell survives and `$?` is 130; the
   child's `SIGINT` death also aborts the command that ran it, so
   `while true; do sleep 5; done` stops after one key
@@ -399,8 +401,9 @@ interactive history cases mostly still fail on the bash-only `^D` marker, not
 on history behaviour.
 
 **Known job-control gaps** (deliberate, not defects to rediscover): there is no
-job control, so `%` specifications and `jobs`/`fg`/`bg`/`disown` are capability
-errors, `Ctrl-Z` stops the shell with its child, `disown -h` no longer exists
+job control, so `%` specifications and `fg`/`bg`/`disown` are capability errors
+(`jobs` lists nothing and succeeds), `Ctrl-Z` stops the shell with its child,
+`disown -h` no longer exists
 and the shell does not send `SIGHUP` to background children on exit. `$!` for a
 background pipeline is the one subshell this shell forks, not bash's last-stage
 pid.
@@ -580,10 +583,11 @@ more are the executor's. Eight are missing outright: `times`, `ulimit`,
 * extension (18): missing `dirs`, `enable`, `let`, `popd`, `pushd`; `history`
   landed here.
 
-`jobs`, `fg`, `bg` and `disown` are still registered and still VM-backed, but
-their only behaviour is the `BAASH-E0302` capability rejection. They are counted
-as "implemented" above because the name resolves and the diagnostic is
-deliberate, not because job control exists.
+`fg`, `bg` and `disown` are still registered and still VM-backed, but their
+only behaviour is the `BAASH-E0302` capability rejection; `jobs` is VM-backed
+too and answers an empty table with success. They are counted as "implemented"
+above because the name resolves and the behaviour is deliberate, not because job
+control exists.
 
 Note the ownership rule that keeps this honest: the VM's table is consulted
 only when the registry entry has no body, so filling in a runtime body silently

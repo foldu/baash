@@ -74,7 +74,8 @@ This is the platform view of the same constructs.
 | `( exec cmd )` | runs, then ends the scope | `exec` fails (`E0205`): there is no image to replace |
 | `cmd &`, external | real child, remembered by pid | same |
 | `f &`, `{ … } &` | rejected (`E0302`) | rejected |
-| `jobs`, `fg`, `bg`, `disown`, `%1` | rejected (`E0302`) | rejected |
+| `jobs` | lists nothing, status 0 | same |
+| `fg`, `bg`, `disown`, `%1` | rejected (`E0302`) | rejected |
 | `exec 3<file` | the fd table | the CRT fd table |
 | `<(...)`, `>(...)` | rejected (`E0301`) | rejected |
 | `$$` | the shell's pid, also inside `( … )` | same |
@@ -85,10 +86,12 @@ This is the platform view of the same constructs.
 | `trap INT` | signals | console control events, coarse (§9) |
 | `kill` | signals, `TerminateProcess` for externals | `TerminateProcess` only |
 
-Two rows are policy rather than mechanism, and both went the same way: `set -m`
-is accepted and inert so an rc file does not break, and `jobs`/`fg`/`bg` stay
-*registered* so `type` finds them, failing when run instead of reporting
-"command not found".
+Three rows are policy rather than mechanism: `set -m` is accepted and inert so
+an rc file does not break, `fg`/`bg`/`disown` stay *registered* so `type` finds
+them and fail when run instead of reporting "command not found", and `jobs`
+answers what it knows — an empty job table — rather than failing, because
+`starship_precmd` and other prompt frameworks run `jobs -p` before every
+prompt.
 
 ## 4. Rejection is a first-class diagnostic
 
@@ -101,8 +104,8 @@ POSIX superset uses):
   list any more: both directions work, buffered (`contracts.md`, `<(…)` hands a
   path).
 * **`BAASH-E0302`** (`CAPABILITY`) — a construct whose POSIX meaning is a
-  second process or a job table: `f &`, `{ … } &`, `jobs`, `fg`, `bg`,
-  `disown`, and `%1` in `wait`/`kill`.
+  second process or a job table: `f &`, `{ … } &`, `fg`, `bg`, `disown`,
+  `%1` in `wait`/`kill`, and a job operand to `jobs`.
 
 (`exec` on Windows is a third: `BAASH-E0205`, the `exec` failure code, because
 it is a named command that cannot do its job rather than a construct the shell
@@ -113,16 +116,17 @@ Each names the construct and the reason, at the point of refusal:
 ```
 $ baash -c 'f() { echo fn; }; f &'
 baash:1:19: error[BAASH-E0302]: &: f is not an external command, and shell code cannot run in the background
-$ baash -c 'jobs'
-baash:1:1: error[BAASH-E0302]: jobs: job control is not implemented in this shell
+$ baash -c 'fg'
+baash:1:1: error[BAASH-E0302]: fg: job control is not implemented in this shell
 $ baash -c 'x=hi; echo ${x@A}'
 baash:1:12: error[BAASH-E0301]: unsupported expansion: parameter transformation (`${x@Q}`)
 ```
 
 The status is 1, the same failure any command returns, so `if` and `&&` behave
-as they would around a failing command. `jobs`, `fg`, `bg` and `disown` are
-registered built-ins that fail when run, because `type jobs` must still answer
-and an rc file must not see "command not found".
+as they would around a failing command. `fg`, `bg` and `disown` are registered
+built-ins that fail when run, because `type fg` must still answer and an rc file
+must not see "command not found". `jobs` is registered for the same reason but
+succeeds with no output: an empty job table is not a capability gap.
 
 Where the construct is syntactically identifiable the refusal is at parse time;
 where it is not — `exec` depends on runtime context — it is at the point of use,

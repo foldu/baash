@@ -25,11 +25,13 @@ use baash_runtime::{ShellHost, Status, signal_number, signal_short_name, signal_
 use super::Interp;
 
 impl Interp {
-    /// `jobs`, `fg`, `bg`, `disown`: known names, deliberately unavailable.
+    /// `fg`, `bg`, `disown`: known names, deliberately unavailable.
     ///
     /// They stay registered so `type`/`command -v` still find them and an rc
     /// file does not get "command not found"; running one is an error
-    /// (`BAASH-E0302`), not a silent no-op.
+    /// (`BAASH-E0302`), not a silent no-op, because each one needs a job to
+    /// act on and this shell has no job table. `jobs` is different: listing an
+    /// empty table is not a capability gap (see [`Interp::bi_jobs`]).
     pub(crate) fn bi_job_control_unavailable(&mut self, argv: &[Vec<u8>]) -> Status {
         let name = super::traps::builtin_name(argv, "jobs");
         self.report(
@@ -40,7 +42,40 @@ impl Interp {
         Status::FAILURE
     }
 
-    /// Report a `%` specification to `wait`/`kill` as the capability gap it is.
+    /// `jobs [-lnprs] [%job …]`: list the job table, which is always empty.
+    ///
+    /// bash with no jobs prints nothing and succeeds, and this shell has no job
+    /// table at all (`Interp::background` remembers children by pid, not by job
+    /// number), so that is the accurate answer rather than a capability
+    /// diagnostic. It is also the answer prompt frameworks need:
+    /// `starship_precmd` runs `jobs -p` on every prompt to count the jobs its
+    /// `$jobs` module shows, and an error there was printed into the terminal
+    /// before every single prompt.
+    ///
+    /// An operand — a `%` spec or a name — asks about a job that cannot exist,
+    /// and gets `reject_job_spec`'s diagnostic, as `wait %1` does; `fg`, `bg`
+    /// and `disown` keep theirs because each needs a job to act on. The flags
+    /// are accepted because they only select which jobs to print.
+    pub(crate) fn bi_jobs(&mut self, argv: &[Vec<u8>]) -> Status {
+        for argument in &argv[1..] {
+            if argument == b"--" {
+                continue;
+            }
+            if argument.len() > 1 && argument[0] == b'-' {
+                for &flag in &argument[1..] {
+                    if !matches!(flag, b'l' | b'n' | b'p' | b'r' | b's') {
+                        return usage(self, argv, "invalid option");
+                    }
+                }
+                continue;
+            }
+            return self.reject_job_spec("jobs", argument);
+        }
+        Status::SUCCESS
+    }
+
+    /// Report a `%` specification (or a `jobs` operand) as the capability gap
+    /// it is: it names a job, and there is no job table to look it up in.
     fn reject_job_spec(&mut self, program: &str, operand: &[u8]) -> Status {
         self.report(
             baash_lang::codes::CAPABILITY,

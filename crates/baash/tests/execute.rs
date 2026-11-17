@@ -1693,10 +1693,11 @@ fn a_unary_test_without_an_operand_is_a_syntax_error() {
 
 #[test]
 fn job_builtins_report_the_capability_gap() {
-    // The names stay known (an rc file with `jobs` must not get "command not
+    // The names stay known (an rc file with `fg` must not get "command not
     // found"), but running one says what is missing. Status 1 is the documented
-    // failure for a capability rejection.
-    for name in ["jobs", "fg", "bg", "disown"] {
+    // failure for a capability rejection. `jobs` is not in the list: listing an
+    // empty job table is silence and success in bash, and `bi_jobs` does that.
+    for name in ["fg", "bg", "disown"] {
         let output = run(name);
         assert_eq!(code(&output), 1, "`{name}` must fail");
         let text = stderr(&output);
@@ -1712,6 +1713,37 @@ fn job_builtins_report_the_capability_gap() {
         );
         assert!(stdout(&output).is_empty(), "`{name}` wrote to stdout");
     }
+}
+
+#[test]
+fn jobs_lists_nothing_and_succeeds() {
+    // bash with no jobs prints nothing and exits 0, and a prompt framework
+    // depends on it: `starship_precmd` runs `jobs -p` on every prompt to count
+    // the jobs its `$jobs` module shows. This shell has no job table, so the
+    // empty listing is the accurate answer — an error here was printed into the
+    // terminal before every prompt.
+    for script in ["jobs", "jobs -p", "jobs -l", "jobs -pn", "jobs --"] {
+        let output = run(script);
+        assert_eq!(code(&output), 0, "`{script}` stderr: {}", stderr(&output));
+        assert!(
+            stdout(&output).is_empty(),
+            "`{script}` stdout: {}",
+            stdout(&output)
+        );
+        assert!(
+            stderr(&output).is_empty(),
+            "`{script}` stderr: {}",
+            stderr(&output)
+        );
+    }
+    // An operand asks about a job, and there is no table to look it up in.
+    let output = run("jobs %1");
+    assert_eq!(code(&output), 1);
+    assert!(
+        stderr(&output).contains("BAASH-E0302"),
+        "stderr: {}",
+        stderr(&output)
+    );
 }
 
 #[test]

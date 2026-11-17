@@ -1124,8 +1124,8 @@ the completion menu is not "fixed" to match the wrong spelling.
 
 **Which built-ins the executor owns.** `break`, `continue`, `return`, `exit`,
 `exec`, `eval`, `.`/`source`, `cd`, `echo`, `read`, `wait` and `kill` are
-implemented in `baash_vm`; `jobs`, `fg`, `bg` and `disown` are registered there
-only to reject job control. They unwind control flow, re-enter the interpreter,
+implemented in `baash_vm`; `fg`, `bg` and `disown` are registered there only to
+reject job control, and `jobs` there to list the (always empty) job table. They unwind control flow, re-enter the interpreter,
 or need the descriptor table, `lseek`, termios and signal delivery, which a
 `fn(host, argv) -> Status` signature cannot express. The executor consults them only when `BuiltinDef::is_implemented()` is
 false, so a runtime implementation takes over silently — deliberate, but it
@@ -1210,12 +1210,15 @@ children remembered only by pid in `Interp::background` (pid → status, so `$!`
 names the last one and `wait PID` can report a child reaped several commands
 ago; a waited status is consumed, so a second `wait PID` is 127). There is no
 job table, no `%N`/`%%`/`%prefix` resolution, no process-group handover and no
-stopped state. `jobs`, `fg`, `bg` and `disown` stay registered so `type` and
-command completion still find them, and running one reports `BAASH-E0302`
-(`CAPABILITY`) naming the construct: `jobs: job control is not implemented in
-this shell`, status 1. A `%` operand to `wait`/`kill` gets the same diagnostic
-and status 1 (`wait: %1: job control is not implemented in this shell`), not
-"no such job". The diagnostic code is `302` (`CAPABILITY`), allocated next to
+stopped state. `fg`, `bg` and `disown` stay registered so `type` and command
+completion still find them, and running one reports `BAASH-E0302` (`CAPABILITY`)
+naming the construct: `fg: job control is not implemented in this shell`,
+status 1. `jobs` is the exception: its table is empty, so it prints nothing and
+returns 0, which is what bash does with no jobs — and what a prompt framework
+needs, because `starship_precmd` runs `jobs -p` on every prompt. A job *operand*
+(`jobs %1`) and a `%` operand to `wait`/`kill` get the same `BAASH-E0302` and
+status 1 (`wait: %1: job control is not implemented in this shell`), not "no
+such job". The diagnostic code is `302` (`CAPABILITY`), allocated next to
 `UNSUPPORTED = 301` in `baash-lang`; `PARAMETER_NULL`, which held 302, moved to
 308 so the pivot's `BAASH-E0302` is unambiguous. `set -m`/`set -o monitor` is
 accepted and inert — the option parses and reads back, and nothing consumes
