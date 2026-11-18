@@ -306,6 +306,7 @@ What exists:
 | file work | `cat` `cp` `du` `ln` `ls` `mkdir` `mktemp` `mv` `readlink` `realpath` `rm` `rmdir` `split` `touch` `truncate` |
 | text | `base64` `cksum` `comm` `cut` `head` `md5sum` `nl` `od` `paste` `sha1sum` `sha256sum` `shuf` `sort` `tac` `tail` `tee` `tr` `uniq` `wc` |
 | process, time | `date` `expr` `nproc` `seq` `sleep` |
+| in a child (§6.2) | `find` `grep` `sed` `xargs` |
 
 The criterion for a name being in that table is **not** "uutils has it": it is
 that a script needs it on a machine with no POSIX userland, and that the
@@ -323,10 +324,11 @@ utility needs nothing Windows does not have. What is out, and why:
 * **Not a body in this process.** `env`, `nice`, `nohup`, `timeout`, `stdbuf`,
   `chroot`, `runcon`, `install` spawn, and spawning is the thing the embedded
   set exists to remove.
-* **Not uutils at all.** `grep`, `sed`, `awk`, `less`, `which`, `tree` (GNU or
-  someone else's), `find`/`xargs` (uutils' *findutils* project), `ps`/`top`
-  (its *procps* project), `tar`/`gzip`/`curl`/`ssh` (nothing). `clear` is
-  ncurses' and is written by hand here — see §6.1.
+* **Not coreutils, and added from their own projects:** `grep` (uutils/grep),
+  `sed` (uutils/sed), `find`/`xargs` (uutils/findutils) — all in a child, §6.2.
+* **Not available anywhere.** `diff`/`cmp`/`diff3` (§6.2 has the API reasons),
+  `awk`, `less`, `which`, `tree`, `ps`/`top`, `tar`/`gzip`/`curl`/`ssh`. `clear`
+  is ncurses' and is written by hand here — §6.1.
 
 ### 6.1 Names Windows already answers, which is its own hazard
 
@@ -367,6 +369,77 @@ Verified on Windows 11 (26300.9711, `win` guest, fat-LTO build):
   screen was erased, the cursor homed, and the literal `ESC[H ESC[2J` bytes did
   not appear, which is the mode change working.
 
+### 6.2 Utilities that have to own a process
+
+`grep`, `sed`, `find` and `xargs` are not linked as bodies like the rest. They
+run in a **child of the shell** — the same executable with `--__embedded NAME`
+in front of the utility's name — because each of them does something a shell may
+not do to itself:
+
+* **`process::exit`.** uutils' `sed` exits from inside `uumain` when it is
+  handed no script at all. In-process, `baash -c sed` would end the *shell*.
+* **Signal state.** `uucore`'s `#[uucore::main]` turns `SIGPIPE` back to its
+  default on the way into the body, because a real utility binary wants GNU
+  behaviour (die on a broken pipe). The shell wants the opposite: `SIGPIPE`
+  ignored, so a write returns `EPIPE` and the session survives the reader
+  leaving. Measured on Linux, reading the shell's own `/proc/self/status`:
+  after one in-process `grep`, `SigIgn` loses bit 12 (SIGPIPE) and the next
+  broken pipe kills the process with status 141; the 0.8-generation bodies do
+  not do this, which is why nothing noticed before.
+* **`argv[0]` identity.** `uucore` derives the name it prints in messages from
+  the *process* argv (`util_name()`), which in-process is `baash`. A child has
+  its own `argv[0]` on Unix (`Command::arg0`), so its messages say `grep`.
+
+A child has none of those problems: it exits, it dies, it names itself, and the
+shell's signal state, session and status are untouched. `$?` is the child's
+status, including `128 + signal` when the utility was killed by one.
+
+The cost is one process per call. Measured on Linux, release build, 300 calls
+of each in a loop with `PATH=''`, against the `grep` this machine has:
+
+| call | per call |
+| --- | ---: |
+| `grep` (embedded, child) | 0.66 ms |
+| `sed` (embedded, child) | 0.85 ms |
+| `find` (embedded, child) | 0.59 ms |
+| `xargs` (embedded, child) | 0.64 ms |
+| `grep` from `PATH` | 0.89 ms |
+
+So the fallback is not slower than the tool it stands in for, and on Windows
+there is no tool to stand in for. On Windows the number is `CreateProcess`: the
+startup table in §8 is the same one that applies here (~12 ms), which is why the
+utilities a *script loops over* stay in-process and only these four pay it.
+
+Two more things about these four, both inherent to the crates rather than to the
+isolation:
+
+* `find` and `xargs` take `&str`, so a non-UTF-8 **argument** is refused with
+  the same message their own binaries print. Only the command line is text —
+  the files they walk stay bytes — and on Linux the system's `find` is found
+  first anyway.
+* `find -exec` and `xargs` run their own children with `std::process::Command`,
+  which is their job and not the shell's loop: a command they run is resolved by
+  `CreateProcess`/`execvp` and not by the shell's `PATH` hash, `PATHEXT` order or
+  functions.
+
+### What is not here: `diff`, `cmp`, `diff3`
+
+`diff` and `cmp` cannot be embedded at all as published, and `diff3` does not
+exist yet:
+
+* `diffutils`' `diff::main(opts: Peekable<ArgsOs>) -> ExitCode` takes the
+  *process* argv — there is no way to hand it a different command line — and
+  returns `std::process::ExitCode`, which exposes no value, so the exit status
+  (`0` same, `1` different, `2` trouble) could not be read.
+* `cmp` has the same `main`, though it also exposes `parse_params` and
+  `cmp(params)`, so a wrapper could be written by reimplementing `cmp`'s CLI.
+* `diff3` is on `diffutils`' roadmap ("drop-in replacement for … diff, cmp,
+  diff3, sdiff") and is not implemented: the crate has no `diff3` module.
+
+A wrapper would be behaviour invented here rather than the crate's, so the
+honest answer is that these three are waiting on upstream: a `uumain(args) ->
+i32` entry point like the one `grep`, `sed` and `findutils` already have.
+
 ### The environment a body reads
 
 An embedded utility reads configuration from the **process** environment
@@ -391,12 +464,13 @@ feature versus the two sets:
 | --- | ---: | ---: |
 | no `builtin-utils` | 11.56 MiB | 12 |
 | ten utilities (the first wave) | 15.64 MiB | 126 |
-| this set | 25.15 MiB | 243 |
+| coreutils only | 25.15 MiB | 243 |
+| with §6.1's `clear` and §6.2's four | 27.39 MiB | 269 |
 
 Nine and a half mebibytes for thirty-one utilities is what makes `cp`, `mv`,
 `sort` and `date` exist at all; the marginal text utilities are a rounding
 error beside them (`sort`'s own rlib is 3.1 MiB, `cp`'s 1.3). The *shipped*
-Windows exe, fat LTO and stripped, is smaller: 16.40 → 17.83 MiB, because most
+Windows exe, fat LTO and stripped, is smaller: 16.40 → 18.99 MiB, because most
 of the Linux figure is symbols.
 
 `stat` is not in the set for a reason worth writing down: uutils 0.8's `stat`

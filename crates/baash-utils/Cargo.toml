@@ -17,6 +17,14 @@ uucore = "0.8"
 # here are linked. The set is chosen for what a script actually needs on a
 # system without a POSIX userland — not accreted. `docs/portability.md` §6 has
 # the selection rule and the measured cost of the set.
+uu_grep = "0.2"
+# `grep` (0.2) and `sed` (0.3) speak `uucore` 0.10's message catalog, which is
+# thread-local to *its own* uucore: a body whose catalog was not installed
+# prints Fluent ids (`clap-error-unexpected-argument`) instead of English. The
+# coreutils crates below are 0.8 and keep using that one.
+uucore10 = { package = "uucore", version = "0.10" }
+uused = { package = "sed", version = "0.3" }
+findutils = "0.11"
 uu_base64 = "0.8"
 uu_basename = "0.8"
 uu_cat = "0.8"

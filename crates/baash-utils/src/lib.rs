@@ -47,6 +47,46 @@ type Entry = fn(Vec<OsString>) -> i32;
 /// A utility written here rather than linked from uutils.
 type Native = fn(&[OsString]) -> i32;
 
+/// A body that runs in a child of the shell rather than in it (see
+/// [`ISOLATED`]): shell bytes in, exit status out.
+type Body = fn(&[Vec<u8>]) -> i32;
+
+/// The flag the shell passes to its own child before the utility's name.
+///
+/// `baash --__embedded grep -n x file` is `grep` running as a child of the
+/// shell; it is handled before any option parsing, so the child is the utility
+/// and nothing else — no rc files, no history, no options of the shell's own.
+pub const ISOLATED_FLAG: &str = "--__embedded";
+
+/// Utilities that have to own the process, so they run in a child of the shell.
+///
+/// Three things make a body unsafe to call in-process, and each of these has at
+/// least one:
+///
+/// * **`process::exit`.** `sed` exits from inside `uumain` when it is given no
+///   arguments at all — in-process that ends the *shell*.
+/// * **Signal state.** `uucore`'s `#[uucore::main]` turns `SIGPIPE` back to its
+///   default on the way into the body (GNU behaviour: die on a broken pipe),
+///   and the shell needs it ignored so a write returns `EPIPE` instead.
+///   Measured: one in-process `grep` drops bit 12 from the shell's `SigIgn`
+///   mask, and the next broken pipe kills the session (`docs/portability.md`
+///   §6).
+/// * **`argv[0]` identity.** `uucore` derives the name it prints from the
+///   *process* argv (`util_name()`), which in-process is `baash`, so a message
+///   would be attributed to the shell.
+///
+/// A child has none of those: it exits, it dies, it prints its own name, and
+/// the shell's signal state and session are untouched. It costs one
+/// `posix_spawn` on Unix (~0.5 ms) or one `CreateProcess` on Windows (~2–5 ms),
+/// which is what running the same tool from `PATH` costs — and on Windows there
+/// is nothing on `PATH` to run.
+const ISOLATED: &[(&str, Body)] = &[
+    ("find", body_find),
+    ("grep", body_grep),
+    ("sed", body_sed),
+    ("xargs", body_xargs),
+];
+
 mod clear;
 
 /// The utilities written here rather than linked from uutils.
@@ -186,6 +226,9 @@ pub fn run(argv: &[Vec<u8>]) -> Option<i32> {
         .iter()
         .map(|arg| baash_sys::os::os_from_bytes(arg))
         .collect();
+    if let Some((_, body)) = ISOLATED.iter().find(|(utility, _)| *utility == typed) {
+        return Some(isolated(argv, *body, typed));
+    }
     if let Some((_, main)) = NATIVE.iter().find(|(utility, _)| *utility == typed) {
         return Some(main(&args));
     }
@@ -239,15 +282,176 @@ pub fn names() -> impl Iterator<Item = &'static str> {
     NATIVE
         .iter()
         .map(|(name, _)| *name)
+        .chain(ISOLATED.iter().map(|(name, _)| *name))
         .chain(UTILITIES.iter().map(|(name, _)| *name))
+}
+
+/// Whether `name` runs in a child of the host rather than in its process.
+///
+/// The host has to be able to spawn itself for one of these to run at all
+/// (`set_host_executable`), which is why a test harness asks this before
+/// calling [`run`].
+pub fn is_isolated(name: &[u8]) -> bool {
+    std::str::from_utf8(name).is_ok_and(|name| ISOLATED.iter().any(|(utility, _)| *utility == name))
 }
 
 /// Whether `name` is embedded.
 pub fn contains(name: &[u8]) -> bool {
     std::str::from_utf8(name).is_ok_and(|name| {
         NATIVE.iter().any(|(utility, _)| *utility == name)
+            || ISOLATED.iter().any(|(utility, _)| *utility == name)
             || UTILITIES.iter().any(|(utility, _)| *utility == name)
     })
+}
+
+/// The executable the isolated utilities are spawned as.
+///
+/// Set once by the shell at startup. Without it [`run`] refuses an isolated
+/// utility rather than spawning whatever `current_exe` happens to be — in a
+/// test harness or another host that would be a different program, and
+/// `--__embedded` would mean nothing to it.
+static HOST: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Register the executable that knows [`ISOLATED_FLAG`].
+///
+/// Called by the shell before it runs anything; a second call is ignored.
+pub fn set_host_executable(path: std::path::PathBuf) {
+    let _ = HOST.set(path);
+}
+
+/// The registered executable, if there is one.
+fn host_executable() -> Option<std::path::PathBuf> {
+    HOST.get().cloned()
+}
+
+/// Run `argv` in a child of this process, for a body that must own one.
+///
+/// The child is this same executable with [`ISOLATED_FLAG`] in front of the
+/// utility's name, so the utility runs as itself: its own `argv[0]` (on Unix,
+/// where a process may set it), its own signal dispositions, its own exit. The
+/// descriptors are inherited, so the redirects the shell applied are the ones
+/// the utility writes to.
+fn isolated(argv: &[Vec<u8>], body: Body, name: &str) -> i32 {
+    // The body is the *child's* to call; keeping it in the table is what lets
+    // the flag dispatch by name alone.
+    let _ = body;
+    let Some(exe) = host_executable() else {
+        // Refusing beats spawning something arbitrary: the host has to be able
+        // to run `--__embedded` for this to mean anything.
+        eprintln!(
+            "baash: {name}: no host executable registered \
+             (baash_utils::set_host_executable); the isolated utilities need one"
+        );
+        return 127;
+    };
+    let mut command = std::process::Command::new(exe);
+    command.arg(ISOLATED_FLAG).arg(name);
+    command.args(
+        argv.iter()
+            .skip(1)
+            .map(|arg| baash_sys::os::os_from_bytes(arg)),
+    );
+    // `uucore` prints its own name from `argv[0]`, so give the child the
+    // utility's name there. Windows has no such override; there a message says
+    // `baash`, which is cosmetic and recorded in `docs/portability.md` §6.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.arg0(name);
+    }
+    match command.status() {
+        Ok(status) => status_code(status),
+        Err(error) => {
+            eprintln!("baash: {name}: {error}");
+            127
+        }
+    }
+}
+
+/// A child's exit status as the shell's status.
+fn status_code(status: std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        // A utility killed by a signal reports 128 + the signal, which is what
+        // `$?` shows for an external command too.
+        if let Some(signal) = status.signal() {
+            return 128 + signal;
+        }
+    }
+    1
+}
+
+/// Run one isolated body in this process, for the child [`ISOLATED_FLAG`] spawns.
+///
+/// `argv` is the utility's own command line, its name first. `None` means the
+/// name is not isolated — only reachable if the flag is typed by hand.
+pub fn run_isolated(argv: &[Vec<u8>]) -> Option<i32> {
+    let (name, _) = argv.split_first()?;
+    let name = std::str::from_utf8(name).ok()?;
+    let (_, body) = ISOLATED
+        .iter()
+        .find(|(utility, _)| *utility == name)
+        .copied()?;
+    // Installed here because the uutils binaries do it in their `main`, not in
+    // `uumain`: without it an error message is its Fluent id
+    // (`clap-error-unexpected-argument`) instead of English.
+    let _ = uucore10::locale::setup_localization(name);
+    Some(body(argv))
+}
+
+/// `grep`, in the child the shell spawned for it.
+fn body_grep(argv: &[Vec<u8>]) -> i32 {
+    uu_grep::uumain(argv.iter().map(|arg| baash_sys::os::os_from_bytes(arg)))
+}
+
+/// `sed`, in the child the shell spawned for it.
+fn body_sed(argv: &[Vec<u8>]) -> i32 {
+    uused::sed::uumain(argv.iter().map(|arg| baash_sys::os::os_from_bytes(arg)))
+}
+
+/// `find`, in the child the shell spawned for it.
+fn body_find(argv: &[Vec<u8>]) -> i32 {
+    let Some(args) = utf8_arguments("find", argv) else {
+        return 1;
+    };
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    findutils::find::find_main(&refs, &findutils::find::StandardDependencies::new())
+}
+
+/// `xargs`, in the child the shell spawned for it.
+fn body_xargs(argv: &[Vec<u8>]) -> i32 {
+    let Some(args) = utf8_arguments("xargs", argv) else {
+        return 1;
+    };
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    findutils::xargs::xargs_main(&refs)
+}
+
+/// `findutils` takes `&str`, so a non-UTF-8 argument is refused here.
+///
+/// This mirrors what `find`/`xargs` do as binaries, message included: the
+/// shell's own paths are bytes everywhere else, and these two crates are the
+/// one place the argument has to be text. A name that is not UTF-8 is a
+/// refusal, never a lossy conversion that would name a different file.
+fn utf8_arguments(name: &str, argv: &[Vec<u8>]) -> Option<Vec<String>> {
+    let mut out = Vec::with_capacity(argv.len());
+    for argument in argv {
+        match std::str::from_utf8(argument) {
+            Ok(text) => out.push(text.to_owned()),
+            Err(_) => {
+                eprintln!(
+                    "{name}: invalid (non-UTF-8) argument: {}",
+                    String::from_utf8_lossy(argument)
+                );
+                return None;
+            }
+        }
+    }
+    Some(out)
 }
 
 fn run_base64(args: Vec<OsString>) -> i32 {
@@ -424,9 +628,14 @@ mod tests {
 
     #[test]
     fn an_unknown_name_is_not_embedded() {
-        assert_eq!(run(&argv(&["grep", "x"])), None);
-        assert!(!contains(b"grep"));
+        assert_eq!(run(&argv(&["awk", "x"])), None);
+        assert!(!contains(b"awk"));
         assert!(contains(b"cat"));
+        // `grep` is embedded, but in a child: a harness with no host to spawn
+        // gets a refusal rather than a wrong process (`is_isolated`).
+        assert!(contains(b"grep"));
+        assert!(is_isolated(b"grep"));
+        assert!(!is_isolated(b"cat"));
     }
 
     #[test]

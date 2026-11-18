@@ -1269,6 +1269,19 @@ the command's redirect and one opening a file by name does so in the shell's
 working directory. That is why the selection rule (`docs/portability.md` §6)
 rejects utilities that fork or replace the process.
 
+**Four utilities run in a child, not in this process.** `ISOLATED` holds
+`grep`, `sed`, `find` and `xargs`: their bodies exit from `uumain`, or turn
+`SIGPIPE` back to its default, or print a name taken from the process argv —
+none of which a shell may do to itself (`docs/portability.md` §6.2 records the
+measurement and the reasoning). The protocol is one hidden flag: the shell
+spawns `HOST --__embedded NAME ARGS…`, where `HOST` is registered once with
+`set_host_executable` (the binary calls it first thing in `main`); the child
+handles the flag *before* any of the shell's own option parsing, installs the
+utility's message catalog (`uucore` 0.10's, which `grep` and `sed` speak) and
+runs `run_isolated`, whose `None` means the name is not isolated. Without a
+registered host, `run` refuses an isolated utility with status 127 rather than
+spawning an executable that would not understand the flag.
+
 **The environment a body reads is the process's, not the shell's.** uutils reads
 configuration through `std::env`, and the shell does not publish its exported
 variables there, so `LC_ALL=C sort` inside a script does not change the embedded

@@ -165,6 +165,21 @@ enum Source {
 }
 
 fn main() -> ExitCode {
+    // The isolated utilities spawn this executable (`--__embedded`), so it has
+    // to be registered before anything can run one.
+    #[cfg(any(windows, feature = "builtin-utils"))]
+    if let Ok(exe) = std::env::current_exe() {
+        baash_utils::set_host_executable(exe);
+    }
+    // Before anything else: this process may *be* an embedded utility. `grep`,
+    // `sed`, `find` and `xargs` run as children of the shell, because their
+    // bodies exit, die on a broken pipe, and print from the process argv — none
+    // of which a shell may do (`baash_utils::ISOLATED`). The child is this same
+    // executable with the flag in front of the utility's name, so it must not
+    // read rc files, open history or parse the shell's options.
+    if let Some(status) = run_as_embedded_utility() {
+        return status;
+    }
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
         Ok((mode, interactive, flags)) => dispatch(mode, interactive, flags),
@@ -174,6 +189,38 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Run this process as an embedded utility, when the shell asked for that.
+///
+/// The layout is `baash --__embedded NAME ARGS…`. `None` means this is an
+/// ordinary shell invocation, which is every case when the embedded table is
+/// not compiled in.
+#[cfg(any(windows, feature = "builtin-utils"))]
+fn run_as_embedded_utility() -> Option<ExitCode> {
+    // The flag is written by the parent, so its position is known to be within
+    // the first three arguments: Unix sets `argv[0]` to the utility's own name
+    // (so the flag is at 1), Windows cannot and the executable path is there
+    // instead (so the flag is at 1 as well, and the name follows it). Taking
+    // the name from after the flag covers both, and the utility's own arguments
+    // are everything after that.
+    let args: Vec<OsString> = std::env::args_os().collect();
+    let flag = baash_utils::ISOLATED_FLAG.as_bytes();
+    let at = args
+        .iter()
+        .take(3)
+        .position(|arg| arg.as_encoded_bytes() == flag)?;
+    let name = args.get(at + 1)?;
+    let mut argv: Vec<Vec<u8>> = vec![bytes(name)];
+    argv.extend(args[at + 2..].iter().map(bytes));
+    let status = baash_utils::run_isolated(&argv).unwrap_or(127);
+    Some(ExitCode::from(u8::try_from(status).unwrap_or(1)))
+}
+
+/// A build without the embedded table has no child to be.
+#[cfg(not(any(windows, feature = "builtin-utils")))]
+fn run_as_embedded_utility() -> Option<ExitCode> {
+    None
 }
 
 fn bytes(value: &OsString) -> Vec<u8> {

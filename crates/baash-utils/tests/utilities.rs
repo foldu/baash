@@ -15,7 +15,10 @@ fn argv(items: &[&str]) -> Vec<Vec<u8>> {
 
 #[test]
 fn every_embedded_utility_answers_help() {
-    for name in baash_utils::names() {
+    // The isolated four need a host executable to spawn, and a test harness is
+    // not one (`baash_utils::is_isolated`); `crates/baash/tests/
+    // embedded_isolated.rs` drives those through the real binary instead.
+    for name in baash_utils::names().filter(|name| !baash_utils::is_isolated(name.as_bytes())) {
         let status = baash_utils::run(&argv(&[name, "--help"]));
         assert_eq!(
             status,
@@ -39,7 +42,8 @@ fn the_set_is_the_one_the_docs_describe() {
     // test is that the two cannot drift: adding a utility means editing both.
     let documented = "base64 basename cat cksum comm cp cut date dirname du expr head ln ls \
 md5sum mkdir mktemp mv nl nproc od paste readlink realpath rm rmdir seq sha1sum sha256sum \
-shuf sleep sort split tac tail tee touch tr truncate uniq wc clear";
+shuf sleep sort split tac tail tee touch tr truncate uniq wc clear \
+find grep sed xargs";
     let documented: HashSet<&str> = documented.split_whitespace().collect();
     let actual: HashSet<&str> = baash_utils::names().collect();
     let missing: Vec<&&str> = documented.difference(&actual).collect();
