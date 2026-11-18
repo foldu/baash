@@ -1186,6 +1186,55 @@ profile showed one allocation per AST node — `Ast::children` built a `Vec` for
 every node the validator visited, 3,366 of them — which is why the walk has
 `children_into` now, appending to one buffer the walk owns.
 
+### 2026-11-19: the whole suite against bash
+
+One release build, one run of the harness (`python3 scripts/bench.py`, bash
+5.3.20 from nixpkgs, 32 cores, load average under 1, each case the minimum of
+its repetitions). The ratio is baash ÷ bash, so lower is faster:
+
+| case | bash ms | baash ms | ratio |
+| --- | ---: | ---: | ---: |
+| startup, per spawn | 0.54 | 0.52 | 1.0× |
+| colon loop 20k | 16.44 | 10.10 | 0.6× |
+| arith loop 20k `((i++))` | 9.45 | 4.62 | 0.5× |
+| expansion 20k `${s#*c}` | 23.51 | 14.37 | 0.6× |
+| expansion 20k `${s//d/e}` | 26.10 | 10.65 | 0.4× |
+| function call 20k | 31.97 | 16.41 | 0.5× |
+| case 20k | 15.86 | 9.66 | 0.6× |
+| builtin echo 20k | 21.78 | 13.93 | 0.6× |
+| fork+exec 200 (`env true`) | 180.70 | 163.78 | 0.9× |
+| pipeline 200 (`echo \| cat`) | 119.62 | 89.50 | 0.7× |
+| cmd subst 1000 `$(echo hi)` | 166.70 | 4.56 | 0.03× |
+| subshell 1000 `( : )` | 143.04 | 1.88 | 0.01× |
+| subshell 200, 20k-element array | 49.99 | 4.41 | 0.09× |
+| subshell 20k `( : )` | 2837.41 | 28.51 | 0.01× |
+| cmd subst 20k `$(echo $i)` | 3411.46 | 79.15 | 0.02× |
+| cmd subst 20k, body writes | 3416.52 | 88.21 | 0.03× |
+| indirect 100 vars, 200 passes | 16.89 | 9.09 | 0.5× |
+| indirect 400 vars, 200 passes | 66.83 | 34.46 | 0.5× |
+| indirect 1000 vars, 200 passes | 171.09 | 83.26 | 0.5× |
+| source bash_completion x15 | 52.46 | 37.20 | 0.7× |
+| assignment+expansion 100k | 334.12 | 178.85 | 0.5× |
+
+Every interpreted case is ahead now, which is not where this started: the
+sections above record `${s//d/e}` as the largest remaining gap at 2.1× and
+function calls at parity (32.6 ms against bash's 32.0); they are 0.4× and 0.5×
+here. The spread is two facts rather than twenty. Interpreted work costs about
+half what bash's does — loops, `case`, expansion of every shape and the ordinary
+builtins all land between 0.4 and 0.7×, so no single case carries the margin —
+and spawning is where the two are closest, because bash
+pays `fork` and this shell pays `posix_spawn` (0.7–0.9×, the two narrowest
+rows). The four rows at 0.01–0.09× are the design's entire point: a subshell and
+`$( … )` are a journal on the variable store here and a `fork` there, so the gap
+is 30 to 100-fold and it widens with the body — `subshell 20k` is 2.8 s against
+29 ms.
+
+The same suite on a debug build, which is what `cargo run` gives an interactive
+session: `colon loop` 8.5×, `arith loop` 8.5×, `builtin echo` 8.0×,
+`function call` 6.2×, startup 1.8×. The figure recorded in `## What this says`
+was 14–25×, so the debug column gained from the allocation work above as much
+as the release one did; what is left is optimiser absence.
+
 ## The test suite: 37 s to 5 s
 
 `cargo test` has to hold `RUST_TEST_THREADS=1` (`.cargo/config.toml`): `$( … )`
@@ -1215,25 +1264,28 @@ sixteen of those at once spend the machine on context switches.
 
 ## What this says
 
-* **Startup was not the problem.** A one-shot `baash -c ':'` costs 0.40 ms in
-  release, slightly *faster* than bash: a small Rust binary with no rc file and
+* **Startup was not the problem.** A one-shot `baash -c ':'` costs about
+  0.5 ms in release, the same as bash: a small Rust binary with no rc file and
   no linker-loaded baggage. Interactive latency is dominated by the editor and
   the terminal, not by process start. On Windows the same conclusion holds one
   order of magnitude up — 12.3 ms, which is `CreateProcess` and the loader, with
   the shell's own share at 0.2 ms (the 2026-11-17 section) — and what an
   interactive start adds there is the bash-completion library, not the port.
-* **The tree-walking evaluator costs 1–2× bash per interpreted statement in
-  release**, and is *faster* where a process is spawned (posix_spawn instead of
-  fork). That is the shape this design expects: interpretation is not the
-  bottleneck, which is why the bytecode VM (`DESIGN.md` §5) is deferred
-  (`docs/direction.md` §2) rather than built alongside.
-* **Debug is 14–25× slower than bash on interpreted work.** Nothing about the
+* **The tree-walking evaluator costs about half of bash per interpreted
+  statement in release** (0.4–0.6× across the 2026-11-19 table), and is faster
+  again where a process is spawned (posix_spawn instead of fork). That is the
+  shape this design expects: interpretation is not the bottleneck, which is why
+  the bytecode VM (`DESIGN.md` §5) is deferred (`docs/direction.md` §2) rather
+  than built alongside.
+* **Debug is 6–9× slower than bash on interpreted work.** Nothing about the
   architecture changed between the two columns; it is entirely optimiser
-  absence (no inlining, bounds checks, overflow checks, unoptimised
-  `Vec<u8>` handling). Anyone using the shell interactively from `cargo run` is
-  using the debug column, which is why it feels slow.
-* The largest remaining interpreter gap is `${s//d/e}` (global replacement,
-  2.1×) — it allocates per iteration more than the single-pattern forms.
+  absence (no inlining, bounds checks, overflow checks, unoptimised `Vec<u8>`
+  handling). Anyone using the shell interactively from `cargo run` is using the
+  debug column, which is why it feels slow.
+* The narrowest remaining margins are where bash's C does the work in-process:
+  spawning a program (0.9×, `fork` versus `posix_spawn` pays for both sides),
+  a pipeline (0.7×) and the builtins that expand an `argv` (0.6×). Global
+  substitution, once the largest gap at 2.1×, is 0.4×.
 
 ## Practical consequences
 
