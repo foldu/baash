@@ -2139,7 +2139,9 @@ fn set_scalar(var: &mut Var, name: &[u8], value: Vec<u8>) -> Result<(), Error> {
 /// A name of at most eight bytes packed most-significant-first, with its length.
 ///
 /// `None` for a longer name: `LastHit` compares packing plus length instead of
-/// the bytes, which is only sound when the packing holds every byte.
+/// the bytes, which is only sound when the packing holds every byte. Sixteen was
+/// tried and is slower: the packing loop gets longer and a 128-bit compare buys
+/// nothing over the hash for names that are already rare.
 #[inline]
 fn pack(name: &[u8]) -> Option<(u64, u32)> {
     if name.len() > 8 {
