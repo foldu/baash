@@ -123,6 +123,70 @@ fn a_prefix_assignment_does_not_persist() {
 }
 
 #[test]
+fn file_and_text_utilities_a_script_needs_run_without_a_path() {
+    // The set a Windows user hits first: `cp`, `mv`, `sort`, `date`, `expr`.
+    // None of them is a shell built-in, none exists on a bare Windows `PATH`
+    // (and `sort.exe` there is a different program entirely), so each one is
+    // the embedded table or nothing.
+    let dir = temp_dir("script-needs");
+    let source = dir.join("one.txt");
+    let copy = dir.join("two.txt");
+    let moved = dir.join("three.txt");
+    std::fs::write(&source, "b\na\nc\n").unwrap();
+    let mut interp = shell();
+    assert!(run(&mut interp, "PATH=''").is_success());
+    for script in [
+        format!("cp '{}' '{}'", source.display(), copy.display()),
+        format!("mv '{}' '{}'", copy.display(), moved.display()),
+        format!("touch '{}'/stamp", dir.display()),
+        format!("mkdir '{}'/sub", dir.display()),
+        format!("rmdir '{}'/sub", dir.display()),
+        format!("truncate -s 3 '{}'/stamp", dir.display()),
+    ] {
+        let status = run(&mut interp, &script);
+        assert!(status.is_success(), "`{script}` failed: {status:?}");
+    }
+    assert_eq!(std::fs::read_to_string(&moved).unwrap(), "b\na\nc\n");
+    assert_eq!(std::fs::metadata(dir.join("stamp")).unwrap().len(), 3);
+
+    // Piped through the shell, so this also covers the worker writing to the
+    // descriptor the pipeline installed rather than to its own stdout.
+    let sorted = dir.join("sorted");
+    assert!(
+        run(
+            &mut interp,
+            &format!("sort '{}' > '{}'", moved.display(), sorted.display())
+        )
+        .is_success()
+    );
+    assert_eq!(std::fs::read_to_string(&sorted).unwrap(), "a\nb\nc\n");
+    let counted = dir.join("counted");
+    assert!(
+        run(
+            &mut interp,
+            &format!(
+                "printf '%s\\n' a b b | uniq -c | wc -l > '{}'",
+                counted.display()
+            )
+        )
+        .is_success()
+    );
+    assert_eq!(std::fs::read_to_string(&counted).unwrap(), "2\n");
+
+    // `expr` and `date` are the two whose *result* the shell then expands.
+    let out = dir.join("expr");
+    assert!(
+        run(
+            &mut interp,
+            &format!("x=$(expr 2 + 3); printf '%s' \"$x\" > '{}'", out.display())
+        )
+        .is_success()
+    );
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "5");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_utility_that_is_not_a_builtin_runs_too() {
     let dir = temp_dir("cat");
     let file = dir.join("data");

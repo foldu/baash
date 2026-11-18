@@ -44,9 +44,7 @@ fn dispatch_overhead() {
 
     // Cold start for every other utility, so the cost of one thread each is
     // visible rather than guessed at.
-    for name in [
-        "printf", "[", "cat", "mkdir", "rm", "ls", "wc", "head", "tail", "tr", "seq", "sleep",
-    ] {
+    for name in baash_utils::names() {
         let start = Instant::now();
         let _ = baash_utils::run(&argv(&[name, "--help"]));
         println!("cold {name}: {:?}", start.elapsed());

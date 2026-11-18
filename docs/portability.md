@@ -284,9 +284,9 @@ milliseconds. On Windows there is no other coreutils to spawn anyway.
 
 What exists:
 
-* `crates/baash-utils` links the individual uutils binaries it uses — `cat`,
-  `mkdir`, `rm`, `ls`, `wc`, `head`, `tail` — each a small library with a
-  `uumain(args)` entry point, not the umbrella crate. Feature-gated as
+* `crates/baash-utils` links the individual uutils binaries it uses — each a
+  small library with a `uumain(args) -> i32` entry point, not the umbrella
+  crate — and the table there is the whole surface. Feature-gated as
   `builtin-utils`: on for Windows, off by default on Linux, where the system
   coreutils are there and `--features builtin-utils` embeds them anyway.
 * The fd boundary is the shell's: the redirection plan is applied to 0/1/2 for
@@ -299,9 +299,74 @@ What exists:
   `baash` is simple, but still one spawn per command, which is the cost this
   exists to remove.
 
-The set is curated, not complete. The shell's own bodies (`printf`, `test`,
-`cd`, `read`, `ulimit`, …) are written against `std` and `baash-sys` and need no
-uutils at all.
+### The set
+
+| group | utilities |
+| --- | --- |
+| file work | `cat` `cp` `du` `ln` `ls` `mkdir` `mktemp` `mv` `readlink` `realpath` `rm` `rmdir` `split` `stat` `touch` `truncate` |
+| text | `base64` `cksum` `comm` `cut` `head` `md5sum` `nl` `od` `paste` `sha1sum` `sha256sum` `shuf` `sort` `tac` `tail` `tee` `tr` `uniq` `wc` |
+| process, time | `date` `expr` `nproc` `seq` `sleep` |
+
+The criterion for a name being in that table is **not** "uutils has it": it is
+that a script needs it on a machine with no POSIX userland, and that the
+utility needs nothing Windows does not have. What is out, and why:
+
+* **No truthful Windows answer.** `chmod`, `chown`, `chgrp` (no mode bits),
+  `df` (no mount table), `id`, `groups`, `logname`, `users`, `who`, `pinky`,
+  `uptime`, `hostid`, `arch`, `uname`, `tty`, `stty`, `dircolors`, `sync`,
+  `sum`, `yes`, `dd`, `pr`, `ptx`, `tsort`, `factor`, `pathchk`, `link`,
+  `unlink`, `dir`, `vdir`, `more`. A wrong answer is worse than "command not
+  found": a script that reads one makes a decision on it.
+* **Not a body in this process.** `env`, `nice`, `nohup`, `timeout`, `stdbuf`,
+  `chroot`, `runcon`, `install` spawn, and spawning is the thing the embedded
+  set exists to remove.
+* **Not uutils at all.** `grep`, `sed`, `awk`, `less`, `which`, `tree` (GNU or
+  someone else's), `find`/`xargs` (uutils' *findutils* project), `ps`/`top`
+  (its *procps* project), `tar`/`gzip`/`curl`/`ssh` (nothing). `clear` is
+  ncurses' and is written by hand here — see §6.1.
+
+### 6.1 Names Windows already answers, which is its own hazard
+
+`PATH` is searched first, so on Windows some of these names resolve to a
+program that means something **else**, which is worse than a missing command:
+
+| typed | runs | difference |
+| --- | --- | --- |
+| `find . -name x` | `find.exe` | searches *text*, and blocks reading stdin |
+| `sort -n` | `sort.exe` | different ordering and flags — ours is embedded for this reason |
+| `fc a b` | `fc.exe` | a file compare with different output, not `diff` |
+| `where x` | `where.exe` | roughly `which` |
+| `more f` | `more.com` | same idea, fine |
+| `tar`, `curl`, `ssh`, `whoami`, `hostname` | the system's | the same meaning |
+
+`clear` is the other side of the same problem: `cls` exists only inside
+`cmd.exe`, so there is no program to find and nothing to fall back on. That is
+what `crates/baash-utils/src/clear.rs` is, and why it is mine rather than
+uutils's: it writes the ECMA-48 clear (`CSI H`, `CSI 2 J`, and `CSI 3 J` for
+the scrollback unless `-x`), which is what every common `terminfo` entry reduces
+to, and on Windows it asks the console for `ENABLE_VIRTUAL_TERMINAL_PROCESSING`
+first (`baash_sys::screen`), because a console that has not been asked renders
+those bytes literally. It does not read `terminfo`: `TERM=dumb` clears nothing
+at all, and any other value gets the same sequence — the `docs/terminal.md` rule
+for the shell's own bytes, where an unparsed sequence is ignored rather than
+worked around.
+
+### Cost
+
+`cargo build --release -p baash` on Linux (thin LTO, 16 codegen units), no
+feature versus the two sets:
+
+| build | release binary | crate tree of `baash-utils` |
+| --- | ---: | ---: |
+| no `builtin-utils` | 11.56 MiB | 12 |
+| ten utilities (the first wave) | 15.64 MiB | 126 |
+| this set | 25.15 MiB | 243 |
+
+Nine and a half mebibytes for thirty-two utilities is what makes `cp`, `mv`,
+`sort` and `date` exist at all; the marginal text utilities are a rounding
+error beside them (`sort`'s own rlib is 3.1 MiB, `cp`'s 1.3). The Windows
+profile (fat LTO, stripped) is measured in §8; CI builds it, so the local loop
+does not pay the link.
 
 ### Built-in gaps on Windows
 

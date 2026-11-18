@@ -152,7 +152,7 @@ as unverified until a guest runs it.
 | `baash-complete-data` | 927 | generated carapace tables: 916 command trees, 58k options and one-line descriptions, compiled in behind the `carapace` feature; no dependencies |
 | `baash-repl` | 3470 | line editor, key decoding, history navigation, prompt adapter, renderer, terminal abstraction |
 | `baash-picker` | 957 | the full-screen fuzzy picker: query, nucleo ranking, the alternate-screen frame; no terminal, no shell |
-| `baash-utils` | 244 | embedded coreutils (uutils 0.8 subcrates): the `builtin-utils` fallback used when `PATH` finds nothing; on by default for Windows, opt-in on Linux |
+| `baash-utils` | 244 | 42 embedded coreutils (uutils 0.8 subcrates) plus `clear`, which uutils has no copy of: the `builtin-utils` fallback used when `PATH` finds nothing; on by default for Windows, opt-in on Linux. The set and its measured cost are `portability.md` §6 |
 | `baash-highlight` | 386 | syntax highlighting (token → style), shared with the editor |
 | `baash-spec` | 3249 | the Oils-suite runner, comparator, ratchet |
 | `baash` | 1971 | the binary: argument parsing, startup files, REPL loop, history ownership swap |
@@ -746,12 +746,15 @@ Where the waves stand:
   report "not implemented" there — the embedded-uutils wave), ConPTY for the
   interactive editor, and PATHEXT-based command resolution.
 
-  The utility fallback has landed: `crates/baash-utils` embeds `printf`,
-  `test`/`[`, `cat`, `mkdir`, `rm`, `ls`, `wc`, `head`, `tail`, `tr`, `seq` and
-  `sleep`, the `builtin-utils` feature is opt-in on Linux and forced on for
-  Windows, and the executor consults it only after `PATH` resolution fails
-  (external utilities still win). Verified under Wine end to end. Cost:
-  +3.7 MiB and 151 crates in that crate's tree; Linux release is thin LTO with
+  The utility fallback has landed: `crates/baash-utils` embeds 42 coreutils —
+  the file, text, date and checksum utilities a script reaches for, listed in
+  `portability.md` §6 — plus `clear`, which is ncurses' and had to be written
+  here, and the shell answers `printf`, `test`/`[`, `echo`, `pwd`, `true`,
+  `false` and `kill` itself. The `builtin-utils` feature is opt-in on Linux and
+  forced on for Windows, and the executor consults the table only after `PATH`
+  resolution fails (external utilities still win). Verified under Wine end to
+  end. Cost: 11.56 → 25.15 MiB of release binary and 126 → 243 crates in that
+  crate's tree, most of it `cp`/`mv`/`sort`/`date`; Linux release is thin LTO with
   16 codegen units (44 s), while `profile.windows` (fat LTO, one unit,
   stripped, 16.4 MiB) is built by CI so the local loop stays fast. Each
   embedded utility runs on its own worker thread, because uutils' message

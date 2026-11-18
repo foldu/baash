@@ -42,17 +42,56 @@ type Entry = fn(Vec<OsString>) -> i32;
 ///
 /// The first argument passed to [`run`] is the name itself, because that is
 /// what `argv[0]` would be and what clap parses.
+///
+/// The set is the coreutils a script reaches for on a machine with no POSIX
+/// userland — not every utility uutils has. What is deliberately *not* here
+/// (`chmod`, `chown`, `mkfifo`, `df`, `id`, `uname`, …) has no truthful answer
+/// on Windows, and what forks (`env`, `timeout`, `nice`, `nohup`) breaks the
+/// rule that an embedded utility is a body in this process; both lists are in
+/// `docs/portability.md` §6.
 const UTILITIES: &[(&str, Entry)] = &[
+    ("base64", run_base64),
+    ("basename", run_basename),
     ("cat", run_cat),
-    ("mkdir", run_mkdir),
-    ("rm", run_rm),
-    ("ls", run_ls),
-    ("wc", run_wc),
+    ("cksum", run_cksum),
+    ("comm", run_comm),
+    ("cp", run_cp),
+    ("cut", run_cut),
+    ("date", run_date),
+    ("dirname", run_dirname),
+    ("du", run_du),
+    ("expr", run_expr),
     ("head", run_head),
-    ("tail", run_tail),
-    ("tr", run_tr),
+    ("ln", run_ln),
+    ("ls", run_ls),
+    ("md5sum", run_md5sum),
+    ("mkdir", run_mkdir),
+    ("mktemp", run_mktemp),
+    ("mv", run_mv),
+    ("nl", run_nl),
+    ("nproc", run_nproc),
+    ("od", run_od),
+    ("paste", run_paste),
+    ("readlink", run_readlink),
+    ("realpath", run_realpath),
+    ("rm", run_rm),
+    ("rmdir", run_rmdir),
     ("seq", run_seq),
+    ("sha1sum", run_sha1sum),
+    ("sha256sum", run_sha256sum),
+    ("shuf", run_shuf),
     ("sleep", run_sleep),
+    ("sort", run_sort),
+    ("split", run_split),
+    ("stat", run_stat),
+    ("tac", run_tac),
+    ("tail", run_tail),
+    ("tee", run_tee),
+    ("touch", run_touch),
+    ("tr", run_tr),
+    ("truncate", run_truncate),
+    ("uniq", run_uniq),
+    ("wc", run_wc),
 ];
 
 /// One call handed to a utility's worker thread.
@@ -170,6 +209,15 @@ fn attempt(name: &'static str, entry: Entry, args: Vec<OsString>) -> Result<i32,
     Err(job.argv)
 }
 
+/// Every embedded utility's name, in table order.
+///
+/// For the tests that have to hold for *all* of them — each one answers
+/// `--help`, each one is listed once — rather than for a sample that a new
+/// entry silently is not in.
+pub fn names() -> impl Iterator<Item = &'static str> {
+    UTILITIES.iter().map(|(name, _)| *name)
+}
+
 /// Whether `name` is embedded.
 pub fn contains(name: &[u8]) -> bool {
     std::str::from_utf8(name)
@@ -177,44 +225,172 @@ pub fn contains(name: &[u8]) -> bool {
         .is_some_and(|name| UTILITIES.iter().any(|(utility, _)| *utility == name))
 }
 
+fn run_base64(args: Vec<OsString>) -> i32 {
+    uu_base64::uumain(args.into_iter())
+}
+
+fn run_basename(args: Vec<OsString>) -> i32 {
+    uu_basename::uumain(args.into_iter())
+}
+
 fn run_cat(args: Vec<OsString>) -> i32 {
     uu_cat::uumain(args.into_iter())
 }
 
-fn run_mkdir(args: Vec<OsString>) -> i32 {
-    uu_mkdir::uumain(args.into_iter())
+fn run_cksum(args: Vec<OsString>) -> i32 {
+    uu_cksum::uumain(args.into_iter())
 }
 
-fn run_rm(args: Vec<OsString>) -> i32 {
-    uu_rm::uumain(args.into_iter())
+fn run_comm(args: Vec<OsString>) -> i32 {
+    uu_comm::uumain(args.into_iter())
 }
 
-fn run_ls(args: Vec<OsString>) -> i32 {
-    uu_ls::uumain(args.into_iter())
+fn run_cp(args: Vec<OsString>) -> i32 {
+    uu_cp::uumain(args.into_iter())
 }
 
-fn run_wc(args: Vec<OsString>) -> i32 {
-    uu_wc::uumain(args.into_iter())
+fn run_cut(args: Vec<OsString>) -> i32 {
+    uu_cut::uumain(args.into_iter())
+}
+
+fn run_date(args: Vec<OsString>) -> i32 {
+    uu_date::uumain(args.into_iter())
+}
+
+fn run_dirname(args: Vec<OsString>) -> i32 {
+    uu_dirname::uumain(args.into_iter())
+}
+
+fn run_du(args: Vec<OsString>) -> i32 {
+    uu_du::uumain(args.into_iter())
+}
+
+fn run_expr(args: Vec<OsString>) -> i32 {
+    uu_expr::uumain(args.into_iter())
 }
 
 fn run_head(args: Vec<OsString>) -> i32 {
     uu_head::uumain(args.into_iter())
 }
 
-fn run_tail(args: Vec<OsString>) -> i32 {
-    uu_tail::uumain(args.into_iter())
+fn run_ln(args: Vec<OsString>) -> i32 {
+    uu_ln::uumain(args.into_iter())
 }
 
-fn run_tr(args: Vec<OsString>) -> i32 {
-    uu_tr::uumain(args.into_iter())
+fn run_ls(args: Vec<OsString>) -> i32 {
+    uu_ls::uumain(args.into_iter())
+}
+
+fn run_md5sum(args: Vec<OsString>) -> i32 {
+    uu_md5sum::uumain(args.into_iter())
+}
+
+fn run_mkdir(args: Vec<OsString>) -> i32 {
+    uu_mkdir::uumain(args.into_iter())
+}
+
+fn run_mktemp(args: Vec<OsString>) -> i32 {
+    uu_mktemp::uumain(args.into_iter())
+}
+
+fn run_mv(args: Vec<OsString>) -> i32 {
+    uu_mv::uumain(args.into_iter())
+}
+
+fn run_nl(args: Vec<OsString>) -> i32 {
+    uu_nl::uumain(args.into_iter())
+}
+
+fn run_nproc(args: Vec<OsString>) -> i32 {
+    uu_nproc::uumain(args.into_iter())
+}
+
+fn run_od(args: Vec<OsString>) -> i32 {
+    uu_od::uumain(args.into_iter())
+}
+
+fn run_paste(args: Vec<OsString>) -> i32 {
+    uu_paste::uumain(args.into_iter())
+}
+
+fn run_readlink(args: Vec<OsString>) -> i32 {
+    uu_readlink::uumain(args.into_iter())
+}
+
+fn run_realpath(args: Vec<OsString>) -> i32 {
+    uu_realpath::uumain(args.into_iter())
+}
+
+fn run_rm(args: Vec<OsString>) -> i32 {
+    uu_rm::uumain(args.into_iter())
+}
+
+fn run_rmdir(args: Vec<OsString>) -> i32 {
+    uu_rmdir::uumain(args.into_iter())
 }
 
 fn run_seq(args: Vec<OsString>) -> i32 {
     uu_seq::uumain(args.into_iter())
 }
 
+fn run_sha1sum(args: Vec<OsString>) -> i32 {
+    uu_sha1sum::uumain(args.into_iter())
+}
+
+fn run_sha256sum(args: Vec<OsString>) -> i32 {
+    uu_sha256sum::uumain(args.into_iter())
+}
+
+fn run_shuf(args: Vec<OsString>) -> i32 {
+    uu_shuf::uumain(args.into_iter())
+}
+
 fn run_sleep(args: Vec<OsString>) -> i32 {
     uu_sleep::uumain(args.into_iter())
+}
+
+fn run_sort(args: Vec<OsString>) -> i32 {
+    uu_sort::uumain(args.into_iter())
+}
+
+fn run_split(args: Vec<OsString>) -> i32 {
+    uu_split::uumain(args.into_iter())
+}
+
+fn run_stat(args: Vec<OsString>) -> i32 {
+    uu_stat::uumain(args.into_iter())
+}
+
+fn run_tac(args: Vec<OsString>) -> i32 {
+    uu_tac::uumain(args.into_iter())
+}
+
+fn run_tail(args: Vec<OsString>) -> i32 {
+    uu_tail::uumain(args.into_iter())
+}
+
+fn run_tee(args: Vec<OsString>) -> i32 {
+    uu_tee::uumain(args.into_iter())
+}
+
+fn run_touch(args: Vec<OsString>) -> i32 {
+    uu_touch::uumain(args.into_iter())
+}
+
+fn run_tr(args: Vec<OsString>) -> i32 {
+    uu_tr::uumain(args.into_iter())
+}
+
+fn run_truncate(args: Vec<OsString>) -> i32 {
+    uu_truncate::uumain(args.into_iter())
+}
+
+fn run_uniq(args: Vec<OsString>) -> i32 {
+    uu_uniq::uumain(args.into_iter())
+}
+
+fn run_wc(args: Vec<OsString>) -> i32 {
+    uu_wc::uumain(args.into_iter())
 }
 
 #[cfg(test)]
