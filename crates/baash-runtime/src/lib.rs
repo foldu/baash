@@ -57,8 +57,8 @@ pub use traps::{
     SIGNALS, TrapAction, TrapKey, TrapTable, signal_number, signal_short_name, signal_table,
 };
 pub use vars::{
-    ArrayShape, Attrs, CreateScope, FrameId, FrameKind, Positional, PrefixAssignments, SavedScope,
-    Var, VarValue, Vars,
+    ArrayShape, Attrs, CreateScope, FrameId, FrameKind, IndexedArray, Positional,
+    PrefixAssignments, SavedScope, Var, VarValue, Vars,
 };
 
 /// An exit status. Only the low 8 bits reach `$?`.
@@ -277,6 +277,30 @@ pub trait ShellHost {
     /// Whether the shell is interactive. Defaults to false; the VM overrides
     /// it for `-i`.
     fn is_interactive(&self) -> bool {
+        false
+    }
+
+    /// Variables the host derives instead of storing: `FUNCNAME`,
+    /// `BASH_SOURCE`, `BASH_LINENO`.
+    ///
+    /// bash rewrites those three on every function entry and return; this
+    /// shell answers them from the call stack when they are read, which is
+    /// what stops a call paying for six array writes it almost never needs
+    /// (`docs/performance.md`). They are therefore *not* in the variable
+    /// table, so a listing that walks it — `set`, `declare -p`, `compgen -v` —
+    /// has to be handed them separately, and that is what this returns.
+    ///
+    /// Empty by default: a host with no call stack has nothing to derive.
+    fn derived_variables(&self) -> Vec<(Vec<u8>, Var)> {
+        Vec::new()
+    }
+
+    /// Remove a derived variable, for `unset`. `true` when `name` was one.
+    ///
+    /// `unset FUNCNAME` is not a table operation here, so the builtin asks the
+    /// host. Default `false`: `name` is an ordinary variable.
+    fn unset_derived_variable(&mut self, name: &[u8]) -> bool {
+        let _ = name;
         false
     }
 

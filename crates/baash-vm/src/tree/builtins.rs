@@ -905,6 +905,13 @@ impl DeclFlags {
 /// attribute filters (`declare -pn`, `-pa`, …).
 fn list_declarations(interp: &mut Interp, flags: &DeclFlags, local_only: bool) -> Status {
     let declarations = flags.print || flags.has_attribute_filter();
+    // The derived variables are not in the table, so they are rendered on
+    // their own. `declare -g` asks for globals, and these are per-call.
+    let derived = if flags.global {
+        Vec::new()
+    } else {
+        interp.derived_variable_rows()
+    };
     let mut out = Vec::new();
     {
         let vars = &interp.state.vars;
@@ -924,6 +931,16 @@ fn list_declarations(interp: &mut Interp, flags: &DeclFlags, local_only: bool) -
             } else {
                 baash_runtime::declare::render_assignment(&mut out, variable, var);
             }
+        }
+    }
+    for (variable, var) in &derived {
+        if !flags.keeps(var) {
+            continue;
+        }
+        if declarations {
+            baash_runtime::declare::render_declaration(&mut out, variable, var);
+        } else {
+            baash_runtime::declare::render_assignment(&mut out, variable, var);
         }
     }
     interp.write_out(&out)
@@ -949,13 +966,26 @@ fn print_one_declaration(
         );
         return Status::FAILURE;
     }
-    let var = if local_only {
-        interp.state.vars.lookup_local(operand)
-    } else if flags.global {
-        interp.state.vars.lookup_global(operand)
+    // The derived variables are answered from the call stack, so a lookup that
+    // misses may still name one (`declare -p FUNCNAME` inside a function).
+    let derived = if flags.global {
+        None
     } else {
-        interp.state.vars.lookup(operand)
+        interp
+            .derived_variable_rows()
+            .into_iter()
+            .find(|(name, _)| name.as_slice() == operand)
+            .map(|(_, var)| var)
     };
+    let var = derived.as_ref().or_else(|| {
+        if local_only {
+            interp.state.vars.lookup_local(operand)
+        } else if flags.global {
+            interp.state.vars.lookup_global(operand)
+        } else {
+            interp.state.vars.lookup(operand)
+        }
+    });
     let Some(var) = var else {
         diagnose(
             interp,

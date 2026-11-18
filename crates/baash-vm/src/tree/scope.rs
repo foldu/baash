@@ -84,6 +84,11 @@ pub(crate) struct Scope {
     read_buffers: BTreeMap<RawFd, Vec<u8>>,
     path_cache: BTreeMap<Vec<u8>, Vec<u8>>,
     pipeline_status: BTreeMap<i64, Vec<u8>>,
+    /// `unset FUNCNAME` and its siblings, which a body inherits but must not
+    /// leak back: the flag is shell state, so the snapshot carries it. The
+    /// arrays themselves are cache — the frames do not change across the
+    /// boundary, so a body that reads one rebuilds the same thing.
+    call_vars_cleared: bool,
     /// How many entries `Interp::committed` had when the scope opened.
     committed: usize,
     /// The working directory to return to, as shell bytes.
@@ -124,6 +129,7 @@ impl Interp {
         Scope {
             state,
             vars,
+            call_vars_cleared: self.call_vars.cleared,
             #[cfg(debug_assertions)]
             before,
             signals,
@@ -165,6 +171,7 @@ impl Interp {
         self.read_buffers = scope.read_buffers;
         self.path_cache = scope.path_cache;
         self.pipeline_status = scope.pipeline_status;
+        self.call_vars.cleared = scope.call_vars_cleared;
         if let Some(cwd) = scope.cwd {
             // Best effort: the directory may have been removed while the body
             // ran, in which case the shell keeps its current directory (bash

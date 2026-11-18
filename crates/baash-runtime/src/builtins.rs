@@ -1059,6 +1059,11 @@ fn bi_unset(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
                 host.unset_function(name);
             }
             Mode::Variable => {
+                // `FUNCNAME` and friends live on the call stack, not in the
+                // table, so removing one is the host's decision.
+                if host.unset_derived_variable(name) {
+                    continue;
+                }
                 if let Err(error) = host.state().vars.unset(name) {
                     let _ = report_error(host, argv, &error);
                     status = Status::FAILURE;
@@ -1068,6 +1073,9 @@ fn bi_unset(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
                 // bash: the variable wins when it exists, and only then is the
                 // function considered, so `f=x; f() { …; }; unset f` keeps the
                 // function.
+                if host.unset_derived_variable(name) {
+                    continue;
+                }
                 if host.state().vars.contains(name) {
                     if let Err(error) = host.state().vars.unset(name) {
                         let _ = report_error(host, argv, &error);
@@ -1390,13 +1398,18 @@ fn bi_set(host: &mut dyn ShellHost, argv: &[&[u8]]) -> Status {
     if let Some(words) = positional {
         host.state().vars.set_positional(words);
     } else if argv.len() == 1 {
-        // `set` with no options or arguments lists the shell variables.
+        // `set` with no options or arguments lists the shell variables,
+        // including the ones the host derives from the call stack.
+        let derived = host.derived_variables();
         let mut out = Vec::new();
         {
             let state = host.state();
             for (name, var) in state.vars.visible() {
                 push_assignment(&mut out, None, name, &var.value);
             }
+        }
+        for (name, var) in &derived {
+            push_assignment(&mut out, None, name, &var.value);
         }
         let write_status = host.write_out(&out);
         if !write_status.is_success() {

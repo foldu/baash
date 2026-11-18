@@ -261,6 +261,21 @@ state. `ShellHost::unset_array_element(&mut self, operand) -> Option<Status>`
 is the seam: the default returns `None` and `unset` keeps its "not implemented"
 diagnostic; the VM expands the subscript and calls back into the store.
 
+**The call-stack arrays are derived, not stored.** `FUNCNAME`, `BASH_SOURCE`
+and `BASH_LINENO` are not entries in the variable table: the VM answers them
+from its call stack when they are read, because republishing all three on every
+call and return was 55% of a call's instructions (`docs/performance.md`). Two
+`ShellHost` methods are the seam, and both default to "not mine":
+
+* `derived_variables(&self) -> Vec<(Vec<u8>, Var)>` — the rows, built on demand,
+  for the listings that walk the table (`set`, `declare -p`, `compgen -v`).
+* `unset_derived_variable(&mut self, name) -> bool` — `unset` asks before
+  touching the table; one-way, because bash never restores the special.
+
+A derived name is refused by every assignment shape (bash drops it silently),
+and `${FUNCNAME[@]}` reaches it through `baash_lang::Vars::array`, not through
+`Vars::value`.
+
 **`$@` and `$*` are not here.** `special_scalar` returns `None` for them because
 they are multi-field; expansion reads `positional().argv` and applies the
 quoting rules itself.

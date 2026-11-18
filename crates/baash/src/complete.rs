@@ -144,6 +144,13 @@ fn split_words(text: &[u8], ifs: &[u8]) -> Vec<Vec<u8>> {
 /// function or a `complete` rule) and while the history ring is in the shell.
 pub fn refresh(shell: &mut Interp, engine: &baash_complete::CompletionEngine) {
     let functions = shell.function_names();
+    // `FUNCNAME` and its siblings live on the call stack, not in the table, so
+    // a name snapshot has to ask for them — before `state()` is borrowed.
+    let derived: Vec<Vec<u8>> = shell
+        .derived_variable_rows()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
     let names: Arc<Names>;
     let history: Arc<Entries>;
     let specs: Arc<Specs>;
@@ -161,6 +168,7 @@ pub fn refresh(shell: &mut Interp, engine: &baash_complete::CompletionEngine) {
             .into_iter()
             .map(|(name, _)| name.to_vec())
             .collect();
+        variables.extend(derived);
         variables.extend(PARAMETER_NAMES.iter().map(|name| name.to_vec()));
         variables.sort_unstable();
         variables.dedup();

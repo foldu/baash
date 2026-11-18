@@ -763,6 +763,13 @@ impl Interp {
                     value,
                     append,
                 } => {
+                    // bash silently drops an assignment to `FUNCNAME`,
+                    // `BASH_SOURCE` or `BASH_LINENO`: their values are derived
+                    // from the call stack, and storing one would only make a
+                    // listing show the name twice (`CallVars`).
+                    if Interp::is_derived_name(name) {
+                        return Ok(());
+                    }
                     // `declare -i n; n=3+4` evaluates the value; `n+=2*3`
                     // adds the evaluated word to the current integer.
                     if self.state.vars.target_has_integer(name) {
@@ -807,6 +814,10 @@ impl Interp {
                     value,
                     append,
                 } => {
+                    // `FUNCNAME[0]=x`: same rule as the scalar arm above.
+                    if Interp::is_derived_name(name) {
+                        return Ok(());
+                    }
                     self.assign_element(name, subscript, *append, value)?;
                 }
                 AssignmentAction::Array {
@@ -814,6 +825,10 @@ impl Interp {
                     elements,
                     append,
                 } => {
+                    // `FUNCNAME=(a b)`: same rule as the scalar arm above.
+                    if Interp::is_derived_name(name) {
+                        return Ok(());
+                    }
                     // A nameref holds a name, not a value: assigning it an
                     // array would have to replace the reference, and bash's
                     // answer (drop the attribute, write the target) is not a

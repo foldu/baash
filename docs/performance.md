@@ -234,10 +234,9 @@ one `Vars::replace_indexed` per array, and the function's definition file is
 stored on the `Function` instead of being copied per call.
 
 An ablation that stubs the rebuild out entirely measures 24 ms (435 ns per
-call), so that is the ceiling of the next step: answering the three arrays from
-the call stack at read time instead of materialising them in the variable
-table. It costs `declare -p FUNCNAME` (bash lists it; we would not), which is
-why it is not in this commit.
+call), so that was the next step: answering the three arrays from the call stack
+at read time instead of materialising them in the variable table. It landed on
+2026-11-18 (the section below) once the listings had somewhere to ask.
 
 ### 2026-11-12: `[[ =~ ]]`, the pattern cache and the two engines
 
@@ -1073,6 +1072,94 @@ hash lookups *per command* — which is the same lesson as the allocation round
 seen from the other side: what costs is the call and the cache line, not the
 bytes. A fixed buffer and a packed name remove both without changing a byte of
 what the shell stores.
+
+### 2026-11-18: the call stack is read, not published
+
+`FUNCNAME`, `BASH_SOURCE` and `BASH_LINENO` describe which functions are
+running, so bash rewrites all three on entry to every function and again on
+return. This shell did the same, and by 2026-11-17 that was the largest single
+term in a call: six array updates per call — three on the way in, three on the
+way out — each one a name lookup and a `BTreeMap` write, for values most calls
+never read.
+
+Measuring it took one ablation: `refresh_call_vars` emptied out entirely, in
+release, on `f() { :; }` called 3000 times.
+
+| release build, `f() { :; }` ×3000 | retired instructions | per call |
+| --- | ---: | ---: |
+| the loop without the call | 33,991,101 | |
+| with the publication, before | 72,899,570 | 12,969 |
+| publication emptied out | 51,376,698 | 5,796 |
+
+So the three arrays were **7,173 instructions of a 12,969-instruction call:
+55%**. (The earlier "31%" was the same ablation in a *debug* build, where
+`ub_checks` and the `Opts` cross-check dwarf everything else: profiling a debug
+build answers a question about the debug build.) Letting the array cells be
+reused rather than rebuilt — one `Vars::replace_indexed` per array, line
+numbers formatted into buffers the shell keeps — recovered 1.7% of it, which is
+the answer to "is it the allocations": no, it is the six lookups and the six
+writes.
+
+**What landed** is `CallVars` in `crates/baash-vm/src/tree/mod.rs`: the three
+arrays are built from `self.calls` the first time something reads one, once per
+frame change, and `push_call`/`pop_call` only invalidate. The cache is a
+`OnceCell` for a reason worth writing down — `baash_lang::Vars::get` and `array`
+take `&self` and return borrows, so the arrays have to be built during the read
+that wants them and the built value has to live somewhere a `&` can be taken
+from; `OnceCell::get_or_init` is the stable way to do that without `unsafe`.
+Invalidation happens where the stack moves, which is `&mut self`, and the
+emptied maps are kept in a `RefCell` to be refilled: a script that reads
+`FUNCNAME` on every call allocates nothing after the first.
+
+Three things had to follow the arrays out of the table:
+
+* **The listings.** `declare -p`, `set` and `compgen -v` show `FUNCNAME` in
+  bash, and they render it by walking the variable table. `ShellHost` grew
+  `derived_variables()` — the rows, built on demand — which those three call
+  sites splice in. `export -p` and `readonly -p` do not: the arrays carry no
+  attributes, so their filter drops them, which is also what bash does.
+* **`unset`.** There is nothing in the table to delete, so the builtin asks the
+  host: `unset_derived_variable` sets a one-way switch, because bash's answer
+  for `unset FUNCNAME` in a function is that the name stays gone for the rest
+  of the shell's life — the next call does *not* bring it back.
+* **Assignment.** bash silently drops `FUNCNAME=x` (status 0, value unchanged,
+  at top level as well), because nothing in the table could decide what the name
+  reads back as. The three assignment shapes — scalar, element, array literal —
+  refuse a derived name in `crates/baash-vm/src/tree/command.rs`.
+
+| release, 3000 iterations | before | after | |
+| --- | ---: | ---: | ---: |
+| the loop without the call | 33,991,101 | 33,991,824 | — |
+| `f() { :; }`, retired instructions | 72,899,570 | 51,427,286 | −29.4% |
+| per call | 12,969 | 5,812 | **−55.2%** |
+| `function call 20k`, wall clock | 25.04 ms | 16.54 ms | **−34.0%** |
+
+Against bash 5.3.20 on the same host the case is now **16.7 ms to bash's 31.2
+(0.5×)**; before this change it was 32.6 to 32.0, which is parity.
+
+The wall clock moves further than the instructions, which is the same lesson as
+the allocation round: six hash lookups and six `BTreeMap` writes per call also
+touch cache lines the loop never used. What the derived-name test costs inside
+a variable read was moved into the *miss* path of `Vars::get` and of the
+arithmetic readers, so a read that finds its variable in the table — every read
+in a loop — pays nothing: the loop above differs by fewer than a thousand
+instructions out of 33,991,101, which is startup noise.
+
+One honest note for anyone re-running the A/B: `case 20k` measured +2% after
+this change while its retired instructions were 35,939,390 before and 35,929,964
+after. That is code layout, not work — the reason this document insists on the
+deterministic count below 1%.
+
+**What is left in a call** is `CallFrame`: `push_call` copies the function name
+and its source file into the frame (`to_vec()` each) so the arrays can borrow
+them. With the arrays lazy, the frame could hold a shared `Arc<[u8]>` from the
+`Function` instead — to be measured, not guessed.
+
+Sourcing `bash_completion` improved with it as well: 37,879,386 → 36,526,747
+retired instructions (−3.6%) for this change and the next together. The same
+profile showed one allocation per AST node — `Ast::children` built a `Vec` for
+every node the validator visited, 3,366 of them — which is why the walk has
+`children_into` now, appending to one buffer the walk owns.
 
 ## The test suite: 37 s to 5 s
 

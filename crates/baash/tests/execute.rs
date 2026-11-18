@@ -2145,6 +2145,69 @@ fn funcname_and_bash_source_describe_the_call_stack() {
 }
 
 #[test]
+fn the_call_stack_arrays_are_derived_rather_than_stored() {
+    // `FUNCNAME`, `BASH_SOURCE` and `BASH_LINENO` are answered from the call
+    // stack when something reads them instead of being rewritten in the
+    // variable table on every call and return (`docs/performance.md`). What a
+    // script can observe must not change, so this pins the parts a script can
+    // reach: reads, the listings that walk the table (`declare -p`, `set`,
+    // `compgen -v`), the attribute form, and `unset` — whose answer in bash is
+    // that the name never comes back, not even for the next call.
+    let script = "\
+f() {
+  echo \"read: ${FUNCNAME[*]}\"
+  declare -p FUNCNAME
+  echo \"listed: $(set | grep -c '^FUNCNAME=')\"
+  echo \"compgen: $(compgen -v | grep -c '^FUNCNAME$')\"
+  echo \"attrs: ${FUNCNAME@a}\"
+  FUNCNAME=ignored
+  echo \"assigned: ${FUNCNAME[*]}\"
+  unset FUNCNAME
+  echo \"unset: [${FUNCNAME[*]}] len=${#FUNCNAME[@]}\"
+  declare -p FUNCNAME
+}
+f
+f
+echo \"top: [${FUNCNAME[*]}]\"
+";
+    assert_eq!(
+        out(script),
+        "\
+read: f
+declare -a FUNCNAME=([0]=\"f\")
+listed: 1
+compgen: 1
+attrs: a
+assigned: f
+unset: [] len=0
+read: 
+listed: 0
+compgen: 0
+attrs: 
+assigned: 
+unset: [] len=0
+top: []
+"
+    );
+    // A subshell inherits the switch — the array is gone inside it too — and
+    // must not hand it back to the parent.
+    let output = run(
+        "f() { ( unset FUNCNAME; echo \"in [${FUNCNAME[*]}]\" ); echo \"after [${FUNCNAME[*]}]\"; }; f",
+    );
+    assert_eq!(stdout(&output), "in []\nafter [f]\n");
+
+    // `declare -p FUNCNAME` still fails once the array is gone, which is what
+    // the empty listings above are the visible half of.
+    let output = run("f() { unset FUNCNAME; declare -p FUNCNAME; }; f");
+    assert_eq!(code(&output), 1);
+    assert!(
+        stderr(&output).contains("FUNCNAME: not found"),
+        "stderr: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn trap_handlers_run_with_the_line_of_the_command_they_serve() {
     // bash reports the line of the command the trap is running for, not line 1
     // of the handler text, and the handler cannot shift the shell's own line.

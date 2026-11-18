@@ -282,13 +282,23 @@ impl Interp {
         // `Vars::visible` reports one definition per name (the innermost) in
         // name order, so a `local` hides the global it shadows instead of
         // being listed twice.
-        self.state
+        let mut names: Vec<Vec<u8>> = self
+            .state
             .vars
             .visible()
             .into_iter()
             .filter(|(name, var)| name.starts_with(prefix) && keep(var))
             .map(|(name, _)| name.to_vec())
-            .collect()
+            .collect();
+        // `FUNCNAME` and its siblings are derived from the call stack rather
+        // than stored, so `compgen -v` (`-A variable`) has to be handed them.
+        names.extend(
+            self.derived_variable_rows()
+                .into_iter()
+                .filter(|(name, var)| name.starts_with(prefix) && keep(var))
+                .map(|(name, _)| name),
+        );
+        names
     }
 
     /// Command names found on `PATH`.

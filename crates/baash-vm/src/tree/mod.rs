@@ -111,6 +111,7 @@
 //! may notice.
 
 use std::borrow::Cow;
+use std::cell::OnceCell;
 use std::sync::Arc;
 
 use baash_diag::{Diagnostic, SourceFile};
@@ -252,6 +253,154 @@ pub(crate) struct CallFrame {
     pub(crate) line: usize,
 }
 
+/// One of the three arrays bash derives from the call stack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CallVar {
+    Funcname,
+    Source,
+    Lineno,
+}
+
+impl CallVar {
+    /// Every variant, in the order the listings show them.
+    const ALL: [Self; 3] = [Self::Funcname, Self::Source, Self::Lineno];
+
+    /// The variable a name spells, if it is one of the three.
+    fn from_name(name: &[u8]) -> Option<Self> {
+        match name {
+            b"FUNCNAME" => Some(Self::Funcname),
+            b"BASH_SOURCE" => Some(Self::Source),
+            b"BASH_LINENO" => Some(Self::Lineno),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static [u8] {
+        match self {
+            Self::Funcname => b"FUNCNAME",
+            Self::Source => b"BASH_SOURCE",
+            Self::Lineno => b"BASH_LINENO",
+        }
+    }
+}
+
+/// `FUNCNAME`, `BASH_SOURCE` and `BASH_LINENO`, built only when something reads
+/// them.
+///
+/// bash rewrites all three on entry to every function and again on return, and
+/// that is what this shell did until the three writes were measured: six array
+/// updates per call, three name lookups each, for values most calls never look
+/// at. Emptied out, a call in the 20k benchmark went from 24.7k to 17.1k
+/// retired instructions, so the arrays moved behind this cache — a read builds
+/// them once per frame change, a call costs nothing but the invalidation
+/// (`docs/performance.md`).
+///
+/// The cache is a `OnceCell` because `baash_lang::Vars::get` and `array` take
+/// `&self` and return borrows: the arrays have to be built during the read that
+/// wants them, and `OnceCell` is the stable way to get a `&` out of an
+/// initialisation on demand. Invalidation happens where the stack moves, which
+/// is `&mut self`, so no interior mutability is needed to *drop* the cache —
+/// only the emptied maps are kept in a `RefCell` so the next build can reuse
+/// them
+#[derive(Debug, Default)]
+struct CallVars {
+    /// Built for the current stack; empty while the cache is invalid.
+    arrays: OnceCell<CallVarArrays>,
+    /// The maps of the previous build, emptied. A function that reads
+    /// `FUNCNAME` on every call would otherwise allocate three `BTreeMap`s and
+    /// three byte vectors per call; refilling reuses the nodes and the
+    /// capacity.
+    spare: std::cell::RefCell<CallVarArrays>,
+    /// `unset FUNCNAME` (or a sibling). bash never brings the special back —
+    /// `unset FUNCNAME` in a function leaves the next call's `${FUNCNAME[@]}`
+    /// empty as well — so one switch is the whole rule.
+    cleared: bool,
+}
+
+impl CallVars {
+    /// The three arrays for `calls`, built on the first read after a change.
+    fn arrays(&self, calls: &[CallFrame]) -> &CallVarArrays {
+        self.arrays.get_or_init(|| {
+            let mut arrays = self.spare.take();
+            arrays.refill(calls);
+            arrays
+        })
+    }
+
+    /// The stack moved, so what a read would answer has changed.
+    fn invalidate(&mut self) {
+        if let Some(arrays) = self.arrays.take() {
+            *self.spare.get_mut() = arrays;
+        }
+    }
+}
+
+/// The three arrays themselves: index → value, innermost frame first.
+#[derive(Debug, Default)]
+struct CallVarArrays {
+    funcname: std::collections::BTreeMap<i64, Vec<u8>>,
+    source: std::collections::BTreeMap<i64, Vec<u8>>,
+    lineno: std::collections::BTreeMap<i64, Vec<u8>>,
+}
+
+impl CallVarArrays {
+    fn get(&self, which: CallVar) -> &std::collections::BTreeMap<i64, Vec<u8>> {
+        match which {
+            CallVar::Funcname => &self.funcname,
+            CallVar::Source => &self.source,
+            CallVar::Lineno => &self.lineno,
+        }
+    }
+
+    /// Rewrite every element from the stack, reusing the cells it has.
+    fn refill(&mut self, calls: &[CallFrame]) {
+        // `calls` is outermost-first and the arrays are innermost-first.
+        fill_indexed(
+            &mut self.funcname,
+            calls.iter().rev().map(|frame| frame.name.as_slice()),
+        );
+        fill_indexed(
+            &mut self.source,
+            calls.iter().rev().map(|frame| frame.source.as_slice()),
+        );
+        let depth = calls.len() as i64;
+        truncate_indexed(&mut self.lineno, depth);
+        for (index, frame) in calls.iter().rev().enumerate() {
+            let slot = self.lineno.entry(index as i64).or_default();
+            write_decimal(slot, i64::try_from(frame.line).unwrap_or(i64::MAX));
+        }
+    }
+}
+
+/// Rewrite an indexed array from borrowed values, keeping its cells.
+///
+/// The same shape as `Vars::replace_indexed`, which is no longer on the hot
+/// path: there the array is shared (`Arc`), here it is owned by `CallVarArrays`,
+/// so an existing cell is rewritten in place and its `Vec` keeps its capacity.
+fn fill_indexed<'a>(
+    elements: &mut std::collections::BTreeMap<i64, Vec<u8>>,
+    values: impl Iterator<Item = &'a [u8]>,
+) {
+    let mut index = 0i64;
+    for value in values {
+        let slot = elements.entry(index).or_default();
+        slot.clear();
+        slot.extend_from_slice(value);
+        index += 1;
+    }
+    truncate_indexed(elements, index);
+}
+
+/// Drop the elements at `keep` and above, which is what a shrinking stack does.
+fn truncate_indexed(elements: &mut std::collections::BTreeMap<i64, Vec<u8>>, keep: i64) {
+    while elements
+        .last_key_value()
+        .is_some_and(|(index, _)| *index >= keep)
+    {
+        elements.pop_last();
+    }
+}
+
 /// A defined shell function: the chunk it was parsed from plus its body node.
 #[derive(Clone, Debug)]
 struct Function {
@@ -261,8 +410,8 @@ struct Function {
     /// `BASH_SOURCE` for frames of this function: the *definition* file.
     ///
     /// Stored rather than recomputed per call, because every call needs the
-    /// bytes (`push_call` copies them into the frame and `refresh_call_vars`
-    /// into the array) and the definition does not move.
+    /// bytes (`push_call` copies them into the frame, `BASH_SOURCE` reads them
+    /// back out of it) and the definition does not move.
     source: Vec<u8>,
 }
 
@@ -462,6 +611,9 @@ pub struct Interp {
     /// Set by a built-in that unwinds (`break`, `continue`, `return`), read by
     /// the command sequence after the built-in returns.
     pending: Option<Unwind>,
+    /// `FUNCNAME`, `BASH_SOURCE` and `BASH_LINENO`: built from the call stack
+    /// on demand, not on every call.
+    call_vars: CallVars,
     /// Function-call nesting, so runaway recursion is diagnosed instead of
     /// overflowing the stack.
     depth: usize,
@@ -756,6 +908,7 @@ impl Interp {
             opts_mask: [0; 2],
             pending: None,
             depth: 0,
+            call_vars: CallVars::default(),
             calls: Vec::new(),
             line_base: None,
             err_trap_reported: false,
@@ -1081,51 +1234,78 @@ impl Interp {
         status
     }
 
-    /// Push one call frame and republish the introspection arrays.
+    /// Push one call frame.
     ///
-    /// `FUNCNAME`/`BASH_SOURCE`/`BASH_LINENO` are ordinary indexed arrays in
-    /// bash (writable, and *unset* at top level, which is why `set -u` makes
-    /// `${FUNCNAME}` an error there), so they are rewritten from the stack
-    /// rather than answered through a hook: `Vars::get` returns a borrow and
-    /// these values are synthesised.
+    /// The three introspection arrays are *not* published here: they are
+    /// answered from this stack at read time (`CallVars`), which is what makes
+    /// a call cost what it does rather than six array writes
+    /// (`docs/performance.md`).
     pub fn push_call(&mut self, name: &[u8], source: &[u8], line: usize) {
         self.calls.push(CallFrame {
             name: name.to_vec(),
             source: source.to_vec(),
             line,
         });
-        self.refresh_call_vars();
+        self.call_vars.invalidate();
     }
 
     /// Drop the innermost frame.
     pub fn pop_call(&mut self) {
         self.calls.pop();
-        self.refresh_call_vars();
+        self.call_vars.invalidate();
     }
 
-    fn refresh_call_vars(&mut self) {
-        if self.calls.is_empty() {
-            for name in [b"FUNCNAME".as_slice(), b"BASH_SOURCE", b"BASH_LINENO"] {
-                let _ = self.state.vars.unset(name);
-            }
-            return;
+    /// The array one of `FUNCNAME`/`BASH_SOURCE`/`BASH_LINENO` stands for now.
+    ///
+    /// `None` covers three cases that must all read as "unset": not one of the
+    /// three names, no function is running (bash leaves them unset at top
+    /// level, which is why `set -u` makes `${FUNCNAME}` an error there), and
+    /// the script unset the name, which bash never reverses.
+    fn call_array(&self, name: &[u8]) -> Option<&std::collections::BTreeMap<i64, Vec<u8>>> {
+        // A variable read is the hottest lookup in the shell — `(( i++ ))`
+        // makes two of them — so the first test is the length of the three
+        // names and nothing else: eight bytes, or eleven.
+        if !matches!(name.len(), 8 | 11) || self.call_vars.cleared || self.calls.is_empty() {
+            return None;
         }
-        // `replace_indexed` installs the whole array per name: one table
-        // operation instead of `declare_shape` + `clear_array` + one
-        // `set_indexed` per element, each of which scanned the variable table.
-        // The three arrays are the entire cost of a function call
-        // (`docs/performance.md`).
-        let mut names: Vec<Vec<u8>> = Vec::with_capacity(self.calls.len());
-        let mut sources: Vec<Vec<u8>> = Vec::with_capacity(self.calls.len());
-        let mut lines: Vec<Vec<u8>> = Vec::with_capacity(self.calls.len());
-        for frame in self.calls.iter().rev() {
-            names.push(frame.name.clone());
-            sources.push(frame.source.clone());
-            lines.push(frame.line.to_string().into_bytes());
+        Some(
+            self.call_vars
+                .arrays(&self.calls)
+                .get(CallVar::from_name(name)?),
+        )
+    }
+
+    /// Whether `name` is one of the arrays derived from the call stack.
+    ///
+    /// bash refuses to store a value in them — `FUNCNAME=x` reports success and
+    /// changes nothing, at top level as well — because nothing in the variable
+    /// table could decide what they read back as.
+    fn is_derived_name(name: &[u8]) -> bool {
+        CallVar::from_name(name).is_some()
+    }
+
+    /// The three arrays as table rows, for the listings that walk the table.
+    ///
+    /// `declare -p`, `set` and `compgen -v` show them in bash, so a built-in
+    /// that enumerates variables has to be given them explicitly: they are not
+    /// entries in the variable table.
+    pub fn derived_variable_rows(&self) -> Vec<(Vec<u8>, baash_runtime::Var)> {
+        if self.call_vars.cleared || self.calls.is_empty() {
+            return Vec::new();
         }
-        let _ = self.state.vars.replace_indexed(b"FUNCNAME", names);
-        let _ = self.state.vars.replace_indexed(b"BASH_SOURCE", sources);
-        let _ = self.state.vars.replace_indexed(b"BASH_LINENO", lines);
+        let arrays = self.call_vars.arrays(&self.calls);
+        CallVar::ALL
+            .iter()
+            .map(|&which| {
+                let var = baash_runtime::Var {
+                    value: baash_runtime::VarValue::Indexed(baash_runtime::IndexedArray::from_map(
+                        arrays.get(which).clone(),
+                    )),
+                    attrs: baash_runtime::Attrs::default(),
+                };
+                (which.name().to_vec(), var)
+            })
+            .collect()
     }
 
     /// Parse and evaluate one chunk, returning the unwind *unabsorbed*.
@@ -1590,8 +1770,18 @@ impl baash_lang::Vars for Interp {
             }
         }
         let value = self.state.vars.scalar(name);
-        if value.is_none() && self.state.vars.is_nameref_cycle(name) {
-            self.nameref_cycle.set(true);
+        if value.is_none() {
+            // `$FUNCNAME`, `$BASH_SOURCE`, `$BASH_LINENO`: element zero, which
+            // is what an array's scalar form is. Answered from the call stack,
+            // so the table never holds them (`CallVars`) — and asked for only
+            // after the table missed, because this is the expansion path every
+            // `$name` takes and those three are rare.
+            if let Some(elements) = self.call_array(name) {
+                return elements.get(&0).map(Vec::as_slice);
+            }
+            if self.state.vars.is_nameref_cycle(name) {
+                self.nameref_cycle.set(true);
+            }
         }
         value
     }
@@ -1609,6 +1799,11 @@ impl baash_lang::Vars for Interp {
     }
 
     fn set(&mut self, name: &[u8], value: Vec<u8>) -> Result<(), baash_lang::SetError> {
+        // `${FUNCNAME:=x}`: as with a plain assignment, there is nowhere to
+        // store it (`is_derived_name`).
+        if Self::is_derived_name(name) {
+            return Ok(());
+        }
         match self.state.vars.assign_scalar(name, &value) {
             Ok(()) => Ok(()),
             Err(baash_runtime::Error::InvalidName { .. }) => Err(baash_lang::SetError::InvalidName),
@@ -1617,6 +1812,11 @@ impl baash_lang::Vars for Interp {
     }
 
     fn attributes(&self, name: &[u8]) -> Vec<u8> {
+        // `${FUNCNAME@a}`: the derived arrays have no attributes to report
+        // beyond the shape, and they are never in the table to be asked.
+        if self.call_array(name).is_some() {
+            return vec![b'a'];
+        }
         let Some(var) = self.state.vars.lookup(name) else {
             return Vec::new();
         };
@@ -1643,17 +1843,32 @@ impl baash_lang::Vars for Interp {
     }
 
     fn names(&self) -> Vec<Vec<u8>> {
-        self.state
+        let mut names: Vec<Vec<u8>> = self
+            .state
             .vars
             .visible()
             .into_iter()
             .map(|(name, _)| name.to_vec())
-            .collect()
+            .collect();
+        // `FUNCNAME` and its siblings are answered from the call stack rather
+        // than stored (`CallVars`), so a name inventory has to be told they
+        // exist — `${!FUNC*}` and `compgen -v` both come through here.
+        names.extend(
+            self.derived_variable_rows()
+                .into_iter()
+                .map(|(name, _)| name),
+        );
+        names
     }
 
     fn array(&self, name: &[u8]) -> Option<baash_lang::ArrayValue<'_>> {
         if name == b"PIPESTATUS" {
             return Some(baash_lang::ArrayValue::Indexed(&self.pipeline_status));
+        }
+        // `FUNCNAME`, `BASH_SOURCE`, `BASH_LINENO`: derived from the call
+        // stack, so `${FUNCNAME[@]}` never walks the variable table.
+        if let Some(elements) = self.call_array(name) {
+            return Some(baash_lang::ArrayValue::Indexed(elements));
         }
         match self.state.vars.value(name)? {
             baash_runtime::VarValue::Indexed(elements) => {
@@ -2021,6 +2236,14 @@ impl crate::arith::IntVars for Interp {
         match bytes {
             Some(bytes) => crate::arith::parse_int(bytes).unwrap_or(0),
             None => {
+                // `$((BASH_LINENO))`: a derived array decays to element zero
+                // too, and the table cannot answer for it.
+                if let Some(elements) = self.call_array(name) {
+                    return elements
+                        .get(&0)
+                        .and_then(|text| crate::arith::parse_int(text))
+                        .unwrap_or(0);
+                }
                 self.note_nounset(name);
                 0
             }
@@ -2069,7 +2292,15 @@ impl crate::arith::IntVars for Interp {
             Some(baash_runtime::VarValue::Assoc(pairs)) => {
                 pairs.get(b"0").map(std::borrow::Cow::Borrowed)
             }
-            _ => self.state.vars.scalar(name).map(std::borrow::Cow::Borrowed),
+            _ => match self.state.vars.scalar(name) {
+                Some(text) => Some(std::borrow::Cow::Borrowed(text)),
+                // `$((BASH_LINENO))`: the text of a derived array's element
+                // zero, which the table cannot answer for.
+                None => self
+                    .call_array(name)
+                    .and_then(|elements| elements.get(&0))
+                    .map(|text| std::borrow::Cow::Borrowed(text.as_slice())),
+            },
         }
     }
 
@@ -2081,7 +2312,13 @@ impl crate::arith::IntVars for Interp {
                 .element_assoc(name, index.to_string().as_bytes()),
             _ => self.state.vars.element_indexed(name, index),
         };
-        value.map(std::borrow::Cow::Borrowed)
+        match value {
+            Some(text) => Some(std::borrow::Cow::Borrowed(text)),
+            None => self
+                .call_array(name)
+                .and_then(|elements| elements.get(&index))
+                .map(|text| std::borrow::Cow::Borrowed(text.as_slice())),
+        }
     }
 
     fn get_index(&mut self, name: &[u8], index: i64) -> i64 {
@@ -2095,6 +2332,12 @@ impl crate::arith::IntVars for Interp {
         match value {
             Some(value) => crate::arith::parse_int(value).unwrap_or(0),
             None => {
+                if let Some(elements) = self.call_array(name) {
+                    return elements
+                        .get(&index)
+                        .and_then(|text| crate::arith::parse_int(text))
+                        .unwrap_or(0);
+                }
                 self.note_nounset(name);
                 0
             }
@@ -2148,6 +2391,25 @@ impl ShellHost for Interp {
             Ok(()) => Status::SUCCESS,
             Err(_) => Status(1),
         }
+    }
+
+    fn derived_variables(&self) -> Vec<(Vec<u8>, baash_runtime::Var)> {
+        self.derived_variable_rows()
+    }
+
+    fn unset_derived_variable(&mut self, name: &[u8]) -> bool {
+        // bash's `unset FUNCNAME` is a one-way switch: the array is empty from
+        // there on, and the next call does not bring it back. Nothing to
+        // remove from the table, because nothing was ever stored there.
+        if CallVar::from_name(name).is_none() || self.calls.is_empty() {
+            return false;
+        }
+        self.call_vars.cleared = true;
+        // A table entry left behind by an assignment shadows nothing now, but
+        // `unset` must still report the same status it would for a real
+        // variable, and bash removes it, so try.
+        let _ = self.state.vars.unset(name);
+        true
     }
 
     fn is_interactive(&self) -> bool {
