@@ -9,8 +9,12 @@
 //!
 //! Only the utilities that are actually embedded are linked: each `uu_*` crate
 //! is a library with one entry point, and the table below is the whole
-//! surface. The set is chosen, not accreted: `cat`, `mkdir`, `rm`, `ls`, `wc`,
-//! `head`, `tail`, `tr`, `seq`, `sleep`.
+//! surface. The set is chosen, not accreted — `docs/portability.md` §6 lists it
+//! by name, says what is deliberately out and why, and records the measured
+//! cost of the table.
+//!
+//! `clear` is the exception that is not uutils at all: ncurses owns the name and
+//! a Windows `PATH` has no `clear.exe`, so it is written here (see `clear.rs`).
 //!
 //! `printf`, `test`/`[`, `true`, `false`, `echo` and `pwd` are the shell's own
 //! bodies — they need the format language, the expression grammar, the shell
@@ -35,8 +39,23 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread;
 
-/// One embedded utility: its name and the uutils entry point.
+/// A uutils entry point: the arguments, and the status to exit with.
+///
+/// By value, because that is what `uumain` takes; [`Native`] borrows instead.
 type Entry = fn(Vec<OsString>) -> i32;
+
+/// A utility written here rather than linked from uutils.
+type Native = fn(&[OsString]) -> i32;
+
+mod clear;
+
+/// The utilities written here rather than linked from uutils.
+///
+/// `clear` is the whole list: it belongs to ncurses, which uutils' coreutils
+/// does not cover, and a Windows `PATH` has no `clear.exe` at all (`cls` is a
+/// `cmd.exe` built-in). They run on the calling thread — there is no message
+/// catalog to install, which is the only reason the uutils entries get a worker.
+const NATIVE: &[(&str, Native)] = &[("clear", clear::main)];
 
 /// The embedded utilities, by the name a command is typed as.
 ///
@@ -83,7 +102,6 @@ const UTILITIES: &[(&str, Entry)] = &[
     ("sleep", run_sleep),
     ("sort", run_sort),
     ("split", run_split),
-    ("stat", run_stat),
     ("tac", run_tac),
     ("tail", run_tail),
     ("tee", run_tee),
@@ -164,11 +182,14 @@ fn serve(name: &'static str, entry: Entry, jobs: Receiver<Job>) {
 pub fn run(argv: &[Vec<u8>]) -> Option<i32> {
     let (typed, _) = argv.split_first()?;
     let typed = std::str::from_utf8(typed).ok()?;
-    let (name, entry) = *UTILITIES.iter().find(|(utility, _)| *utility == typed)?;
     let args: Vec<OsString> = argv
         .iter()
         .map(|arg| baash_sys::os::os_from_bytes(arg))
         .collect();
+    if let Some((_, main)) = NATIVE.iter().find(|(utility, _)| *utility == typed) {
+        return Some(main(&args));
+    }
+    let (name, entry) = *UTILITIES.iter().find(|(utility, _)| *utility == typed)?;
     match attempt(name, entry, args) {
         Ok(status) => Some(status),
         // The worker died with the job (it panics outside `catch_unwind` only
@@ -215,14 +236,18 @@ fn attempt(name: &'static str, entry: Entry, args: Vec<OsString>) -> Result<i32,
 /// `--help`, each one is listed once — rather than for a sample that a new
 /// entry silently is not in.
 pub fn names() -> impl Iterator<Item = &'static str> {
-    UTILITIES.iter().map(|(name, _)| *name)
+    NATIVE
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(UTILITIES.iter().map(|(name, _)| *name))
 }
 
 /// Whether `name` is embedded.
 pub fn contains(name: &[u8]) -> bool {
-    std::str::from_utf8(name)
-        .ok()
-        .is_some_and(|name| UTILITIES.iter().any(|(utility, _)| *utility == name))
+    std::str::from_utf8(name).is_ok_and(|name| {
+        NATIVE.iter().any(|(utility, _)| *utility == name)
+            || UTILITIES.iter().any(|(utility, _)| *utility == name)
+    })
 }
 
 fn run_base64(args: Vec<OsString>) -> i32 {
@@ -355,10 +380,6 @@ fn run_sort(args: Vec<OsString>) -> i32 {
 
 fn run_split(args: Vec<OsString>) -> i32 {
     uu_split::uumain(args.into_iter())
-}
-
-fn run_stat(args: Vec<OsString>) -> i32 {
-    uu_stat::uumain(args.into_iter())
 }
 
 fn run_tac(args: Vec<OsString>) -> i32 {

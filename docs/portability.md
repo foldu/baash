@@ -303,7 +303,7 @@ What exists:
 
 | group | utilities |
 | --- | --- |
-| file work | `cat` `cp` `du` `ln` `ls` `mkdir` `mktemp` `mv` `readlink` `realpath` `rm` `rmdir` `split` `stat` `touch` `truncate` |
+| file work | `cat` `cp` `du` `ln` `ls` `mkdir` `mktemp` `mv` `readlink` `realpath` `rm` `rmdir` `split` `touch` `truncate` |
 | text | `base64` `cksum` `comm` `cut` `head` `md5sum` `nl` `od` `paste` `sha1sum` `sha256sum` `shuf` `sort` `tac` `tail` `tee` `tr` `uniq` `wc` |
 | process, time | `date` `expr` `nproc` `seq` `sleep` |
 
@@ -315,8 +315,11 @@ utility needs nothing Windows does not have. What is out, and why:
   `df` (no mount table), `id`, `groups`, `logname`, `users`, `who`, `pinky`,
   `uptime`, `hostid`, `arch`, `uname`, `tty`, `stty`, `dircolors`, `sync`,
   `sum`, `yes`, `dd`, `pr`, `ptx`, `tsort`, `factor`, `pathchk`, `link`,
-  `unlink`, `dir`, `vdir`, `more`. A wrong answer is worse than "command not
-  found": a script that reads one makes a decision on it.
+  `unlink`, `dir`, `vdir`, `more`, and `stat` — uutils 0.8's `stat` imports
+  `std::os::unix::fs::{MetadataExt, FileTypeExt}` without a gate, so it does not
+  compile for Windows at all, which settles the question. A wrong answer is
+  worse than "command not found": a script that reads one makes a decision on
+  it.
 * **Not a body in this process.** `env`, `nice`, `nohup`, `timeout`, `stdbuf`,
   `chroot`, `runcon`, `install` spawn, and spawning is the thing the embedded
   set exists to remove.
@@ -351,6 +354,34 @@ at all, and any other value gets the same sequence — the `docs/terminal.md` ru
 for the shell's own bytes, where an unparsed sequence is ignored rather than
 worked around.
 
+Verified on Windows 11 (26300.9711, `win` guest, fat-LTO build):
+
+* `baash.exe -c "clear -T xterm-256color"` with stdout redirected writes
+  `1b 5b 48 1b 5b 32 4a 1b 5b 33 4a` (11 bytes), `-x` writes the first seven,
+  `-T dumb` writes nothing, all with status 0; `--help` is status 0 and
+  `clear -q` is status 2 with the usage on stderr.
+* In a console — a scheduled task in the logged-on session, so `stdout` is the
+  console and not the ssh pipe — a `cmd.exe` window printed `BEFORE-CLEAR` and
+  twenty filler lines, ran `baash.exe -c clear`, then `echo AFTER-CLEAR`. The
+  screenshot afterwards shows **only** `AFTER-CLEAR` at the top left: the
+  screen was erased, the cursor homed, and the literal `ESC[H ESC[2J` bytes did
+  not appear, which is the mode change working.
+
+### The environment a body reads
+
+An embedded utility reads configuration from the **process** environment
+(`std::env`), not from the shell's variables: a prefix assignment and `export`
+both live in the shell's table, and the redirect plan is what the call shares
+with the shell, not the environment. So `LC_ALL=C sort` inside a script does not
+change the embedded `sort`'s collation, `TZ=UTC date` ignores the assignment,
+`COLUMNS` is not what `ls` sees, and `TERM=dumb clear` clears whereas
+`clear -T dumb` does not. Only the variables the shell *inherited* — the process
+environment it started with — are visible, because they are the process's own.
+
+This is a gap, not a design: publishing the exported environment around the call
+is the fix, and it is recorded here so nobody assumes otherwise in the meantime.
+`clear` is the one body where the difference is user-visible today.
+
 ### Cost
 
 `cargo build --release -p baash` on Linux (thin LTO, 16 codegen units), no
@@ -362,11 +393,16 @@ feature versus the two sets:
 | ten utilities (the first wave) | 15.64 MiB | 126 |
 | this set | 25.15 MiB | 243 |
 
-Nine and a half mebibytes for thirty-two utilities is what makes `cp`, `mv`,
+Nine and a half mebibytes for thirty-one utilities is what makes `cp`, `mv`,
 `sort` and `date` exist at all; the marginal text utilities are a rounding
-error beside them (`sort`'s own rlib is 3.1 MiB, `cp`'s 1.3). The Windows
-profile (fat LTO, stripped) is measured in §8; CI builds it, so the local loop
-does not pay the link.
+error beside them (`sort`'s own rlib is 3.1 MiB, `cp`'s 1.3). The *shipped*
+Windows exe, fat LTO and stripped, is smaller: 16.40 → 17.83 MiB, because most
+of the Linux figure is symbols.
+
+`stat` is not in the set for a reason worth writing down: uutils 0.8's `stat`
+imports `std::os::unix::fs::{MetadataExt, FileTypeExt}` without a gate, so it
+does not *compile* for `x86_64-pc-windows-gnu` — the cross-build says so in 29
+errors, and it was the only one of the thirty-two candidates that failed.
 
 ### Built-in gaps on Windows
 

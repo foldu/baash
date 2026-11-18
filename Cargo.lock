@@ -326,7 +326,6 @@ dependencies = [
  "uu_sleep",
  "uu_sort",
  "uu_split",
- "uu_stat",
  "uu_tac",
  "uu_tail",
  "uu_tee",
@@ -4942,18 +4941,6 @@ dependencies = [
  "clap",
  "fluent",
  "memchr",
- "thiserror",
- "uucore",
-]
-
-[[package]]
-name = "uu_stat"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be816279fef66994fbaabfe26890ff1396d260e68401f483ad9911fc560078db"
-dependencies = [
- "clap",
- "fluent",
  "thiserror",
  "uucore",
 ]

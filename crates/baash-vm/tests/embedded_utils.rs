@@ -58,6 +58,53 @@ fn an_embedded_utility_runs_when_path_finds_nothing() {
 }
 
 #[test]
+fn clear_writes_the_ecma_48_sequence() {
+    // `clear` is the one embedded utility that is not uutils: ncurses owns the
+    // name and a Windows `PATH` has no `clear.exe` at all. Its observable is
+    // the bytes, which a redirection captures — the same thing ncurses' `clear`
+    // does (`clear > file` records the sequence, with or without `-x`).
+    let dir = temp_dir("clear");
+    let plain = dir.join("plain");
+    let scrollback = dir.join("scrollback");
+    let dumb = dir.join("dumb");
+    let mut interp = shell();
+    assert!(run(&mut interp, "PATH=''").is_success());
+    // `-T`, not `TERM=…`: an embedded utility reads the *process* environment,
+    // and a prefix assignment is a shell variable (`docs/portability.md` §6).
+    for (script, target) in [
+        (
+            format!("clear -T xterm-256color > '{}'", plain.display()),
+            &plain,
+        ),
+        (
+            format!("clear -x -T xterm-256color > '{}'", scrollback.display()),
+            &scrollback,
+        ),
+        (format!("clear -T dumb > '{}'", dumb.display()), &dumb),
+    ] {
+        let status = run(&mut interp, &script);
+        assert!(status.is_success(), "`{script}` failed: {status:?}");
+        assert!(target.exists(), "`{script}` wrote no file");
+    }
+    assert_eq!(
+        std::fs::read(&plain).unwrap(),
+        b"\x1b[H\x1b[2J\x1b[3J",
+        "the display is erased and the scrollback with it"
+    );
+    assert_eq!(
+        std::fs::read(&scrollback).unwrap(),
+        b"\x1b[H\x1b[2J",
+        "-x keeps the saved lines"
+    );
+    assert_eq!(
+        std::fs::read(&dumb).unwrap(),
+        b"",
+        "a dumb terminal has no cursor addressing to blank"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_utility_in_path_still_wins() {
     let dir = temp_dir("ordering");
     let external = dir.join("tr");

@@ -184,6 +184,21 @@ makes a bare `Esc` distinguishable from the start of a sequence that never
 arrives. The split matters: `ls | baashzf` must paint on the terminal while its
 stdout is a pipe, which is why this opens the terminal rather than descriptor 0.
 
+**`screen::clear(bytes)` owns the platform half of blanking a terminal.** On
+Unix that is a write to standard output and a flush: a terminal is a byte
+stream, so the sequence *is* the operation. On Windows it is
+`console::write_escapes`, because a console renders `CSI` sequences only when
+the process set `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on the handle — the line
+editor does that for the prompt, but `baash -c 'clear'` runs with the console's
+own mode, where the bytes would appear literally. That function sets the bit,
+writes through `WriteConsoleW` (the same chunked UTF-16 path `Console::write`
+uses), and puts the mode back; the mode change is not left behind, because
+clearing the screen is not a reason to hand the next writer a console that
+interprets escapes. Standard output that is not a console takes the plain-write
+path on both platforms, which is what ncurses' `clear` does as well
+(`clear > file` records the sequence). The caller chooses the bytes: `baash-utils`
+owns `-x`, `TERM=dumb` and the ECMA-48 shapes.
+
 **`parent_pid()` answers `Option<u32>`, and `None` means "not known here".**
 Unix always answers (zero included: `getppid` reporting no parent is what an
 isolated PID namespace looks like, and bash shows `PPID=0` there). Windows has
@@ -1229,6 +1244,37 @@ spelled the way bash's `compgen -A signal` prints it (`SIGHUP`, `EXIT`, …).
 `compgen -A signal` in this shell still prints the runtime's short names
 (`HUP`); that existing inconsistency is a `baash-runtime` fix, recorded here so
 the completion menu is not "fixed" to match the wrong spelling.
+
+---
+
+## baash-utils
+
+**The table is the surface.** `run(argv) -> Option<i32>` runs `argv[0]` when it
+is embedded and returns `None` otherwise, so the caller keeps its own "command
+not found"; `contains(name)` answers the same question for resolution, and
+`names()` is the table in order (tests, documentation). The vm consults them
+only after `PATH` resolution failed, so an external utility always wins — an
+embedded `sort` never shadows `/usr/bin/sort`.
+
+**Two tables, one dispatch.** `UTILITIES` is uutils, one `uu_*` crate each, run
+on a per-utility worker thread because uucore's message catalog is thread-local
+and holds one utility's strings. `NATIVE` is the utilities written here, which
+today is `clear` alone — ncurses owns the name, uutils has no copy of it, and a
+Windows `PATH` has no `clear.exe` (`cls` is a `cmd.exe` built-in) — and they run
+on the caller's thread, because there is no catalog to install.
+
+**A body writes to the descriptors the shell gave it.** The vm applies the
+redirection plan around the call, so a body writing to its own stdout lands in
+the command's redirect and one opening a file by name does so in the shell's
+working directory. That is why the selection rule (`docs/portability.md` §6)
+rejects utilities that fork or replace the process.
+
+**The environment a body reads is the process's, not the shell's.** uutils reads
+configuration through `std::env`, and the shell does not publish its exported
+variables there, so `LC_ALL=C sort` inside a script does not change the embedded
+`sort`'s collation and `TERM=dumb clear` differs from `clear -T dumb`
+(`docs/portability.md` §6 records it as a gap; the fix is to publish the
+exported environment around the call).
 
 ---
 

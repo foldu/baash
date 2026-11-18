@@ -25,6 +25,11 @@ lets unknown ones be ignored.
 
 `TERM=dumb` gets no announcements at all.
 
+The same rule governs the one *command* that writes terminal controls,
+`clear` (`docs/portability.md` §6.1): it sends the ECMA-48 clear
+unconditionally, because there is no per-terminal table to consult and a
+terminal that does not parse the sequence ignores it.
+
 ## 2. OSC 7: the working directory
 
 ```

@@ -39,7 +39,7 @@ fn the_set_is_the_one_the_docs_describe() {
     // test is that the two cannot drift: adding a utility means editing both.
     let documented = "base64 basename cat cksum comm cp cut date dirname du expr head ln ls \
 md5sum mkdir mktemp mv nl nproc od paste readlink realpath rm rmdir seq sha1sum sha256sum \
-shuf sleep sort split stat tac tail tee touch tr truncate uniq wc";
+shuf sleep sort split tac tail tee touch tr truncate uniq wc clear";
     let documented: HashSet<&str> = documented.split_whitespace().collect();
     let actual: HashSet<&str> = baash_utils::names().collect();
     let missing: Vec<&&str> = documented.difference(&actual).collect();

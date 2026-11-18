@@ -285,47 +285,8 @@ impl Console {
     /// Invalid UTF-8 becomes `U+FFFD` rather than failing: a frame is a
     /// mixture of escape sequences and the line's bytes, and half a sequence
     /// painted is easier to recover from than an editor that stops painting.
-    ///
-    /// Long writes are split: `WriteConsoleW` refuses a buffer that is too
-    /// large, and a pasted screenful is easily large enough. The split is
-    /// between characters, so a surrogate pair is never cut in half.
     pub fn write(&self, bytes: &[u8]) -> io::Result<()> {
-        /// The largest chunk `WriteConsoleW` is documented to accept.
-        const CHUNK: usize = 8192;
-        let text = String::from_utf8_lossy(bytes);
-        let mut chunk: Vec<u16> = Vec::with_capacity(CHUNK);
-        for character in text.chars() {
-            if chunk.len() >= CHUNK {
-                self.write_units(&chunk)?;
-                chunk.clear();
-            }
-            let mut pair = [0u16; 2];
-            chunk.extend_from_slice(character.encode_utf16(&mut pair));
-        }
-        if !chunk.is_empty() {
-            self.write_units(&chunk)?;
-        }
-        Ok(())
-    }
-
-    /// One `WriteConsoleW` call.
-    fn write_units(&self, units: &[u16]) -> io::Result<()> {
-        let mut written = 0u32;
-        // SAFETY: `units` holds `units.len()` UTF-16 code units and stays alive
-        // for the call; the console writes at most that many.
-        let ok = unsafe {
-            WriteConsoleW(
-                self.output.handle(),
-                units.as_ptr(),
-                units.len() as u32,
-                &mut written,
-                std::ptr::null_mut(),
-            )
-        };
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+        write_text(self.output.handle(), bytes)
     }
 
     /// Turn echo off, keeping the console's line editing, for `read -s`.
@@ -382,6 +343,94 @@ impl Console {
             saved_output,
         })
     }
+}
+
+/// Write UTF-8 to a console handle.
+///
+/// Invalid UTF-8 becomes `U+FFFD` rather than failing, for the reason
+/// [`Console::write`] gives. Long writes are split: `WriteConsoleW` refuses a
+/// buffer that is too large, and a pasted screenful is easily large enough. The
+/// split is between characters, so a surrogate pair is never cut in half.
+fn write_text(handle: RawHandle, bytes: &[u8]) -> io::Result<()> {
+    /// The largest chunk `WriteConsoleW` is documented to accept.
+    const CHUNK: usize = 8192;
+    let text = String::from_utf8_lossy(bytes);
+    let mut chunk: Vec<u16> = Vec::with_capacity(CHUNK);
+    for character in text.chars() {
+        if chunk.len() >= CHUNK {
+            write_units(handle, &chunk)?;
+            chunk.clear();
+        }
+        let mut pair = [0u16; 2];
+        chunk.extend_from_slice(character.encode_utf16(&mut pair));
+    }
+    if !chunk.is_empty() {
+        write_units(handle, &chunk)?;
+    }
+    Ok(())
+}
+
+/// One `WriteConsoleW` call on `handle`.
+fn write_units(handle: RawHandle, units: &[u16]) -> io::Result<()> {
+    let mut written = 0u32;
+    // SAFETY: `units` holds `units.len()` UTF-16 code units and stays alive for
+    // the call; the console writes at most that many.
+    let ok = unsafe {
+        WriteConsoleW(
+            handle,
+            units.as_ptr(),
+            units.len() as u32,
+            &mut written,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Write ANSI escapes to standard output, with interpretation turned on.
+///
+/// A console renders `CSI` sequences only when the process enabled
+/// `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on that handle. The line editor does
+/// that for the prompt, but `baash -c 'clear'` runs with the console's own
+/// mode, where the bytes would appear on screen literally — so the bit is set
+/// for the write and put back afterwards: clearing the screen is not a reason
+/// to leave escapes interpreted for whoever writes next.
+///
+/// Standard output that is not a console — a file, a pipe, a redirection — gets
+/// a plain write, which is what ncurses' `clear` does as well (`clear > file`
+/// records the sequence).
+pub fn write_escapes(bytes: &[u8]) -> io::Result<()> {
+    let Some(handle) = standard_handle(STD_OUTPUT_HANDLE) else {
+        return write_plain(bytes);
+    };
+    // `GetConsoleMode` fails on anything that is not a console, which is the
+    // question being asked.
+    let Ok(saved) = mode_of(handle) else {
+        return write_plain(bytes);
+    };
+    let wanted = saved | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    let changed = wanted != saved;
+    if changed {
+        set_mode(handle, wanted)?;
+    }
+    let result = write_text(handle, bytes);
+    if changed {
+        // The screen is already cleared; a console that refuses to go back to
+        // its old mode must not turn a successful clear into a failure.
+        let _ = set_mode(handle, saved);
+    }
+    result
+}
+
+/// Write bytes to standard output the way a program writing to a file would.
+fn write_plain(bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(bytes)?;
+    stdout.flush()
 }
 
 /// A new handle to the same object, not inheritable by a child.
