@@ -1201,7 +1201,11 @@ impl Interp {
         // line (bash: "BASH_SOURCE is about the definition, FUNCNAME and
         // BASH_LINENO are about the call").
         let line = self.line_number().max(0) as usize;
-        self.push_call(&function.name, &function.source, line);
+        self.push_call(
+            Arc::clone(&function.name),
+            Arc::clone(&function.source),
+            line,
+        );
         // `$LINENO` belongs to the *call site* again once the body returns:
         // an `ERR` trap that fires for the call reports the caller's line, not
         // the function's last one (`line=14` for a call on line 14).
@@ -1740,7 +1744,7 @@ impl Interp {
     pub(crate) fn function_index(&self, name: &[u8]) -> Option<usize> {
         self.functions
             .iter()
-            .rposition(|function| function.name == name)
+            .rposition(|function| function.name.as_ref() == name)
     }
 
     /// Resolve a command word for execution: the first candidate, and a
@@ -1867,7 +1871,7 @@ impl Interp {
                 let name = self
                     .functions
                     .get(index)
-                    .map(|function| function.name.clone())
+                    .map(|function| function.name.to_vec())
                     .unwrap_or_default();
                 CommandInfo {
                     kind: CommandKind::Function,

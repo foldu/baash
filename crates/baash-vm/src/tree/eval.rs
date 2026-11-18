@@ -146,13 +146,14 @@ impl Interp {
                     );
                     return Unwind::Status(Status(2));
                 };
-                self.functions.retain(|function| function.name != name);
-                self.functions.push(Function {
-                    name,
-                    source: chunk.source.name().as_bytes().to_vec(),
+                self.functions
+                    .retain(|function| function.name.as_ref() != name);
+                self.functions.push(Arc::new(Function {
+                    name: Arc::from(name),
+                    source: Arc::from(chunk.source.name().as_bytes()),
                     chunk: chunk.clone(),
                     body: *body,
-                });
+                }));
                 Unwind::Status(Status::SUCCESS)
             }
             NodeKind::Redirected { body, redirects } => {

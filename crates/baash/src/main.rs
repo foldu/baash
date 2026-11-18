@@ -822,7 +822,7 @@ fn execute(shell: &mut Interp, source: Source) -> ExitCode {
                     let display = String::from_utf8_lossy(&name).into_owned();
                     let framed = script.is_some();
                     if let Some(path) = &script {
-                        shell.push_call(b"main", path, 0);
+                        shell.push_call(&b"main"[..], &path[..], 0);
                     }
                     let status = shell.run_named(&display, &bytes);
                     if framed {

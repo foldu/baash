@@ -342,7 +342,7 @@ fn bi_source(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
     // A sourced file is a stack frame named `source`, and `BASH_LINENO`
     // records where the `.` command ran (`Locations when sourcing`).
     let line = interp.line_number().max(0) as usize;
-    interp.push_call(b"source", &path, line);
+    interp.push_call(&b"source"[..], &path[..], line);
     let unwind = if argv.len() > first + 1 {
         // `source file a b` gives the sourced file its own positional
         // parameters; a frame is the cheapest way to scope them.
@@ -1044,7 +1044,7 @@ fn list_functions(interp: &mut Interp, names_only: bool) -> Status {
     let mut names: Vec<Vec<u8>> = interp
         .functions
         .iter()
-        .map(|function| function.name.clone())
+        .map(|function| function.name.to_vec())
         .collect();
     names.sort();
     names.dedup();

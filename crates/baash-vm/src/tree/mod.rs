@@ -246,9 +246,12 @@ pub(crate) struct ParsedChunk {
 #[derive(Clone, Debug)]
 pub(crate) struct CallFrame {
     /// `FUNCNAME[i]`: the function name, `source` or `main`.
-    pub(crate) name: Vec<u8>,
+    ///
+    /// Shared with the definition: a call does not own these bytes, it points
+    /// at them (`docs/performance.md`).
+    pub(crate) name: Arc<[u8]>,
     /// `BASH_SOURCE[i]`: the file the frame runs from.
-    pub(crate) source: Vec<u8>,
+    pub(crate) source: Arc<[u8]>,
     /// `BASH_LINENO[i]`: the caller's line that started this frame.
     pub(crate) line: usize,
 }
@@ -357,11 +360,11 @@ impl CallVarArrays {
         // `calls` is outermost-first and the arrays are innermost-first.
         fill_indexed(
             &mut self.funcname,
-            calls.iter().rev().map(|frame| frame.name.as_slice()),
+            calls.iter().rev().map(|frame| &frame.name[..]),
         );
         fill_indexed(
             &mut self.source,
-            calls.iter().rev().map(|frame| frame.source.as_slice()),
+            calls.iter().rev().map(|frame| &frame.source[..]),
         );
         let depth = calls.len() as i64;
         truncate_indexed(&mut self.lineno, depth);
@@ -404,15 +407,16 @@ fn truncate_indexed(elements: &mut std::collections::BTreeMap<i64, Vec<u8>>, kee
 /// A defined shell function: the chunk it was parsed from plus its body node.
 #[derive(Clone, Debug)]
 struct Function {
-    name: Vec<u8>,
+    /// The name and the definition file as shared slices, not `Vec`s: a call
+    /// takes the definition out of the table and then needs the same two byte
+    /// strings for the call frame, so with `Vec`s every call copied them twice
+    /// — four allocation/free pairs of one to eleven bytes. `Arc::clone` is an
+    /// increment, which is 8.7% of a call (`docs/performance.md`).
+    name: Arc<[u8]>,
     chunk: Arc<ParsedChunk>,
     body: NodeId,
     /// `BASH_SOURCE` for frames of this function: the *definition* file.
-    ///
-    /// Stored rather than recomputed per call, because every call needs the
-    /// bytes (`push_call` copies them into the frame, `BASH_SOURCE` reads them
-    /// back out of it) and the definition does not move.
-    source: Vec<u8>,
+    source: Arc<[u8]>,
 }
 
 /// Cached values for the special parameters that `baash_lang::Vars::get` has to
@@ -577,7 +581,9 @@ pub struct Interp {
     utf8_locale: bool,
     /// The source of the chunk being evaluated, for diagnostics.
     current: Arc<SourceFile>,
-    functions: Vec<Function>,
+    /// Defined functions, newest last. Each is shared with the frames that are
+    /// running it, so a call clones an `Arc` and not the definition.
+    functions: Vec<Arc<Function>>,
     specials: Specials,
     /// Status of the last command substitution performed while expanding:
     /// `x=$(false)` must leave `$?` at 1.
@@ -1240,10 +1246,15 @@ impl Interp {
     /// answered from this stack at read time (`CallVars`), which is what makes
     /// a call cost what it does rather than six array writes
     /// (`docs/performance.md`).
-    pub fn push_call(&mut self, name: &[u8], source: &[u8], line: usize) {
+    pub fn push_call(
+        &mut self,
+        name: impl Into<Arc<[u8]>>,
+        source: impl Into<Arc<[u8]>>,
+        line: usize,
+    ) {
         self.calls.push(CallFrame {
-            name: name.to_vec(),
-            source: source.to_vec(),
+            name: name.into(),
+            source: source.into(),
             line,
         });
         self.call_vars.invalidate();
@@ -2665,7 +2676,8 @@ impl ShellHost for Interp {
 
     fn unset_function(&mut self, name: &[u8]) -> bool {
         let before = self.functions.len();
-        self.functions.retain(|function| function.name != name);
+        self.functions
+            .retain(|function| function.name.as_ref() != name);
         self.functions.len() != before
     }
 

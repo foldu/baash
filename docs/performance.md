@@ -1150,10 +1150,35 @@ this change while its retired instructions were 35,939,390 before and 35,929,964
 after. That is code layout, not work — the reason this document insists on the
 deterministic count below 1%.
 
-**What is left in a call** is `CallFrame`: `push_call` copies the function name
-and its source file into the frame (`to_vec()` each) so the arrays can borrow
-them. With the arrays lazy, the frame could hold a shared `Arc<[u8]>` from the
-`Function` instead — to be measured, not guessed.
+**What was left in a call** was the frame's bytes. `push_call` copied the
+function name and its source file into the frame (`to_vec()` each, 163
+instructions per call), `pop_call` freed them again (117), and
+`call_function` had *already* cloned the whole `Function` to get it out of the
+table — copying the same two strings a second time. An ablation confirms the
+size rather than guessing it: pushing frames with empty names and sources
+removed 240 instructions per call out of `push_call` alone.
+
+`Function` and `CallFrame` hold `Arc<[u8]>` for the name and the definition
+file now, and the table holds `Arc<Function>`, so a call clones three `Arc`s
+(uncontended increments) and allocates nothing; `push_call` no longer has a
+cost worth a symbol. The allocator's share of a call fell by 136 (`malloc`) and
+168 (`free`) instructions.
+
+| release, 3000 iterations | before | after | |
+| --- | ---: | ---: | ---: |
+| `call_function`, inclusive | 18,027,103 | 16,520,688 | −8.4% |
+| per call | 5,812 | 5,308 | **−8.7%** |
+| `function call 20k`, wall clock | 16.23 ms | 15.64 ms | −3.6% |
+| `source bash_completion`, instructions | 36,518,328 | 36,539,571 | +0.06% |
+
+The last row is the price, and it is the right way round: a *definition* now
+allocates one `Arc` per function (about a thousand for the completion library,
++0.06% of sourcing it), while the copy it replaces was paid on every *call*.
+
+**What is left in `call_function`** is the positional parameters:
+`argv[1..].to_vec()` into the new frame, which is `finish_grow` at 552
+instructions per call. That one is a copy the callee genuinely owns, so moving
+it wants a measurement first, not an `Arc`.
 
 Sourcing `bash_completion` improved with it as well: 37,879,386 → 36,526,747
 retired instructions (−3.6%) for this change and the next together. The same

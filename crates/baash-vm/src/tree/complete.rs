@@ -49,7 +49,7 @@ impl CompletionSource for Interp {
         let mut names: Vec<Vec<u8>> = self
             .functions
             .iter()
-            .map(|function| function.name.clone())
+            .map(|function| function.name.to_vec())
             .filter(|name| name.starts_with(prefix))
             .collect();
         names.sort_unstable();
@@ -265,7 +265,7 @@ impl Interp {
         let mut names: Vec<Vec<u8>> = self
             .functions
             .iter()
-            .map(|function| function.name.clone())
+            .map(|function| function.name.to_vec())
             .collect();
         names.sort_unstable();
         names.dedup();
