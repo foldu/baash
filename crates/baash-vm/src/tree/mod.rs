@@ -1193,6 +1193,9 @@ impl Interp {
     ) -> Option<(baash_diag::Span, String)> {
         let extglob = self.state.opts.extglob;
         let mut stack = vec![chunk.ast.root];
+        // Reused across the walk: `children_into` appends to it, so a chunk with
+        // a thousand nodes does not allocate a `Vec` per node.
+        let mut children = Vec::new();
         while let Some(id) = stack.pop() {
             if let baash_syntax::NodeKind::TestCommand { body } = &chunk.ast.node(id).kind {
                 let body = body.clone();
@@ -1211,7 +1214,9 @@ impl Interp {
                     return last;
                 }
             }
-            stack.extend(chunk.ast.children(id));
+            children.clear();
+            chunk.ast.children_into(id, &mut children);
+            stack.extend_from_slice(&children);
         }
         None
     }

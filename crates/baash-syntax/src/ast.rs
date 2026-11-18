@@ -58,41 +58,54 @@ impl Ast {
 
     /// The children of a node, in source order.
     pub fn children(&self, id: NodeId) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        self.children_into(id, &mut out);
+        out
+    }
+
+    /// The children of a node, appended to `out`.
+    ///
+    /// The form a tree walk wants: a walk visits every node of a chunk and
+    /// needs their children for exactly as long as it takes to push them onto
+    /// its stack, so a `Vec` per node is an allocation per node. Sourcing the
+    /// completion library was 3,366 of them — 6% of that script's allocations
+    /// (`docs/performance.md`).
+    pub fn children_into(&self, id: NodeId, out: &mut Vec<NodeId>) {
         match &self.node(id).kind {
             NodeKind::Empty
             | NodeKind::Simple(_)
             | NodeKind::ArithCommand { .. }
-            | NodeKind::TestCommand { .. } => Vec::new(),
-            NodeKind::List { items } => items.iter().map(|i| i.node).collect(),
+            | NodeKind::TestCommand { .. } => {}
+            NodeKind::List { items } => out.extend(items.iter().map(|item| item.node)),
             NodeKind::AndOr { first, rest } => {
-                let mut out = vec![*first];
-                out.extend(rest.iter().map(|l| l.node));
-                out
+                out.push(*first);
+                out.extend(rest.iter().map(|list| list.node));
             }
-            NodeKind::Pipeline { stages, .. } => stages.clone(),
+            NodeKind::Pipeline { stages, .. } => out.extend_from_slice(stages),
             NodeKind::If {
                 branches,
                 else_body,
             } => {
-                let mut out = Vec::new();
-                for b in branches {
-                    out.push(b.cond);
-                    out.push(b.body);
+                for branch in branches {
+                    out.push(branch.cond);
+                    out.push(branch.body);
                 }
-                if let Some(e) = else_body {
-                    out.push(*e);
+                if let Some(otherwise) = else_body {
+                    out.push(*otherwise);
                 }
-                out
             }
             NodeKind::For { body, .. }
             | NodeKind::ForArith { body, .. }
             | NodeKind::BraceGroup { body }
             | NodeKind::Subshell { body }
-            | NodeKind::Function { body, .. } => vec![*body],
-            NodeKind::While { cond, body, .. } => vec![*cond, *body],
-            NodeKind::Case { arms, .. } => arms.iter().map(|a| a.body).collect(),
-            NodeKind::Redirected { body, .. } => vec![*body],
-            NodeKind::Timed { body } => vec![*body],
+            | NodeKind::Function { body, .. } => out.push(*body),
+            NodeKind::While { cond, body, .. } => {
+                out.push(*cond);
+                out.push(*body);
+            }
+            NodeKind::Case { arms, .. } => out.extend(arms.iter().map(|arm| arm.body)),
+            NodeKind::Redirected { body, .. } => out.push(*body),
+            NodeKind::Timed { body } => out.push(*body),
         }
     }
 }
