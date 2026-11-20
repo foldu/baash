@@ -402,13 +402,14 @@ impl<'a> ShellCompleter<'a> {
         if status == baash_runtime::Status(124) {
             return Run::Retry;
         }
-        if !status.is_success() {
-            // bash shows nothing for a function that failed part-way, and the
-            // ordinary completion is better than half-filled replies — but what
-            // the function wrote (a complaint, or the shell's own diagnostic
-            // about a construct it rejects) is still worth painting.
-            return Run::Fail(output);
-        }
+        // The function's status decides nothing else. bash takes `COMPREPLY`
+        // whatever the function returned (124 is the one value with a meaning),
+        // and bash-completion relies on that: `_comp_complete_longopt` ends with
+        // `[[ ${COMPREPLY-} == *= ]] && compopt -o nospace`, which *fails*
+        // whenever the last option it found is not `=value`. Gating on the
+        // status made `ls --<TAB>` an empty menu on Windows, where uutils `ls`
+        // lists `--version` last (measured: the function returns 1 with 61
+        // candidates, and bash completes all 61).
         let vars = &self.shell.state().vars;
         Run::Replies(
             baash_complete::Replies::new(completion_replies(vars), options),
@@ -730,7 +731,12 @@ mod tests {
     }
 
     #[test]
-    fn a_failing_completion_function_leaves_the_data_path_alone() {
+    fn a_failing_completion_function_answers_with_nothing() {
+        // A rule answered, so the hook must not return `None` (which means "no
+        // rule, use the ordinary completion"). bash uses `COMPREPLY` whatever
+        // the function returned — only `124` means "retry" — and a rule
+        // without `-o default` does not fall back to the data path when the
+        // function filled nothing, so the answer is an *empty* menu.
         let mut shell = Interp::new(false);
         shell.set_arg0("baash");
         shell.run_named("<test>", b"f(){ return 1; }\ncomplete -F f mycmd\n");
@@ -739,8 +745,46 @@ mod tests {
         let menu = {
             let mut completer = ShellCompleter::new(&mut shell, &engine);
             baash_repl::ShellCompletion::complete(&mut completer, b"mycmd al", 8)
-        };
-        assert!(menu.is_none(), "a failed function falls back");
+        }
+        .expect("the rule answered");
+        assert!(
+            menu.menu.candidates.is_empty(),
+            "no fallback without -o default: {:?}",
+            menu.menu
+                .candidates
+                .iter()
+                .map(|c| String::from_utf8_lossy(&c.insert).into_owned())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_completion_function_that_fails_after_filling_compreply_is_used() {
+        // The status is not a verdict on the replies: bash-completion's own
+        // functions end with a test that fails whenever it happens to, and
+        // gating on it emptied `ls --<TAB>` on Windows (docs/portability.md,
+        // "A pipe is not seekable, and a completion's status is not a
+        // verdict").
+        let mut shell = Interp::new(false);
+        shell.set_arg0("baash");
+        shell.run_named(
+            "<test>",
+            b"f(){ COMPREPLY=(alpha); return 1; }\ncomplete -F f mycmd\n",
+        );
+        let engine = CompletionEngine::new();
+        refresh(&mut shell, &engine);
+        let menu = {
+            let mut completer = ShellCompleter::new(&mut shell, &engine);
+            baash_repl::ShellCompletion::complete(&mut completer, b"mycmd al", 8)
+        }
+        .expect("the rule answered");
+        let inserts: Vec<Vec<u8>> = menu
+            .menu
+            .candidates
+            .iter()
+            .map(|c| c.insert.clone())
+            .collect();
+        assert_eq!(inserts, vec![b"alpha".to_vec()]);
     }
 
     #[test]

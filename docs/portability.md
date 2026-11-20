@@ -782,6 +782,79 @@ platform that makes it a gap — `Ctrl-C` is a *byte* at the prompt and a consol
 *event* only while a command runs, and the event is exactly what the handler
 swallows.
 
+### A pipe is not seekable, and a completion's status is not a verdict (2026-11-20)
+
+`ls --<TAB>` completed nothing on Windows, and every bash-completion function
+that reads a command's `--help` through a `while read` loop saw one or two lines
+of it. The suspicion was the embedded `sed`/`grep` — the completion scripts
+shell out to them — and both are innocent: `printf 'a\nb\n' | sed 's/a/A/'`,
+the same through `grep`, and a `while read` loop over a *file* were all correct.
+There were three causes, all in the shell's own boundary code.
+
+**The pipe.** `baash_sys::lseek` is how `read` decides whether the bytes it
+buffered can be given back, and on a pipe the CRT answers the question wrongly:
+`_lseeki64(fd, 0, SEEK_CUR)` returns 0 instead of failing. Every `read` from a
+pipe therefore took the 4096-byte chunk path, consumed one line, and dropped the
+rest of the chunk — the rewind that would have returned it was also misread as
+successful, because the declaration took the C `long` to be 64 bits (`long` is
+32 on Windows, LLP64) so a failed seek's `-1` arrived as a large positive
+offset. A 171-line `ls --help` reached a `while read` loop as two lines.
+`lseek` asks the handle type now (`GetFileType == FILE_TYPE_DISK`) and uses
+`_lseeki64`, so a pipe fails with `ESPIPE` exactly as on Unix.
+
+**The deadline.** `read -t` sets a deadline only for a non-seekable descriptor
+(a regular file cannot block), and `poll_readable` was supposed to wait for it.
+On Windows it ignored the timeout and answered "is there data right now?" — and
+the probe cannot be `WaitForSingleObject` either: the handle `_pipe` hands out
+is *always* signalled (measured: it returns in 0 ms on an empty pipe), so
+waiting on it turns `read -t` back into a blocking read. It is `PeekNamedPipe`
+in 2 ms slices now, and a peek that fails because the writer closed counts as
+readable, so `read -t` sees end of file rather than a timeout — what `poll`
+calls `POLLHUP`.
+
+**The status.** A `-F` function's exit status threw its `COMPREPLY` away:
+`baash/src/complete.rs` returned "no candidates" for any non-zero status except
+`124`. bash uses `COMPREPLY` whatever the function returned, and
+bash-completion depends on it: `_comp_complete_longopt` ends with
+`[[ ${COMPREPLY-} == *= ]] && compopt -o nospace`, which fails whenever the last
+option it found is not `=value` — and uutils `ls` ends its `--help` at
+`--version`. The function was measured returning **1 with 61 candidates**
+(headless, `-i --rcfile`), and bash 5.3.20 returns 1 with 52 on the same call
+and lists them all at Tab (the second Tab: bash needs `show-all-if-ambiguous`
+to list on the first). Only `124` has a meaning now.
+
+Measured on the guest (2026-11-20, Windows 11 26300, `windows-fast`; the `before`
+column is `HEAD` built in a worktree, the `after` column is this tree; keys for
+the interactive row were written into the console input buffer so the editor
+read them as a keyboard's):
+
+| case | before | after |
+|---|---|---|
+| `cat h_plain.txt \| while IFS= read -r l; do n=$((n+1)); done` | 2 of 171 lines | 171 |
+| `seq 1 2000 \| { while read …; done; echo $n; }` | 2 | 2000 |
+| `_comp_complete_longopt ls --` (headless, `-i --rcfile`) | 0 candidates, `rc=1` | 61, `rc=1` |
+| `ls --<TAB>` at a fresh prompt | nothing | `--all`, `--almost-all`, `--author`, … |
+| `read -t 1` on a silent *external* pipe (`hold.cmd \| …`) | blocked 9 s, then EOF | `142` at 1 s |
+| `read -t 12` on the same pipe (writer exits at ~10 s) | blocked 9 s, EOF | EOF at 10 s |
+
+The lesson worth keeping: a completion menu that is silently empty says nothing
+about *which* layer failed, and the layer that failed here was `read` — the
+utility the scripts call, not the utilities they call it with.
+
+**What those three do not fix: `awk` and `perl`.** Windows has neither, and
+bash-completion leans on `awk` far more than the seven scripts that name it
+directly suggest: **150 of the 1,097 scripts** call it through `_comp_awk` (138
+in `completions-core`, 12 in `completions-fallback`; counted over non-comment
+lines). For most it is one option's branch — `curl`'s `--help` categories,
+`configure`'s hints — but for a few it is the completion: `make`, `gmake` and
+`gnumake` pipe `make -npq` into `helpers-core/make-extract-targets.awk`, and
+`python`/`python3` parse `-h` with it for `--jit`-style options. `perl` is three
+scripts (`perl`, `perldoc`, `cpan2dist`) plus the fallback in
+`_comp_compgen_uids`/`_comp_compgen_gids` that only runs when `getent` is
+missing — as on Windows — and then needs `/etc/passwd`, which Windows also has
+not. With `awk` absent, `_comp_awk` prints `awk: command not found` above the
+prompt and completes nothing; that is §6's table, not this bug.
+
 ### Command resolution on Windows (2026-11-06)
 
 `whoami: command not found` had five separate causes; all are fixed, and all

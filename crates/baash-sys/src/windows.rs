@@ -68,7 +68,7 @@ unsafe extern "C" {
     fn _write(fd: c_int, buffer: *const std::ffi::c_void, count: u32) -> c_int;
     fn _dup(fd: c_int) -> c_int;
     fn _dup2(from: c_int, to: c_int) -> c_int;
-    fn _lseek(fd: c_int, offset: i64, origin: c_int) -> i64;
+    fn _lseeki64(fd: c_int, offset: i64, origin: c_int) -> i64;
     fn _pipe(fds: *mut c_int, size: u32, mode: c_int) -> c_int;
     fn _get_osfhandle(fd: c_int) -> isize;
     fn _open_osfhandle(osfhandle: isize, flags: c_int) -> c_int;
@@ -352,10 +352,37 @@ pub fn write_all(fd: c_int, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether `fd` names a file with a file pointer, i.e. one that can be rewound.
+///
+/// The CRT cannot answer this. `_lseeki64(fd, 0, SEEK_CUR)` on a *pipe* returns
+/// 0 instead of failing, so "the query succeeded" is not the same question as
+/// "these bytes can be given back"; asking it that way made every `read` from a
+/// pipe take the chunked path and throw the rest of its chunk away. `GetFileType`
+/// answers the real question: only a disk handle has a file pointer, while a
+/// pipe, a console and `NUL` are `FILE_TYPE_PIPE`/`FILE_TYPE_CHAR`.
+fn has_file_pointer(fd: c_int) -> io::Result<bool> {
+    // SAFETY: `_get_osfhandle` only inspects the CRT descriptor and returns a
+    // handle owned by the descriptor table, so it is not ours to close.
+    let handle = unsafe { _get_osfhandle(fd) };
+    if handle == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(windows_sys_handle::is_disk(handle as RawHandle))
+}
+
 /// Reposition `fd`.
+///
+/// A descriptor with no file pointer fails with `ESPIPE`, exactly as on Unix:
+/// that error is the shell's way of asking "can these bytes be given back?"
+/// (`read` rewinds a seekable descriptor and reads a pipe one byte at a time,
+/// so nothing is stolen from a later reader). `_lseeki64` is the 64-bit CRT
+/// entry point because the C `long` is 32 bits wide on Windows.
 pub fn lseek(fd: c_int, offset: i64, origin: c_int) -> io::Result<i64> {
-    // SAFETY: `_lseek` takes integers only.
-    let position = unsafe { _lseek(fd, offset, origin) };
+    if !has_file_pointer(fd)? {
+        return Err(io::Error::from_raw_os_error(libc::ESPIPE));
+    }
+    // SAFETY: `_lseeki64` takes integers only.
+    let position = unsafe { _lseeki64(fd, offset, origin) };
     if position < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -479,18 +506,37 @@ fn tempfile_path() -> Vec<u8> {
 
 /// Whether `fd` has anything to read, waiting at most `timeout_ms`.
 ///
-/// `poll(2)` has no direct equivalent; the shell uses this for `read -t` and
-/// for the prompt's "did the user type" checks. A console handle is always
-/// reported readable — the read that follows is what blocks — and a pipe is
-/// probed with `PeekNamedPipe`.
+/// `poll(2)` has no direct equivalent. A console and a file are reported ready
+/// (a file cannot block, and a console's read is what blocks); a pipe is asked
+/// with `PeekNamedPipe`, in short slices, because the pipe handle the CRT hands
+/// out is **always signalled** — `WaitForSingleObject` returns at once even
+/// when the pipe is empty (measured), so waiting on it would turn `read -t`
+/// into a blocking read.
+///
+/// A pipe whose writer has closed counts as readable: the read that follows
+/// returns end of file, which is what `poll` reports as `POLLHUP` and what
+/// `read -t` must see instead of a timeout.
 pub fn poll_readable(fd: c_int, timeout_ms: c_int) -> io::Result<bool> {
-    let _ = timeout_ms;
     // SAFETY: `_get_osfhandle` takes an integer.
     let handle = unsafe { _get_osfhandle(fd) };
     if handle == -1 {
         return Err(io::Error::last_os_error());
     }
-    Ok(peek_readable(handle as RawHandle))
+    let handle = handle as RawHandle;
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_millis(u64::try_from(timeout_ms.max(0)).unwrap_or(0));
+    loop {
+        if peek_readable(handle) {
+            return Ok(true);
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Ok(false);
+        }
+        // Short slices: `read -t 0.2` should be about that, and a polled pipe
+        // must not spin the CPU.
+        std::thread::sleep((deadline - now).min(std::time::Duration::from_millis(2)));
+    }
 }
 
 /// Probe one handle without consuming from it.
@@ -517,12 +563,21 @@ mod windows_sys_handle {
         fn GetFileType(handle: RawHandle) -> u32;
     }
 
+    /// `FILE_TYPE_DISK`: a seekable file, the only kind `_lseeki64` can move.
+    const FILE_TYPE_DISK: u32 = 0x0001;
     /// `FILE_TYPE_PIPE`
     const FILE_TYPE_PIPE: u32 = 0x0003;
 
+    /// Whether `handle` is a disk file, i.e. one with a file pointer.
+    pub(super) fn is_disk(handle: RawHandle) -> bool {
+        // SAFETY: `handle` comes from `_get_osfhandle` and the call only reads
+        // the object's type.
+        unsafe { GetFileType(handle) == FILE_TYPE_DISK }
+    }
+
     pub(super) fn available(handle: RawHandle) -> bool {
-        // SAFETY: `handle` comes from `_get_osfhandle`; the out-parameters
-        // are a live `u32` each.
+        // SAFETY: `handle` comes from `_get_osfhandle`, and the call only reads
+        // the object's type.
         let file_type = unsafe { GetFileType(handle) };
         if file_type != FILE_TYPE_PIPE {
             // A console or a file: a read either blocks on the console (so
@@ -541,7 +596,9 @@ mod windows_sys_handle {
                 std::ptr::null_mut(),
             )
         };
-        rc != 0 && available > 0
+        // A failed peek is the writer's end closed, which is end of file: the
+        // next read reports it, and `read -t` must not call that a timeout.
+        rc == 0 || available > 0
     }
 }
 

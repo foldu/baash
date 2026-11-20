@@ -99,7 +99,10 @@ POSIX.
 
 **New in this wave, all thin and all unsafe-free at the API:** `lseek` (plus
 `fd::seek`) is how `read` rewinds the bytes it buffered but did not consume, and
-`ESPIPE` is how it discovers that a descriptor is a pipe; `NoEcho` is `read -s`
+`ESPIPE` is how it discovers that a descriptor is a pipe — on Windows the handle
+type decides (`GetFileType`), because the CRT answers 0 to a zero-offset query
+on a pipe and takes the C `long` for 64 bits if asked through `_lseek`;
+`NoEcho` is `read -s`
 (echo off, canonical mode and signal generation kept); `Disposition` /
 `set_disposition` / `ignore_signals` are the two places the shell changes a
 signal *action* rather than blocking it (`trap '' SIG` is `SIG_IGN`, which
@@ -1146,7 +1149,12 @@ interpreter to abandon the function mid-run, which is a separate decision.
 A function that returns status `124` asks for the completion to be retried after
 it changed the rules — bash-completion's `-D` loader sources a command's script
 and returns 124 — so `ShellCompleter` refreshes the engine's snapshot and looks
-the rule up again, at most four times. The `-D` default is visible to the engine
+the rule up again, at most four times. Any *other* non-zero status is ignored:
+bash uses `COMPREPLY` whatever the function returned, and bash-completion's own
+functions end with a test that fails whenever it happens to (`ls --<TAB>` on
+Windows: `_comp_complete_longopt` returns 1 with 61 candidates, and bash
+completes all 61). The function's output is painted above the prompt either way.
+The `-D` default is visible to the engine
 because `CompletionTable::get` falls back to it, and `COMP_WORDBREAKS` is read
 from the shell before every prompt (`CompletionEngine::set_word_breaks`) so the
 `COMP_WORDS` split follows what bash-completion sets.

@@ -389,6 +389,30 @@ fn a_function_rule_runs_the_shell_function() {
     cleanup(&mut session, &home, &work);
 }
 
+/// A function's exit status does not throw its replies away.
+///
+/// bash uses `COMPREPLY` whatever the function returned; only `124` has a
+/// meaning ("the rule changed, complete again"). bash-completion's own
+/// functions end with a test that fails half the time — `_comp_complete_longopt`
+/// finishes with `[[ ${COMPREPLY-} == *= ]] && compopt -o nospace` — so gating
+/// on the status emptied the `ls --<TAB>` menu on Windows, where uutils `ls`
+/// lists `--version` last and the test therefore fails (the function still
+/// returned 61 candidates; bash completed all of them).
+#[test]
+fn a_function_rule_that_returns_nonzero_still_completes() {
+    let (mut session, home, work) = session("functionstatus");
+    session.line("mycmd () { echo \"args:$*\"; }");
+    session.line("f () { COMPREPLY=(alpha-$2); false; }");
+    session.line("complete -F f mycmd");
+
+    session.send(b"mycmd al\t");
+    session.expect(b"alpha-al", Duration::from_secs(10));
+    session.send(b"\n");
+    session.expect(b"args:alpha-al\r\n", Duration::from_secs(10));
+    session.prompt();
+    cleanup(&mut session, &home, &work);
+}
+
 /// A `for (( … ))` header is word-expanded before arithmetic reads it.
 ///
 /// bash-completion recovers the word to complete with a C-style `for` over
