@@ -146,3 +146,45 @@ fn the_opt_out_leaves_completion_as_it_was() {
     let _ = std::fs::remove_dir_all(&cache);
     let _ = std::fs::remove_dir_all(&config);
 }
+
+/// A child of the shell reads a mounted file by its path.
+///
+/// The tree is a mount (`baash_runtime::vfs`), which only the shell's own file
+/// operations can see — but bash-completion's make helper hands `awk` a path
+/// under the mount (`${BASH_SOURCE%/*}/../helpers-core/make-extract-targets.awk`)
+/// and `awk` is a child. The binary registers `bash_completion::mounted_file`
+/// with `baash_utils::set_file_source` so the embedded awk can open it, and this
+/// is the shape that proves it: a `..` in the path, a child, and the mount.
+#[test]
+fn an_embedded_awk_reads_a_mounted_file() {
+    let home = dir("awk-home");
+    let cache = dir("awk-cache");
+    let config = dir("awk-config");
+    let output = interactive(
+        &home,
+        &cache,
+        &config.join("absent"),
+        r#"library=${BAASH_EMBEDDED_BASH_COMPLETION-}
+if [[ -z $library ]]; then
+    echo skipped
+    exit 0
+fi
+helper=${library%/*}/completions-core/../helpers-core/make-extract-targets.awk
+printf 'BEGIN { print "mount-ok" }\n' > "$HOME/probe.awk"
+awk -f "$helper" /dev/null 2>&1 | head -1
+awk -f "$HOME/probe.awk" /dev/null
+"#,
+    );
+    let text = stdout(&output);
+    if text.contains("skipped") {
+        return;
+    }
+    assert!(
+        text.contains("mount-ok"),
+        "the child did not read the program file: {text}"
+    );
+    assert!(
+        !text.contains("cannot open program file"),
+        "the mount was not reachable from the child: {text}"
+    );
+}

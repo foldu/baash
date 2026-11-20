@@ -99,6 +99,31 @@ mod clear;
 /// catalog to install, which is the only reason the uutils entries get a worker.
 const NATIVE: &[(&str, Native)] = &[("clear", clear::main)];
 
+/// A reader for a file the shell carries in memory rather than on disk.
+///
+/// The embedded bash-completion tree is mounted in the shell's virtual file
+/// system (`crates/baash/src/bash_completion.rs`), and a *child* cannot read a
+/// mount. bash-completion's make helper names its awk script by path —
+/// `${BASH_SOURCE%/*}/../helpers-core/make-extract-targets.awk` — so the binary
+/// registers a reader here and a body that opens files by name asks it before
+/// the file system. `awk` is the only body this shell wrote, and the only one
+/// that can ask: the uutils bodies open their own files with `std::fs`.
+/// A reader for a mounted file, as the shell registers it.
+type FileSource = fn(&[u8]) -> Option<Vec<u8>>;
+
+static IN_MEMORY: std::sync::OnceLock<FileSource> = std::sync::OnceLock::new();
+
+/// Register the in-memory reader. Called by the shell at startup; later calls
+/// are ignored, so the first registration wins.
+pub fn set_file_source(source: FileSource) {
+    let _ = IN_MEMORY.set(source);
+}
+
+/// The bytes of `path`, when the shell carries that file in memory.
+pub fn mounted_file(path: &[u8]) -> Option<Vec<u8>> {
+    IN_MEMORY.get().and_then(|source| source(path))
+}
+
 /// The embedded utilities, by the name a command is typed as.
 ///
 /// The first argument passed to [`run`] is the name itself, because that is

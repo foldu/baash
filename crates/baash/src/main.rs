@@ -171,6 +171,14 @@ fn main() -> ExitCode {
     if let Ok(exe) = std::env::current_exe() {
         baash_utils::set_host_executable(exe);
     }
+    // The embedded library is a mount, and a child cannot read a mount: the
+    // `awk` body asks this reader for bash-completion's helper files by the
+    // path its scripts compute. Registered in the child too, which is this same
+    // executable.
+    // `mounted_file` answers `None` in a build without the tree, so one cfg is
+    // enough: the reader exists whenever a body that reads could.
+    #[cfg(any(windows, feature = "builtin-utils"))]
+    baash_utils::set_file_source(bash_completion::mounted_file);
     // Before anything else: this process may *be* an embedded utility. `grep`,
     // `sed`, `find` and `xargs` run as children of the shell, because their
     // bodies exit, die on a broken pipe, and print from the process argv — none

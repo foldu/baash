@@ -418,6 +418,20 @@ are not visible to them. It is a gap, not a decision of this wave: `date` and
 actually needs (`PATH`, `IFS`) are read from the shell's table by the shell
 itself.
 
+**A mount is not a file system, and a child cannot read one.** The library is
+mounted in the shell's VFS rather than written to disk (1,106 files; on Windows
+writing them cost 475 ms of first start), which is why `source`, `test` and
+pathname expansion read it without touching the disk. A child calls `std::fs`,
+and for it `/__baash__/bash-completion/...` does not exist. That surfaced in the
+first *real* per-command script: `make <TAB>` painted `awk: cannot open program
+file /__baash__/bash-completion/completions-core/../helpers-core/…
+(os error 3)`, because bash-completion hands `awk` a path computed from
+`BASH_SOURCE`. The binary therefore registers `bash_completion::mounted_file`
+with `baash_utils::set_file_source` — in the child too, which is the same
+executable with the same tree compiled in — and the awk driver resolves `-f`
+and input operands through it, `..` included, before `std::fs`. The uutils
+bodies are not covered and cannot be: they open their own files.
+
 The cost is one process per call. Measured on Linux, release build, 300 calls
 of each in a loop with `PATH=''`, against the `grep` this machine has:
 

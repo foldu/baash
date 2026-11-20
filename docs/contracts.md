@@ -1296,6 +1296,14 @@ functions and aliases, not the shell's own utilities (`docs/portability.md` §6.
 has the measurement). That is load-bearing for bash-completion, whose `_comp_awk`
 and `_comp_tail` helpers are `command awk` and `command tail`.
 
+**A body that opens a file by name asks the mount first.** The embedded
+bash-completion tree is a mount, and a child cannot read a mount; bash-completion
+hands `awk` a path into it (`${BASH_SOURCE%/*}/../helpers-core/…awk`), so the
+binary registers `bash_completion::mounted_file` with `set_file_source` and the
+awk driver resolves `-f` and input operands through `mounted_file` before
+`std::fs`. It is the only body that asks, and the only one that can: the uutils
+bodies open their own files (`docs/portability.md` §6.2).
+
 **A child is given the shell's exported environment; an in-process body is
 not.** `run_with(argv, Some(&vars.envp()))` is what the vm calls, so an isolated
 utility sees exactly the `KEY=VALUE` list an external command would — `awk`'s
@@ -2179,10 +2187,13 @@ path prefix and a table of `(relative path, bytes)`; `Vfs` answers `file`,
 `kind` and `entries` from it, matching bytes after a trailing slash and
 requiring a component boundary (mounting `/a/b` never matches `/a/bc`). Only
 `source`, the file predicates and pathname expansion ask, which is why the
-mounted tree is invisible to `ls`, `cat` and any child process. There are no
-writes, no symlinks and no `.`/`..` resolution inside a mount; `ShellState`
-clones the table for a subshell, so paths and slices are copied and the bytes
-are not.
+mounted tree is invisible to `ls`, `cat` and any child process — with one
+exception: `baash_utils::mounted_file` hands a *child that is this same
+executable* the bytes of a mounted file by name, and the embedded `awk` asks for
+bash-completion's helper (see the `baash-utils` section). There are no writes, no
+symlinks and no `.`/`..` resolution inside a mount; `ShellState` clones the table
+for a subshell, so paths and slices are copied and the bytes are not, and a
+reader that takes a path with `..` in it resolves that itself.
 
 **`baash_runtime::filecmp` answers `-nt`, `-ot` and `-ef` for both commands.**
 `test`/`[` and `[[ … ]]` ask the same three questions about a pair of paths, and
@@ -2230,8 +2241,11 @@ with no library installed still has one, and a single `baash.exe` is enough on
 Windows. The mount is `baash_runtime::vfs::Vfs` in `ShellState`, and only three
 layers consult it: `.`/`source` reads `Vfs::file`, `test`/`[`/`[[` answer
 `-e`/`-f`/`-d`/`-s`/`-r`/`-x` from `Vfs::kind`, and pathname expansion lists
-`Vfs::entries`. Nothing is written to disk, and no external command can see
-the tree — it is shell data, not a file system. An earlier design unpacked it
+`Vfs::entries` — plus `bash_completion::mounted_file`, registered with
+`baash_utils::set_file_source`, for the one child that has to read a file out of
+the tree (`awk -f`, whose path bash-completion computes from `BASH_SOURCE`).
+Nothing is written to disk, and no other external command can see the tree — it
+is shell data, not a file system. An earlier design unpacked it
 into the cache directory instead; on Windows that cost 475 ms of the first
 start and a cache directory to version.
 

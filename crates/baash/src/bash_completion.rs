@@ -81,6 +81,53 @@ pub fn install(shell: &mut Interp) -> Option<Vec<u8>> {
     Some(path)
 }
 
+/// The bytes of a file under [`MOUNT`], for a child that cannot see the mount.
+///
+/// The tree is compiled in, and the child that runs an embedded utility is this
+/// same executable, so the bytes are already there — what is missing is the
+/// mapping from the mounted path to a tree name. bash-completion's make helper
+/// asks for `completions-core/../helpers-core/make-extract-targets.awk`, so the
+/// `..` is resolved here the way the shell resolves it before asking the VFS.
+///
+/// Registered with `baash_utils::set_file_source`; `None` means "not a mounted
+/// file, use the file system" (and is the only answer in a build without the
+/// tree, where a distribution's library lives on disk).
+#[cfg(any(windows, feature = "embedded-bash-completion"))]
+pub(crate) fn mounted_file(path: &[u8]) -> Option<Vec<u8>> {
+    let path = normalize(path)?;
+    let relative = path.strip_prefix(MOUNT)?.strip_prefix(b"/")?;
+    let name = std::str::from_utf8(relative).ok()?;
+    Library::get(name).map(|file| file.data.into_owned())
+}
+
+#[cfg(not(any(windows, feature = "embedded-bash-completion")))]
+pub(crate) fn mounted_file(_path: &[u8]) -> Option<Vec<u8>> {
+    None
+}
+
+/// Resolve `.` and `..` in a path, or `None` if it climbs above the root.
+fn normalize(path: &[u8]) -> Option<Vec<u8>> {
+    let mut parts: Vec<&[u8]> = Vec::new();
+    for part in path.split(|byte| *byte == b'/') {
+        match part {
+            b"" | b"." => {}
+            b".." => {
+                parts.pop()?;
+            }
+            other => parts.push(other),
+        }
+    }
+    let mut out = Vec::with_capacity(path.len());
+    for part in parts {
+        out.push(b'/');
+        out.extend_from_slice(part);
+    }
+    if out.is_empty() {
+        out.push(b'/');
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -135,9 +135,7 @@ fn run(argv: &[Vec<u8>]) -> Result<i32, String> {
     } else {
         let mut source = String::new();
         for path in &program_files {
-            let text = fs::read_to_string(path)
-                .map_err(|error| format!("cannot open program file {path}: {error}"))?;
-            source.push_str(&text);
+            source.push_str(&program_text(path)?);
             if !source.ends_with('\n') {
                 source.push('\n');
             }
@@ -170,6 +168,11 @@ fn run(argv: &[Vec<u8>]) -> Result<i32, String> {
         for path in &files {
             if path == "-" {
                 inputs.push(Box::new(BufReader::new(io::stdin())));
+            } else if let Some(bytes) = crate::mounted_file(path.as_bytes()) {
+                // A file the shell carries in memory (the bash-completion
+                // mount): a child cannot read the mount, so the bytes come
+                // through the reader the shell registered.
+                inputs.push(Box::new(io::Cursor::new(bytes)));
             } else {
                 let file =
                     fs::File::open(path).map_err(|error| format!("cannot open {path}: {error}"))?;
@@ -189,6 +192,20 @@ fn run(argv: &[Vec<u8>]) -> Result<i32, String> {
         .flush()
         .map_err(|error| format!("write error: {error}"))?;
     Ok(status)
+}
+
+/// The text of a program file, from the shell's in-memory tree or the disk.
+///
+/// bash-completion's per-command scripts name their helper by path
+/// (`${BASH_SOURCE%/*}/../helpers-core/make-extract-targets.awk`), and on
+/// Windows that path is a mount the child cannot see; `mounted_file` answers it
+/// from the same bytes the shell mounted, and everything else is a real file.
+fn program_text(path: &str) -> Result<String, String> {
+    if let Some(bytes) = crate::mounted_file(path.as_bytes()) {
+        return String::from_utf8(bytes)
+            .map_err(|_| format!("program file {path} is not valid UTF-8"));
+    }
+    fs::read_to_string(path).map_err(|error| format!("cannot open program file {path}: {error}"))
 }
 
 /// One argument as text: UTF-8 or a refusal, never a lossy conversion.
