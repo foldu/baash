@@ -18,6 +18,11 @@ uucore = "0.8"
 # system without a POSIX userland — not accreted. `docs/portability.md` §6 has
 # the selection rule and the measured cost of the set.
 uu_grep = "0.2"
+# `awk`, in the same child shape as `sed`: an awk program can `exit`, and
+# awk-rs still has `todo!()` paths whose panic would end the session if the
+# body ran in-process. It is what `_comp_awk` calls for 150 of bash-completion's
+# scripts; `docs/portability.md` §6 records the subset it implements today.
+awk-rs = "0.2"
 # `grep` (0.2) and `sed` (0.3) speak `uucore` 0.10's message catalog, which is
 # thread-local to *its own* uucore: a body whose catalog was not installed
 # prints Fluent ids (`clap-error-unexpected-argument`) instead of English. The

@@ -2664,6 +2664,20 @@ impl ShellHost for Interp {
             false
         });
         let Some(resolution) = found else {
+            // `command` bypasses functions and aliases, not the shell's own
+            // utilities: bash's `command` runs a built-in, and the embedded set
+            // is what this shell answers `NAME` with when `PATH` has nothing
+            // (`docs/portability.md` §6). It is not cosmetic — bash-completion's
+            // `_comp_awk` and `_comp_tail` shims are `command awk` and `command
+            // tail`, so without this the completion functions that use them
+            // find nothing on Windows.
+            #[cfg(feature = "builtin-utils")]
+            if !name.contains(&b'/') && baash_utils::contains(&name) {
+                let environment = self.state.vars.envp();
+                return Status(
+                    baash_utils::run_with(argv, Some(&environment)).unwrap_or(Status::NOT_FOUND.0),
+                );
+            }
             return self.command_not_found(&name).status();
         };
         if let command::Resolution::External(path) = &resolution

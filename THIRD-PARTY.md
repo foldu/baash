@@ -80,6 +80,25 @@ The upstream license is [spec/oils/LICENSE.txt](spec/oils/LICENSE.txt).
 
 [oils]: https://oilshell.org
 
+## awk-rs — MIT OR Apache-2.0
+
+`crates/baash-utils` embeds [awk-rs][awk-rs] 0.2 (the `awk-rs` crate, upstream
+`quinnjr/rawk`) as the `awk` of the embedded set: bash-completion's scripts call
+`awk` through `_comp_awk` in 150 of their files, and a Windows `PATH` has none,
+so `make`, `python` and `curl` complete nothing without it. It is the only
+embedded utility that is not uutils: uutils' own [awk][uutils-awk] is a work in
+progress that is not on crates.io and still returns wrong answers on the
+completion programs (`docs/portability.md` §6.2 records the measurement).
+
+It runs in a child of the shell, like `grep` and `sed`, and is licensed MIT OR
+Apache-2.0 — the same pair as the uutils crates above and the Oils tests below,
+whose license texts this file already reproduces. The crate has two
+dependencies, `regex` and `thiserror`, both already in the tree under the same
+permissive terms. Upstream: <https://github.com/quinnjr/rawk>.
+
+[awk-rs]: https://github.com/quinnjr/rawk
+[uutils-awk]: https://github.com/uutils/awk
+
 ## bash-completion — GPL-2.0-or-later
 
 The [bash-completion][bash-completion] library (2.18.0, as pinned by

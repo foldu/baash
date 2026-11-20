@@ -81,12 +81,14 @@ pub const ISOLATED_FLAG: &str = "--__embedded";
 /// which is what running the same tool from `PATH` costs — and on Windows there
 /// is nothing on `PATH` to run.
 const ISOLATED: &[(&str, Body)] = &[
+    ("awk", awk::main),
     ("find", body_find),
     ("grep", body_grep),
     ("sed", body_sed),
     ("xargs", body_xargs),
 ];
 
+mod awk;
 mod clear;
 
 /// The utilities written here rather than linked from uutils.
@@ -218,8 +220,23 @@ fn serve(name: &'static str, entry: Entry, jobs: Receiver<Job>) {
 ///
 /// Returns `None` when the name is not embedded, so the caller keeps whatever
 /// diagnostic it would have produced. Blocks until the utility finishes, like a
-/// built-in.
+/// built-in. The utility inherits this process's environment; the shell calls
+/// [`run_with`] instead so an isolated utility gets the shell's exported
+/// variables rather than the ones `baash` was started with.
 pub fn run(argv: &[Vec<u8>]) -> Option<i32> {
+    run_with(argv, None)
+}
+
+/// [`run`], with the environment an isolated utility's child receives.
+///
+/// `environment` is the shell's exported variables as `KEY=VALUE` bytes — what
+/// an external command is given — and `None` inherits this process's
+/// environment (a test harness, the child itself). It reaches a *child* only:
+/// the in-process bodies read `std::env`, which no shell command changes, so a
+/// utility that runs on this thread sees the environment `baash` started with.
+/// That is why `awk` (which reads `ENVIRON`) is isolated, and it is recorded in
+/// `docs/portability.md` §6.
+pub fn run_with(argv: &[Vec<u8>], environment: Option<&[Vec<u8>]>) -> Option<i32> {
     let (typed, _) = argv.split_first()?;
     let typed = std::str::from_utf8(typed).ok()?;
     let args: Vec<OsString> = argv
@@ -227,7 +244,7 @@ pub fn run(argv: &[Vec<u8>]) -> Option<i32> {
         .map(|arg| baash_sys::os::os_from_bytes(arg))
         .collect();
     if let Some((_, body)) = ISOLATED.iter().find(|(utility, _)| *utility == typed) {
-        return Some(isolated(argv, *body, typed));
+        return Some(isolated(argv, *body, typed, environment));
     }
     if let Some((_, main)) = NATIVE.iter().find(|(utility, _)| *utility == typed) {
         return Some(main(&args));
@@ -331,7 +348,7 @@ fn host_executable() -> Option<std::path::PathBuf> {
 /// where a process may set it), its own signal dispositions, its own exit. The
 /// descriptors are inherited, so the redirects the shell applied are the ones
 /// the utility writes to.
-fn isolated(argv: &[Vec<u8>], body: Body, name: &str) -> i32 {
+fn isolated(argv: &[Vec<u8>], body: Body, name: &str, environment: Option<&[Vec<u8>]>) -> i32 {
     // The body is the *child's* to call; keeping it in the table is what lets
     // the flag dispatch by name alone.
     let _ = body;
@@ -351,6 +368,24 @@ fn isolated(argv: &[Vec<u8>], body: Body, name: &str) -> i32 {
             .skip(1)
             .map(|arg| baash_sys::os::os_from_bytes(arg)),
     );
+    // The environment is the shell's exported variables, not this process's:
+    // `baash` keeps its `export`s in its own table and passes an explicit
+    // environment to every external command, so a child that inherited
+    // `std::env` would see the variables `baash` started with. `awk` reads
+    // `ENVIRON` (bash-completion's `make` helper exports `prefix` for it), and
+    // `LC_ALL=C grep`/`sed` are the same question.
+    if let Some(environment) = environment {
+        command.env_clear();
+        for entry in environment {
+            let Some(equals) = entry.iter().position(|byte| *byte == b'=') else {
+                continue;
+            };
+            command.env(
+                baash_sys::os::os_from_bytes(&entry[..equals]),
+                baash_sys::os::os_from_bytes(&entry[equals + 1..]),
+            );
+        }
+    }
     // `uucore` prints its own name from `argv[0]`, so give the child the
     // utility's name there. Windows has no such override; there a message says
     // `baash`, which is cosmetic and recorded in `docs/portability.md` §6.
@@ -396,25 +431,34 @@ pub fn run_isolated(argv: &[Vec<u8>]) -> Option<i32> {
         .iter()
         .find(|(utility, _)| *utility == name)
         .copied()?;
-    // Installed here because the uutils binaries do it in their `main`, not in
-    // `uumain`: without it an error message is its Fluent id
-    // (`clap-error-unexpected-argument`) instead of English.
-    let _ = uucore10::locale::setup_localization(name);
     Some(body(argv))
+}
+
+/// Install the message catalog a uutils body prints through.
+///
+/// The uutils binaries do this in their `main`, not in `uumain`: without it an
+/// error message is its Fluent id (`clap-error-unexpected-argument`) instead of
+/// English. `awk` has no catalog — awk-rs carries its own messages — which is
+/// why this belongs to each uutils body rather than to [`run_isolated`].
+fn install_catalog(name: &str) {
+    let _ = uucore10::locale::setup_localization(name);
 }
 
 /// `grep`, in the child the shell spawned for it.
 fn body_grep(argv: &[Vec<u8>]) -> i32 {
+    install_catalog("grep");
     uu_grep::uumain(argv.iter().map(|arg| baash_sys::os::os_from_bytes(arg)))
 }
 
 /// `sed`, in the child the shell spawned for it.
 fn body_sed(argv: &[Vec<u8>]) -> i32 {
+    install_catalog("sed");
     uused::sed::uumain(argv.iter().map(|arg| baash_sys::os::os_from_bytes(arg)))
 }
 
 /// `find`, in the child the shell spawned for it.
 fn body_find(argv: &[Vec<u8>]) -> i32 {
+    install_catalog("find");
     let Some(args) = utf8_arguments("find", argv) else {
         return 1;
     };
@@ -424,6 +468,7 @@ fn body_find(argv: &[Vec<u8>]) -> i32 {
 
 /// `xargs`, in the child the shell spawned for it.
 fn body_xargs(argv: &[Vec<u8>]) -> i32 {
+    install_catalog("xargs");
     let Some(args) = utf8_arguments("xargs", argv) else {
         return 1;
     };
@@ -628,11 +673,15 @@ mod tests {
 
     #[test]
     fn an_unknown_name_is_not_embedded() {
-        assert_eq!(run(&argv(&["awk", "x"])), None);
-        assert!(!contains(b"awk"));
+        // `tar` is on the "not available anywhere" list (docs/portability.md
+        // §6): the embedded set is chosen, not "whatever a crate has".
+        assert_eq!(run(&argv(&["tar", "x"])), None);
+        assert!(!contains(b"tar"));
         assert!(contains(b"cat"));
-        // `grep` is embedded, but in a child: a harness with no host to spawn
-        // gets a refusal rather than a wrong process (`is_isolated`).
+        // `awk`/`grep` are embedded, but in a child: a harness with no host to
+        // spawn gets a refusal rather than a wrong process (`is_isolated`).
+        assert!(contains(b"awk"));
+        assert!(is_isolated(b"awk"));
         assert!(contains(b"grep"));
         assert!(is_isolated(b"grep"));
         assert!(!is_isolated(b"cat"));

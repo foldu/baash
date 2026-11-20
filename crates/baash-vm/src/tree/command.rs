@@ -517,7 +517,9 @@ impl Interp {
                 );
             }
         };
-        let status = Status(baash_utils::run(argv).unwrap_or(Status::NOT_FOUND.0));
+        let environment = self.state.vars.envp();
+        let status =
+            Status(baash_utils::run_with(argv, Some(&environment)).unwrap_or(Status::NOT_FOUND.0));
         let _ = self.state.vars.finish_prefix_assignments(applied);
         self.restore_fds(saved);
         Some(Unwind::Status(status))
@@ -1100,7 +1102,11 @@ impl Interp {
                 BuiltinBody::Runtime(def)
                     if !def.is_implemented() && baash_utils::contains(def.name.as_bytes()) =>
                 {
-                    Status(baash_utils::run(argv).unwrap_or(Status::NOT_FOUND.0))
+                    let environment = self.state.vars.envp();
+                    Status(
+                        baash_utils::run_with(argv, Some(&environment))
+                            .unwrap_or(Status::NOT_FOUND.0),
+                    )
                 }
                 BuiltinBody::Runtime(def) => def.run(self, &slices),
             }

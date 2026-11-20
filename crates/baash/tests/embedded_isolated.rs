@@ -103,3 +103,92 @@ fn a_broken_pipe_does_not_kill_the_shell_after_an_embedded_utility() {
         "the shell must survive a reader that left, not die of SIGPIPE ({status:?})"
     );
 }
+
+/// `awk`, in the child the shell spawns for it.
+///
+/// It is here for one measured reason: bash-completion's scripts call `awk`
+/// through `_comp_awk` in 150 of their files, and a Windows `PATH` has none, so
+/// `make`, `python` and `curl` complete nothing without it
+/// (`docs/portability.md` §6 has the subset awk-rs implements).
+#[test]
+fn awk_runs_without_a_path() {
+    let output = run("printf 'a b\\nc d\\n' | awk '{print $2}'");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "b\nd\n");
+
+    let output = run("awk 'BEGIN { print 1 + 1 }'");
+    assert_eq!(stdout(&output), "2\n");
+
+    let output = run("printf 'x:y\\n' | awk -F: '{print $2}'");
+    assert_eq!(stdout(&output), "y\n");
+
+    // POSIX: the escapes in a `-v` value are processed like a string literal.
+    let output = run("awk -v 'x=a\\tb' 'BEGIN { print \"[\" x \"]\" }'");
+    assert_eq!(stdout(&output), "[a\tb]\n");
+
+    // `sub` on a field, which is what most of the completion programs do.
+    let output = run("printf 'ab\\n' | awk '{ sub(/b/, \"X\"); print }'");
+    assert_eq!(stdout(&output), "aX\n");
+
+    // The library calls it as `command awk` (`_comp_awk`), which has to reach
+    // the embedded utility: `command` bypasses functions and aliases, not the
+    // shell's own utilities.
+    let output = run("printf 'a b\\n' | command awk '{print $1}'");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "a\n");
+
+    // The same question for the other shim, `_comp_tail`.
+    let output = run("printf '1\\n2\\n' | command tail -n 1");
+    assert_eq!(stdout(&output), "2\n");
+}
+
+#[test]
+fn awk_reads_a_program_file() {
+    let path = std::env::temp_dir().join(format!("baash-awk-{}.awk", std::process::id()));
+    std::fs::write(&path, "BEGIN { print \"from file\" }\n").expect("write the program");
+    let script = format!("awk -f {} </dev/null", path.display());
+    let output = run(&script);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "from file\n");
+}
+
+/// `ENVIRON` is the shell's exported variables, which is why `awk` is isolated.
+///
+/// bash-completion's `make` helper reads `ENVIRON["prefix"]` and its caller
+/// exports it (`local -x prefix=…`), so an inherited `std::env` would leave
+/// every target out: the shell keeps its exports in its own table and only ever
+/// hands them to a child explicitly.
+#[test]
+fn awk_sees_the_shells_exported_variables() {
+    let output = run("export FOO=bar; awk 'BEGIN { print ENVIRON[\"FOO\"] }'");
+    assert_eq!(stdout(&output), "bar\n");
+
+    let output = run("f() { local -x prefix=al; awk 'BEGIN { print ENVIRON[\"prefix\"] }'; }; f");
+    assert_eq!(stdout(&output), "al\n");
+
+    let output = run("FOO=pre command awk 'BEGIN { print ENVIRON[\"FOO\"] }'");
+    assert_eq!(stdout(&output), "pre\n");
+}
+
+/// An assignment operand would have to run between files, which awk-rs cannot
+/// express (it runs one program over all inputs), so it is refused rather than
+/// silently moved before `BEGIN`.
+#[test]
+fn awk_refuses_assignment_operands() {
+    let output = run("awk '{print}' a=1 /dev/null");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("assignment operands"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = run("awk -f /nonexistent-baash-test.awk </dev/null");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("cannot open program file"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

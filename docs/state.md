@@ -152,7 +152,7 @@ as unverified until a guest runs it.
 | `baash-complete-data` | 927 | generated carapace tables: 916 command trees, 58k options and one-line descriptions, compiled in behind the `carapace` feature; no dependencies |
 | `baash-repl` | 3470 | line editor, key decoding, history navigation, prompt adapter, renderer, terminal abstraction |
 | `baash-picker` | 957 | the full-screen fuzzy picker: query, nucleo ranking, the alternate-screen frame; no terminal, no shell |
-| `baash-utils` | 244 | 41 embedded coreutils (uutils 0.8 subcrates), plus `clear` and the four that run in a child (`grep`, `sed`, `find`, `xargs`): the `builtin-utils` fallback used when `PATH` finds nothing; on by default for Windows, opt-in on Linux. The set and its measured cost are `portability.md` §6 |
+| `baash-utils` | 244 | 41 embedded coreutils (uutils 0.8 subcrates), plus `clear` and the five that run in a child (`awk`, `grep`, `sed`, `find`, `xargs`): the `builtin-utils` fallback used when `PATH` finds nothing; on by default for Windows, opt-in on Linux. The set and its measured cost are `portability.md` §6 |
 | `baash-highlight` | 386 | syntax highlighting (token → style), shared with the editor |
 | `baash-spec` | 3249 | the Oils-suite runner, comparator, ratchet |
 | `baash` | 1971 | the binary: argument parsing, startup files, REPL loop, history ownership swap |
@@ -747,9 +747,9 @@ Where the waves stand:
   interactive editor, and PATHEXT-based command resolution.
 
   The utility fallback has landed: `crates/baash-utils` embeds 41 coreutils,
-  `clear` and the four that have to own a process (`grep`, `sed`, `find`,
+  `clear` and the five that have to own a process (`awk`, `grep`, `sed`, `find`,
   `xargs`; §6.2 of `portability.md` explains the measurement that put them in a
-  child) —
+  child, and `awk` is awk-rs rather than uutils) —
   the file, text, date and checksum utilities a script reaches for, listed in
   `portability.md` §6 — plus `clear`, which is ncurses' and had to be written
   here, and the shell answers `printf`, `test`/`[`, `echo`, `pwd`, `true`,

@@ -306,7 +306,7 @@ What exists:
 | file work | `cat` `cp` `du` `ln` `ls` `mkdir` `mktemp` `mv` `readlink` `realpath` `rm` `rmdir` `split` `touch` `truncate` |
 | text | `base64` `cksum` `comm` `cut` `head` `md5sum` `nl` `od` `paste` `sha1sum` `sha256sum` `shuf` `sort` `tac` `tail` `tee` `tr` `uniq` `wc` |
 | process, time | `date` `expr` `nproc` `seq` `sleep` |
-| in a child (§6.2) | `find` `grep` `sed` `xargs` |
+| in a child (§6.2) | `awk` `find` `grep` `sed` `xargs` |
 
 The criterion for a name being in that table is **not** "uutils has it": it is
 that a script needs it on a machine with no POSIX userland, and that the
@@ -325,10 +325,13 @@ utility needs nothing Windows does not have. What is out, and why:
   `chroot`, `runcon`, `install` spawn, and spawning is the thing the embedded
   set exists to remove.
 * **Not coreutils, and added from their own projects:** `grep` (uutils/grep),
-  `sed` (uutils/sed), `find`/`xargs` (uutils/findutils) — all in a child, §6.2.
+  `sed` (uutils/sed), `find`/`xargs` (uutils/findutils) — all in a child, §6.2 —
+  and `awk` ([awk-rs], a POSIX awk with gawk extensions, also in a child).
 * **Not available anywhere.** `diff`/`cmp`/`diff3` (§6.2 has the API reasons),
-  `awk`, `less`, `which`, `tree`, `ps`/`top`, `tar`/`gzip`/`curl`/`ssh`. `clear`
+  `less`, `which`, `tree`, `ps`/`top`, `tar`/`gzip`/`curl`/`ssh`. `clear`
   is ncurses' and is written by hand here — §6.1.
+
+[awk-rs]: https://github.com/quinnjr/rawk
 
 ### 6.1 Names Windows already answers, which is its own hazard
 
@@ -371,10 +374,10 @@ Verified on Windows 11 (26300.9711, `win` guest, fat-LTO build):
 
 ### 6.2 Utilities that have to own a process
 
-`grep`, `sed`, `find` and `xargs` are not linked as bodies like the rest. They
-run in a **child of the shell** — the same executable with `--__embedded NAME`
-in front of the utility's name — because each of them does something a shell may
-not do to itself:
+`awk`, `grep`, `sed`, `find` and `xargs` are not linked as bodies like the
+rest. They run in a **child of the shell** — the same executable with
+`--__embedded NAME` in front of the utility's name — because each of them does
+something a shell may not do to itself:
 
 * **`process::exit`.** uutils' `sed` exits from inside `uumain` when it is
   handed no script at all. In-process, `baash -c sed` would end the *shell*.
@@ -389,10 +392,31 @@ not do to itself:
 * **`argv[0]` identity.** `uucore` derives the name it prints in messages from
   the *process* argv (`util_name()`), which in-process is `baash`. A child has
   its own `argv[0]` on Unix (`Command::arg0`), so its messages say `grep`.
+* **A body that is an interpreter.** `awk` is [awk-rs], and an awk program can
+  `exit 3`; awk-rs is also a young implementation (0.2.0), and a panic on an
+  input it has not seen would, in-process, take the session with it. A child
+  contains both. Its `ENVIRON` is another reason — see below.
 
 A child has none of those problems: it exits, it dies, it names itself, and the
 shell's signal state, session and status are untouched. `$?` is the child's
 status, including `128 + signal` when the utility was killed by one.
+
+**A child gets the shell's environment, not the launcher's.** `baash` keeps its
+exported variables in its own table (`Vars::envp`) and passes them explicitly to
+every external command; the process environment never changes after startup, so
+a child that inherited it would see the variables `baash` was *started* with.
+`baash_utils::run_with` therefore hands the child the same `KEY=VALUE` list an
+external command gets. This is what makes `awk`'s `ENVIRON` correct —
+bash-completion's `make` helper reads `ENVIRON["prefix"]`, and its caller
+exports it with `local -x prefix=…` — and it is why `LC_ALL=C grep`/`sed` now
+mean something in a child.
+
+The in-process bodies read the process environment, which no shell command
+changes: `export TZ=…; date` in one script, and `TZ=… date` around a utility,
+are not visible to them. It is a gap, not a decision of this wave: `date` and
+`sort` are in-process for the loop cost, and the variables a completion script
+actually needs (`PATH`, `IFS`) are read from the shell's table by the shell
+itself.
 
 The cost is one process per call. Measured on Linux, release build, 300 calls
 of each in a loop with `PATH=''`, against the `grep` this machine has:
@@ -402,16 +426,16 @@ of each in a loop with `PATH=''`, against the `grep` this machine has:
 | `grep` (embedded, child) | 0.66 ms |
 | `sed` (embedded, child) | 0.85 ms |
 | `find` (embedded, child) | 0.59 ms |
+| `awk` (embedded, child) | 0.63 ms |
 | `xargs` (embedded, child) | 0.64 ms |
 | `grep` from `PATH` | 0.89 ms |
 
 So the fallback is not slower than the tool it stands in for, and on Windows
 there is no tool to stand in for. On Windows the number is `CreateProcess`: the
 startup table in §8 is the same one that applies here (~12 ms), which is why the
-utilities a *script loops over* stay in-process and only these four pay it.
+utilities a *script loops over* stay in-process and only these five pay it.
 
-Two more things about these four, both inherent to the crates rather than to the
-isolation:
+Three more things, inherent to the crates rather than to the isolation:
 
 * `find` and `xargs` take `&str`, so a non-UTF-8 **argument** is refused with
   the same message their own binaries print. Only the command line is text —
@@ -421,6 +445,19 @@ isolation:
   which is their job and not the shell's loop: a command they run is resolved by
   `CreateProcess`/`execvp` and not by the shell's `PATH` hash, `PATHEXT` order or
   functions.
+* `awk` is awk-rs, not gawk, and the differences were measured against gawk
+  5.4.1 on the programs bash-completion ships. `next` inside an `if` is a
+  **no-op** — only a top-level `next` skips — so `make`'s helper
+  (`if (/\.PHONY:/) next;`) prints the special targets with the real ones:
+  `all bar foo .PHONY` where gawk prints `all bar foo`. One POSIX bracket
+  expression in the tree, `chronyc.bash`'s `/^foo[ \t][^ []]/`, is refused by the
+  Rust `regex` crate awk-rs matches with, so that branch reports a regex error
+  instead of completing; the rest of the sampled programs (`{print $1}`, `sub`,
+  `gsub`, `split`, `printf`/`sprintf`, `-F` including a regex, ranges,
+  `getline`, `print > file`, `ENVIRON`) matched gawk. An **assignment operand**
+  (`awk '{…}' a=1 file`) is refused by the driver with a diagnostic rather than
+  moved before `BEGIN`: awk-rs runs one program over all inputs, so there is no
+  point at which POSIX would apply it.
 
 ### What is not here: `diff`, `cmp`, `diff3`
 
@@ -841,19 +878,23 @@ The lesson worth keeping: a completion menu that is silently empty says nothing
 about *which* layer failed, and the layer that failed here was `read` — the
 utility the scripts call, not the utilities they call it with.
 
-**What those three do not fix: `awk` and `perl`.** Windows has neither, and
-bash-completion leans on `awk` far more than the seven scripts that name it
-directly suggest: **150 of the 1,097 scripts** call it through `_comp_awk` (138
-in `completions-core`, 12 in `completions-fallback`; counted over non-comment
-lines). For most it is one option's branch — `curl`'s `--help` categories,
-`configure`'s hints — but for a few it is the completion: `make`, `gmake` and
-`gnumake` pipe `make -npq` into `helpers-core/make-extract-targets.awk`, and
-`python`/`python3` parse `-h` with it for `--jit`-style options. `perl` is three
-scripts (`perl`, `perldoc`, `cpan2dist`) plus the fallback in
+**What those three did not fix: `awk` (now embedded) and `perl` (still not).**
+Windows has neither, and bash-completion leans on `awk` far more than the seven
+scripts that name it directly suggest: **150 of the 1,097 scripts** call it
+through `_comp_awk` (138 in `completions-core`, 12 in
+`completions-fallback`; counted over non-comment lines). For most it is one
+option's branch — `curl`'s `--help` categories, `configure`'s hints — but for a
+few it is the completion: `make`/`gmake`/`gnumake` pipe `make -npq` into
+`helpers-core/make-extract-targets.awk`, and `python`/`python3` parse `-h` with
+it. So `awk` is embedded now — [awk-rs], in a child, §6.2 — and `command awk`
+reaches it (`_comp_awk` is `command awk`, and `command` had to learn to run the
+shell's own utilities). Two measured differences from gawk remain, both in §6.2:
+`next` inside an `if` is a no-op (`make` lists `.PHONY` with its targets), and
+`chronyc.bash`'s `[^ []]` pattern is refused by the regex crate. `perl` is still
+missing: three scripts (`perl`, `perldoc`, `cpan2dist`) plus the fallback in
 `_comp_compgen_uids`/`_comp_compgen_gids` that only runs when `getent` is
 missing — as on Windows — and then needs `/etc/passwd`, which Windows also has
-not. With `awk` absent, `_comp_awk` prints `awk: command not found` above the
-prompt and completes nothing; that is §6's table, not this bug.
+not.
 
 ### Command resolution on Windows (2026-11-06)
 
