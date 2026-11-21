@@ -385,6 +385,17 @@ option_table! {
     /// `shopt -s autocd`: a command name that is a directory changes to it.
     Autocd => autocd, "autocd", None, [Shopt], true, false, false, &[];
 
+    /// `shopt -s autopushd`: every `cd` leaves the directory it left on the
+    /// stack, exactly as `pushd` would (a baash extension; zsh spells the
+    /// same idea `AUTO_PUSHD`).
+    ///
+    /// Off by default, like zsh's, because POSIX `cd` has no such effect and a
+    /// script that `cd`s in a loop would grow the stack on every iteration
+    /// with no `popd` to drain it. `autopushd` is the name `$BASHOPTS` shows
+    /// while it is on; bash has no such option, the same caveat
+    /// `strict_nameref` already carries.
+    Autopushd => autopushd, "autopushd", None, [Shopt], true, false, false, &[];
+
     /// `shopt -s cdable_vars`: `cd` to a variable's value when it is not a
     /// directory.
     CdableVars => cdable_vars, "cdable_vars", None, [Shopt], true, false, false, &[];

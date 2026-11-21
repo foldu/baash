@@ -4,7 +4,9 @@
 //! subshell clones the state and must not leak a `pushd` back into the parent.
 //! Element 0 is always the current directory — the same order bash uses in
 //! `DIRSTACK` and prints first — so `cd` only has to rewrite element 0 and
-//! everything else stays where `pushd` put it.
+//! everything else stays where `pushd` put it; with `shopt -s autopushd` it
+//! also inserts the directory it left at element 1, the shape `pushd`
+//! produces (`push_previous`).
 //!
 //! Paths are kept lexically normalised (`//`, `.` and `..` resolved) rather
 //! than canonicalised: `pushd ..` must print `/` for `cd /tmp`, and a
@@ -97,7 +99,12 @@ fn cwd_bytes(target: &[u8]) -> Vec<u8> {
 }
 
 /// The current directory as the shell spells it.
-fn current(interp: &Interp) -> Vec<u8> {
+///
+/// `cd` reads it before entering the new directory, so that `shopt -s
+/// autopushd` can keep the name the user was in rather than `OLDPWD` — which
+/// `enter` is about to overwrite, and which does not exist at all when `PWD`
+/// was unset.
+pub(super) fn current(interp: &Interp) -> Vec<u8> {
     interp
         .state
         .vars
@@ -129,6 +136,22 @@ pub(super) fn sync(interp: &mut Interp, current: &[u8]) {
     if let Some(first) = interp.state.dirs.first_mut() {
         *first = current.to_vec();
     }
+}
+
+/// Keep the directory a `cd` left behind, for `shopt -s autopushd`.
+///
+/// Element 0 already holds the new directory (`sync` ran), so the old one goes
+/// in at 1 — the shape `pushd` leaves, which is what makes `popd` walk back
+/// through every `cd`. A stack the shell never allocated is materialised
+/// first: it is lazily empty (`ShellState::dirs`), and an entry at 0 is only
+/// ever the current directory, so the old one cannot simply be pushed to an
+/// empty `Vec`.
+pub(super) fn push_previous(interp: &mut Interp, previous: &[u8]) {
+    if interp.state.dirs.is_empty() {
+        let here = current(interp);
+        interp.state.dirs.push(here);
+    }
+    interp.state.dirs.insert(1, previous.to_vec());
 }
 
 /// `pwd`: the logical directory (`-L`, the default) or the kernel's answer

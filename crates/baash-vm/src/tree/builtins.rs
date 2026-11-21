@@ -637,6 +637,8 @@ fn bi_cd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
             }
         }
     }
+    // Read before `enter` moves: this is the directory `autopushd` keeps.
+    let previous = super::dirs::current(interp);
     let current = match super::dirs::enter(interp, &target, physical) {
         Ok(current) => current,
         Err(error) => {
@@ -650,6 +652,15 @@ fn bi_cd(interp: &mut Interp, argv: &[Vec<u8>]) -> Status {
     // `cd` replaces the current directory on the stack; the pushed entries
     // stay where they are.
     super::dirs::sync(interp, &current);
+    // `shopt -s autopushd`: keep the directory this `cd` left, so `popd` walks
+    // back through the `cd`s the way it walks back through `pushd`s. A `cd`
+    // that lands where it started (`cd .`, `cd "$PWD"`) records nothing: a
+    // duplicate entry's `popd` would not move, and a `PROMPT_COMMAND` that
+    // normalises the directory would fill the stack twice a prompt otherwise.
+    // `pushd` itself is untouched — it already leaves the old directory at 1.
+    if interp.state.opts.autopushd && previous != current {
+        super::dirs::push_previous(interp, &previous);
+    }
     if print {
         let mut out = current;
         out.push(b'\n');

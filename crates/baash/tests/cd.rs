@@ -177,6 +177,115 @@ fn pushd_and_popd_move_the_stack_not_just_the_directory() {
 }
 
 #[test]
+fn autopushd_is_off_until_shopt_turns_it_on() {
+    let dir = TestDir::new("autopushd-off");
+    dir.child("a");
+    dir.child("b");
+    let root = dir.path().display().to_string();
+    // Without the option `cd` only rewrites element 0, so `dirs` is `$PWD`.
+    let script = "cd a && cd ../b && dirs -l -p";
+    assert_eq!(out_in(dir.path(), script), format!("{root}/b\n"));
+    // ... and there is nothing for `popd` to pop.
+    let output = run_in(dir.path(), "cd a; popd");
+    assert_eq!(code(&output), 1);
+    assert!(
+        stderr(&output).contains("directory stack empty"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn autopushd_keeps_the_directory_each_cd_left() {
+    let dir = TestDir::new("autopushd-on");
+    dir.child("a");
+    dir.child("b");
+    let root = dir.path().display().to_string();
+    // Every `cd` leaves the directory it left at element 1, so the stack is
+    // the walk itself and `popd` retraces it one step at a time.
+    let script = "shopt -s autopushd\n\
+                  cd a\n\
+                  cd ../b\n\
+                  dirs -l -p\n\
+                  popd > /dev/null\n\
+                  pwd\n\
+                  popd > /dev/null\n\
+                  pwd";
+    assert_eq!(
+        out_in(dir.path(), script),
+        format!("{root}/b\n{root}/a\n{root}\n{root}/a\n{root}\n")
+    );
+}
+
+#[test]
+fn autopushd_records_what_cd_dash_left() {
+    let dir = TestDir::new("autopushd-dash");
+    dir.child("a");
+    let root = dir.path().display().to_string();
+    // `cd -` prints where it went, and the directory it left is pushed like
+    // any other `cd`'s: the stack reads `root, a, root` — the way back is
+    // `popd` to `a` and then to `root` again.
+    let script = "shopt -s autopushd; cd a; cd -; dirs -l -p";
+    assert_eq!(
+        out_in(dir.path(), script),
+        format!("{root}\n{root}\n{root}/a\n{root}\n")
+    );
+}
+
+#[test]
+fn autopushd_records_nothing_for_a_cd_that_stays_put() {
+    let dir = TestDir::new("autopushd-still");
+    let root = dir.path().display().to_string();
+    let script = "shopt -s autopushd; cd .; cd \"$PWD\"; dirs -l -p";
+    assert_eq!(out_in(dir.path(), script), format!("{root}\n"));
+    // The stack is still the single current directory, so `popd` refuses.
+    let output = run_in(dir.path(), "shopt -s autopushd; cd .; popd");
+    assert_eq!(code(&output), 1);
+    assert!(
+        stderr(&output).contains("directory stack empty"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn autopushd_keeps_a_failed_cd_out_of_the_stack() {
+    let dir = TestDir::new("autopushd-fail");
+    let root = dir.path().display().to_string();
+    let script = "shopt -s autopushd; cd missing; echo st=$?; dirs -l -p";
+    let output = run_in(dir.path(), script);
+    assert_eq!(code(&output), 0);
+    assert_eq!(stdout(&output), format!("st=1\n{root}\n"));
+    assert!(
+        stderr(&output).contains("No such file or directory"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn autopushd_leaves_pushd_alone() {
+    let dir = TestDir::new("autopushd-pushd");
+    dir.child("a");
+    let root = dir.path().display().to_string();
+    // `pushd` already leaves the old directory at element 1; pushing it a
+    // second time would put `root` on the stack twice.
+    let script = "shopt -s autopushd; pushd a > /dev/null; dirs -l -p";
+    assert_eq!(out_in(dir.path(), script), format!("{root}/a\n{root}\n"));
+}
+
+#[test]
+fn autopushd_does_not_leak_out_of_a_subshell() {
+    let dir = TestDir::new("autopushd-scope");
+    dir.child("a");
+    let root = dir.path().display().to_string();
+    // The stack is part of `ShellState`, which a `( … )` clones; the push of
+    // the inner `cd` dies with the scope like every other shell write.
+    let script = "shopt -s autopushd\n( cd a )\ndirs -l -p";
+    assert_eq!(out_in(dir.path(), script), format!("{root}\n"));
+}
+
+#[test]
 fn cd_with_no_operand_goes_to_home() {
     let dir = TestDir::new("home");
     dir.child("sub");

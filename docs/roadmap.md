@@ -184,6 +184,8 @@ entry names the suite file that measures it.
 - [x] `pushd` / `popd` / `dirs` — `builtin-dirs` (16), now 18/18. The stack
       lives in `ShellState` so a subshell cannot leak it; `cd` rewrites element
       0, and paths stay lexical so a symlink keeps the name typed.
+      `shopt -s autopushd` (a baash extension, zsh's `AUTO_PUSHD`) also keeps
+      the directory each `cd` leaves, so `popd` walks back through the `cd`s.
 - [~] Special variables — `vars-special` 20/42 -> 35/42. `PATH`, `IFS`,
       `PS4`, `SECONDS`, `_`, `RANDOM`, `UID`/`EUID`, `PPID`, `OSTYPE` and
       `HOSTNAME`; `HISTFILE` stays a deliberate divergence.

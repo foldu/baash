@@ -177,10 +177,12 @@ fn option_tables_are_separate_but_share_members() {
     let shopt: Vec<&str> = opts.names(OptionKind::Shopt).collect();
 
     assert_eq!(set_o.len(), 27);
-    // 45 bash `shopt` options. `histappend` is in the table and has no effect:
-    // the history is a database that always appends, and a distribution's
-    // `.bashrc` sets the option (docs/contracts.md, "Shell options").
-    assert_eq!(shopt.len(), 45);
+    // 45 bash `shopt` options plus `autopushd`. `histappend` is in the table
+    // and has no effect: the history is a database that always appends, and a
+    // distribution's `.bashrc` sets the option (docs/contracts.md, "Shell
+    // options"). `autopushd` is a baash extension (zsh's `AUTO_PUSHD`) and is
+    // the same kind of exception `strict_nameref` below already is.
+    assert_eq!(shopt.len(), 46);
     assert!(set_o.contains(&"errexit"));
     assert!(set_o.contains(&"pipefail"));
     assert!(!set_o.contains(&"extglob"));

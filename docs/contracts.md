@@ -302,7 +302,7 @@ quoting rules itself.
 `baash-lang`/the VM *before* `assign`; the store does not parse numbers.
 
 **Construct `Opts` from the presets** (`Opts::POSIX`, `Opts::BASH`, `Default`).
-It carries 73 flags now; an exhaustive struct literal outside this crate will
+It carries 72 flags now; an exhaustive struct literal outside this crate will
 break on the next flag.
 
 **`Opts::set_flag` is the only write path.** `SHELLOPTS`, `BASHOPTS` and `$-` are
@@ -1329,6 +1329,28 @@ means whoever implements one of those in `baash-runtime` must delete the
 executor's body in the same change. `trap`, by contrast, *is* implemented in
 `baash-runtime`: its work is table mutation, and the execution half stays here
 (see below).
+
+**The directory stack is `ShellState::dirs`, and element 0 is the current
+directory** — bash's `DIRSTACK` order, which is why `dirs` and `pushd` print it
+first. `cd` rewrites element 0 (`sync`) and leaves the pushed entries alone;
+`pushd` inserts at 0, `popd` removes. Paths stay lexically normalised, never
+canonicalised, so a symlinked directory keeps the name the user typed. The
+stack is cloned with the rest of the state, so a `( … )` cannot leak a
+`pushd` or a `cd` back into its parent.
+
+**`shopt -s autopushd` makes every `cd` leave the directory it left behind.**
+After a successful `cd`, the old directory goes in at element 1 — the shape
+`pushd` leaves — so `popd` walks back through the `cd`s exactly as it walks
+back through `pushd`s. `cd` reads the old name *before* `enter` moves, rather
+than reading `OLDPWD` afterwards, because `enter` is about to overwrite it and
+because `PWD` need not have existed. A `cd` that lands where it started
+(`cd .`, `cd "$PWD"`) records nothing: a duplicate entry's `popd` would not
+move, and a `PROMPT_COMMAND` that normalises the directory would otherwise
+grow the stack twice a prompt. `pushd` is untouched (it already leaves the old
+directory at 1), the option is off by default (like zsh's `AUTO_PUSHD`: POSIX
+`cd` has no such effect, and a script that `cd`s in a loop has no `popd` to
+drain it), and `autopushd` is a baash extension, absent from bash — when it is
+on, `$BASHOPTS` names it, the same caveat `strict_nameref` carries.
 
 **Trap execution is a command-boundary poll.** Caught signals are blocked in the
 shell thread and drained from a `signalfd` at the start of each simple command,

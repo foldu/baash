@@ -127,9 +127,10 @@ pub struct ShellState {
     /// The directory stack `pushd` maintains: element 0 is the current
     /// directory, matching bash's `DIRSTACK` order.
     ///
-    /// Empty until the first `pushd` (or `dirs -c`), because `dirs` with no
-    /// stack is just `PWD` and a shell that never uses `pushd` should not pay
-    /// for a copy. `cd` rewrites element 0 when there is one.
+    /// Empty until the first `pushd` (or `dirs -c`, or a `cd` under
+    /// `shopt -s autopushd`), because `dirs` with no stack is just `PWD` and a
+    /// shell that never uses the stack should not pay for a copy. `cd`
+    /// rewrites element 0 when there is one.
     pub dirs: Vec<Vec<u8>>,
     /// How many lines of input the interactive loop has handed to the
     /// interpreter.
