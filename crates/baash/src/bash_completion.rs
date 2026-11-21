@@ -92,7 +92,19 @@ pub fn install(shell: &mut Interp) -> Option<Vec<u8>> {
 /// Registered with `baash_utils::set_file_source`; `None` means "not a mounted
 /// file, use the file system" (and is the only answer in a build without the
 /// tree, where a distribution's library lives on disk).
-#[cfg(any(windows, feature = "embedded-bash-completion"))]
+///
+/// The reader exists wherever `baash_utils` does, because that is who calls
+/// it: the `builtin-utils` feature, or Windows, whose target dependencies make
+/// the utilities unconditional (`crates/baash/Cargo.toml`). The tree is a
+/// separate question: a Linux build with `builtin-utils` but no
+/// `embedded-bash-completion` has utilities and no mount, and the stub below
+/// answers `None`. A build with neither has nothing to call it, and compiling
+/// this pair there is a dead-code warning in the gate's `cargo build`, so both
+/// are gated on a caller.
+#[cfg(any(
+    windows,
+    all(feature = "builtin-utils", feature = "embedded-bash-completion")
+))]
 pub(crate) fn mounted_file(path: &[u8]) -> Option<Vec<u8>> {
     let path = normalize(path)?;
     let relative = path.strip_prefix(MOUNT)?.strip_prefix(b"/")?;
@@ -100,12 +112,19 @@ pub(crate) fn mounted_file(path: &[u8]) -> Option<Vec<u8>> {
     Library::get(name).map(|file| file.data.into_owned())
 }
 
-#[cfg(not(any(windows, feature = "embedded-bash-completion")))]
+#[cfg(all(
+    feature = "builtin-utils",
+    not(any(windows, feature = "embedded-bash-completion"))
+))]
 pub(crate) fn mounted_file(_path: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
 /// Resolve `.` and `..` in a path, or `None` if it climbs above the root.
+#[cfg(any(
+    windows,
+    all(feature = "builtin-utils", feature = "embedded-bash-completion")
+))]
 fn normalize(path: &[u8]) -> Option<Vec<u8>> {
     let mut parts: Vec<&[u8]> = Vec::new();
     for part in path.split(|byte| *byte == b'/') {
