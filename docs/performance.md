@@ -1265,6 +1265,16 @@ a terminal): they ask once per `INTERRUPT_SLICE` (20 ms) only while the command
 is actually waiting, which is 50 wakeups a second for a command that was
 blocked anyway.
 
+One decision in the same change *does* cost something, which is why it is
+interactive-only: a stream filter (`cat`, `wc`, `sort`, …) can only be stopped
+by the key if it owns a process, so an interactive shell spawns one instead of
+running it on a worker. Measured per call on this host: ~23 µs in process
+against ~0.5 ms as a child (`posix_spawn`), and 2–5 ms on Windows
+(`CreateProcess`). A script keeps the worker. The line is drawn at
+`is_interactive` rather than at a descriptor or operand heuristic: a heuristic
+that guesses "this read can block" wrong hangs, while the interactive split is
+exact, and the extra spawn is paid only while a person is at the keyboard.
+
 ## The test suite: 37 s to 5 s
 
 `cargo test` has to hold `RUST_TEST_THREADS=1` (`.cargo/config.toml`): `$( … )`

@@ -1451,6 +1451,25 @@ trap runs at the next boundary, and the line resumes). Everything the probe
 reads that is not the untrapped `INT` is put back in the pending queue, so
 asking is invisible to the trap table.
 
+**An interactive shell runs a stream filter as a child; a script runs it in
+process.** `baash_utils::STREAM_FILTERS` — the embedded utilities whose work is
+reading stdin or a file operand to end-of-file (`cat`, `tee`, `wc`, `sort`,
+`cut`, `tr`, `head`, `tail`, the hashes) — cannot be stopped in process: `read`
+is a syscall nothing in the process can end, and poking the worker does not work
+(a signal's `EINTR` is retried by `uutils`; Windows' `CancelSynchronousIo` does
+not complete a console read — `docs/portability.md`). So when the shell is
+interactive it runs one through the ordinary *external* path, as
+`baash --__embedded <name> <args…>`: the child dies of the key, the pipeline
+descriptors and the close-before-wait order are the external path's, and
+`Signaled(SIGINT)` sets the same latch a foreground command does. A script keeps
+the in-process worker — its `Ctrl-C` ends the shell — and pays no spawn per
+filter. Two invariants make the child path correct and are easy to lose: the
+spawn is `baash_sys::spawn` with `sigmask = empty` (an interactive shell blocks
+`SIGINT`, and a child that inherits the mask ignores the key it exists to die
+of), and the child receives the *whole* argv, `argv[0]` included (a uutils entry
+point has `main`'s shape), or `wc -l` silently becomes `wc` and `cat file`
+becomes `cat` on the console.
+
 **A `-F` reply replaces the `COMP_WORDS` element, not the parser's word.**
 bash splices `COMPREPLY` over the word delimited by `COMP_WORDBREAKS`, and
 `:` is one of them, so `rsync host:src/<TAB>` replaces `src/` and keeps

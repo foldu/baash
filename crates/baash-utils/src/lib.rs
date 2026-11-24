@@ -39,6 +39,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread;
 
+use baash_sys::{SignalSet, SpawnPlan, WaitOutcome, spawn};
+
 /// A uutils entry point: the arguments, and the status to exit with.
 ///
 /// By value, because that is what `uumain` takes; [`Native`] borrows instead.
@@ -204,6 +206,64 @@ pub enum Waited {
 /// one whose whole effect is waiting writes nothing, so the shell can stop
 /// waiting for it exactly where bash's `SIGINT` stops its `sleep` child.
 const INTERRUPTIBLE: &[&str] = &["sleep"];
+
+/// Utilities whose work is a stream: they read stdin or a file operand until
+/// end-of-file, so an interrupt has to be able to stop a read that may never
+/// return.
+///
+/// In-process, nothing can stop that read: the shell's polled latch can only
+/// reach a wait the shell itself performs, and interrupting the thread's syscall
+/// does not work — a signal makes the call return `EINTR`, which `uutils` retries
+/// on purpose, and Windows' `CancelSynchronousIo` reports success on a console
+/// read that never completes (`docs/portability.md` records both findings). A
+/// *child* dies of the same key, which is why an interactive shell runs these
+/// as one, exactly as it already runs `grep`/`sed`/`awk`/`find`/`xargs`.
+///
+/// A script keeps them in process: its `Ctrl-C` is the terminal's and ends the
+/// shell anyway, and a spawn per `cat` would be paid by every loop over files
+/// for a key nobody is going to press (`wc -l *` over a thousand files is
+/// 23 µs each in process and 0.5 ms each as a child on Linux, 2–5 ms on
+/// Windows).
+pub const STREAM_FILTERS: &[&str] = &[
+    "base64",
+    "cat",
+    "cksum",
+    "comm",
+    "cut",
+    "head",
+    "md5sum",
+    "nl",
+    "od",
+    "paste",
+    "sha1sum",
+    "sha256sum",
+    "sort",
+    "split",
+    "tac",
+    "tail",
+    "tee",
+    "tr",
+    "uniq",
+    "wc",
+];
+
+/// Whether `name` belongs to [`STREAM_FILTERS`].
+///
+/// The caller decides *when* that matters: only an interactive shell needs the
+/// child, because only there does a key have to stop the read.
+pub fn runs_as_child(name: &[u8]) -> bool {
+    std::str::from_utf8(name).is_ok_and(|name| STREAM_FILTERS.contains(&name))
+}
+
+/// What an embedded utility's child did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ran {
+    /// It exited with this status.
+    Status(i32),
+    /// `Ctrl-C` killed it. Not a status the utility chose: the shell treats it
+    /// as the abort the key stands for, like any other foreground child.
+    Interrupted,
+}
 
 /// The worker threads, one per utility, created on first use.
 ///
@@ -430,7 +490,11 @@ pub fn set_host_executable(path: std::path::PathBuf) {
 }
 
 /// The registered executable, if there is one.
-fn host_executable() -> Option<std::path::PathBuf> {
+///
+/// Public because the *VM* runs an interactive stream filter through its own
+/// external-command path (the pipeline's descriptors and the wait are the
+/// shell's business); the child is this executable with [`ISOLATED_FLAG`].
+pub fn host_executable() -> Option<std::path::PathBuf> {
     HOST.get().cloned()
 }
 
@@ -445,6 +509,21 @@ fn isolated(argv: &[Vec<u8>], body: Body, name: &str, environment: Option<&[Vec<
     // The body is the *child's* to call; keeping it in the table is what lets
     // the flag dispatch by name alone.
     let _ = body;
+    match spawn_embedded(name, argv, environment) {
+        Ran::Status(status) => status,
+        // A body killed by the key reports 130, like any external command.
+        Ran::Interrupted => 128 + 2,
+    }
+}
+
+/// Spawn `baash --__embedded <name> <args>` and report what it did.
+///
+/// The spawn goes through [`baash_sys::spawn`] rather than `std::process`, for
+/// one reason: an interactive shell *blocks* `SIGINT`, a blocked mask is
+/// inherited across a spawn, and a child that inherited it would ignore the very
+/// key this child exists to die of. `SpawnPlan.sigmask` is the attribute that
+/// clears it, and `Command` has no equivalent.
+fn spawn_embedded(name: &str, argv: &[Vec<u8>], environment: Option<&[Vec<u8>]>) -> Ran {
     let Some(exe) = host_executable() else {
         // Refusing beats spawning something arbitrary: the host has to be able
         // to run `--__embedded` for this to mean anything.
@@ -452,65 +531,74 @@ fn isolated(argv: &[Vec<u8>], body: Body, name: &str, environment: Option<&[Vec<
             "baash: {name}: no host executable registered \
              (baash_utils::set_host_executable); the isolated utilities need one"
         );
-        return 127;
+        return Ran::Status(127);
     };
-    let mut command = std::process::Command::new(exe);
-    command.arg(ISOLATED_FLAG).arg(name);
-    command.args(
-        argv.iter()
-            .skip(1)
-            .map(|arg| baash_sys::os::os_from_bytes(arg)),
-    );
+    // `uucore` prints its own name from `argv[0]`, so the child gets the
+    // utility's name there (`posix_spawn` takes the program path and `argv[0]`
+    // separately). Windows prints the executable's name, which is cosmetic and
+    // recorded in `docs/portability.md` §6.
+    let mut child_argv: Vec<Vec<u8>> = vec![
+        name.as_bytes().to_vec(),
+        ISOLATED_FLAG.as_bytes().to_vec(),
+        name.as_bytes().to_vec(),
+    ];
+    child_argv.extend(argv.iter().skip(1).cloned());
     // The environment is the shell's exported variables, not this process's:
     // `baash` keeps its `export`s in its own table and passes an explicit
     // environment to every external command, so a child that inherited
     // `std::env` would see the variables `baash` started with. `awk` reads
     // `ENVIRON` (bash-completion's `make` helper exports `prefix` for it), and
-    // `LC_ALL=C grep`/`sed` are the same question.
-    if let Some(environment) = environment {
-        command.env_clear();
-        for entry in environment {
-            let Some(equals) = entry.iter().position(|byte| *byte == b'=') else {
-                continue;
-            };
-            command.env(
-                baash_sys::os::os_from_bytes(&entry[..equals]),
-                baash_sys::os::os_from_bytes(&entry[equals + 1..]),
-            );
+    // `LC_ALL=C grep`/`sed` are the same question. A caller with no environment
+    // to pass is a host process (a test), which gets its own.
+    let inherited: Vec<Vec<u8>>;
+    let envp: &[Vec<u8>] = match environment {
+        Some(environment) => environment,
+        None => {
+            inherited = std::env::vars_os()
+                .map(|(key, value)| {
+                    let mut entry = baash_sys::os::bytes_from_os(&key);
+                    entry.push(b'=');
+                    entry.extend_from_slice(&baash_sys::os::bytes_from_os(&value));
+                    entry
+                })
+                .collect();
+            &inherited
         }
-    }
-    // `uucore` prints its own name from `argv[0]`, so give the child the
-    // utility's name there. Windows has no such override; there a message says
-    // `baash`, which is cosmetic and recorded in `docs/portability.md` §6.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.arg0(name);
-    }
-    match command.status() {
-        Ok(status) => status_code(status),
+    };
+    let program = baash_sys::os::bytes_from_os(&exe);
+    let mut plan = match SpawnPlan::new_with_env(
+        &program,
+        child_argv.iter().map(Vec::as_slice),
+        envp.iter().map(Vec::as_slice),
+    ) {
+        Ok(plan) => plan,
         Err(error) => {
             eprintln!("baash: {name}: {error}");
-            127
+            return Ran::Status(127);
+        }
+    };
+    // The child starts with nothing blocked, and with `SIGPIPE` back at its
+    // default: `uutils` expects to die of a broken pipe, and the shell keeps it
+    // ignored for its own writes. An *ignored* signal (`trap '' INT`) is left
+    // alone deliberately — `SIG_IGN` surviving `exec` is what that means for a
+    // child, on both platforms.
+    plan.sigmask = Some(SignalSet::empty());
+    plan.reset_signals = SignalSet::of(&[baash_sys::SIGPIPE]);
+    let child = match spawn(plan) {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!("baash: {name}: {error}");
+            return Ran::Status(127);
+        }
+    };
+    match child.wait() {
+        Ok(WaitOutcome::Signaled(signal)) if signal == baash_sys::SIGINT => Ran::Interrupted,
+        Ok(outcome) => Ran::Status(outcome.exit_status()),
+        Err(error) => {
+            eprintln!("baash: {name}: {error}");
+            Ran::Status(127)
         }
     }
-}
-
-/// A child's exit status as the shell's status.
-fn status_code(status: std::process::ExitStatus) -> i32 {
-    if let Some(code) = status.code() {
-        return code;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        // A utility killed by a signal reports 128 + the signal, which is what
-        // `$?` shows for an external command too.
-        if let Some(signal) = status.signal() {
-            return 128 + signal;
-        }
-    }
-    1
 }
 
 /// Run one isolated body in this process, for the child [`ISOLATED_FLAG`] spawns.
@@ -520,11 +608,25 @@ fn status_code(status: std::process::ExitStatus) -> i32 {
 pub fn run_isolated(argv: &[Vec<u8>]) -> Option<i32> {
     let (name, _) = argv.split_first()?;
     let name = std::str::from_utf8(name).ok()?;
-    let (_, body) = ISOLATED
-        .iter()
-        .find(|(utility, _)| *utility == name)
-        .copied()?;
-    Some(body(argv))
+    if let Some((_, body)) = ISOLATED.iter().find(|(utility, _)| *utility == name) {
+        return Some(body(argv));
+    }
+    // A [`STREAM_FILTERS`] member an interactive shell sent to a child of its
+    // own. In a process of its own the catalog is per process and `argv[0]` is
+    // the utility's, so the uutils entry runs directly — no worker thread, no
+    // shared interpreter, no thread to stop.
+    let (_, entry) = *UTILITIES.iter().find(|(utility, _)| *utility == name)?;
+    let _ = uucore::locale::setup_localization(name);
+    // The *whole* argv, `argv[0]` included: a uutils entry point takes the same
+    // shape a `main` does (`uumain` skips its first element itself), which is
+    // what the worker hands it and what the bodies above get. Dropping
+    // `argv[0]` here turned `wc -l` into `wc` and `cat file` into `cat` — the
+    // file became the program name, and `cat` then read the console for ever.
+    Some(entry(
+        argv.iter()
+            .map(|arg| baash_sys::os::os_from_bytes(arg))
+            .collect(),
+    ))
 }
 
 /// Install the message catalog a uutils body prints through.

@@ -453,6 +453,10 @@ impl Interp {
             None => {
                 #[cfg(feature = "builtin-utils")]
                 if let Some(unwind) =
+                    self.run_embedded_as_child(chunk, &command.redirects, &assign_views, &argv)
+                {
+                    unwind
+                } else if let Some(unwind) =
                     self.run_embedded(chunk, &command.redirects, &assign_views, &argv)
                 {
                     unwind
@@ -473,6 +477,47 @@ impl Interp {
             let _ = self.state.vars.assign_scalar(b"_", last);
         }
         unwind
+    }
+
+    /// Run an embedded *stream filter* as a child of this shell, when an
+    /// interactive user's key has to be able to stop it.
+    ///
+    /// Nothing in process can end a read that may never return: the shell's
+    /// polled latch only reaches waits the shell performs, and poking the
+    /// worker's syscall does not work (a signal's `EINTR` is retried by
+    /// `uutils` on purpose; Windows' `CancelSynchronousIo` does not complete a
+    /// console read — `docs/portability.md`). A child dies of the same key that
+    /// kills `ping`.
+    ///
+    /// It goes through [`Interp::run_external`] rather than a spawn-and-wait
+    /// here, so that everything an external command gets is right: the
+    /// pipeline's descriptors and the point where the shell closes its own
+    /// copies, the foreground wait that turns `Signaled(SIGINT)` into the abort
+    /// latch, `$!` for a backgrounded one, and the prefix assignments and
+    /// redirections. The child is this executable with [`ISOLATED_FLAG`].
+    ///
+    /// A *script* keeps the in-process worker: its `Ctrl-C` ends the shell
+    /// anyway, and a spawn per `cat` would be paid by every loop over files.
+    #[cfg(feature = "builtin-utils")]
+    fn run_embedded_as_child(
+        &mut self,
+        chunk: &Arc<ParsedChunk>,
+        redirects: &[Redirect],
+        assigns: &[(&[u8], &[u8])],
+        argv: &[Vec<u8>],
+    ) -> Option<Unwind> {
+        let name = argv.first()?;
+        if !self.is_interactive() || name.contains(&b'/') || !baash_utils::runs_as_child(name) {
+            return None;
+        }
+        let host = baash_utils::host_executable()?;
+        let host = baash_sys::os::bytes_from_os(&host);
+        let mut child_argv: Vec<Vec<u8>> = Vec::with_capacity(argv.len() + 2);
+        child_argv.push(name.clone());
+        child_argv.push(baash_utils::ISOLATED_FLAG.as_bytes().to_vec());
+        child_argv.push(name.clone());
+        child_argv.extend_from_slice(&argv[1..]);
+        Some(self.run_external(chunk, &host, redirects, assigns, &child_argv))
     }
 
     /// Run an embedded coreutils implementation because resolution found

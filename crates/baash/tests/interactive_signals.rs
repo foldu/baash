@@ -387,6 +387,87 @@ fn ctrl_c_ends_a_wait_whose_child_ignores_the_key() {
     session.wait_child();
 }
 
+/// `Ctrl-C` ends a stream filter that is parked in a read.
+///
+/// `cat` here is an embedded utility (`PATH` cannot resolve one). In process it
+/// would be a worker thread parked in `read(2)` on a fifo whose writer — the
+/// shell's own `exec 3<>` — never closes it, and nothing can end that read:
+/// the shell's polled latch only reaches waits the shell performs, and a signal
+/// to the thread is retried by `uutils` (see `STREAM_FILTERS`). An interactive
+/// shell therefore runs the filter as a child of its own, and the child dies of
+/// the key like any foreground command.
+#[cfg(all(unix, feature = "builtin-utils"))]
+#[test]
+fn ctrl_c_ends_a_stream_filter_parked_in_a_read() {
+    let directory = std::env::temp_dir().join(format!("baash-signals-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("a temporary directory");
+    let fifo = directory.join("f");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo is on the test host");
+    assert!(made.success(), "cannot create the fifo");
+
+    let mut session = Session::spawn();
+    session.prompt();
+
+    // Force the embedded table, and keep a writer on the fifo so the read
+    // blocks rather than seeing end-of-file.
+    session.line("PATH=/nonexistent");
+    session.line(&format!("exec 3<>{f}", f = fifo.display()));
+    session.line(&format!("cat <{f}", f = fifo.display()));
+    settle();
+    session.send(b"\x03");
+    session.expect(b"^C", Duration::from_secs(3));
+    session.expect(PROMPT, Duration::from_secs(3));
+    session.line("echo status=$?");
+    session.expect(b"status=130", Duration::from_secs(10));
+    session.prompt();
+
+    session.line("exit");
+    session.wait_child();
+    let _ = std::fs::remove_file(&fifo);
+    let _ = std::fs::remove_dir(&directory);
+}
+
+/// An interactive filter pipeline still finishes.
+///
+/// The isolation above makes each filter a child of the shell, and the shell
+/// must close its own copy of the pipe *before* waiting for the reader stage:
+/// a stage that spawns and waits inside its own evaluation would hold the write
+/// end open and the reader would wait for an end-of-file that never comes. This
+/// pins the shape that broke when the filters were first isolated.
+#[cfg(all(unix, feature = "builtin-utils"))]
+#[test]
+fn an_interactive_filter_pipeline_finishes() {
+    let file = std::env::temp_dir().join(format!("baash-pipe-{}.txt", std::process::id()));
+    // 42 lines, so the expected output is one number and it is not confused
+    // with the words/bytes `wc` prints when it never saw its `-l`.
+    let body: String = (1..=42).map(|line| format!("line {line}\n")).collect();
+    std::fs::write(&file, body).expect("write the fixture");
+
+    let mut session = Session::spawn();
+    session.prompt();
+    session.line("PATH=/nonexistent");
+    // The child must receive the whole argv: `wc -l` with its `-l` dropped
+    // prints three numbers, and `wc` with its file dropped reads the console.
+    session.line(&format!("wc -l {f}", f = file.display()));
+    // `wc` names the file it measured; the whole line is the assertion, so a
+    // dropped `-l` (three numbers) or a dropped operand (a hang) fails.
+    session.expect(
+        format!("42 {}\r\n", file.display()).as_bytes(),
+        Duration::from_secs(10),
+    );
+    session.prompt();
+    session.line(&format!("cat <{f} | wc -l", f = file.display()));
+    session.expect(b"42\r\n", Duration::from_secs(10));
+    session.prompt();
+
+    session.line("exit");
+    session.wait_child();
+    let _ = std::fs::remove_file(&file);
+}
+
 /// A trapped `INT` stops a blocked `sleep` and the line resumes.
 ///
 /// The probe has three answers (`Interrupt`): nothing for an ignored `INT`, an

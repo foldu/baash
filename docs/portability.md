@@ -449,6 +449,13 @@ there is no tool to stand in for. On Windows the number is `CreateProcess`: the
 startup table in §8 is the same one that applies here (~12 ms), which is why the
 utilities a *script loops over* stay in-process and only these five pay it.
 
+**A second class is a child for a different reason.** `baash_utils::STREAM_FILTERS`
+(`cat`, `tee`, `wc`, `sort`, `cut`, `tr`, `head`, `tail`, the hashes, and the
+rest of the filters) is a child only when the shell is *interactive*, and only
+so the key can end a read that nothing in process can; a script keeps the
+worker. §9's 2026-11-24 entry has the mechanism, the two invariants that make it
+correct, and the measurement behind the interactive-only split.
+
 Three more things, inherent to the crates rather than to the isolation:
 
 * `find` and `xargs` take `&str`, so a non-UTF-8 **argument** is refused with
@@ -932,11 +939,34 @@ the `winvm` guest (the same exe, an interactive console session, keys via
 | `read -t 10 ignored; echo done-$((6*7))`, then a key | the prompt in about a second, `done-42` never printed, `$?` = 130 |
 | `trap 'echo caught' INT; sleep 10; echo after-$((6*7))`, then a key | `caught`, then `after-42`, `$?` = 0 — the sleep stops, the trap runs, the line resumes |
 
-Still not fixed: an *embedded utility other than `sleep`* that blocks for ever
-(a `cat` reading a console or a fifo nobody writes to) is abandoned only at its
-next boundary. Abandoning it would interleave its output with the next prompt,
-and there is no way to stop a thread, so the shell does not pretend otherwise.
-`Ctrl-\` has no Windows equivalent at all.
+**A stream filter is a child, in an interactive shell (2026-11-24).** With the
+poke ruled out, the only way to end a read that may never return is to give the
+body its own process: a child dies of the same console event (Windows) or
+terminal `SIGINT` (Unix) that kills `ping`. The shell already runs
+`grep`/`sed`/`awk`/`find`/`xargs` that way (`baash_utils::ISOLATED`); it now
+does the same for `baash_utils::STREAM_FILTERS` — the twenty utilities whose
+work is reading stdin or a file to end-of-file (`cat`, `tee`, `wc`, `sort`,
+`cut`, `tr`, `head`, `tail`, `sha*sum`, …) — **when the shell is interactive**.
+A script keeps the in-process worker, because its `Ctrl-C` ends the shell
+anyway and a spawn per `cat` would be paid by every loop over files; the cost is
+one `posix_spawn` (~0.5 ms) or `CreateProcess` (2–5 ms) per interactive filter
+call, against ~23 µs in process, and every case it slows down is one where a
+human pressed a key.
+
+The filter goes through the shell's ordinary *external* path rather than a
+spawn-and-wait of its own: the child is this executable with
+`--__embedded <name>`, and running it there is what makes the pipeline's
+descriptors, the close-before-wait order, `$!`, redirections and prefix
+assignments, and the `Signaled(SIGINT)` latch all behave as they do for any
+foreground command. Two things had to be right for that: the spawn goes through
+`baash_sys::spawn`, not `std::process` (an interactive shell *blocks* `SIGINT`,
+the mask is inherited, and a child that inherited it would ignore the very key
+it exists to die of — `SpawnPlan.sigmask` clears it); and the child has to be
+given the *whole* argv, `argv[0]` included, or `wc -l` becomes `wc` and
+`cat file` becomes `cat` reading the console.
+
+Still not fixed: a script's stream filter (it runs in process and stops at the
+next boundary), and `Ctrl-\`, which has no Windows equivalent at all.
 
 **Interrupting that body in place was measured and does not work** (2026-11-24),
 so nobody should re-derive it as an idea. The primitive itself is fine — a
@@ -950,7 +980,25 @@ builtins; its handler `longjmp`s out of the builtin, which is not available to
 a Rust process. Windows is no better: `CancelSynchronousIo` on the worker
 *reports success* while the console read it "cancelled" never completes, so the
 utility stays blocked. Closing this gap needs the body to own a process of its
-own — a child dies of the key — not a poke at its syscall.
+own — a child dies of the key — not a poke at its syscall, which is what the
+next paragraph does.
+
+**Verified on the `winvm` guest (2026-11-24)**, the same exe, Windows Terminal,
+keys via `virsh send-key --holdtime 25`, screenshots as readback:
+
+| case | what was seen |
+|---|---|
+| `cat` with no operand, then a key | the prompt returned in 1.9 s and `$?` = 130 — the console read that `CancelSynchronousIo` could not end dies with its child |
+| `wc -l C:/build/helper.awk` | `91 C:/build/helper.awk` — the operand and the `-l` both reached the child |
+| `cat C:/build/helper.awk \| wc -l` | `91` — two filter children in a pipeline; the shell closes its own pipe ends before waiting, so the reader sees end-of-file |
+| `grep -c . C:/build/helper.awk` | `77` — an `ISOLATED` body still runs through the same child spawn |
+| `ping -n 1 127.0.0.1 \| cmd /c findstr Reply` | the reply line: an ordinary external pipeline is unaffected |
+
+The host's pty tests pin the same shapes: `ctrl_c_ends_a_stream_filter_parked_in_a_read`
+(a fifo held open by the shell's own `exec 3<>`), and
+`an_interactive_filter_pipeline_finishes`, which asserts the *whole* `wc` line
+(`42 <path>`) so a dropped `-l` or a dropped operand fails instead of passing on
+a substring.
 
 ### A pipe is not seekable, and a completion's status is not a verdict (2026-11-20)
 
