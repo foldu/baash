@@ -354,6 +354,39 @@ fn ctrl_c_aborts_a_loop_whose_body_has_no_command() {
     session.wait_child();
 }
 
+/// `Ctrl-C` ends a `wait` whose child ignores the key.
+///
+/// `wait` is a builtin, not a foreground command: bash's "ignore `SIGINT` while
+/// waiting for a child" rule does not apply to it, and bash's handler makes
+/// `waitpid` return `EINTR`. The shell blocks the signal instead, so the wait
+/// polls and stops. The child here ignores `SIGINT` so that nothing *else* can
+/// end the wait — without the poll, the shell would hang until the child's
+/// sleep ran out.
+#[test]
+fn ctrl_c_ends_a_wait_whose_child_ignores_the_key() {
+    let mut session = Session::spawn();
+    session.prompt();
+
+    session.line("sh -c 'trap \"\" INT; sleep 300' &");
+    session.prompt();
+
+    session.line("wait");
+    settle();
+    session.send(b"\x03");
+    session.expect(b"^C", Duration::from_secs(3));
+    session.expect(PROMPT, Duration::from_secs(3));
+    session.line("echo status=$?");
+    session.expect(b"status=130", Duration::from_secs(10));
+    session.prompt();
+
+    // Do not leave a 300-second `sleep` behind: `$!` still names the child.
+    session.line("kill $! 2>/dev/null");
+    session.prompt();
+
+    session.line("exit");
+    session.wait_child();
+}
+
 /// A trapped `INT` stops a blocked `sleep` and the line resumes.
 ///
 /// The probe has three answers (`Interrupt`): nothing for an ignored `INT`, an

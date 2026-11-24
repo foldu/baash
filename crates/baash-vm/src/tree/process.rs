@@ -113,10 +113,13 @@ impl Interp {
         }
         let operands = &argv[index..];
 
-        // Signals that arrive while the shell waits behave like the ones that
-        // arrive during a foreground command: they run afterwards, and
-        // `SIGINT`/`SIGQUIT` are discarded (bash ignores them while waiting).
-        let guard = self.ignore_int_quit();
+        // The `wait` builtin is *not* a foreground-command wait, so bash's
+        // "ignore `SIGINT` while waiting for a child" rule does not apply: a
+        // `Ctrl-C` interrupts `wait` itself (in bash the handler makes
+        // `waitpid` return `EINTR`). The shell blocks `SIGINT`instead of
+        // catching it, so each wait polls for an interrupt and stops when one
+        // arrives; a child that ignores the key would otherwise hold the shell
+        // until it exits.
         let status = if next {
             self.wait_next(operands)
         } else if operands.is_empty() {
@@ -124,9 +127,12 @@ impl Interp {
         } else {
             self.wait_operands(operands)
         };
-        drop(guard);
 
-        if let Some(exit) = self.after_foreground_wait() {
+        // Traps run after the wait, and an `INT` that arrived is *not*
+        // discarded: it is either the abort the wait just returned for, or a
+        // trap that is the user's business (`after_foreground_wait` would drop
+        // it, which is the rule for a command's wait, not this one).
+        if let Some(exit) = self.run_pending_signal_traps() {
             self.state.request_exit(exit);
             return exit;
         }
@@ -172,24 +178,48 @@ impl Interp {
     }
 
     /// `wait PID`: the child's status, or 127 when it is not this shell's child.
-    fn wait_one(&mut self, pid: i32) -> Status {
+    ///
+    /// `None` means an interrupt ended the wait; the caller turns that into
+    /// 130 and the latch unwinds the command.
+    fn wait_one(&mut self, pid: i32) -> Option<Status> {
         if let Some(slot) = self.background.get_mut(&pid)
             && let Some(status) = slot.take()
         {
             self.background.remove(&pid);
-            return status;
+            return Some(status);
         }
-        let status = match baash_sys::wait_pid(pid) {
-            Ok(outcome) => {
+        let status = match self.wait_for_child(pid) {
+            Ok(Some(outcome)) => {
                 self.report_signal_death(outcome);
                 Some(Status(outcome.exit_status()))
             }
-            Err(error) if error.raw_os_error() == Some(baash_sys::ECHILD) => None,
-            Err(_) => None,
+            Ok(None) => None,
+            // Interrupted: the caller reports 130, and the child is left
+            // recorded so a later `wait`/reap still sees it.
+            Err(()) => return None,
         };
         // The status is reported once; a second `wait PID` must say 127.
         self.background.remove(&pid);
-        status.unwrap_or(Status(127))
+        Some(status.unwrap_or(Status(127)))
+    }
+
+    /// Block until `pid` exits, in `INTERRUPT_SLICE` slices.
+    ///
+    /// `Ok(None)` is "not this shell's child" (or already reaped); `Err(())`
+    /// is an interrupt, which the caller reports as 130.
+    fn wait_for_child(&mut self, pid: i32) -> Result<Option<baash_sys::WaitOutcome>, ()> {
+        loop {
+            match baash_sys::wait_pid_nohang(pid) {
+                Ok(Some(outcome)) => return Ok(Some(outcome)),
+                Ok(None) => {}
+                Err(error) if error.raw_os_error() == Some(baash_sys::ECHILD) => return Ok(None),
+                Err(_) => return Ok(None),
+            }
+            if self.probe_interrupt() != super::traps::Interrupt::None {
+                return Err(());
+            }
+            std::thread::sleep(baash_sys::INTERRUPT_SLICE);
+        }
     }
 
     fn wait_operands(&mut self, operands: &[Vec<u8>]) -> Status {
@@ -197,7 +227,10 @@ impl Interp {
         for operand in operands {
             match self.operand_pid(operand, "wait") {
                 Err(failure) => status = failure,
-                Ok(pid) => status = self.wait_one(pid),
+                Ok(pid) => match self.wait_one(pid) {
+                    Some(waited) => status = waited,
+                    None => return Status(128 + baash_sys::SIGINT),
+                },
             }
         }
         status
@@ -217,16 +250,15 @@ impl Interp {
                 return Status::SUCCESS;
             }
             for pid in pending {
-                match baash_sys::wait_pid(pid) {
+                match self.wait_for_child(pid) {
                     Ok(_) => {
                         // `wait` consumed the child: a second `wait PID` must
                         // say 127.
                         self.background.remove(&pid);
                     }
-                    // Not a child any more: drop it so the loop terminates.
-                    Err(_) => {
-                        self.background.remove(&pid);
-                    }
+                    // Interrupted: stop waiting, and report the key rather
+                    // than a child's status.
+                    Err(()) => return Status(128 + baash_sys::SIGINT),
                 }
             }
         }
@@ -304,6 +336,9 @@ impl Interp {
                             .any(|pid| self.background.contains_key(pid))
                     {
                         return Status(127);
+                    }
+                    if self.probe_interrupt() != super::traps::Interrupt::None {
+                        return Status(128 + baash_sys::SIGINT);
                     }
                     std::thread::sleep(Duration::from_millis(1));
                 }

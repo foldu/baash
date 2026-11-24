@@ -933,10 +933,24 @@ the `winvm` guest (the same exe, an interactive console session, keys via
 | `trap 'echo caught' INT; sleep 10; echo after-$((6*7))`, then a key | `caught`, then `after-42`, `$?` = 0 — the sleep stops, the trap runs, the line resumes |
 
 Still not fixed: an *embedded utility other than `sleep`* that blocks for ever
-(`cat` on a pipe nobody writes to) is abandoned only at its next boundary.
-Abandoning it would interleave its output with the next prompt, and there is no
-way to stop a thread, so the shell does not pretend otherwise. `Ctrl-\` has no
-Windows equivalent at all.
+(a `cat` reading a console or a fifo nobody writes to) is abandoned only at its
+next boundary. Abandoning it would interleave its output with the next prompt,
+and there is no way to stop a thread, so the shell does not pretend otherwise.
+`Ctrl-\` has no Windows equivalent at all.
+
+**Interrupting that body in place was measured and does not work** (2026-11-24),
+so nobody should re-derive it as an idea. The primitive itself is fine — a
+signal delivered to the worker with a no-op handler, without `SA_RESTART`,
+does make a blocked `read(2)` return `EINTR` — but `uutils` bodies **retry
+`EINTR` on purpose**, because that is what a correct tool does with an
+interrupted system call: `uu_cat`'s read loop is
+`Err(e) if e.kind() == ErrorKind::Interrupted => {}` followed by `continue`, and
+the line-numbering loop does the same. bash does not rely on `EINTR` for its
+builtins; its handler `longjmp`s out of the builtin, which is not available to
+a Rust process. Windows is no better: `CancelSynchronousIo` on the worker
+*reports success* while the console read it "cancelled" never completes, so the
+utility stays blocked. Closing this gap needs the body to own a process of its
+own — a child dies of the key — not a poke at its syscall.
 
 ### A pipe is not seekable, and a completion's status is not a verdict (2026-11-20)
 

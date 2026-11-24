@@ -152,8 +152,8 @@ pub use windows::{
     chdir, close, create_unlinked_temp, dup, dup_above, dup2, exec, fd_is_cloexec, fd_is_open,
     fd_path, fork_child_status, ignore_signals, lseek, open_cloexec, open_pty, parent_pid, pid,
     poll_readable, read_all, read_fd, replace_signal_mask, seek, send_signal, set_cloexec,
-    set_disposition, spawn, wait_any_nohang, wait_pid, window_size, window_size_fd, write_all,
-    write_fd,
+    set_disposition, spawn, wait_any_nohang, wait_pid, wait_pid_nohang, window_size,
+    window_size_fd, write_all, write_fd,
 };
 
 // `FdAction::Open` and the signal APIs name C types in their signatures, so a

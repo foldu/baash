@@ -1410,6 +1410,31 @@ pub fn wait_pid(pid: i32) -> io::Result<WaitOutcome> {
     Ok(wait_outcome(status))
 }
 
+/// Reap `pid` if it has finished, without blocking — Unix's `waitpid(WNOHANG)`.
+///
+/// The child table owns the process handle, so there is nothing to open: a pid
+/// that is not in it is not this shell's child, and the caller gets `NotFound`
+/// where Unix would say `ECHILD` (both mean "no such child" to the shell).
+pub fn wait_pid_nohang(pid: i32) -> io::Result<Option<WaitOutcome>> {
+    let mut map = children()
+        .lock()
+        .map_err(|_| io::Error::other("child table"))?;
+    let Some(child) = map.get_mut(&pid) else {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no child with pid {pid}"),
+        ));
+    };
+    let outcome = match child.try_wait()? {
+        Some(status) => Some(wait_outcome(status)),
+        None => None,
+    };
+    if outcome.is_some() {
+        map.remove(&pid);
+    }
+    Ok(outcome)
+}
+
 /// Reap any finished child, reporting its status like Unix's version.
 pub fn wait_any_nohang() -> Option<(i32, WaitOutcome)> {
     let mut map = children().lock().ok()?;
