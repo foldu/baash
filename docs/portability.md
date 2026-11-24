@@ -802,14 +802,18 @@ interrupted with `Ctrl-C` prints `Control-C`, returns to the prompt, and
 previous build in `-c` mode: the old one printed only `hi`, the new one prints
 `hi` and `after`.
 
-What is still coarse: the handler swallows the event for the whole interactive
-process, so the shell has no pending signal to drain and a `Ctrl-C` pressed
-while a *built-in* loop runs does nothing until it returns, `trap INT` never
-runs for a console event, and `Ctrl-\` has no equivalent at all. The
-Unix-side abort (`Unwind::Interrupt`) is shared, though: a foreground child
-killed by `Ctrl-C` arrives as `WaitOutcome::Signaled(SIGINT)`
-(`STATUS_CONTROL_C_EXIT`), and the interpreter's first boundary after that wait
-abandons the command.
+That run left one gap open: the handler swallowed the event for the whole
+interactive process, so the shell had no pending signal to drain and a `Ctrl-C`
+pressed while an in-process loop ran did nothing. The next dated entry closes
+it. What is still coarse: `Ctrl-\` has no equivalent at all, and `kill` remains
+`TerminateProcess` only. A `Ctrl-C` that arrives while an in-process *builtin* is
+inside a blocking call — `sleep 5` runs the embedded coreutils `sleep` here,
+because a Windows `PATH` has no coreutils — still waits for that call to return,
+because the abort is taken at the next command boundary; that is the same
+promise a blocked `SIGINT` gives on Unix. The Unix-side abort
+(`Unwind::Interrupt`) is shared: a foreground child killed by `Ctrl-C` arrives
+as `WaitOutcome::Signaled(SIGINT)` (`STATUS_CONTROL_C_EXIT`), and the
+interpreter's first boundary after that wait abandons the command.
 
 **Verified on the `winvm` guest (2026-11-16)** — the plain console host
 (`conhost`, not the Windows Terminal tab the 2026-11-12 run used) started with
@@ -828,10 +832,68 @@ abandons the command.
 
 The last row is the symmetry the two platforms are meant to have: an
 interactive shell survives what kills its child, and a script dies of it. The
-built-in loop stays the gap a user notices first, and it is the shape of the
-platform that makes it a gap — `Ctrl-C` is a *byte* at the prompt and a console
-*event* only while a command runs, and the event is exactly what the handler
-swallows.
+built-in loop in the table is the gap the next section closes; it was the shape
+of the platform that made it a gap — `Ctrl-C` is a *byte* at the prompt and a
+console *event* only while a command runs, and the event was exactly what the
+handler swallowed.
+
+### The console event reaches the abort latch (2026-11-24)
+
+`while true; do i=$((i+1)); echo $i; done` could not be stopped by `Ctrl-C`, and
+neither could any other loop whose iterations are shell code: the key raised a
+console event, the handler answered `TRUE` (so the session survived), and
+nothing read the event afterwards. `trap 'echo caught' INT` never ran for the
+same reason — there was no pending signal to deliver. Measured on the guest
+before the fix: the loop's CPU time climbed continuously after the key, and the
+screen did not change.
+
+Two layers had to be wrong for the event to vanish, and both were:
+
+* **The handler returned `TRUE` without recording anything.** That is the
+  Windows half of bash's "ignore `SIGINT` while waiting for a foreground job",
+  and it was the whole of it: the shell had no pending signal to drain, so
+  `run_pending_signal_traps` had nothing to turn into the abort latch.
+* **`SignalSet` was a stub on Windows.** `insert`, `remove` and `contains`
+  answered `false` and `of()` returned an empty set, so `sync_traps`' *wanted*
+  set was empty for an interactive shell, it never opened a `SignalFd`, and
+  `drain_signals` returned early every time. Even a handler that recorded the
+  key would have had no reader.
+
+The handler now counts each `CTRL_C_EVENT`/`CTRL_BREAK_EVENT` in a portable
+`ConsoleInterrupts` latch (one relaxed atomic; a console handler may not
+allocate, lock or panic), and the Windows `SignalFd` drains one event per
+`read()` as `SIGINT`. That is the same reader the interpreter already drains at
+a command boundary on Unix, so the untrapped `INT` sets the same
+`interrupt_pending` latch, `Unwind::Interrupt` unwinds the same way, and status
+130 comes from the same place. `SignalSet` moved to
+`crates/baash-sys/src/signal_set.rs` as a real bitmask compiled on both
+platforms — only the `sigprocmask`/`signalfd` calls are Unix-only, and Windows'
+`SignalSet::current()` is honestly empty because the process has no mask.
+
+`Ctrl-C` that belongs to a foreground child is still discarded the way a blocked
+`SIGINT` is: the child dies of the same console event, the shell's wait sees
+`Signaled(SIGINT)` and aborts the command, and `after_foreground_wait` throws the
+recorded event away so it cannot abort the *next* line.
+
+**Verified on the `winvm` guest (2026-11-24)**, `baash.exe --norc -i` started
+with `schtasks /it` into the console session, Windows Terminal as the console
+host, keys injected with `virsh send-key --holdtime 25` and read back from
+screenshots:
+
+| case | what was seen |
+|---|---|
+| `while true; do i=$((i+1)); done` then `Ctrl-C` | the prompt returned and the loop's CPU time stopped rising (0.97 s before, 1.00 s after, flat afterwards); `$?` = 130 |
+| `ping -t 127.0.0.1; echo not-reached`, then `Ctrl-C` | `Control-C`, the ping statistics, the prompt, `not-reached` never printed, `$?` = 130 |
+| `trap 'echo caught' INT; sleep 4; echo after`, a key during the sleep | `caught` then `after`, `$?` = 0 — the trap runs for a console event now |
+| `echo abc` then `Ctrl-C` at the prompt | `echo abc^C` and a fresh prompt |
+| three keys in a row while a child ran, then `echo still-works` | `^C` twice at the prompt, then `still-works`, `$?` = 0: nothing stayed latched |
+| `C:/build/baash.exe -c "ping -t 127.0.0.1"` run from the interactive shell, then `Ctrl-C` | the script process was gone from `Get-Process baash` afterwards and the interactive shell reported 130 — the script still dies with its child |
+
+Still not fixed, and shared with Unix: a loop whose body has no simple command
+at all (`while ((1)); do ((i++)); done`) has no boundary inside the iteration to
+check the latch at, on either platform. And a blocking built-in (`sleep`, on
+Windows the embedded coreutils one) is only aborted at the boundary after it
+returns.
 
 ### A pipe is not seekable, and a completion's status is not a verdict (2026-11-20)
 

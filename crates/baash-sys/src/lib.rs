@@ -81,6 +81,7 @@ pub mod console;
 pub mod dirs;
 #[cfg(unix)]
 pub mod fd;
+pub mod interrupt;
 #[cfg(unix)]
 pub mod notify;
 pub mod osc;
@@ -93,6 +94,7 @@ pub mod regex;
 pub mod screen;
 #[cfg(unix)]
 pub mod signal;
+pub mod signal_set;
 #[cfg(unix)]
 pub mod spawn;
 #[cfg(unix)]
@@ -123,9 +125,10 @@ pub use pty::{Pty, become_session_leader, open_pty};
 pub use regex::{Cache, CaptureRanges, Engine, Regex, RegexError};
 #[cfg(unix)]
 pub use signal::{
-    Disposition, MaskGuard, SignalEvent, SignalFd, SignalGuard, SignalSet, ignore_signals,
+    Disposition, MaskGuard, SignalEvent, SignalFd, SignalGuard, ignore_signals,
     replace_signal_mask, send_signal, set_disposition,
 };
+pub use signal_set::SignalSet;
 #[cfg(unix)]
 pub use spawn::{Child, FdAction, SpawnPlan, exec, fork_child_status, spawn};
 /// The descriptor vocabulary, under one set of names on both platforms.
@@ -144,12 +147,12 @@ pub use wait::{wait_any_nohang, wait_pid, wait_pid_nohang};
 #[cfg(windows)]
 pub use windows::{
     AsRawFd, Child, Disposition, FdAction, FromRawFd, IntoRawFd, MaskGuard, NoEcho, OwnedFd, Pipe,
-    Pty, RawFd, RawMode, SignalEvent, SignalFd, SignalGuard, SignalSet, SpawnPlan,
-    become_session_leader, chdir, close, create_unlinked_temp, dup, dup_above, dup2, exec,
-    fd_is_cloexec, fd_is_open, fd_path, fork_child_status, ignore_signals, lseek, open_cloexec,
-    open_pty, parent_pid, pid, poll_readable, read_all, read_fd, replace_signal_mask, seek,
-    send_signal, set_cloexec, set_disposition, spawn, wait_any_nohang, wait_pid, window_size,
-    window_size_fd, write_all, write_fd,
+    Pty, RawFd, RawMode, SignalEvent, SignalFd, SignalGuard, SpawnPlan, become_session_leader,
+    chdir, close, create_unlinked_temp, dup, dup_above, dup2, exec, fd_is_cloexec, fd_is_open,
+    fd_path, fork_child_status, ignore_signals, lseek, open_cloexec, open_pty, parent_pid, pid,
+    poll_readable, read_all, read_fd, replace_signal_mask, seek, send_signal, set_cloexec,
+    set_disposition, spawn, wait_any_nohang, wait_pid, window_size, window_size_fd, write_all,
+    write_fd,
 };
 
 // `FdAction::Open` and the signal APIs name C types in their signatures, so a

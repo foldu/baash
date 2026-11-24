@@ -149,6 +149,9 @@ encodings reach the editor.
   and the key goes missing. Text is the same thing one `send-key` per
   character — `KEY_LEFTSHIFT KEY_4` is `$`, and lowercase letters need no
   modifier, which is why the probes spell `echo not-reached` rather than shout.
+  A loop of *shell* code prints nothing the screen can show, so the readback
+  there is `(Get-Process baash).CPU` sampled twice: a stopped loop's total is
+  flat, a running one climbs.
 * **A screenshot is the only readback, and two identical ones do not mean a
   frozen guest.** A console scrolling lines that are all the same text repaints
   to a byte-identical PNG; read the taskbar clock, or sample

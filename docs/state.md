@@ -478,9 +478,12 @@ rediscover):
   now owns duplicated handles, every child gets descriptors 0–2 (duplicated,
   `NUL` when closed), and an interactive shell
   installs a `SetConsoleCtrlHandler` that keeps it alive while the child dies —
-  `$?` is 130 because `STATUS_CONTROL_C_EXIT` maps to `Signaled(SIGINT)`.
-  `docs/portability.md` §9 records the measurement and the residual coarseness
-  (a built-in loop is not interruptible, `trap INT` never runs).
+  `$?` is 130 because `STATUS_CONTROL_C_EXIT` maps to `Signaled(SIGINT)`. The
+  handler also records each delivery in a latch the interpreter drains at its
+  command boundaries, so an in-process loop stops and a `trap INT` runs, just as
+  a blocked `SIGINT` does on Unix; `docs/portability.md` §9 records the
+  measurement and what is still coarse (a blocking built-in waits for the
+  boundary after it, and `Ctrl-\` has no equivalent).
 * **On Windows the library is there, and `=~` now has an engine.** Verified on
   the guest: the exe mounts the tree in memory (no file, no cache directory),
   the framework sources, an embedded script registers its rule, a user's

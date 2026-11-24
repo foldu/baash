@@ -1408,6 +1408,23 @@ trap-less interactive shell return early, and a startup file's `$( … )` (NixOS
 `eval "$(zoxide init bash)"` is the one that found this) then left the mask
 unblocked for the rest of the session — the next `Ctrl-C` in a loop killed it.
 
+**On Windows the same promise is a latch, not a mask.** There is no `signalfd`
+and no `sigprocmask`: a console delivers `CTRL_C_EVENT` to a handler on a
+console-owned thread, which may do one thing — count the key in
+`baash_sys::interrupt::ConsoleInterrupts` (a relaxed atomic; no allocation, no
+lock, no panic) — and return `TRUE`, so `ExitProcess` does not end the session.
+The Windows `SignalFd` drains one recorded event per `read()` as `SIGINT` at the
+same command boundaries the Unix reader is drained at, so the untrapped `INT`
+sets the same `interrupt_pending` latch, unwinds through the same
+`Unwind::Interrupt`, and reports the same 130. A foreground child still receives
+its own copy of the event and dies of it; the shell's wait then discards the
+recorded `SIGINT`, exactly as the blocked-mask path ignores it, and the child's
+`Signaled(SIGINT)` is what aborts the command. `SignalSet` is a real bitmask
+(`baash-sys/src/signal_set.rs`) on both platforms: Windows has no mask to
+apply, but `sync_traps` builds its wanted set from it everywhere, and a set whose
+`insert` always answered `false` silently meant "no reader" — which is how the
+console event used to be recorded by nothing and drained by nobody.
+
 **A `-F` reply replaces the `COMP_WORDS` element, not the parser's word.**
 bash splices `COMPREPLY` over the word delimited by `COMP_WORDBREAKS`, and
 `:` is one of them, so `rsync host:src/<TAB>` replaces `src/` and keeps

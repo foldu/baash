@@ -28,7 +28,10 @@
 //!   started on ([`crate::console`]) — so this is a missing test facility and a
 //!   missing `script(1)` emulation, not a missing terminal.
 //! * Signals: there is no `signalfd`, and `SIGINT` delivery to a console is a
-//!   different mechanism (`SetConsoleCtrlHandler`). Every signal entry point
+//!   different mechanism (`SetConsoleCtrlHandler`). `Ctrl-C` is the one signal
+//!   the console can deliver, so an interactive shell records it in the
+//!   interpreter's abort latch ([`install_console_control_handler`]); every
+//!   other signal entry point — dispositions, masks, `kill` with a number —
 //!   reports `Unsupported` rather than pretending to work.
 //!
 //! Path bytes are WTF-8 (`crate::wtf8`), which is UTF-8 extended with the
@@ -44,6 +47,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use crate::c_int;
+use crate::signal_set::SignalSet;
 
 /// File creation mode.
 ///
@@ -716,55 +720,17 @@ pub fn window_size() -> Option<(u16, u16)> {
 // Signals
 // ---------------------------------------------------------------------------
 
-/// A set of signal numbers.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SignalSet {
-    _private: (),
-}
-
+/// The process's current blocked-signal set.
+///
+/// A Windows process has no blocked-signal mask, so this is always empty. It
+/// exists because the interpreter asks the same question on both platforms
+/// when it rebuilds the wanted set; the mask itself is never applied
+/// ([`replace_signal_mask`]) and the one signal a console delivers is recorded
+/// by the control handler instead.
 impl SignalSet {
-    /// An empty set.
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
-    /// A set with `signals` in it. Windows has no signal mask; the set is
-    /// always empty.
-    pub fn of(_signals: &[c_int]) -> Self {
-        Self::default()
-    }
-
-    /// The process's current blocked-signal set.
-    ///
-    /// Returns `Ok` for the same shape as Unix; a Windows process has no
-    /// blocked-signal set to read.
+    /// The process's current blocked-signal set: always empty here.
     pub fn current() -> io::Result<Self> {
-        Ok(Self::default())
-    }
-
-    /// Add a signal. Returns whether it was absent, as on Unix.
-    pub fn insert(&mut self, _signal: c_int) -> bool {
-        false
-    }
-
-    /// Remove a signal. Returns whether it was present, as on Unix.
-    pub fn remove(&mut self, _signal: c_int) -> bool {
-        false
-    }
-
-    /// Whether `signal` is in the set.
-    pub fn contains(&self, _signal: c_int) -> bool {
-        false
-    }
-
-    /// Whether the set is empty.
-    pub fn is_empty(&self) -> bool {
-        true
-    }
-
-    /// The signals in the set.
-    pub fn iter(&self) -> impl Iterator<Item = c_int> {
-        std::iter::empty()
+        Ok(Self::empty())
     }
 }
 
@@ -787,33 +753,54 @@ pub struct SignalEvent {
     pub signal: c_int,
 }
 
+/// `Ctrl-C`/`Ctrl-Break` deliveries the console handler has recorded.
+///
+/// The handler runs on a thread the console owns, so it cannot wake the
+/// interpreter's event loop or touch its state; it counts the key here instead
+/// and [`SignalFd::read`] drains one event per call at the interpreter's command
+/// boundaries, which is where a Unix shell drains `signalfd`. One queue for the
+/// process is right: only one interactive shell owns the console.
+static PENDING_INTERRUPTS: crate::interrupt::ConsoleInterrupts =
+    crate::interrupt::ConsoleInterrupts::new();
+
 /// A queue of delivered signals.
 ///
-/// There is no `signalfd`; `SetConsoleCtrlHandler` is the equivalent and it
-/// delivers only `Ctrl-C`, `Ctrl-Break` and a few console events. The type
-/// exists and reports `Unsupported` rather than pretending a console event is
-/// a signal.
+/// There is no `signalfd`. A console delivers `CTRL_C_EVENT` to a callback
+/// instead, and Windows folds `Ctrl-Break` into the same event family, so both
+/// arrive here as `SIGINT` — the shell has no separate `SIGQUIT` to offer and
+/// [`Disposition`] is still unsupported. The queue is the one
+/// `install_console_control_handler` fills; a reader built for a mask without
+/// `SIGINT` reports nothing, because nothing in that mask can arrive.
 #[derive(Debug, Default)]
 pub struct SignalFd {
-    _private: (),
+    /// Whether the interpreter asked for the console's interrupt.
+    interrupts: bool,
 }
 
 impl SignalFd {
     /// A queue for `mask`.
-    pub fn new(_mask: &SignalSet) -> io::Result<Self> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "signalfd has no Windows equivalent (docs/portability.md §5)",
-        ))
+    pub fn new(mask: &SignalSet) -> io::Result<Self> {
+        Ok(Self {
+            interrupts: mask.contains(crate::SIGINT),
+        })
     }
 
     /// The descriptor to poll.
+    ///
+    /// There is no descriptor: the queue is filled by a callback, not by the
+    /// kernel, and nothing on Windows polls it. `-1` keeps the shape of the Unix
+    /// reader for callers that check it.
     pub fn raw_fd(&self) -> c_int {
         -1
     }
 
     /// Take one pending event.
     pub fn read(&self) -> io::Result<Option<SignalEvent>> {
+        if self.interrupts && PENDING_INTERRUPTS.take() {
+            return Ok(Some(SignalEvent {
+                signal: crate::SIGINT,
+            }));
+        }
         Ok(None)
     }
 }
@@ -852,7 +839,8 @@ pub fn ignore_signals(_signals: &[c_int]) -> io::Result<SignalGuard> {
     Ok(SignalGuard { _private: () })
 }
 
-/// Keep `Ctrl-C` from ending an interactive shell.
+/// Keep `Ctrl-C` from ending an interactive shell, and hand it to the
+/// interpreter.
 ///
 /// Windows has no `SIGINT`. A console turns `Ctrl-C` into a `CTRL_C_EVENT`
 /// delivered to *every* process attached to it, and the default handler calls
@@ -861,6 +849,16 @@ pub fn ignore_signals(_signals: &[c_int]) -> io::Result<SignalGuard> {
 /// suppresses that default, so the foreground child (which receives the same
 /// event and has its own default) dies and the shell draws the next prompt, the
 /// way a Unix shell ignores `SIGINT` while it waits for a foreground job.
+///
+/// Suppressing is only half the promise. The event must also reach the
+/// interpreter's abort latch, or a `Ctrl-C` during shell code that runs in
+/// process — `while true; do i=$((i+1)); done`, a built-in loop, a trapped `INT` —
+/// is swallowed with nothing to show for it. The handler therefore records the
+/// delivery in [`PENDING_INTERRUPTS`], and [`SignalFd::read`] drains it at the
+/// next command boundary, the same boundary where Unix reads `signalfd`. A
+/// `Ctrl-C` that belongs to a foreground child is discarded there by
+/// `after_foreground_wait`, exactly as the blocked-mask path discards it; the
+/// child's own `STATUS_CONTROL_C_EXIT` is what aborts the command.
 ///
 /// The handler is installed only for an interactive shell: `baash -c 'sleep'`
 /// must still die on `Ctrl-C`, exactly as a script does.
@@ -873,17 +871,26 @@ pub fn install_console_control_handler() -> io::Result<()> {
         ) -> i32;
     }
 
-    /// `TRUE` for `CTRL_C_EVENT` (0) and `CTRL_BREAK_EVENT` (1): handled.
+    /// Record the key for `CTRL_C_EVENT` (0) and `CTRL_BREAK_EVENT` (1), and
+    /// say it was handled.
     ///
     /// The other events — close, logoff, shutdown — must still end the process,
-    /// so they fall through to the default handler.
-    unsafe extern "system" fn keep_running(event: u32) -> i32 {
-        if event <= 1 { 1 } else { 0 }
+    /// so they fall through to the default handler. A console handler may run
+    /// on any thread and must not block, allocate or panic; this one does a
+    /// single relaxed atomic increment and nothing else.
+    unsafe extern "system" fn record_interrupt(event: u32) -> i32 {
+        if event <= 1 {
+            PENDING_INTERRUPTS.record();
+            1
+        } else {
+            0
+        }
     }
 
     // SAFETY: the handler is a plain function with the signature the console
-    // expects, and it touches no state; `add` is 1, which appends it.
-    let ok = unsafe { SetConsoleCtrlHandler(Some(keep_running), 1) };
+    // expects, and it touches no state beyond the atomic; `add` is 1, which
+    // appends it.
+    let ok = unsafe { SetConsoleCtrlHandler(Some(record_interrupt), 1) };
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
