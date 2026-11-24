@@ -19,6 +19,17 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// How long a blocking wait may go between asking the shell whether an
+/// interrupt has arrived.
+///
+/// A `Ctrl-C` has to be able to end a `read` on a terminal and an embedded
+/// `sleep`; on Unix neither can be interrupted by the kernel, because the shell
+/// keeps `SIGINT` blocked so that no handler may touch interpreter state. So a
+/// wait is cut into slices this long and the interpreter is asked between them:
+/// 20 ms is below what a person notices, and it costs a few dozen wakeups a
+/// second only while a command is actually waiting.
+pub const INTERRUPT_SLICE: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// `Ctrl-C`/`Ctrl-Break` deliveries that a console handler has recorded and the
 /// interpreter has not drained yet.
 ///

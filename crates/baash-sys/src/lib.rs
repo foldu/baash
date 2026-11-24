@@ -119,6 +119,7 @@ pub use fd::{
     fd_is_open, fd_path, lseek, open_cloexec, poll_readable, read_all, read_fd, seek, set_cloexec,
     write_all, write_fd,
 };
+pub use interrupt::INTERRUPT_SLICE;
 pub use outcome::WaitOutcome;
 #[cfg(unix)]
 pub use pty::{Pty, become_session_leader, open_pty};

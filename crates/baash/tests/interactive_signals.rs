@@ -275,8 +275,8 @@ fn ctrl_c_on_a_foreground_command_leaves_status_130_and_the_shell_alive() {
     session.wait_child();
 }
 
-/// `Ctrl-C` while the shell itself runs a command must not end the session,
-/// and the command it interrupted must stop.
+/// `Ctrl-C` while the shell itself waits inside one command must end *that
+/// wait*, not merely the line after it.
 ///
 /// The editor turns the terminal's keyboard signals off for the line, but a
 /// command runs with the terminal back in cooked mode — that is what lets
@@ -284,27 +284,133 @@ fn ctrl_c_on_a_foreground_command_leaves_status_130_and_the_shell_alive() {
 /// foreground process group, and that group is the shell's own. With the
 /// default disposition the shell died; blocking the signal kept the session but
 /// let the builtin run to completion, which left `while true; do echo lol;
-/// done` printing forever. The block is still what keeps the session alive: the
-/// pending `INT` is drained at the command boundary and aborts the command
-/// there, which is bash's abort without bash's asynchronous handler.
+/// done` printing forever. The block is still what keeps the session alive, so
+/// the wait asks the signal source between slices (`Interp::probe_interrupt`)
+/// instead of being interrupted by the kernel: that is what ends a `read`, and
+/// it is bash's behaviour with bash's asynchronous handler replaced by the poll.
 ///
-/// `read -t` is the one builtin that blocks without a child, so it is the way
-/// to be inside the shell — and not inside the editor — when the key arrives.
-/// The signal is blocked, so the read is not interrupted; it ends on its own
-/// two-second timeout and the *next* command boundary abandons the line. That
-/// is why `done-42` must not appear: the `echo` is part of the aborted command.
+/// The `-t` is far longer than the test, so the prompt can only come from the
+/// key: `done-42` must not appear, because the `echo` is part of the aborted
+/// line.
 #[test]
-fn ctrl_c_while_a_builtin_is_blocked_aborts_the_command() {
+fn ctrl_c_ends_a_read_that_is_waiting_for_a_line() {
     let mut session = Session::spawn();
     session.prompt();
 
-    session.line("read -t 2 ignored; echo done-$((6*7))");
+    session.line("read -t 10 ignored; echo done-$((6*7))");
     settle();
     session.send(b"\x03");
-    // `read` is not interrupted (the signal is blocked) and it consumes input,
-    // so wait out its two-second timeout before typing the next line; the
-    // abort is observed at the `echo` boundary after it.
-    session.output_for(2_500);
+    // The `^C` the terminal echoes when it turns the key into `SIGINT`, then the
+    // prompt: waiting for the prompt alone can match a frame the editor painted
+    // *before* the key, and a line typed then becomes the read's input. Three
+    // seconds, where the read's own timeout is ten: this can only pass if the
+    // interrupt ended it.
+    session.expect(b"^C", Duration::from_secs(3));
+    session.expect(PROMPT, Duration::from_secs(3));
+    session.line("echo status=$?");
+    session.expect(b"status=130", Duration::from_secs(10));
+    session.prompt();
+    assert!(
+        find(&session.output, b"done-42").is_none(),
+        "the rest of the interrupted line ran: {}",
+        String::from_utf8_lossy(&session.output)
+    );
+
+    session.line("echo still-here");
+    session.expect(b"still-here", Duration::from_secs(10));
+    session.prompt();
+
+    session.line("exit");
+    session.wait_child();
+}
+
+/// A loop whose body has no command at all still answers `Ctrl-C`.
+///
+/// `while ((1)); do ((i++)); done` never crosses a command boundary, so the
+/// latch that a boundary fills is never filled; bash's `QUIT` macro checks
+/// `interrupt_state` on each iteration and throws to the top level, and this is
+/// the polled equivalent: the loop top asks the signal source every so many
+/// iterations (`SIGNAL_POLL_STRIDE`). Before that, the register moved and the
+/// key did nothing at all.
+#[test]
+fn ctrl_c_aborts_a_loop_whose_body_has_no_command() {
+    let mut session = Session::spawn();
+    session.prompt();
+
+    session.line("while ((1)); do ((i++)); done");
+    settle();
+    session.send(b"\x03");
+    session.expect(b"^C", Duration::from_secs(5));
+    session.expect(PROMPT, Duration::from_secs(5));
+    session.line("echo status=$?");
+    session.expect(b"status=130", Duration::from_secs(10));
+    session.prompt();
+
+    session.line("echo still-here");
+    session.expect(b"still-here", Duration::from_secs(10));
+    session.prompt();
+
+    session.line("exit");
+    session.wait_child();
+}
+
+/// A trapped `INT` stops a blocked `sleep` and the line resumes.
+///
+/// The probe has three answers (`Interrupt`): nothing for an ignored `INT`, an
+/// abort latch for an untrapped one, and "stop the wait but run the trap" for a
+/// trapped one. This is the third: the sleep stops where bash's `SIGINT` stops
+/// its `sleep` child, the trap runs at the next boundary, and the command after
+/// the sleep still runs.
+#[cfg(feature = "builtin-utils")]
+#[test]
+fn an_int_trap_stops_a_blocked_sleep_and_the_line_resumes() {
+    let mut session = Session::spawn();
+    session.prompt();
+
+    // The embedded `sleep`: an external one dies of the terminal's `SIGINT` and
+    // the shell *discards* that signal while it waits, so no trap would run.
+    session.line("PATH=/nonexistent");
+    session.line("trap 'echo caught' INT; sleep 10; echo after-$((6*7))");
+    settle();
+    session.send(b"\x03");
+    session.expect(b"caught", Duration::from_secs(3));
+    session.expect(b"after-42", Duration::from_secs(3));
+    session.prompt();
+
+    session.line("echo still-here");
+    session.expect(b"still-here", Duration::from_secs(10));
+    session.prompt();
+
+    session.line("exit");
+    session.wait_child();
+}
+
+/// `Ctrl-C` ends a `sleep` the shell runs itself.
+///
+/// On Windows a `PATH` has no `sleep.exe`, so the embedded coreutils `sleep`
+/// runs on a worker thread and the shell waits for it; on Unix the same happens
+/// when `PATH` cannot resolve one. The wait is sliced and asks the interpreter,
+/// so the key ends the sleep where bash's `SIGINT` ends its `sleep` child. The
+/// alternative was to wait the whole duration out, which is what the guest
+/// showed before this.
+#[cfg(feature = "builtin-utils")]
+#[test]
+fn ctrl_c_ends_an_embedded_sleep() {
+    let mut session = Session::spawn();
+    session.prompt();
+
+    // Force the embedded table: the harness's `PATH` has the host's `sleep`,
+    // which would be a child and would die of the terminal's own `SIGINT`.
+    session.line("PATH=/nonexistent");
+    session.line("sleep 0.1; echo embedded-$((6*7))");
+    session.expect(b"embedded-42", Duration::from_secs(10));
+    session.prompt();
+
+    session.line("sleep 10; echo done-$((6*7))");
+    settle();
+    session.send(b"\x03");
+    session.expect(b"^C", Duration::from_secs(3));
+    session.expect(PROMPT, Duration::from_secs(3));
     session.line("echo status=$?");
     session.expect(b"status=130", Duration::from_secs(10));
     session.prompt();

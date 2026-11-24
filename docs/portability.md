@@ -805,14 +805,12 @@ previous build in `-c` mode: the old one printed only `hi`, the new one prints
 That run left one gap open: the handler swallowed the event for the whole
 interactive process, so the shell had no pending signal to drain and a `Ctrl-C`
 pressed while an in-process loop ran did nothing. The next dated entry closes
-it. What is still coarse: `Ctrl-\` has no equivalent at all, and `kill` remains
-`TerminateProcess` only. A `Ctrl-C` that arrives while an in-process *builtin* is
-inside a blocking call — `sleep 5` runs the embedded coreutils `sleep` here,
-because a Windows `PATH` has no coreutils — still waits for that call to return,
-because the abort is taken at the next command boundary; that is the same
-promise a blocked `SIGINT` gives on Unix. The Unix-side abort
-(`Unwind::Interrupt`) is shared: a foreground child killed by `Ctrl-C` arrives
-as `WaitOutcome::Signaled(SIGINT)` (`STATUS_CONTROL_C_EXIT`), and the
+it, and also the wait inside one command (an embedded `sleep`, `read` on a
+console), which had the same shape: nothing outside a command boundary ever
+asked whether the key had arrived. What is still coarse: `Ctrl-\` has no
+equivalent at all, and `kill` remains `TerminateProcess` only. The Unix-side
+abort (`Unwind::Interrupt`) is shared: a foreground child killed by `Ctrl-C`
+arrives as `WaitOutcome::Signaled(SIGINT)` (`STATUS_CONTROL_C_EXIT`), and the
 interpreter's first boundary after that wait abandons the command.
 
 **Verified on the `winvm` guest (2026-11-16)** — the plain console host
@@ -889,11 +887,56 @@ screenshots:
 | three keys in a row while a child ran, then `echo still-works` | `^C` twice at the prompt, then `still-works`, `$?` = 0: nothing stayed latched |
 | `C:/build/baash.exe -c "ping -t 127.0.0.1"` run from the interactive shell, then `Ctrl-C` | the script process was gone from `Get-Process baash` afterwards and the interactive shell reported 130 — the script still dies with its child |
 
-Still not fixed, and shared with Unix: a loop whose body has no simple command
-at all (`while ((1)); do ((i++)); done`) has no boundary inside the iteration to
-check the latch at, on either platform. And a blocking built-in (`sleep`, on
-Windows the embedded coreutils one) is only aborted at the boundary after it
-returns.
+**The latch is also polled, not only filled at a boundary.** The other half of
+the same problem, on both platforms: the latch is only set where a command
+boundary drains the source, so a loop whose body holds no command
+(`while ((1)); do ((i++)); done`) and a built-in that blocks inside itself
+(`read`, the embedded `sleep`) could not be stopped at all. bash answers both
+with its asynchronous handler — `interrupt_state` is a global the `QUIT` macro
+checks on every loop iteration, and `interrupt_immediately` makes the handler
+`throw_to_top_level()` out of a blocked built-in. This shell keeps handlers out
+of interpreter state, so it *asks* instead of being told:
+
+* **The loop top** drains the source every `SIGNAL_POLL_STRIDE` (256)
+  iterations, then checks the latch; a trap that has arrived runs there, since
+  a loop top is a safe point. The stride is a measurement, not a preference:
+  a drain is ~160 ns against a ~320 ns arithmetic iteration, so asking every
+  time would nearly double a loop, while one drain per 256 bounds the delay to
+  a few hundred interpreter steps at no measurable cost
+  (`performance.md`, 2026-11-24).
+* **A blocking wait** is cut into `baash_sys::INTERRUPT_SLICE` (20 ms) slices
+  and the interpreter is asked between them (`Interp::probe_interrupt`). `read`
+  does this around `poll_readable`, so a `Ctrl-C` ends a `read` instead of
+  waiting for a line. The embedded `sleep` is waited for in slices by
+  `baash_utils::run_interruptible`; it is the one utility whose wait the shell
+  may abandon, because it writes nothing — a utility that writes cannot be
+  abandoned safely, since its worker would keep printing after the next prompt
+  and a running `uutils` body cannot be stopped.
+
+The probe has three answers, which is what keeps the trap table in charge: a
+`trap '' INT` lets the wait run on (bash's `SIG_IGN` does not stop its `sleep`
+child either); an untrapped `INT` is taken, the latch set and the command
+abandoned with 130; a trapped `INT` stops the wait but is left for the next
+boundary, so the trap runs and the line resumes. Anything the probe reads that
+it does not own — a `SIGCHLD`, a trapped `USR1` — goes back into the pending
+queue, so asking is invisible to the table.
+
+Verified on the host's pty (`crates/baash/tests/interactive_signals.rs`) and on
+the `winvm` guest (the same exe, an interactive console session, keys via
+`virsh send-key --holdtime 25`):
+
+| case | what was seen |
+|---|---|
+| `while ((1)); do ((i++)); done`, then a key | the prompt returned and the shell's CPU time went flat (0.80 s → 0.81 s → 0.81 s); `$?` = 130 |
+| `sleep 10; echo done-$((6*7))`, then a key (the embedded `sleep`; on Windows there is no `sleep.exe`) | the prompt in about a second, `done-42` never printed, `$?` = 130 |
+| `read -t 10 ignored; echo done-$((6*7))`, then a key | the prompt in about a second, `done-42` never printed, `$?` = 130 |
+| `trap 'echo caught' INT; sleep 10; echo after-$((6*7))`, then a key | `caught`, then `after-42`, `$?` = 0 — the sleep stops, the trap runs, the line resumes |
+
+Still not fixed: an *embedded utility other than `sleep`* that blocks for ever
+(`cat` on a pipe nobody writes to) is abandoned only at its next boundary.
+Abandoning it would interleave its output with the next prompt, and there is no
+way to stop a thread, so the shell does not pretend otherwise. `Ctrl-\` has no
+Windows equivalent at all.
 
 ### A pipe is not seekable, and a completion's status is not a verdict (2026-11-20)
 

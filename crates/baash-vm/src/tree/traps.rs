@@ -60,6 +60,37 @@ pub(crate) struct SignalState {
     /// subshell body starts from a state that must be rebuilt even though the
     /// restored table's generation is unchanged.
     generation: Option<u64>,
+    /// Signals read off the source and not yet handed to the trap table.
+    ///
+    /// A blocking wait (`read`, an embedded `sleep`) asks whether an `INT` has
+    /// arrived, and answering means reading the source — but what it reads may
+    /// be a *trapped* signal or a `SIGCHLD` that belongs to the next boundary.
+    /// Those wait here rather than being dropped on the floor, so a probe is
+    /// invisible to everything it does not own.
+    pending: Vec<i32>,
+}
+
+/// How many loop iterations pass between two signal-source pollings.
+///
+/// A drain is `sync_traps` plus one `read(2)`; measured on this host, a command
+/// boundary that drains costs ~160 ns against a bare arithmetic iteration of
+/// ~320 ns, so asking every iteration would nearly double a loop's cost. A
+/// loop whose body *has* a command drains at it anyway, so this only has to
+/// cover the boundary-free shape; at 256 the delay is a few tens of
+/// microseconds of interpreter work and the amortised cost is under a
+/// nanosecond per iteration.
+const SIGNAL_POLL_STRIDE: u32 = 256;
+
+/// What a blocking wait has to do about an `INT` that has arrived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Interrupt {
+    /// Nothing: no signal, or an `INT` the table ignores.
+    None,
+    /// An untrapped `INT`: stop waiting and abandon the command line.
+    Abort,
+    /// A trapped `INT`: stop waiting, but let the trap run at the next
+    /// boundary and resume the command.
+    Trapped,
 }
 
 impl Interp {
@@ -173,18 +204,91 @@ impl Interp {
     /// those two while it waits, so a `kill -INT <shell>` during `sleep` never
     /// runs an `INT` trap (the suite pins that difference against `USR1`).
     pub(crate) fn drain_signals(&mut self, discard: &[i32]) -> Vec<i32> {
-        let Some(reader) = self.signals.reader.clone() else {
-            return Vec::new();
-        };
-        let mut signals = Vec::new();
-        while let Ok(Some(event)) = reader.read() {
-            if !discard.contains(&event.signal) {
-                signals.push(event.signal);
-            }
-        }
+        self.read_pending_signals();
+        let mut signals = std::mem::take(&mut self.signals.pending);
+        signals.retain(|signal| !discard.contains(signal));
         signals.sort_unstable();
         signals.dedup();
         signals
+    }
+
+    /// Move everything the reader has into [`SignalState::pending`].
+    fn read_pending_signals(&mut self) {
+        let Some(reader) = self.signals.reader.clone() else {
+            return;
+        };
+        while let Ok(Some(event)) = reader.read() {
+            self.signals.pending.push(event.signal);
+        }
+    }
+
+    /// Ask whether an `INT` has arrived, without running a trap.
+    ///
+    /// A command that blocks inside itself — `read` on a terminal, an embedded
+    /// `sleep` on its worker — cannot reach a command boundary, so this is the
+    /// only place an abort can be noticed from. Reading the source is
+    /// unavoidable, so everything the read finds that the caller does not own
+    /// stays in `pending`: a `SIGCHLD`, a trapped signal, an `INT` the table
+    /// ignores. Only an untrapped `INT` is taken, and taking it sets the same
+    /// latch a command boundary would have set.
+    pub(crate) fn probe_interrupt(&mut self) -> Interrupt {
+        if !self.interactive || self.in_trap {
+            return Interrupt::None;
+        }
+        if self.interrupt_pending {
+            return Interrupt::Abort;
+        }
+        self.sync_traps();
+        self.read_pending_signals();
+        let target = baash_sys::SIGINT;
+        let Some(index) = self
+            .signals
+            .pending
+            .iter()
+            .position(|signal| *signal == target)
+        else {
+            return Interrupt::None;
+        };
+        match self.state.traps.signal_action(target) {
+            // `trap '' INT` is `SIG_IGN`: bash's ignored signal does not stop a
+            // sleep either, so the wait continues and the entry is dropped by
+            // the next boundary like any ignored signal.
+            Some(TrapAction::Ignore) => Interrupt::None,
+            // The trap is the user's business and runs at the next boundary;
+            // the wait stops, but nothing was consumed here, so the trap is
+            // still there for it to run.
+            Some(TrapAction::Command(_)) => Interrupt::Trapped,
+            _ => {
+                self.signals.pending.remove(index);
+                self.interrupt_pending = true;
+                Interrupt::Abort
+            }
+        }
+    }
+
+    /// The interrupt point at the top of a loop iteration.
+    ///
+    /// The latch alone cannot answer: only a command boundary fills it, and a
+    /// loop body may hold no command at all (`while ((1)); do ((i++)); done`
+    /// spins without ever draining the source). So the loop asks the source
+    /// itself, once every [`SIGNAL_POLL_STRIDE`] iterations — the loop top is a
+    /// safe point, so a trap that has arrived runs there.
+    pub(crate) fn loop_interrupt(&mut self) -> Option<super::Unwind> {
+        if self.interrupt_pending {
+            return Some(super::Unwind::Interrupt);
+        }
+        if self.signal_poll == 0 {
+            self.signal_poll = SIGNAL_POLL_STRIDE;
+            if let Some(exit) = self.run_pending_signal_traps() {
+                return Some(super::Unwind::Exit(exit));
+            }
+            if self.interrupt_pending {
+                return Some(super::Unwind::Interrupt);
+            }
+        } else {
+            self.signal_poll -= 1;
+        }
+        None
     }
 
     /// Run the traps for the signals that have arrived. Returns an exit status

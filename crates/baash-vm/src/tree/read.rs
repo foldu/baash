@@ -75,6 +75,8 @@ enum Stop {
     Eof,
     /// `-t` expired.
     Timeout,
+    /// `Ctrl-C` arrived while the read waited (`probe_interrupt`).
+    Interrupted,
     /// The descriptor could not be read.
     Error(std::io::Error),
 }
@@ -300,6 +302,9 @@ fn read_line(interp: &mut Interp, options: &Options) -> Status {
             Status::FAILURE
         }
         Stop::Timeout => Status(128 + baash_sys::SIGALRM),
+        // bash reports an interrupted `read` as 130 and abandons the rest of
+        // the line; the latch the probe set is what abandons it.
+        Stop::Interrupted => Status(128 + baash_sys::SIGINT),
         Stop::Eof => Status::FAILURE,
         Stop::Delimiter | Stop::Count => Status::SUCCESS,
     };
@@ -344,24 +349,37 @@ impl Interp {
 
         loop {
             if consumed >= buffer.len() {
-                if let Some(deadline) = deadline {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        stop = Stop::Timeout;
-                        break;
+                if let Some(deadline) = deadline
+                    && Instant::now() >= deadline
+                {
+                    stop = Stop::Timeout;
+                    break;
+                }
+                // Wait in slices rather than for as long as `-t` allows: the
+                // shell's `SIGINT` is *blocked*, so a blocked `read` is not
+                // interrupted by the kernel the way bash's is, and the key has
+                // to end the read instead of holding the shell until a line
+                // arrives. A slice that expires re-checks both the deadline and
+                // the interpreter.
+                let wait = match deadline {
+                    Some(deadline) => deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(baash_sys::INTERRUPT_SLICE),
+                    None => baash_sys::INTERRUPT_SLICE,
+                };
+                let millis = wait.as_millis().max(1).min(i32::MAX as u128) as i32;
+                match baash_sys::poll_readable(fd, millis) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if self.probe_interrupt() != super::traps::Interrupt::None {
+                            stop = Stop::Interrupted;
+                            break;
+                        }
+                        continue;
                     }
-                    let remaining = deadline.saturating_duration_since(now);
-                    let millis = remaining.as_millis().max(1).min(i32::MAX as u128) as i32;
-                    match baash_sys::poll_readable(fd, millis) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            stop = Stop::Timeout;
-                            break;
-                        }
-                        Err(error) => {
-                            stop = Stop::Error(error);
-                            break;
-                        }
+                    Err(error) => {
+                        stop = Stop::Error(error);
+                        break;
                     }
                 }
                 let mut chunk_bytes = [0u8; 4096];

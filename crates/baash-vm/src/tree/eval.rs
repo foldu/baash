@@ -639,8 +639,8 @@ impl Interp {
             // A `for` body can be an arithmetic command or `[[ … ]]`, neither
             // of which crosses a simple-command boundary; the iteration
             // boundary is the commutator for the latch.
-            if self.interrupt_pending() {
-                return Unwind::Interrupt;
+            if let Some(unwind) = self.loop_interrupt() {
+                return unwind;
             }
             // bash treats the `for` header as one DEBUG event *per iteration*
             // (a loop with no iterations runs no trap at all), reported on the
@@ -697,8 +697,8 @@ impl Interp {
         }
         let mut last = Status::SUCCESS;
         loop {
-            if self.interrupt_pending() {
-                return Unwind::Interrupt;
+            if let Some(unwind) = self.loop_interrupt() {
+                return unwind;
             }
             // The header is re-evaluated on every iteration, and `$LINENO`
             // inside it is the header's line even after the body moved the
@@ -866,8 +866,8 @@ impl Interp {
             // body may be a compound command with no simple command in it
             // (`while :; do (( i += 1 )); done`), and the condition of the
             // next iteration must not be evaluated after the abort.
-            if self.interrupt_pending() {
-                return Unwind::Interrupt;
+            if let Some(unwind) = self.loop_interrupt() {
+                return unwind;
             }
             // The condition is inside the loop: `while break; do …; done` leaves
             // the loop, exactly as bash does, instead of reporting a stray

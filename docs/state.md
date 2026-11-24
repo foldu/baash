@@ -480,10 +480,12 @@ rediscover):
   installs a `SetConsoleCtrlHandler` that keeps it alive while the child dies —
   `$?` is 130 because `STATUS_CONTROL_C_EXIT` maps to `Signaled(SIGINT)`. The
   handler also records each delivery in a latch the interpreter drains at its
-  command boundaries, so an in-process loop stops and a `trap INT` runs, just as
-  a blocked `SIGINT` does on Unix; `docs/portability.md` §9 records the
-  measurement and what is still coarse (a blocking built-in waits for the
-  boundary after it, and `Ctrl-\` has no equivalent).
+  command boundaries — and polls at a loop top and inside a blocking `read` or
+  embedded `sleep`, where no boundary is reached — so an in-process loop stops,
+  a `trap INT` runs and a sleeping `sleep` ends on the key, just as a blocked
+  `SIGINT` does on Unix; `docs/portability.md` §9 records the measurements and
+  what is still coarse (an embedded utility other than `sleep` that blocks for
+  ever, and `Ctrl-\`, which has no equivalent).
 * **On Windows the library is there, and `=~` now has an engine.** Verified on
   the guest: the exe mounts the tree in memory (no file, no cache directory),
   the framework sources, an embedded script registers its rule, a user's

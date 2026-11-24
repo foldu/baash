@@ -518,11 +518,35 @@ impl Interp {
             }
         };
         let environment = self.state.vars.envp();
-        let status =
-            Status(baash_utils::run_with(argv, Some(&environment)).unwrap_or(Status::NOT_FOUND.0));
+        // An embedded utility runs on a worker thread and the shell waits for
+        // it, so the wait is the one place a `Ctrl-C` can be answered from:
+        // no command boundary is reached until it finishes. `sleep` is the
+        // utility whose only effect is waiting, so it is the one the shell
+        // stops waiting for (bash's `SIGINT` stops its `sleep` child the same
+        // way); every other one holds a descriptor and may be writing, which is
+        // why it runs to completion (`baash_utils::run_interruptible`).
+        let mut verdict = super::traps::Interrupt::None;
+        let waited = {
+            let mut cancel = || {
+                verdict = self.probe_interrupt();
+                verdict != super::traps::Interrupt::None
+            };
+            baash_utils::run_interruptible(argv, Some(&environment), &mut cancel)
+        };
         let _ = self.state.vars.finish_prefix_assignments(applied);
         self.restore_fds(saved);
-        Some(Unwind::Status(status))
+        Some(match waited {
+            Some(baash_utils::Waited::Status(status)) => Unwind::Status(Status(status)),
+            Some(baash_utils::Waited::Abandoned) => match verdict {
+                // Untrapped: `probe_interrupt` set the latch, so the rest of
+                // the line unwinds with 130 like any other `Ctrl-C`.
+                super::traps::Interrupt::Abort => Unwind::Interrupt,
+                // Trapped: the command stops with the signal's status, the trap
+                // runs at the next boundary and the line resumes.
+                _ => Unwind::Status(Status(128 + baash_sys::SIGINT)),
+            },
+            None => Unwind::Status(Status::NOT_FOUND),
+        })
     }
 
     /// Run one resolved command.

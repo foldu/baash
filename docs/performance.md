@@ -1235,6 +1235,36 @@ session: `colon loop` 8.5×, `arith loop` 8.5×, `builtin echo` 8.0×,
 was 14–25×, so the debug column gained from the allocation work above as much
 as the release one did; what is left is optimiser absence.
 
+### 2026-11-24: polling a loop for `Ctrl-C` costs nothing
+
+A loop whose body holds no command (`while ((1)); do ((i++)); done`) never
+crosses a command boundary, so the signal source is never drained and `Ctrl-C`
+could not stop it. Draining at the top of every iteration was the obvious fix
+and too expensive: a drain is `sync_traps` plus one `read(2)`, and measured
+against a command boundary it is ~160 ns while a bare arithmetic iteration is
+~320 ns — asking every time would nearly double the loop.
+
+So the loop asks every `SIGNAL_POLL_STRIDE` (256) iterations, and the
+amortised cost is a decrement. Release build, 300 000 iterations, minimum of
+five runs, before (`ba29193`) and after:
+
+| body | before ms | after ms | delta |
+| --- | ---: | ---: | ---: |
+| `((j++))` (no boundary) | 95.8 | 94.8 | −1% |
+| `:` (one boundary) | 152.0 | 143.1 | −6% |
+| `true` (one boundary) | 159.4 | 153.4 | −4% |
+
+The deltas are noise, which is the point: the per-iteration work is one
+compare and one subtract, and the drain happens once per 256. The delay a
+`Ctrl-C` sees in a boundary-free loop is bounded by the stride rather than by
+time — a few hundred interpreter steps, tens of microseconds here — so the
+poll costs no measurable throughput and stays deterministic.
+
+The same applies to the two interruptible waits (an embedded `sleep`, `read` on
+a terminal): they ask once per `INTERRUPT_SLICE` (20 ms) only while the command
+is actually waiting, which is 50 wakeups a second for a command that was
+blocked anyway.
+
 ## The test suite: 37 s to 5 s
 
 `cargo test` has to hold `RUST_TEST_THREADS=1` (`.cargo/config.toml`): `$( … )`

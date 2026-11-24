@@ -1425,6 +1425,32 @@ apply, but `sync_traps` builds its wanted set from it everywhere, and a set whos
 `insert` always answered `false` silently meant "no reader" — which is how the
 console event used to be recorded by nothing and drained by nobody.
 
+**An interactive shell polls its signal source where it cannot reach a
+boundary.** A trap still runs only at a safe point, but two places have no
+ordinary boundary and would otherwise never see an interrupt at all:
+
+* **A loop iteration.** The top of `while`/`until`, `for`, and the C-style `for`
+  drains the source every `SIGNAL_POLL_STRIDE` (256) iterations
+  (`Interp::loop_interrupt`). The stride exists because a drain is a `read(2)`:
+  measured at ~160 ns against a ~320 ns arithmetic iteration, so polling each
+  time would nearly double a loop, while one in 256 bounds the delay to a few
+  hundred interpreter steps at no measurable cost (`performance.md`,
+  2026-11-24).
+* **A wait inside one command.** `read` polls its descriptor and the embedded
+  `sleep` waits on its worker in `baash_sys::INTERRUPT_SLICE` (20 ms) slices,
+  asking `Interp::probe_interrupt` between them. `baash_utils::run_interruptible`
+  may give up the wait only for an `INTERRUPTIBLE` utility — `sleep`, which
+  writes nothing; a utility that writes would keep printing after the next
+  prompt, and a running `uutils` body cannot be stopped.
+
+`probe_interrupt` answers with `Interrupt`: `None` for no signal or an `INT`
+the table ignores (`trap '' INT` lets the wait run on, as `SIG_IGN` does),
+`Abort` for an untrapped one (taken, latch set, command abandoned with 130), and
+`Trapped` for a trapped one (the wait stops, the signal stays pending so the
+trap runs at the next boundary, and the line resumes). Everything the probe
+reads that is not the untrapped `INT` is put back in the pending queue, so
+asking is invisible to the trap table.
+
 **A `-F` reply replaces the `COMP_WORDS` element, not the parser's word.**
 bash splices `COMPREPLY` over the word delimited by `COMP_WORDBREAKS`, and
 `:` is one of them, so `rsync host:src/<TAB>` replaces `src/` and keeps
@@ -1438,7 +1464,11 @@ Getting this wrong deleted the host from every `host:path` completion.
 **`read` never over-reads.** A seekable descriptor is read in one chunk and
 rewound by the surplus with `lseek`; a pipe is read one byte at a time because
 bytes cannot be given back to it. `Interp::read_buffers` only holds a surplus
-whose rewind failed, and a forked child starts with it empty.
+whose rewind failed, and a forked child starts with it empty. An interactive
+`read` that waits for a line is interruptible: it waits in `INTERRUPT_SLICE`
+slices and asks `probe_interrupt` between them, so `Ctrl-C` ends it with 130
+(bash interrupts its `read` too) instead of holding the shell until a line
+arrives.
 
 **There is no job control, and that is a contract.** `bg` children are real
 children remembered only by pid in `Interp::background` (pid → status, so `$!`

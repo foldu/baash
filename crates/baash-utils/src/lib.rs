@@ -185,6 +185,26 @@ struct Job {
     reply: Sender<i32>,
 }
 
+/// What waiting for an embedded utility produced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Waited {
+    /// The utility finished with this status.
+    Status(i32),
+    /// [`run_interruptible`]'s caller asked to stop waiting. The utility is
+    /// still on its worker and will stop after the call it is in; its status is
+    /// discarded, so the caller must supply its own.
+    Abandoned,
+}
+
+/// The utilities whose wait may be given up.
+///
+/// Only `sleep`. A utility that *writes* cannot be abandoned safely: its worker
+/// would keep printing into the shell's descriptor after the next prompt has
+/// been drawn, and a running `uutils` body cannot be stopped from outside. The
+/// one whose whole effect is waiting writes nothing, so the shell can stop
+/// waiting for it exactly where bash's `SIGINT` stops its `sleep` child.
+const INTERRUPTIBLE: &[&str] = &["sleep"];
+
 /// The worker threads, one per utility, created on first use.
 ///
 /// A pool of interchangeable workers would be wrong: the catalog `uucore`
@@ -262,6 +282,37 @@ pub fn run(argv: &[Vec<u8>]) -> Option<i32> {
 /// That is why `awk` (which reads `ENVIRON`) is isolated, and it is recorded in
 /// `docs/portability.md` §6.
 pub fn run_with(argv: &[Vec<u8>], environment: Option<&[Vec<u8>]>) -> Option<i32> {
+    match dispatch(argv, environment, None)? {
+        Waited::Status(status) => Some(status),
+        // Only a caller that passed a cancel hook can reach this, and
+        // `run_with` passed none.
+        Waited::Abandoned => None,
+    }
+}
+
+/// [`run_with`], giving up the wait when `cancel` says so.
+///
+/// A shell that blocks `SIGINT` cannot be interrupted while it waits inside one
+/// command, so a blocking utility is the one shape where an interrupt has to be
+/// asked for rather than delivered. `cancel` is asked between slices of the
+/// wait, on this thread and never while the utility is running; it must only
+/// report whether the shell wants the command to stop.
+///
+/// The answer abandons only an [`INTERRUPTIBLE`] utility: every other one holds
+/// a descriptor and may be writing, and there is no way to stop a thread.
+pub fn run_interruptible(
+    argv: &[Vec<u8>],
+    environment: Option<&[Vec<u8>]>,
+    cancel: &mut dyn FnMut() -> bool,
+) -> Option<Waited> {
+    dispatch(argv, environment, Some(cancel))
+}
+
+fn dispatch(
+    argv: &[Vec<u8>],
+    environment: Option<&[Vec<u8>]>,
+    cancel: Option<&mut dyn FnMut() -> bool>,
+) -> Option<Waited> {
     let (typed, _) = argv.split_first()?;
     let typed = std::str::from_utf8(typed).ok()?;
     let args: Vec<OsString> = argv
@@ -269,46 +320,63 @@ pub fn run_with(argv: &[Vec<u8>], environment: Option<&[Vec<u8>]>) -> Option<i32
         .map(|arg| baash_sys::os::os_from_bytes(arg))
         .collect();
     if let Some((_, body)) = ISOLATED.iter().find(|(utility, _)| *utility == typed) {
-        return Some(isolated(argv, *body, typed, environment));
+        return Some(Waited::Status(isolated(argv, *body, typed, environment)));
     }
     if let Some((_, main)) = NATIVE.iter().find(|(utility, _)| *utility == typed) {
-        return Some(main(&args));
+        return Some(Waited::Status(main(&args)));
     }
     let (name, entry) = *UTILITIES.iter().find(|(utility, _)| *utility == typed)?;
-    match attempt(name, entry, args) {
-        Ok(status) => Some(status),
+    let mut cancel = cancel.filter(|_| INTERRUPTIBLE.contains(&name));
+    match attempt(name, entry, args, &mut cancel) {
+        Ok(waited) => Some(waited),
         // The worker died with the job (it panics outside `catch_unwind` only
         // if the shell's own dispatch is broken); try once on a fresh thread.
-        Err(args) if !args.is_empty() => match attempt(name, entry, args) {
-            Ok(status) => Some(status),
+        Err(args) if !args.is_empty() => match attempt(name, entry, args, &mut cancel) {
+            Ok(waited) => Some(waited),
             Err(_) => {
                 eprintln!("baash: {name}: embedded utility failed");
-                Some(1)
+                Some(Waited::Status(1))
             }
         },
         Err(_) => {
             eprintln!("baash: {name}: embedded utility failed");
-            Some(1)
+            Some(Waited::Status(1))
         }
     }
 }
 
 /// Hand one call to the worker, giving `argv` back when the worker died.
-fn attempt(name: &'static str, entry: Entry, args: Vec<OsString>) -> Result<i32, Vec<OsString>> {
+///
+/// The wait is sliced rather than one `recv`, so `cancel` can give it up: the
+/// job's reply channel is then dropped, which is what tells the worker to stop
+/// after the call it is in, and the worker is forgotten so the next call starts
+/// a fresh one instead of queueing behind a sleep that is still running.
+fn attempt(
+    name: &'static str,
+    entry: Entry,
+    args: Vec<OsString>,
+    cancel: &mut Option<&mut dyn FnMut() -> bool>,
+) -> Result<Waited, Vec<OsString>> {
     let Some(jobs) = worker(name, entry) else {
         return Err(args);
     };
     let (reply, answer) = channel();
     let job = match jobs.send(Job { argv: args, reply }) {
-        Ok(()) => {
-            return match answer.recv() {
-                Ok(status) => Ok(status),
-                Err(_) => {
-                    forget(name);
-                    Err(Vec::new())
+        Ok(()) => loop {
+            match answer.recv_timeout(baash_sys::INTERRUPT_SLICE) {
+                Ok(status) => return Ok(Waited::Status(status)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if cancel.as_mut().is_some_and(|asked| asked()) {
+                        forget(name);
+                        return Ok(Waited::Abandoned);
+                    }
                 }
-            };
-        }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    forget(name);
+                    return Err(Vec::new());
+                }
+            }
+        },
         Err(std::sync::mpsc::SendError(job)) => job,
     };
     forget(name);

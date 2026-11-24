@@ -818,6 +818,15 @@ pub struct Interp {
     /// `Ctrl-C` inside `$( … )` aborts the line, as in bash, it just does not
     /// end the session.
     interrupt_pending: bool,
+    /// Iterations left before a loop asks the signal source whether an
+    /// interrupt has arrived.
+    ///
+    /// A command boundary drains the source for free, but a loop body need not
+    /// contain one (`while ((1)); do ((i++)); done`), so the loop top asks —
+    /// and a drain is a `read(2)`, which is too much once per iteration. The
+    /// stride bounds the delay to a few hundred interpreter steps while keeping
+    /// the per-iteration cost a decrement (`tree/traps.rs` has the measurement).
+    signal_poll: u32,
 }
 
 /// One `name=(…)` argument in a declaration command.
@@ -953,6 +962,7 @@ impl Interp {
             lineno: Decimal::one(),
             current_span: 0..0,
             interrupt_pending: false,
+            signal_poll: 0,
         };
         // POSIX initializes `OPTIND` to 1 at shell startup, and `getopts`
         // counts from there; a script that never mentions it still needs the
